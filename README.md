@@ -138,6 +138,39 @@ follows is in `design/`.
 Set `PMSS_PMAPI_URL` to point the customer API client at a mock server when
 working on that feature.
 
+## License
+
+pmss-fleet-manager is free software under the **GNU Affero General Public
+License v3 or later** ([`LICENSE`](LICENSE)).
+
+The AGPL's §13 obligation is to offer the Corresponding Source to everyone who
+interacts with the program *over a network*, so these three routes are
+deliberately served **without basic auth**, since a login wall would defeat
+the offer:
+
+| Route | Serves |
+| --- | --- |
+| `/license` | the AGPL text embedded in this binary |
+| `/third-party-licenses` | every linked dependency's licence and notices |
+| `/source` | redirects to the Corresponding Source, pinned to the running version |
+
+They are linked from **Settings → about & licensing**. A stamped release
+points `/source` at its own tag, so the source you are offered is the source
+that is running; an unstamped build can only point at the repository.
+
+`THIRD_PARTY_LICENSES.md` is generated from the modules **actually linked into
+the binary** (read back off a probe build with `go version -m`):
+
+```sh
+make notices        # regenerate (also runs as part of `make build`)
+make notices-check  # fail if the committed copy is stale
+```
+
+`notices-check` gates the release workflow rather than every PR, because
+Dependabot bumps go.mod but cannot regenerate the file. Every first-party
+source file carries the AGPL header; `make license-check` enforces that on
+every PR and `make license-headers` stamps any new file.
+
 ## Status
 
 Written against five real Pulsed Media boxes (KVM, Dragon-R, Mesitorvi N100,

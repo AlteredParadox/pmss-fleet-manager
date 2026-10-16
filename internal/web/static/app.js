@@ -1,3 +1,19 @@
+// pmss-fleet-manager — a single-pane dashboard for Pulsed Media seedboxes.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 /* Fleet Manager frontend: vanilla JS, hash routing, SSE live updates. */
 (() => {
 'use strict';
@@ -121,6 +137,7 @@ async function loadState() {
     const d = await api('GET', '/api/state');
     if (d.instance && S.instance && d.instance !== S.instance) { location.reload(); return; } // server was rebuilt: pick up new JS/CSS
     S.instance = d.instance || S.instance;
+    S.version = d.version; S.sourceUrl = d.source_url;
     S.boxes = d.boxes || [];
     S.totals = d.totals || {};
     S.unacked = d.alerts_unacked || 0;
@@ -826,6 +843,11 @@ function viewSettings() {
       <div class="hint">Read-only customer API key from the client area (<a href="https://pulsedmedia.com/clients/index.php?m=pmapi" target="_blank" rel="noopener">?m=pmapi ↗</a>). Fills in plan names, prices and renewal dates for boxes whose host or username matches a service. Stored in the local database; leave blank to keep the current key.${S.settings.has_pm_api_key && !s.clear_pm_api_key ? ` <button class="small ghost" data-act="settings:clear-key">remove key</button>` : ''}</div>
     </div>
     <div class="form-foot" style="justify-content:flex-start"><button class="primary" data-act="settings:save">save settings</button></div>
+    <div class="panel"><div class="tile-label">about &amp; licensing</div>
+      <div class="row"><span>version</span><span>${esc(S.version || 'dev')}</span></div>
+      <div class="hint">pmss-fleet-manager is free software under the GNU Affero General Public License v3 or later. Because you are using it over a network, you are entitled to its source code.</div>
+      <div class="row" style="justify-content:flex-start;gap:16px"><a href="/license" target="_blank" rel="noopener">license ↗</a><a href="/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
+    </div>
   </div>
   ${viewServices()}`;
 }
