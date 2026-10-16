@@ -64,7 +64,7 @@ plan and renewal values on a box take precedence.
 Requires Go 1.26 or later to build. No other runtime dependencies.
 
 ```sh
-go build -o pmss-fleet-manager ./cmd/pmss-fleet-manager
+make build                                 # or: go build -o pmss-fleet-manager ./cmd/pmss-fleet-manager
 ./pmss-fleet-manager                       # http://127.0.0.1:8080, data in ./data
 ./pmss-fleet-manager -listen 127.0.0.1:8080,10.11.0.13:8080 -auth me:secret -data /var/lib/pmss-fleet-manager
 ```
@@ -120,9 +120,15 @@ failure it waits 20 minutes before trying again, and after a ban 65 minutes.
 ## Development
 
 ```sh
-go test ./...
-go vet ./...
+make vet     # gofmt -l + go vet
+make test    # go test ./...
+make build   # static binary with the version stamped in (`pmss-fleet-manager --version`)
 ```
+
+CI runs the same targets plus the race suite and govulncheck on every pull
+request; `check` is the required status on `main`. Pushing a `vX.Y.Z` tag
+builds linux amd64 and arm64 binaries and publishes a GitHub Release with
+checksums. Dependabot keeps Go modules and pinned actions current weekly.
 
 The frontend is vanilla JS and CSS in `internal/web/static`, embedded into the
 binary; there is no build step. `docs/ARCHITECTURE.md` lists the tenant-readable

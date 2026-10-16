@@ -12,3 +12,7 @@ config.local.yaml
 # editor / os
 .DS_Store
 *.swp
+
+# test and release artifacts
+*.test
+coverage.out

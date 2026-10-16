@@ -21,7 +21,15 @@ import (
 	"pmss-fleet-manager/internal/store"
 )
 
+// version is stamped at build time by `make build` and the release workflow
+// via -ldflags "-X main.version=vX.Y.Z". Plain `go build` reports "dev".
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version") {
+		fmt.Println("pmss-fleet-manager", version)
+		return
+	}
 	listen := flag.String("listen", envOr("PMSS_LISTEN", "127.0.0.1:8080"), "address(es) to listen on, comma-separated")
 	dataDir := flag.String("data", envOr("PMSS_DATA", "./data"), "directory for the SQLite database")
 	auth := flag.String("auth", os.Getenv("PMSS_AUTH"), "optional HTTP basic auth as user:password")
@@ -78,7 +86,7 @@ func main() {
 		srv := &http.Server{Addr: a, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 		servers = append(servers, srv)
 		go func(srv *http.Server) {
-			log.Info("pmss-fleet-manager listening", "addr", "http://"+srv.Addr)
+			log.Info("pmss-fleet-manager listening", "addr", "http://"+srv.Addr, "version", version)
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("http", "addr", srv.Addr, "err", err)
 				stop()
