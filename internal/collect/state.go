@@ -1,0 +1,282 @@
+package collect
+
+import (
+	"time"
+
+	"pmss-fleet-manager/internal/store"
+)
+
+// BoxState is everything the UI knows about one box. It is rebuilt after
+// every poll and served as JSON.
+type BoxState struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	User       string `json:"user"`
+	Type       string `json:"type"`
+	Plan       string `json:"plan"`
+	Datacenter string `json:"datacenter"`
+	Renewal    string `json:"renewal"`
+	Enabled    bool   `json:"enabled"`
+
+	// Service is the Pulsed Media billing record matched from the customer
+	// API, when an API key is configured and a service matches this box.
+	Service *ServiceInfo `json:"service,omitempty"`
+
+	Status       string    `json:"status"` // online | degraded | offline | disabled | pending
+	StatusReason string    `json:"status_reason,omitempty"`
+	LastPoll     time.Time `json:"last_poll"`
+	LastOK       time.Time `json:"last_ok"`
+	Failures     int       `json:"failures"`
+	LastError    string    `json:"last_error,omitempty"`
+	PollMs       int64     `json:"poll_ms"`
+	HostKeyFP    string    `json:"host_key_fp,omitempty"`
+
+	Hostname string `json:"hostname,omitempty"`
+	UID      int    `json:"uid,omitempty"`
+
+	Disk    DiskState    `json:"disk"`
+	Traffic TrafficState `json:"traffic"`
+	Rates   RateState    `json:"rates"`
+	CPU     CPUState     `json:"cpu"`
+	RAM     RAMState     `json:"ram"`
+	HostSys HostState    `json:"host_sys"`
+	Account AccountState `json:"account"`
+	Qbt     QbtState     `json:"qbt"`
+	Docker  DockerState  `json:"docker"`
+	Dirs    DirsState    `json:"dirs"`
+}
+
+// DiskState is the user quota view.
+type DiskState struct {
+	OK         bool    `json:"ok"`
+	UsedBytes  int64   `json:"used_bytes"`
+	QuotaBytes int64   `json:"quota_bytes"` // soft limit = the plan's quota
+	HardBytes  int64   `json:"hard_bytes"`
+	Pct        float64 `json:"pct"`
+	FilesUsed  int64   `json:"files_used"`
+	FilesSoft  int64   `json:"files_soft"`
+	Source     string  `json:"source,omitempty"`
+	AgeSec     int64   `json:"age_sec,omitempty"`
+}
+
+// DayPoint is one day's traffic.
+type DayPoint struct {
+	Date   string  `json:"date"` // YYYY-MM-DD
+	OutMiB float64 `json:"out_mib"`
+	InMiB  float64 `json:"in_mib"`
+}
+
+// TrafficState is the rolling 30-day traffic view.
+type TrafficState struct {
+	OK             bool       `json:"ok"`
+	OutMonthBytes  int64      `json:"out_month_bytes"`
+	InMonthBytes   int64      `json:"in_month_bytes"`
+	OutDayBytes    int64      `json:"out_day_bytes"`
+	InDayBytes     int64      `json:"in_day_bytes"`
+	LimitBytes     int64      `json:"limit_bytes"` // effective; 0 = unlimited
+	BaseLimitBytes int64      `json:"base_limit_bytes"`
+	BonusBytes     int64      `json:"bonus_bytes"`
+	Pct            float64    `json:"pct"`
+	Throttled      bool       `json:"throttled"`
+	CapMbit        float64    `json:"cap_mbit,omitempty"`
+	Daily          []DayPoint `json:"daily"`
+}
+
+// RateState is the current bandwidth.
+type RateState struct {
+	UpBps   float64 `json:"up_bps"`
+	DownBps float64 `json:"down_bps"`
+	Source  string  `json:"source,omitempty"` // qbt | pmss-15min | ""
+}
+
+// CPUState is the slice's CPU accounting.
+type CPUState struct {
+	OK        bool    `json:"ok"`
+	Pct       float64 `json:"pct"` // of the user's quota if set, else of all host CPUs
+	QuotaCPUs float64 `json:"quota_cpus"`
+	HostCPUs  int     `json:"host_cpus"`
+}
+
+// RAMState is the slice's memory accounting.
+type RAMState struct {
+	OK         bool    `json:"ok"`
+	UsedBytes  int64   `json:"used_bytes"`
+	LimitBytes int64   `json:"limit_bytes"`
+	Pct        float64 `json:"pct"`
+	Pids       int64   `json:"pids"`
+}
+
+// HostState is shared-host information.
+type HostState struct {
+	UptimeSec   float64 `json:"uptime_sec"`
+	Load1       float64 `json:"load1"`
+	Load5       float64 `json:"load5"`
+	Load15      float64 `json:"load15"`
+	MemTotal    int64   `json:"mem_total"`
+	MemAvail    int64   `json:"mem_avail"`
+	NCPU        int     `json:"ncpu"`
+	Kernel      string  `json:"kernel,omitempty"`
+	Debian      string  `json:"debian,omitempty"`
+	PMSSVersion string  `json:"pmss_version,omitempty"`
+	HomeFSType  string  `json:"home_fs_type,omitempty"`
+	HomeSize    int64   `json:"home_size"`
+	HomeUsed    int64   `json:"home_used"`
+	HomeAvail   int64   `json:"home_avail"`
+	CPUModel    string  `json:"cpu_model,omitempty"`
+	CPUShort    string  `json:"cpu_short,omitempty"`
+	CPUFlags    string  `json:"cpu_flags,omitempty"`
+	GPUPresent  bool    `json:"gpu_present"`
+	GPUDevice   string  `json:"gpu_device,omitempty"`
+	GPUVendor   string  `json:"gpu_vendor,omitempty"`
+	GPUAccess   bool    `json:"gpu_access"`
+	HWEncode    string  `json:"hw_encode,omitempty"` // short human label for tags: "QSV", "VAAPI", "NVENC", "GPU no access", ""
+}
+
+// AccountState mirrors the PMSS account config.
+type AccountState struct {
+	OK             bool    `json:"ok"`
+	QuotaGiB       float64 `json:"quota_gib"`
+	RAMMiB         float64 `json:"ram_mib"`
+	DockerEnabled  bool    `json:"docker_enabled"`
+	TrafficCapMbit float64 `json:"traffic_cap_mbit"`
+	Suspended      bool    `json:"suspended"`
+}
+
+// TorrentView is one torrent for the UI.
+type TorrentView struct {
+	Hash     string  `json:"hash"`
+	Name     string  `json:"name"`
+	Size     int64   `json:"size"`
+	Progress float64 `json:"progress"`
+	UpBps    int64   `json:"up_bps"`
+	DownBps  int64   `json:"down_bps"`
+	Ratio    float64 `json:"ratio"`
+	State    string  `json:"state"`
+	Kind     string  `json:"kind"` // seeding | leeching | paused | checking | error | unknown
+	ETA      int64   `json:"eta"`
+	AddedOn  int64   `json:"added_on"`
+	Uploaded int64   `json:"uploaded"`
+	Category string  `json:"category,omitempty"`
+	Seeds    int     `json:"seeds"`
+	Leechs   int     `json:"leechs"`
+}
+
+// QbtState is the torrent client view.
+type QbtState struct {
+	Enabled       bool          `json:"enabled"`
+	Installed     bool          `json:"installed"`
+	ProcessUp     bool          `json:"process_up"`
+	Reachable     bool          `json:"reachable"`
+	Version       string        `json:"version,omitempty"`
+	Port          int           `json:"port"`
+	Error         string        `json:"error,omitempty"`
+	LocalBypass   bool          `json:"local_bypass"`  // qBittorrent.conf bypasses auth for localhost
+	SubnetBypass  bool          `json:"subnet_bypass"` // whitelist bypass enabled
+	SubnetList    string        `json:"subnet_list,omitempty"`
+	ConfUser      string        `json:"conf_user,omitempty"`
+	HasCreds      bool          `json:"has_creds"`
+	AuthHold      bool          `json:"auth_hold"`                // login attempts suspended after a failure
+	BinaryVersion string        `json:"binary_version,omitempty"` // ~/bin/qbittorrent-nox --version
+	LatestVersion string        `json:"latest_version,omitempty"` // newest userdocs release
+	UpdateAvail   bool          `json:"update_available"`         // binary on disk is older than latest
+	RestartNeeded bool          `json:"restart_needed"`           // running version differs from binary on disk
+	StartHelper   bool          `json:"start_helper"`             // ~/bin/qbt-start present
+	CronInstalled bool          `json:"cron_installed"`
+	Total         int           `json:"total"`
+	Seeding       int           `json:"seeding"`
+	Leeching      int           `json:"leeching"`
+	Paused        int           `json:"paused"`
+	Checking      int           `json:"checking"`
+	Errored       int           `json:"errored"`
+	Active        int           `json:"active"` // transferring right now
+	GlobalRatio   float64       `json:"global_ratio"`
+	AllTimeUL     int64         `json:"alltime_ul"`
+	AllTimeDL     int64         `json:"alltime_dl"`
+	SessionUL     int64         `json:"session_ul"`
+	SessionDL     int64         `json:"session_dl"`
+	Connection    string        `json:"connection,omitempty"`
+	FreeSpaceDisk int64         `json:"free_space_disk"`
+	Torrents      []TorrentView `json:"torrents,omitempty"`
+}
+
+// ContainerView is one container for the UI.
+type ContainerView struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Image    string   `json:"image"`
+	State    string   `json:"state"`
+	Status   string   `json:"status"`
+	Created  int64    `json:"created"`
+	Ports    []string `json:"ports"`
+	CPUPct   float64  `json:"cpu_pct"`
+	MemUsage int64    `json:"mem_usage"`
+	MemLimit int64    `json:"mem_limit"`
+	HasStats bool     `json:"has_stats"`
+}
+
+// DockerState is the rootless docker view.
+type DockerState struct {
+	Enabled    bool            `json:"enabled"`
+	SocketUp   bool            `json:"socket_up"`
+	Reachable  bool            `json:"reachable"`
+	Version    string          `json:"version,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	Running    int             `json:"running"`
+	Stopped    int             `json:"stopped"`
+	Containers []ContainerView `json:"containers,omitempty"`
+}
+
+// DirEntry is one measured directory.
+type DirEntry struct {
+	Name  string `json:"name"`
+	Bytes int64  `json:"bytes"`
+}
+
+// DirsState is the cached du result.
+type DirsState struct {
+	Enabled bool       `json:"enabled"`
+	At      time.Time  `json:"at"`
+	Running bool       `json:"running"`
+	Error   string     `json:"error,omitempty"`
+	Entries []DirEntry `json:"entries,omitempty"`
+}
+
+// EffectivePlan is the manual plan name, else the API product name.
+func (s BoxState) EffectivePlan() string {
+	if s.Plan != "" || s.Service == nil {
+		return s.Plan
+	}
+	return s.Service.Product
+}
+
+// EffectiveRenewal is the manual renewal date, else the API next-due date.
+func (s BoxState) EffectiveRenewal() string {
+	if s.Renewal != "" || s.Service == nil {
+		return s.Renewal
+	}
+	return s.Service.NextDue
+}
+
+// Summary strips the large lists for the fleet view and SSE events.
+func (s BoxState) Summary() BoxState {
+	c := s
+	c.Qbt.Torrents = nil
+	c.Docker.Containers = nil
+	c.Dirs.Entries = nil
+	c.Traffic.Daily = nil
+	return c
+}
+
+func fromBox(b *store.Box) BoxState {
+	return BoxState{
+		ID: b.ID, Name: b.Name, Host: b.Host, Port: b.Port, User: b.User, Type: b.Type,
+		Plan: b.Plan, Datacenter: b.Datacenter, Renewal: b.Renewal, Enabled: b.Enabled,
+		Status:    "pending",
+		Qbt:       QbtState{Enabled: b.QbtEnabled, Port: b.QbtPort},
+		Docker:    DockerState{Enabled: b.DockerEnabled},
+		Dirs:      DirsState{Enabled: b.DuEnabled},
+		HostKeyFP: fingerprintOrEmpty(b.HostKey),
+	}
+}

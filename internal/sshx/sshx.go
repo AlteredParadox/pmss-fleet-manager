@@ -1,0 +1,296 @@
+// Package sshx wraps golang.org/x/crypto/ssh with the small surface the
+// collector needs: connect with key/agent/password, run a command with a
+// deadline, and dial unix or tcp endpoints on the remote side.
+package sshx
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
+)
+
+// Config describes how to reach one box.
+type Config struct {
+	Host          string
+	Port          int
+	User          string
+	AuthMethod    string // "key", "agent", "password", "" = try everything available
+	KeyPath       string
+	KeyPassphrase string
+	Password      string
+	// HostKey is the pinned public key in authorized_keys format ("ssh-ed25519 AAAA...").
+	// Empty means trust on first use; the key seen is then available via Client.HostKey().
+	HostKey string
+	Timeout time.Duration
+}
+
+// ErrHostKeyMismatch is returned when the remote host key differs from the pinned one.
+var ErrHostKeyMismatch = errors.New("ssh: host key mismatch")
+
+// Client is a live SSH connection to one box.
+type Client struct {
+	cfg     Config
+	mu      sync.Mutex
+	cli     *ssh.Client
+	hostKey string
+}
+
+// Dial opens a connection. The caller owns the returned client and must Close it.
+func Dial(ctx context.Context, cfg Config) (*Client, error) {
+	if cfg.Port == 0 {
+		cfg.Port = 22
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 15 * time.Second
+	}
+	auths, err := authMethods(cfg)
+	if err != nil {
+		return nil, err
+	}
+	c := &Client{cfg: cfg}
+	sshCfg := &ssh.ClientConfig{
+		User:            cfg.User,
+		Auth:            auths,
+		Timeout:         cfg.Timeout,
+		HostKeyCallback: c.hostKeyCallback,
+	}
+	addr := net.JoinHostPort(cfg.Host, fmt.Sprint(cfg.Port))
+	dialer := net.Dialer{Timeout: cfg.Timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	// Bound the handshake by the context too.
+	done := make(chan struct{})
+	var (
+		cc    ssh.Conn
+		chans <-chan ssh.NewChannel
+		reqs  <-chan *ssh.Request
+		herr  error
+	)
+	go func() {
+		cc, chans, reqs, herr = ssh.NewClientConn(conn, addr, sshCfg)
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		conn.Close()
+		<-done
+		return nil, ctx.Err()
+	case <-done:
+	}
+	if herr != nil {
+		conn.Close()
+		return nil, herr
+	}
+	c.cli = ssh.NewClient(cc, chans, reqs)
+	return c, nil
+}
+
+func (c *Client) hostKeyCallback(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	seen := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
+	c.hostKey = seen
+	if c.cfg.HostKey == "" {
+		return nil
+	}
+	if strings.TrimSpace(c.cfg.HostKey) != seen {
+		return fmt.Errorf("%w: got %s", ErrHostKeyMismatch, Fingerprint(seen))
+	}
+	return nil
+}
+
+// HostKey returns the remote host key seen during the handshake, authorized_keys format.
+func (c *Client) HostKey() string { return c.hostKey }
+
+// Fingerprint renders a SHA256 fingerprint for an authorized_keys-format public key.
+func Fingerprint(authorizedKey string) string {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorizedKey))
+	if err != nil {
+		return "?"
+	}
+	sum := sha256.Sum256(pk.Marshal())
+	return "SHA256:" + strings.TrimRight(base64.StdEncoding.EncodeToString(sum[:]), "=")
+}
+
+func authMethods(cfg Config) ([]ssh.AuthMethod, error) {
+	var methods []ssh.AuthMethod
+	useKey := cfg.AuthMethod == "key" || cfg.AuthMethod == ""
+	useAgent := cfg.AuthMethod == "agent" || cfg.AuthMethod == ""
+	usePass := cfg.AuthMethod == "password" || (cfg.AuthMethod == "" && cfg.Password != "")
+
+	if useKey {
+		paths := []string{}
+		if cfg.KeyPath != "" {
+			paths = append(paths, expandHome(cfg.KeyPath))
+		} else {
+			home, _ := os.UserHomeDir()
+			for _, n := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
+				paths = append(paths, filepath.Join(home, ".ssh", n))
+			}
+		}
+		var signers []ssh.Signer
+		for _, p := range paths {
+			pem, err := os.ReadFile(p)
+			if err != nil {
+				if cfg.KeyPath != "" {
+					return nil, fmt.Errorf("read key %s: %w", p, err)
+				}
+				continue
+			}
+			var s ssh.Signer
+			if cfg.KeyPassphrase != "" {
+				s, err = ssh.ParsePrivateKeyWithPassphrase(pem, []byte(cfg.KeyPassphrase))
+			} else {
+				s, err = ssh.ParsePrivateKey(pem)
+			}
+			if err != nil {
+				if cfg.KeyPath != "" {
+					return nil, fmt.Errorf("parse key %s: %w", p, err)
+				}
+				continue
+			}
+			signers = append(signers, s)
+		}
+		if len(signers) > 0 {
+			methods = append(methods, ssh.PublicKeys(signers...))
+		} else if cfg.AuthMethod == "key" {
+			return nil, errors.New("ssh: no usable private key in ~/.ssh (set a key path, or the key needs a passphrase)")
+		}
+	}
+	if useAgent {
+		if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+			if conn, err := net.Dial("unix", sock); err == nil {
+				ag := agent.NewClient(conn)
+				methods = append(methods, ssh.PublicKeysCallback(ag.Signers))
+			} else if cfg.AuthMethod == "agent" {
+				return nil, fmt.Errorf("ssh agent: %w", err)
+			}
+		} else if cfg.AuthMethod == "agent" {
+			return nil, errors.New("ssh agent: SSH_AUTH_SOCK not set")
+		}
+	}
+	if usePass {
+		if cfg.Password == "" {
+			return nil, errors.New("ssh: password auth selected but no password set")
+		}
+		methods = append(methods, ssh.Password(cfg.Password))
+		pw := cfg.Password
+		methods = append(methods, ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
+			answers := make([]string, len(questions))
+			for i := range questions {
+				answers[i] = pw
+			}
+			return answers, nil
+		}))
+	}
+	if len(methods) == 0 {
+		return nil, errors.New("ssh: no authentication method available (set a key, agent or password)")
+	}
+	return methods, nil
+}
+
+func expandHome(p string) string {
+	if strings.HasPrefix(p, "~/") {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, p[2:])
+	}
+	return p
+}
+
+// Run executes cmd on the remote with optional stdin and returns stdout/stderr.
+// The session is torn down when ctx ends.
+func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
+	c.mu.Lock()
+	cli := c.cli
+	c.mu.Unlock()
+	if cli == nil {
+		return nil, nil, errors.New("ssh: not connected")
+	}
+	sess, err := cli.NewSession()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer sess.Close()
+	var out, errb bytes.Buffer
+	sess.Stdout = &out
+	sess.Stderr = &errb
+	if stdin != nil {
+		sess.Stdin = stdin
+	}
+	done := make(chan error, 1)
+	go func() { done <- sess.Run(cmd) }()
+	select {
+	case <-ctx.Done():
+		_ = sess.Signal(ssh.SIGKILL)
+		sess.Close()
+		return out.Bytes(), errb.Bytes(), ctx.Err()
+	case err := <-done:
+		return out.Bytes(), errb.Bytes(), err
+	}
+}
+
+// DialUnix opens a stream to a unix socket on the remote host.
+func (c *Client) DialUnix(ctx context.Context, path string) (net.Conn, error) {
+	return c.dial(ctx, "unix", path)
+}
+
+// DialTCP opens a stream to host:port as seen from the remote host.
+func (c *Client) DialTCP(ctx context.Context, addr string) (net.Conn, error) {
+	return c.dial(ctx, "tcp", addr)
+}
+
+func (c *Client) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	c.mu.Lock()
+	cli := c.cli
+	c.mu.Unlock()
+	if cli == nil {
+		return nil, errors.New("ssh: not connected")
+	}
+	return cli.DialContext(ctx, network, addr)
+}
+
+// Ping sends a keepalive request and reports whether the connection answered.
+func (c *Client) Ping(ctx context.Context) error {
+	c.mu.Lock()
+	cli := c.cli
+	c.mu.Unlock()
+	if cli == nil {
+		return errors.New("ssh: not connected")
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := cli.SendRequest("keepalive@openssh.com", true, nil)
+		done <- err
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		return err
+	}
+}
+
+// Close tears the connection down.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cli == nil {
+		return nil
+	}
+	err := c.cli.Close()
+	c.cli = nil
+	return err
+}

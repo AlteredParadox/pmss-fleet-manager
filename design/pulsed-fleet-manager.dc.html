@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;padding:0;height:100%;background:#0b0e13;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;}
+*{box-sizing:border-box;}
+a{color:#3b82f6;text-decoration:none;} a:hover{color:#60a5fa;text-decoration:underline;}
+input,select,button{font-family:inherit;}
+input:focus,select:focus{outline:1px solid #3b82f6;outline-offset:0;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</helmet>
+<div data-theme="{{ theme }}" style="--bg:{{ tv.bg }};--panel:{{ tv.panel }};--panel2:{{ tv.panel2 }};--line:{{ tv.line }};--text:{{ tv.text }};--muted:{{ tv.muted }};--dim:{{ tv.dim }};--accent:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;display:grid;grid-template-columns:220px minmax(0,1fr);min-height:100vh;background:var(--bg);color:var(--text);font-size:13px;line-height:1.45;">
+
+  <!-- Sidebar -->
+  <aside style="border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;padding:20px 14px;gap:6px;position:sticky;top:0;height:100vh;">
+    <div style="display:flex;align-items:center;gap:10px;padding:4px 8px 18px;">
+      <div style="width:10px;height:10px;background:var(--accent);box-shadow:0 0 10px var(--accent);"></div>
+      <div style="font-weight:700;letter-spacing:.04em;font-size:13px;">FLEET<span style="color:var(--muted);">.ctl</span></div>
+    </div>
+    <sc-for list="{{ navItems }}" as="n" hint-placeholder-count="4">
+      <button onClick="{{ n.go }}" style="display:flex;align-items:center;justify-content:space-between;width:100%;text-align:left;padding:9px 10px;border:1px solid transparent;border-radius:3px;cursor:pointer;background:{{ n.bg }};color:{{ n.color }};font-size:12.5px;font-weight:500;" style-hover="background:var(--panel2);">
+        <span>{{ n.label }}</span>
+        <sc-if value="{{ n.badge }}" hint-placeholder-val="{{ false }}"><span style="font-size:10px;padding:1px 6px;background:var(--bad);color:#fff;border-radius:2px;font-weight:600;">{{ n.badge }}</span></sc-if>
+      </button>
+    </sc-for>
+    <div style="flex:1;"></div>
+    <div style="border-top:1px solid var(--line);padding-top:14px;font-size:11px;color:var(--muted);display:grid;gap:4px;">
+      <div style="display:flex;justify-content:space-between;"><span>boxes</span><span style="color:var(--text);">{{ totals.count }}</span></div>
+      <div style="display:flex;justify-content:space-between;"><span>online</span><span style="color:var(--ok);">{{ totals.online }}</span></div>
+      <div style="display:flex;justify-content:space-between;"><span>storage</span><span style="color:var(--text);">{{ totals.disk }}</span></div>
+      <div style="display:flex;justify-content:space-between;"><span>last poll</span><span style="color:var(--text);">{{ lastPoll }}</span></div>
+    </div>
+  </aside>
+
+  <main style="padding:28px 32px 48px;min-width:0;">
+
+    <!-- FLEET -->
+    <sc-if value="{{ isFleet }}" hint-placeholder-val="{{ true }}">
+      <div data-screen-label="Fleet overview">
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:22px;">
+          <div>
+            <div style="font-size:11px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;">pulsedmedia.com</div>
+            <h1 style="margin:2px 0 0;font-size:22px;font-weight:600;letter-spacing:-.01em;">Fleet overview</h1>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <div style="display:flex;border:1px solid var(--line);border-radius:3px;overflow:hidden;">
+              <button onClick="{{ setCards }}" style="padding:7px 12px;border:0;cursor:pointer;font-size:12px;background:{{ cardsBg }};color:{{ cardsColor }};">cards</button>
+              <button onClick="{{ setTable }}" style="padding:7px 12px;border:0;cursor:pointer;font-size:12px;background:{{ tableBg }};color:{{ tableColor }};border-left:1px solid var(--line);">table</button>
+            </div>
+            <button onClick="{{ goAdd }}" style="padding:7px 14px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:3px;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap;" style-hover="filter:brightness(1.1);">+ add box</button>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1px;background:var(--panel);border:1px solid var(--line);margin-bottom:24px;">
+          <div style="background:var(--panel);padding:14px 16px;"><div style="font-size:11px;color:var(--muted);">total storage</div><div style="font-size:20px;font-weight:600;margin-top:2px;">{{ totals.diskUsed }} <span style="font-size:12px;color:var(--muted);font-weight:400;">/ {{ totals.disk }}</span></div></div>
+          <div style="background:var(--panel);padding:14px 16px;"><div style="font-size:11px;color:var(--muted);">traffic this month</div><div style="font-size:20px;font-weight:600;margin-top:2px;">{{ totals.traffic }}</div></div>
+          <div style="background:var(--panel);padding:14px 16px;"><div style="font-size:11px;color:var(--muted);">aggregate up / down</div><div style="font-size:20px;font-weight:600;margin-top:2px;"><span style="color:var(--ok);">↑</span>{{ totals.up }} <span style="color:var(--accent);">↓</span>{{ totals.down }}</div></div>
+          <div style="background:var(--panel);padding:14px 16px;"><div style="font-size:11px;color:var(--muted);">active torrents</div><div style="font-size:20px;font-weight:600;margin-top:2px;">{{ totals.torrents }}</div></div>
+          <div style="background:var(--panel);padding:14px 16px;"><div style="font-size:11px;color:var(--muted);">next renewal</div><div style="font-size:20px;font-weight:600;margin-top:2px;">{{ totals.renewal }}</div></div>
+        </div>
+
+        <sc-if value="{{ isCards }}" hint-placeholder-val="{{ true }}">
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;">
+            <sc-for list="{{ boxes }}" as="b" hint-placeholder-count="6">
+              <div onClick="{{ b.open }}" style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px;cursor:pointer;display:grid;gap:12px;transition:border-color .15s;" style-hover="border-color:var(--accent);">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+                  <div style="min-width:0;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                      <span style="width:8px;height:8px;border-radius:50%;flex:none;background:{{ b.statusColor }};box-shadow:0 0 8px {{ b.statusColor }};"></span>
+                      <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ b.name }}</span>
+                    </div>
+                    <div style="font-size:11px;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ b.hostname }}</div>
+                  </div>
+                  <span style="font-size:10px;padding:2px 7px;border:1px solid var(--line);border-radius:2px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;flex:none;">{{ b.type }}</span>
+                </div>
+                <div style="display:grid;gap:8px;">
+                  <div>
+                    <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:4px;"><span>disk</span><span style="color:var(--text);">{{ b.diskLabel }}</span></div>
+                    <div style="height:4px;background:var(--line);"><div style="height:100%;background:{{ b.diskColor }};width:{{ b.diskPct }}%;"></div></div>
+                  </div>
+                  <div>
+                    <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:4px;"><span>traffic</span><span style="color:var(--text);">{{ b.trafficLabel }}</span></div>
+                    <div style="height:4px;background:var(--line);"><div style="height:100%;background:{{ b.trafficColor }};width:{{ b.trafficPct }}%;"></div></div>
+                  </div>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:11px;border-top:1px solid var(--line);padding-top:10px;">
+                  <div><div style="color:var(--muted);">up/down</div><div style="margin-top:1px;"><span style="color:var(--ok);">↑</span>{{ b.up }} <span style="color:var(--accent);">↓</span>{{ b.down }}</div></div>
+                  <div><div style="color:var(--muted);">torrents</div><div style="margin-top:1px;">{{ b.torrents }} <span style="color:var(--muted);">r{{ b.ratio }}</span></div></div>
+                  <div><div style="color:var(--muted);">cpu/ram</div><div style="margin-top:1px;">{{ b.cpu }}% / {{ b.ram }}%</div></div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ isTable }}" hint-placeholder-val="{{ false }}">
+          <div style="border:1px solid var(--line);border-radius:4px;overflow:auto;background:var(--panel);">
+            <div style="display:grid;grid-template-columns:minmax(180px,1.6fr) 90px minmax(130px,1fr) minmax(130px,1fr) 120px 110px 90px 90px;min-width:960px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;padding:10px 14px;border-bottom:1px solid var(--line);gap:12px;">
+              <span>box</span><span>type</span><span>disk</span><span>traffic</span><span>up / down</span><span>torrents</span><span>cpu/ram</span><span>uptime</span>
+            </div>
+            <sc-for list="{{ boxes }}" as="b" hint-placeholder-count="6">
+              <div onClick="{{ b.open }}" style="display:grid;grid-template-columns:minmax(180px,1.6fr) 90px minmax(130px,1fr) minmax(130px,1fr) 120px 110px 90px 90px;min-width:960px;align-items:center;padding:11px 14px;border-bottom:1px solid var(--line);gap:12px;cursor:pointer;font-size:12px;" style-hover="background:var(--panel2);">
+                <div style="display:flex;align-items:center;gap:8px;min-width:0;"><span style="width:7px;height:7px;border-radius:50%;flex:none;background:{{ b.statusColor }};box-shadow:0 0 6px {{ b.statusColor }};"></span><div style="min-width:0;"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ b.name }}</div><div style="font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ b.hostname }}</div></div></div>
+                <span style="color:var(--muted);">{{ b.type }}</span>
+                <div><div style="display:flex;justify-content:space-between;font-size:11px;"><span>{{ b.diskLabel }}</span></div><div style="height:3px;background:var(--line);margin-top:4px;"><div style="height:100%;background:{{ b.diskColor }};width:{{ b.diskPct }}%;"></div></div></div>
+                <div><div style="font-size:11px;">{{ b.trafficLabel }}</div><div style="height:3px;background:var(--line);margin-top:4px;"><div style="height:100%;background:{{ b.trafficColor }};width:{{ b.trafficPct }}%;"></div></div></div>
+                <span><span style="color:var(--ok);">↑</span>{{ b.up }} <span style="color:var(--accent);">↓</span>{{ b.down }}</span>
+                <span>{{ b.torrents }} <span style="color:var(--muted);">r{{ b.ratio }}</span></span>
+                <span>{{ b.cpu }}% / {{ b.ram }}%</span>
+                <span style="color:var(--muted);">{{ b.uptimeLabel }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <!-- BOX DETAIL -->
+    <sc-if value="{{ isBox }}" hint-placeholder-val="{{ false }}">
+      <div data-screen-label="Box detail">
+        <button onClick="{{ goFleet }}" style="background:none;border:0;color:var(--muted);cursor:pointer;padding:0;font-size:12px;margin-bottom:14px;" style-hover="color:var(--text);">← fleet</button>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:20px;">
+          <div>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span style="width:10px;height:10px;border-radius:50%;background:{{ sel.statusColor }};box-shadow:0 0 10px {{ sel.statusColor }};"></span>
+              <h1 style="margin:0;font-size:22px;font-weight:600;">{{ sel.name }}</h1>
+              <span style="font-size:10px;padding:2px 7px;border:1px solid var(--line);border-radius:2px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">{{ sel.type }}</span>
+            </div>
+            <div style="font-size:12px;color:var(--muted);margin-top:6px;display:flex;gap:16px;flex-wrap:wrap;">
+              <span>{{ sel.hostname }}</span><span>{{ sel.ip }}</span><span>{{ sel.dc }}</span><span>{{ sel.plan }}</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button onClick="{{ refreshSel }}" style="padding:7px 12px;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:3px;cursor:pointer;font-size:12px;white-space:nowrap;" style-hover="border-color:var(--accent);">refresh</button>
+            <button onClick="{{ toggleSelPower }}" style="padding:7px 12px;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:3px;cursor:pointer;font-size:12px;white-space:nowrap;" style-hover="border-color:var(--accent);">{{ sel.powerLabel }}</button>
+            <button onClick="{{ removeSel }}" style="padding:7px 12px;border:1px solid var(--line);background:var(--panel);color:var(--bad);border-radius:3px;cursor:pointer;font-size:12px;white-space:nowrap;" style-hover="border-color:var(--bad);">remove</button>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:20px;">
+          <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="4">
+            <button onClick="{{ t.go }}" style="padding:9px 14px;border:0;background:none;cursor:pointer;font-size:12px;color:{{ t.color }};border-bottom:2px solid {{ t.border }};margin-bottom:-1px;" style-hover="color:var(--text);">{{ t.label }}</button>
+          </sc-for>
+        </div>
+
+        <sc-if value="{{ tabOverview }}" hint-placeholder-val="{{ true }}">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px;">
+              <div style="font-size:11px;color:var(--muted);">disk</div>
+              <div style="font-size:22px;font-weight:600;margin:4px 0 8px;">{{ sel.diskUsedLabel }} <span style="font-size:12px;color:var(--muted);font-weight:400;">/ {{ sel.diskQuotaLabel }}</span></div>
+              <div style="height:6px;background:var(--line);"><div style="height:100%;background:{{ sel.diskColor }};width:{{ sel.diskPct }}%;"></div></div>
+              <div style="font-size:11px;color:var(--muted);margin-top:6px;">{{ sel.diskPct }}% used · {{ sel.diskFreeLabel }} free</div>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px;">
+              <div style="font-size:11px;color:var(--muted);">monthly traffic</div>
+              <div style="font-size:22px;font-weight:600;margin:4px 0 8px;">{{ sel.trafficUsedLabel }} <span style="font-size:12px;color:var(--muted);font-weight:400;">/ {{ sel.trafficLimitLabel }}</span></div>
+              <div style="height:6px;background:var(--line);"><div style="height:100%;background:{{ sel.trafficColor }};width:{{ sel.trafficPct }}%;"></div></div>
+              <div style="font-size:11px;color:var(--muted);margin-top:6px;">{{ sel.trafficNote }}</div>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px;">
+              <div style="font-size:11px;color:var(--muted);">bandwidth now</div>
+              <div style="font-size:22px;font-weight:600;margin:4px 0 8px;"><span style="color:var(--ok);">↑</span> {{ sel.up }}</div>
+              <div style="font-size:22px;font-weight:600;"><span style="color:var(--accent);">↓</span> {{ sel.down }}</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:6px;">port speed {{ sel.port }}</div>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px;">
+              <div style="font-size:11px;color:var(--muted);">cpu / ram</div>
+              <div style="font-size:22px;font-weight:600;margin:4px 0 8px;">{{ sel.cpu }}% <span style="font-size:12px;color:var(--muted);font-weight:400;">cpu</span></div>
+              <div style="height:6px;background:var(--line);margin-bottom:10px;"><div style="height:100%;background:var(--accent);width:{{ sel.cpu }}%;"></div></div>
+              <div style="font-size:22px;font-weight:600;margin:4px 0 8px;">{{ sel.ram }}% <span style="font-size:12px;color:var(--muted);font-weight:400;">ram · {{ sel.ramLabel }}</span></div>
+              <div style="height:6px;background:var(--line);"><div style="height:100%;background:var(--accent);width:{{ sel.ram }}%;"></div></div>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px;display:grid;gap:8px;font-size:12px;align-content:start;">
+              <div style="font-size:11px;color:var(--muted);">box</div>
+              <div style="display:flex;justify-content:space-between;gap:8px;"><span style="color:var(--muted);">status</span><span style="color:{{ sel.statusColor }};">{{ sel.status }}</span></div>
+              <div style="display:flex;justify-content:space-between;gap:8px;"><span style="color:var(--muted);">uptime</span><span>{{ sel.uptimeLabel }}</span></div>
+              <div style="display:flex;justify-content:space-between;gap:8px;"><span style="color:var(--muted);">client</span><span>{{ sel.client }}</span></div>
+              <div style="display:flex;justify-content:space-between;gap:8px;"><span style="color:var(--muted);">torrents</span><span>{{ sel.torrents }} active · ratio {{ sel.ratio }}</span></div>
+              <div style="display:flex;justify-content:space-between;gap:8px;"><span style="color:var(--muted);">plan</span><span>{{ sel.plan }}</span></div>
+              <div style="display:flex;justify-content:space-between;gap:8px;"><span style="color:var(--muted);">renews</span><span style="color:{{ sel.renewColor }};">{{ sel.renewal }} ({{ sel.renewIn }})</span></div>
+              <div style="display:flex;justify-content:space-between;gap:8px;"><span style="color:var(--muted);">datacenter</span><span>{{ sel.dc }}</span></div>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ tabTraffic }}" hint-placeholder-val="{{ false }}">
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:18px;">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:16px;">
+              <div><div style="font-size:11px;color:var(--muted);">last 30 days · daily transfer</div><div style="font-size:18px;font-weight:600;margin-top:2px;">{{ sel.trafficUsedLabel }} <span style="font-size:12px;color:var(--muted);font-weight:400;">of {{ sel.trafficLimitLabel }} this cycle</span></div></div>
+              <div style="display:flex;gap:16px;font-size:11px;color:var(--muted);"><span><span style="display:inline-block;width:8px;height:8px;background:var(--ok);margin-right:6px;"></span>upload</span><span><span style="display:inline-block;width:8px;height:8px;background:var(--accent);margin-right:6px;"></span>download</span></div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(30,1fr);gap:3px;height:200px;align-items:end;border-bottom:1px solid var(--line);padding-bottom:1px;">
+              <sc-for list="{{ sel.history }}" as="d" hint-placeholder-count="30">
+                <div title="{{ d.title }}" style="display:flex;flex-direction:column;justify-content:flex-end;height:100%;gap:1px;">
+                  <div style="background:var(--ok);height:{{ d.upPct }}%;min-height:1px;"></div>
+                  <div style="background:var(--accent);height:{{ d.downPct }}%;min-height:1px;"></div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted);margin-top:6px;"><span>{{ sel.histStart }}</span><span>today</span></div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);margin-top:18px;">
+              <div style="background:var(--panel);padding:12px 14px;"><div style="font-size:11px;color:var(--muted);">uploaded</div><div style="font-size:16px;font-weight:600;color:var(--ok);">{{ sel.histUp }}</div></div>
+              <div style="background:var(--panel);padding:12px 14px;"><div style="font-size:11px;color:var(--muted);">downloaded</div><div style="font-size:16px;font-weight:600;color:var(--accent);">{{ sel.histDown }}</div></div>
+              <div style="background:var(--panel);padding:12px 14px;"><div style="font-size:11px;color:var(--muted);">daily avg</div><div style="font-size:16px;font-weight:600;">{{ sel.histAvg }}</div></div>
+              <div style="background:var(--panel);padding:11px 14px;"><div style="font-size:11px;color:var(--muted);">cycle resets</div><div style="font-size:16px;font-weight:600;">{{ sel.cycleReset }}</div></div>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ tabTorrents }}" hint-placeholder-val="{{ false }}">
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;overflow:hidden;">
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:8px;">
+              <div style="font-size:12px;"><span style="font-weight:600;">{{ sel.client }}</span> <span style="color:var(--muted);">· {{ sel.torrents }} active · {{ sel.seeding }} seeding · {{ sel.leeching }} leeching</span></div>
+              <div style="display:flex;gap:6px;">
+                <button onClick="{{ pauseAll }}" style="padding:5px 10px;border:1px solid var(--line);background:none;color:var(--text);border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap;" style-hover="border-color:var(--accent);">pause all</button>
+                <button onClick="{{ resumeAll }}" style="padding:5px 10px;border:1px solid var(--line);background:none;color:var(--text);border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap;" style-hover="border-color:var(--accent);">resume all</button>
+              </div>
+            </div>
+            <div style="overflow:auto;">
+              <div style="display:grid;grid-template-columns:minmax(240px,2fr) 90px 110px 100px 100px 70px;min-width:760px;gap:12px;padding:8px 16px;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--line);"><span>name</span><span>size</span><span>progress</span><span>up</span><span>down</span><span>ratio</span></div>
+              <sc-for list="{{ sel.torrentList }}" as="t" hint-placeholder-count="6">
+                <div style="display:grid;grid-template-columns:minmax(240px,2fr) 90px 110px 100px 100px 70px;min-width:760px;gap:12px;padding:10px 16px;font-size:12px;border-bottom:1px solid var(--line);align-items:center;" style-hover="background:var(--panel2);">
+                  <div style="min-width:0;display:flex;align-items:center;gap:8px;"><span style="width:6px;height:6px;flex:none;border-radius:50%;background:{{ t.color }};"></span><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ t.name }}</span></div>
+                  <span style="color:var(--muted);">{{ t.size }}</span>
+                  <div><div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted);"><span>{{ t.state }}</span><span>{{ t.pct }}%</span></div><div style="height:3px;background:var(--line);margin-top:3px;"><div style="height:100%;background:{{ t.color }};width:{{ t.pct }}%;"></div></div></div>
+                  <span style="color:var(--ok);">{{ t.up }}</span>
+                  <span style="color:var(--accent);">{{ t.down }}</span>
+                  <span>{{ t.ratio }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ tabStorage }}" hint-placeholder-val="{{ false }}">
+          <div style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:14px;">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:18px;">
+              <div style="font-size:11px;color:var(--muted);">usage by directory</div>
+              <div style="font-size:18px;font-weight:600;margin:2px 0 14px;">{{ sel.diskUsedLabel }} <span style="font-size:12px;color:var(--muted);font-weight:400;">of {{ sel.diskQuotaLabel }}</span></div>
+              <div style="display:flex;height:14px;gap:1px;margin-bottom:16px;">
+                <sc-for list="{{ sel.dirs }}" as="d" hint-placeholder-count="5">
+                  <div title="{{ d.name }}" style="background:{{ d.color }};width:{{ d.pct }}%;"></div>
+                </sc-for>
+                <div style="flex:1;background:var(--line);"></div>
+              </div>
+              <div style="display:grid;gap:8px;">
+                <sc-for list="{{ sel.dirs }}" as="d" hint-placeholder-count="5">
+                  <div style="display:grid;grid-template-columns:12px minmax(0,1fr) auto auto;gap:10px;align-items:center;font-size:12px;">
+                    <span style="width:10px;height:10px;background:{{ d.color }};"></span>
+                    <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ d.name }}</span>
+                    <span style="color:var(--muted);">{{ d.pct }}%</span>
+                    <span style="min-width:70px;text-align:right;">{{ d.size }}</span>
+                  </div>
+                </sc-for>
+                <div style="display:grid;grid-template-columns:12px minmax(0,1fr) auto auto;gap:10px;align-items:center;font-size:12px;color:var(--muted);">
+                  <span style="width:10px;height:10px;background:var(--line);"></span><span>free</span><span>{{ sel.diskFreePct }}%</span><span style="min-width:70px;text-align:right;">{{ sel.diskFreeLabel }}</span>
+                </div>
+              </div>
+            </div>
+            <div style="display:grid;gap:14px;align-content:start;">
+              <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px;display:grid;gap:8px;font-size:12px;">
+                <div style="font-size:11px;color:var(--muted);">filesystem</div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">mount</span><span>/home/{{ sel.user }}</span></div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">type</span><span>{{ sel.fs }}</span></div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">quota</span><span>{{ sel.diskQuotaLabel }}</span></div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">inodes</span><span>{{ sel.inodes }}</span></div>
+              </div>
+              <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px;display:grid;gap:8px;font-size:12px;">
+                <div style="font-size:11px;color:var(--muted);">access</div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">sftp</span><span>{{ sel.hostname }}:22</span></div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">ftps</span><span>{{ sel.hostname }}:21</span></div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">https</span><a href="#">{{ sel.hostname }}/</a></div>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <!-- ADD BOX -->
+    <sc-if value="{{ isAdd }}" hint-placeholder-val="{{ false }}">
+      <div data-screen-label="Add box" style="max-width:560px;">
+        <button onClick="{{ goFleet }}" style="background:none;border:0;color:var(--muted);cursor:pointer;padding:0;font-size:12px;margin-bottom:14px;" style-hover="color:var(--text);">← fleet</button>
+        <h1 style="margin:0 0 6px;font-size:22px;font-weight:600;">Add box</h1>
+        <div style="display:flex;gap:6px;align-items:center;font-size:11px;color:var(--muted);margin-bottom:24px;">
+          <span style="color:{{ step1Color }};">1 connect</span><span>—</span><span style="color:{{ step2Color }};">2 detect</span><span>—</span><span style="color:{{ step3Color }};">3 confirm</span>
+        </div>
+
+        <sc-if value="{{ addStep1 }}" hint-placeholder-val="{{ true }}">
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:20px;display:grid;gap:16px;">
+            <label style="display:grid;gap:6px;font-size:11px;color:var(--muted);">display name
+              <input value="{{ form.name }}" onChange="{{ setFormName }}" placeholder="e.g. seed-02" style="padding:9px 10px;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:3px;font-size:13px;">
+            </label>
+            <label style="display:grid;gap:6px;font-size:11px;color:var(--muted);">hostname *
+              <input value="{{ form.host }}" onChange="{{ setFormHost }}" placeholder="server.pulsedmedia.com" style="padding:9px 10px;background:var(--bg);border:1px solid {{ hostBorder }};color:var(--text);border-radius:3px;font-size:13px;">
+              <sc-if value="{{ hostError }}" hint-placeholder-val="{{ false }}"><span style="color:var(--bad);">{{ hostError }}</span></sc-if>
+            </label>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <label style="display:grid;gap:6px;font-size:11px;color:var(--muted);">username *
+                <input value="{{ form.user }}" onChange="{{ setFormUser }}" style="padding:9px 10px;background:var(--bg);border:1px solid {{ userBorder }};color:var(--text);border-radius:3px;font-size:13px;">
+              </label>
+              <label style="display:grid;gap:6px;font-size:11px;color:var(--muted);">password / api key *
+                <input type="password" value="{{ form.pass }}" onChange="{{ setFormPass }}" style="padding:9px 10px;background:var(--bg);border:1px solid {{ passBorder }};color:var(--text);border-radius:3px;font-size:13px;">
+              </label>
+            </div>
+            <label style="display:grid;gap:6px;font-size:11px;color:var(--muted);">box type
+              <select value="{{ form.type }}" onChange="{{ setFormType }}" style="padding:9px 10px;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:3px;font-size:13px;">
+                <option value="seedbox">seedbox</option><option value="storage">storage box</option>
+              </select>
+            </label>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px;">
+              <button onClick="{{ goFleet }}" style="padding:8px 14px;border:1px solid var(--line);background:none;color:var(--text);border-radius:3px;cursor:pointer;font-size:12px;white-space:nowrap;">cancel</button>
+              <button onClick="{{ addNext }}" style="padding:8px 14px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:3px;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap;" style-hover="filter:brightness(1.1);">test connection →</button>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ addStep2 }}" hint-placeholder-val="{{ false }}">
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:20px;display:grid;gap:10px;font-size:12px;">
+            <sc-for list="{{ detectLog }}" as="l" hint-placeholder-count="4">
+              <div style="display:flex;gap:10px;align-items:center;"><span style="color:{{ l.color }};width:14px;">{{ l.mark }}</span><span style="color:{{ l.textColor }};">{{ l.text }}</span></div>
+            </sc-for>
+            <sc-if value="{{ detectDone }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
+                <button onClick="{{ addBack }}" style="padding:8px 14px;border:1px solid var(--line);background:none;color:var(--text);border-radius:3px;cursor:pointer;font-size:12px;white-space:nowrap;">← back</button>
+                <button onClick="{{ addNext }}" style="padding:8px 14px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:3px;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap;">continue →</button>
+              </div>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ addStep3 }}" hint-placeholder-val="{{ false }}">
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:20px;display:grid;gap:10px;font-size:12px;">
+            <div style="font-size:11px;color:var(--muted);">detected</div>
+            <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">name</span><span>{{ pending.name }}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">hostname</span><span>{{ pending.hostname }}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">plan</span><span>{{ pending.plan }}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">disk quota</span><span>{{ pending.diskQuotaLabel }}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">traffic limit</span><span>{{ pending.trafficLimitLabel }}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">client</span><span>{{ pending.client }}</span></div>
+            <div style="display:flex;justify-content:space-between;"><span style="color:var(--muted);">datacenter</span><span>{{ pending.dc }}</span></div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
+              <button onClick="{{ addBack }}" style="padding:8px 14px;border:1px solid var(--line);background:none;color:var(--text);border-radius:3px;cursor:pointer;font-size:12px;white-space:nowrap;">← back</button>
+              <button onClick="{{ addConfirm }}" style="padding:8px 14px;border:1px solid var(--ok);background:var(--ok);color:#06240f;border-radius:3px;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap;">add to fleet</button>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <!-- ALERTS -->
+    <sc-if value="{{ isAlerts }}" hint-placeholder-val="{{ false }}">
+      <div data-screen-label="Alerts" style="max-width:820px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:20px;gap:12px;flex-wrap:wrap;">
+          <h1 style="margin:0;font-size:22px;font-weight:600;">Alerts</h1>
+          <button onClick="{{ ackAll }}" style="padding:7px 12px;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:3px;cursor:pointer;font-size:12px;white-space:nowrap;" style-hover="border-color:var(--accent);">acknowledge all</button>
+        </div>
+        <sc-if value="{{ noAlerts }}" hint-placeholder-val="{{ false }}"><div style="padding:40px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:4px;">no active alerts</div></sc-if>
+        <div style="display:grid;gap:8px;">
+          <sc-for list="{{ alerts }}" as="a" hint-placeholder-count="4">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:14px 16px;display:grid;grid-template-columns:8px minmax(0,1fr) auto;gap:14px;align-items:center;opacity:{{ a.opacity }};">
+              <span style="width:8px;height:8px;border-radius:50%;background:{{ a.color }};box-shadow:0 0 8px {{ a.color }};"></span>
+              <div style="min-width:0;">
+                <div style="font-size:13px;font-weight:500;">{{ a.title }}</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:3px;"><button onClick="{{ a.openBox }}" style="background:none;border:0;padding:0;color:var(--accent);cursor:pointer;font-size:11px;">{{ a.box }}</button> · {{ a.time }}</div>
+              </div>
+              <sc-if value="{{ a.active }}" hint-placeholder-val="{{ true }}"><button onClick="{{ a.ack }}" style="padding:5px 10px;border:1px solid var(--line);background:none;color:var(--text);border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap;" style-hover="border-color:var(--accent);">ack</button></sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-if>
+
+    <!-- SETTINGS -->
+    <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+      <div data-screen-label="Settings" style="max-width:560px;display:grid;gap:14px;">
+        <h1 style="margin:0 0 6px;font-size:22px;font-weight:600;">Settings</h1>
+        <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:18px;display:grid;gap:14px;">
+          <div style="font-size:11px;color:var(--muted);">appearance</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;"><span>theme</span>
+            <div style="display:flex;border:1px solid var(--line);border-radius:3px;overflow:hidden;">
+              <button onClick="{{ setDark }}" style="padding:6px 12px;border:0;cursor:pointer;font-size:12px;background:{{ darkBg }};color:{{ darkColor }};">dark</button>
+              <button onClick="{{ setLight }}" style="padding:6px 12px;border:0;cursor:pointer;font-size:12px;border-left:1px solid var(--line);background:{{ lightBg }};color:{{ lightColor }};">light</button>
+            </div>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;"><span>default fleet view</span>
+            <div style="display:flex;border:1px solid var(--line);border-radius:3px;overflow:hidden;">
+              <button onClick="{{ setCards }}" style="padding:6px 12px;border:0;cursor:pointer;font-size:12px;background:{{ cardsBg }};color:{{ cardsColor }};">cards</button>
+              <button onClick="{{ setTable }}" style="padding:6px 12px;border:0;cursor:pointer;font-size:12px;border-left:1px solid var(--line);background:{{ tableBg }};color:{{ tableColor }};">table</button>
+            </div>
+          </div>
+        </div>
+        <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:18px;display:grid;gap:14px;">
+          <div style="font-size:11px;color:var(--muted);">polling</div>
+          <label style="display:flex;justify-content:space-between;align-items:center;gap:12px;">refresh interval
+            <select value="{{ interval }}" onChange="{{ setInterval }}" style="padding:6px 10px;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:3px;font-size:12px;">
+              <option value="10">10 s</option><option value="30">30 s</option><option value="60">60 s</option><option value="300">5 min</option>
+            </select>
+          </label>
+          <label style="display:flex;justify-content:space-between;align-items:center;gap:12px;">disk alert threshold
+            <select value="{{ diskThreshold }}" onChange="{{ setDiskThreshold }}" style="padding:6px 10px;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:3px;font-size:12px;">
+              <option value="80">80%</option><option value="90">90%</option><option value="95">95%</option>
+            </select>
+          </label>
+          <label style="display:flex;justify-content:space-between;align-items:center;gap:12px;">traffic alert threshold
+            <select value="{{ trafficThreshold }}" onChange="{{ setTrafficThreshold }}" style="padding:6px 10px;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:3px;font-size:12px;">
+              <option value="75">75%</option><option value="90">90%</option><option value="100">100%</option>
+            </select>
+          </label>
+        </div>
+        <div style="background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:18px;display:grid;gap:10px;">
+          <div style="font-size:11px;color:var(--muted);">pulsedmedia account</div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--muted);">billing email</span><span>me@example.com</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--muted);">api key</span><span>pm_••••••••••••7f3a</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--muted);">client area</span><a href="#">pulsedmedia.com/clients</a></div>
+        </div>
+      </div>
+    </sc-if>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;startTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;dark&quot;,&quot;light&quot;],&quot;default&quot;:&quot;dark&quot;,&quot;tsType&quot;:&quot;'dark'|'light'&quot;,&quot;section&quot;:&quot;Appearance&quot;},&quot;startView&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;cards&quot;,&quot;table&quot;],&quot;default&quot;:&quot;cards&quot;,&quot;tsType&quot;:&quot;'cards'|'table'&quot;,&quot;section&quot;:&quot;Appearance&quot;}}">
+class Component extends DCLogic {
+  constructor(p){
+    super(p);
+    const H=()=>Array.from({length:30},(_,i)=>({up:40+Math.round(Math.abs(Math.sin(i*1.7+3))*220+((i*37)%50)),down:10+Math.round(Math.abs(Math.cos(i*1.1))*90+((i*13)%30))}));
+    const T=(n,seedN)=>Array.from({length:n},(_,i)=>{const s=(i*7+seedN)%5;const states=['seeding','seeding','seeding','leeching','paused'];const st=states[s];return{name:['Debian-13.1-amd64-DVD-1.iso','ubuntu-26.04-live-server-amd64.iso','Arch Linux 2026.10.01','LibreOffice_26.2_Linux_x86-64_deb.tar.gz','Blender-5.0-linux-x64.tar.xz','Fedora-Workstation-Live-44.iso','Wikipedia enwiki-20261001-pages-articles.xml.bz2','OpenStreetMap planet-261006.osm.pbf','Project Gutenberg DVD 2026','Mozilla Firefox 146 (all locales)','KDE neon 2026.10 user','FreeBSD-15.0-RELEASE-amd64-dvd1.iso'][(i+seedN)%12],sizeGB:[4.7,2.9,1.2,0.3,0.4,2.3,22.1,78.4,9.8,1.1,3.6,4.2][(i+seedN)%12],state:st,pct:st==='leeching'?20+((i*31+seedN)%70):100,up:st==='seeding'?(2+((i*17+seedN)%40))/10:0,down:st==='leeching'?(5+((i*23+seedN)%90))/10:0,ratio:(st==='seeding'?(0.4+((i*11+seedN)%60)/10):((i*3)%10)/10).toFixed(2)}});
+    this.state={
+      view:'fleet',fleetView:p.startView||'cards',tab:'overview',theme:p.startTheme||'dark',selId:null,addStep:1,detectLog:[],detectDone:false,pending:null,
+      form:{name:'',host:'',user:'',pass:'',type:'seedbox'},errors:{},interval:'30',diskThreshold:'90',trafficThreshold:'90',lastPoll:'just now',
+      boxes:[
+        {id:1,name:'seed-01',type:'seedbox',plan:'Dragon-R 2TB',dc:'Helsinki, FI',hostname:'odin.pulsedmedia.com',ip:'95.216.44.112',user:'ragnar',status:'online',client:'rTorrent 0.9.8 / ruTorrent',diskUsed:1620,diskQuota:2000,trafficUsed:6.8,trafficLimit:10,up:412,down:38,port:'1 Gbit/s',cpu:34,ram:48,ramGB:'3.8 / 8 GB',torrents:148,seeding:139,leeching:6,ratio:'4.21',uptime:182,renewal:'2026-11-02',fs:'ext4',inodes:'0.4%',history:H(),torrentList:T(10,1),dirs:[['data/complete',0.68],['data/incomplete',0.11],['watch',0.01],['session',0.02],['backups',0.08]]},
+        {id:2,name:'seed-02',type:'seedbox',plan:'M10G 4TB',dc:'Helsinki, FI',hostname:'thor.pulsedmedia.com',ip:'95.216.41.7',user:'mjolnir',status:'online',client:'qBittorrent 5.1',diskUsed:3880,diskQuota:4000,trafficUsed:11.9,trafficLimit:12,up:830,down:120,port:'10 Gbit/s',cpu:71,ram:62,ramGB:'9.9 / 16 GB',torrents:412,seeding:380,leeching:21,ratio:'6.07',uptime:41,renewal:'2026-10-21',fs:'xfs',inodes:'1.1%',history:H(),torrentList:T(12,4),dirs:[['data/complete',0.81],['data/incomplete',0.09],['watch',0.01],['session',0.03],['backups',0.03]]},
+        {id:3,name:'seed-03',type:'seedbox',plan:'Value 1TB',dc:'Helsinki, FI',hostname:'loki.pulsedmedia.com',ip:'95.216.39.201',user:'trick',status:'degraded',client:'Deluge 2.2',diskUsed:410,diskQuota:1000,trafficUsed:2.1,trafficLimit:4,up:0,down:0,port:'1 Gbit/s',cpu:3,ram:21,ramGB:'0.8 / 4 GB',torrents:52,seeding:52,leeching:0,ratio:'2.88',uptime:0.3,renewal:'2027-01-14',fs:'ext4',inodes:'0.2%',history:H(),torrentList:T(7,2),dirs:[['data/complete',0.35],['data/incomplete',0.02],['watch',0.0],['session',0.01],['backups',0.03]]},
+        {id:4,name:'archive-01',type:'storage',plan:'Storage 10TB',dc:'Helsinki, FI',hostname:'freya.pulsedmedia.com',ip:'95.216.52.18',user:'vault',status:'online',client:'—',diskUsed:7120,diskQuota:10000,trafficUsed:1.4,trafficLimit:0,up:22,down:64,port:'1 Gbit/s',cpu:5,ram:18,ramGB:'0.7 / 4 GB',torrents:0,seeding:0,leeching:0,ratio:'—',uptime:396,renewal:'2026-12-09',fs:'zfs',inodes:'—',history:H(),torrentList:[],dirs:[['media/video',0.44],['media/photos',0.12],['backups/hosts',0.09],['docs',0.02],['misc',0.04]]},
+        {id:5,name:'archive-02',type:'storage',plan:'Storage 20TB',dc:'Helsinki, FI',hostname:'heimdall.pulsedmedia.com',ip:'95.216.50.90',user:'bifrost',status:'online',client:'—',diskUsed:18400,diskQuota:20000,trafficUsed:0.6,trafficLimit:0,up:8,down:140,port:'1 Gbit/s',cpu:2,ram:14,ramGB:'0.6 / 4 GB',torrents:0,seeding:0,leeching:0,ratio:'—',uptime:512,renewal:'2027-03-30',fs:'zfs',inodes:'—',history:H(),torrentList:[],dirs:[['media/video',0.71],['media/photos',0.08],['backups/hosts',0.1],['docs',0.01],['misc',0.02]]},
+        {id:6,name:'seed-04',type:'seedbox',plan:'Dragon-R 1TB',dc:'Helsinki, FI',hostname:'tyr.pulsedmedia.com',ip:'95.216.47.33',user:'onehand',status:'offline',client:'rTorrent 0.9.8 / ruTorrent',diskUsed:230,diskQuota:1000,trafficUsed:0.9,trafficLimit:6,up:0,down:0,port:'1 Gbit/s',cpu:0,ram:0,ramGB:'0 / 8 GB',torrents:0,seeding:0,leeching:0,ratio:'1.42',uptime:0,renewal:'2026-10-18',fs:'ext4',inodes:'0.1%',history:H(),torrentList:T(5,3),dirs:[['data/complete',0.2],['data/incomplete',0.01],['watch',0.0],['session',0.01],['backups',0.01]]}
+      ],
+      alerts:[
+        {id:1,sev:'bad',title:'seed-04 unreachable — connection timed out (3 retries)',boxId:6,time:'12 min ago',active:true},
+        {id:2,sev:'warn',title:'seed-02 traffic at 99% of 12 TB monthly limit',boxId:2,time:'1 h ago',active:true},
+        {id:3,sev:'warn',title:'seed-02 disk at 97% quota',boxId:2,time:'3 h ago',active:true},
+        {id:4,sev:'warn',title:'seed-03 rebooted — rTorrent not yet responding',boxId:3,time:'5 h ago',active:true},
+        {id:5,sev:'warn',title:'seed-04 renews in 2 days',boxId:6,time:'yesterday',active:true},
+        {id:6,sev:'ok',title:'archive-02 scrub completed, 0 errors',boxId:5,time:'2 days ago',active:false}
+      ]
+    };
+  }
+  componentDidMount(){
+    this.t=setInterval(()=>{
+      this.setState(s=>({lastPoll:'just now',boxes:s.boxes.map(b=>b.status!=='online'?b:{...b,up:Math.max(0,Math.round(b.up*(0.9+Math.random()*0.2))),down:Math.max(0,Math.round(b.down*(0.85+Math.random()*0.3))),cpu:Math.min(100,Math.max(1,b.cpu+Math.round((Math.random()-0.5)*6)))})}));
+    },3000);
+  }
+  componentWillUnmount(){clearInterval(this.t);clearTimeout(this.d);}
+  fmtGB(g){return g>=1000?(g/1000).toFixed(g>=10000?0:1)+' TB':Math.round(g)+' GB';}
+  fmtMb(m){return m>=1000?(m/1000).toFixed(1)+' Gb/s':m+' Mb/s';}
+  daysUntil(d){return Math.round((new Date(d)-new Date('2026-10-16'))/864e5);}
+  enrich(b){
+    const S=this.state;const diskPct=Math.round(b.diskUsed/b.diskQuota*100);
+    const unl=!b.trafficLimit;const trafficPct=unl?Math.min(100,Math.round(b.trafficUsed/20*100)):Math.min(100,Math.round(b.trafficUsed/b.trafficLimit*100));
+    const C={online:'var(--ok)',degraded:'var(--warn)',offline:'var(--bad)'};
+    const warn=(p,t)=>p>=t?'var(--bad)':p>=t-15?'var(--warn)':'var(--accent)';
+    const hist=b.history;const maxD=Math.max(...hist.map(h=>h.up+h.down));
+    const upSum=hist.reduce((a,h)=>a+h.up,0),downSum=hist.reduce((a,h)=>a+h.down,0);
+    const dCols=['var(--accent)','#60a5fa','#2563eb','#93c5fd','#1d4ed8'];
+    const days=this.daysUntil(b.renewal);
+    return {...b,open:()=>this.setState({view:'box',selId:b.id,tab:'overview'}),statusColor:C[b.status],
+      diskPct,diskColor:warn(diskPct,+S.diskThreshold),diskLabel:this.fmtGB(b.diskUsed)+' / '+this.fmtGB(b.diskQuota),diskUsedLabel:this.fmtGB(b.diskUsed),diskQuotaLabel:this.fmtGB(b.diskQuota),diskFreeLabel:this.fmtGB(b.diskQuota-b.diskUsed),diskFreePct:100-diskPct,
+      trafficPct,trafficColor:unl?'var(--dim)':warn(trafficPct,+S.trafficThreshold),trafficLabel:b.trafficUsed+' TB'+(unl?' · unlimited':' / '+b.trafficLimit+' TB'),trafficUsedLabel:b.trafficUsed+' TB',trafficLimitLabel:unl?'unlimited':b.trafficLimit+' TB',trafficNote:unl?'no monthly cap on this plan':trafficPct+'% of cap · resets Nov 1',
+      up:this.fmtMb(b.up),down:this.fmtMb(b.down),ramLabel:b.ramGB,uptimeLabel:b.uptime>=1?Math.round(b.uptime)+'d':b.uptime>0?Math.round(b.uptime*24)+'h':'—',
+      renewIn:days<0?'overdue':days+'d',renewColor:days<=7?'var(--warn)':'var(--text)',powerLabel:b.status==='offline'?'power on':'reboot',
+      history:hist.map((h,i)=>({upPct:Math.round(h.up/maxD*100),downPct:Math.round(h.down/maxD*100),title:'day -'+(29-i)+': ↑'+h.up+' GB ↓'+h.down+' GB'})),
+      histStart:'Sep 17',histUp:(upSum/1000).toFixed(2)+' TB',histDown:(downSum/1000).toFixed(2)+' TB',histAvg:Math.round((upSum+downSum)/30)+' GB',cycleReset:'Nov 1',
+      torrentList:b.torrentList.map(t=>({...t,size:t.sizeGB+' GB',up:t.up?t.up+' MB/s':'—',down:t.down?t.down+' MB/s':'—',color:t.state==='seeding'?'var(--ok)':t.state==='leeching'?'var(--accent)':'var(--dim)'})),
+      dirs:b.dirs.map(([n,f],i)=>({name:n,pct:Math.round(f*100),size:this.fmtGB(f*b.diskQuota),color:dCols[i]}))};
+  }
+  runDetect(){
+    const f=this.state.form;const lines=[['…','connecting to '+f.host+':22','var(--muted)'],['✓','ssh auth ok ('+f.user+')','var(--text)'],['✓','pulsedmedia api: plan '+(f.type==='storage'?'Storage 10TB':'M10G 2TB')+' detected','var(--text)'],['✓',(f.type==='storage'?'no torrent client (storage box)':'rTorrent 0.9.8 responding'),'var(--text)'],['✓','quota: '+(f.type==='storage'?'10 TB':'2 TB')+' · traffic '+(f.type==='storage'?'unlimited':'8 TB/mo'),'var(--text)']];
+    this.setState({detectLog:[],detectDone:false});let i=0;
+    const step=()=>{if(i<lines.length){const [mark,text,textColor]=lines[i++];this.setState(s=>({detectLog:[...s.detectLog.map(l=>l.mark==='…'?{...l,mark:'✓',color:'var(--ok)'}:l),{mark,text,textColor,color:mark==='…'?'var(--accent)':'var(--ok)'}]}));this.d=setTimeout(step,550);}else{this.setState(s=>({detectDone:true,detectLog:s.detectLog.map(l=>({...l,mark:'✓',color:'var(--ok)'}))}));}};
+    step();
+  }
+  renderVals(){
+    const S=this.state;const boxes=S.boxes.map(b=>this.enrich(b));
+    const sel=boxes.find(b=>b.id===S.selId)||boxes[0];
+    const activeAlerts=S.alerts.filter(a=>a.active).length;
+    const online=S.boxes.filter(b=>b.status==='online');
+    const nextRenew=S.boxes.map(b=>b.renewal).sort()[0];
+    const totals={count:S.boxes.length,online:online.length,disk:this.fmtGB(S.boxes.reduce((a,b)=>a+b.diskQuota,0)),diskUsed:this.fmtGB(S.boxes.reduce((a,b)=>a+b.diskUsed,0)),traffic:S.boxes.reduce((a,b)=>a+b.trafficUsed,0).toFixed(1)+' TB',up:this.fmtMb(online.reduce((a,b)=>a+b.up,0)),down:this.fmtMb(online.reduce((a,b)=>a+b.down,0)),torrents:S.boxes.reduce((a,b)=>a+b.torrents,0),renewal:nextRenew?nextRenew.slice(5)+' · '+this.daysUntil(nextRenew)+'d':'—'};
+    const go=v=>()=>this.setState({view:v});
+    const nav=[['fleet','fleet'],['add','add box'],['alerts','alerts'],['settings','settings']].map(([v,label])=>({label,go:go(v),bg:S.view===v||(v==='fleet'&&S.view==='box')?'var(--panel2)':'transparent',color:S.view===v||(v==='fleet'&&S.view==='box')?'var(--text)':'var(--muted)',badge:v==='alerts'&&activeAlerts?String(activeAlerts):null}));
+    const tabs=[['overview','overview'],['traffic','traffic'],['torrents','torrents'],['storage','storage']].filter(([k])=>!(k==='torrents'&&sel&&sel.type==='storage')).map(([k,label])=>({label,go:()=>this.setState({tab:k}),color:S.tab===k?'var(--text)':'var(--muted)',border:S.tab===k?'var(--accent)':'transparent'}));
+    const seg=(on)=>({bg:on?'var(--accent)':'transparent',color:on?'#fff':'var(--muted)'});
+    const c=seg(S.fleetView==='cards'),t=seg(S.fleetView==='table'),dk=seg(S.theme==='dark'),lt=seg(S.theme==='light');
+    const fset=k=>e=>this.setState(s=>({form:{...s.form,[k]:e.target.value},errors:{...s.errors,[k]:undefined}}));
+    const E=S.errors;const bd=k=>E[k]?'var(--bad)':'var(--line)';
+    const alertColor={bad:'var(--bad)',warn:'var(--warn)',ok:'var(--ok)'};
+    const stepColor=n=>S.addStep===n?'var(--accent)':S.addStep>n?'var(--text)':'var(--muted)';
+    const pending=S.pending?this.enrich(S.pending):{};
+    return {
+      theme:S.theme,tv:S.theme==='light'?{bg:'#f2f3f5',panel:'#ffffff',panel2:'#f7f8fa',line:'#dfe3e9',text:'#0f1420',muted:'#5d667a',dim:'#8b93a3'}:{bg:'#0b0e13',panel:'#11151d',panel2:'#161b25',line:'#1f2633',text:'#e6e9ef',muted:'#8b93a3',dim:'#5a6272'},navItems:nav,totals,lastPoll:S.lastPoll,boxes,sel:sel||{},tabs,pending,
+      isFleet:S.view==='fleet',isBox:S.view==='box'&&!!sel,isAdd:S.view==='add',isAlerts:S.view==='alerts',isSettings:S.view==='settings',
+      isCards:S.fleetView==='cards',isTable:S.fleetView==='table',cardsBg:c.bg,cardsColor:c.color,tableBg:t.bg,tableColor:t.color,darkBg:dk.bg,darkColor:dk.color,lightBg:lt.bg,lightColor:lt.color,
+      tabOverview:S.tab==='overview',tabTraffic:S.tab==='traffic',tabTorrents:S.tab==='torrents',tabStorage:S.tab==='storage',
+      setCards:()=>this.setState({fleetView:'cards'}),setTable:()=>this.setState({fleetView:'table'}),setDark:()=>this.setState({theme:'dark'}),setLight:()=>this.setState({theme:'light'}),
+      goFleet:go('fleet'),goAdd:()=>this.setState({view:'add',addStep:1}),
+      refreshSel:()=>this.setState({lastPoll:'just now'}),
+      toggleSelPower:()=>this.setState(s=>({boxes:s.boxes.map(b=>b.id!==s.selId?b:{...b,status:b.status==='offline'?'online':b.status,uptime:b.status==='offline'?0.01:b.uptime,up:b.status==='offline'?120:b.up,down:b.status==='offline'?15:b.down,cpu:b.status==='offline'?12:b.cpu,ram:b.status==='offline'?30:b.ram})})),
+      removeSel:()=>this.setState(s=>({boxes:s.boxes.filter(b=>b.id!==s.selId),alerts:s.alerts.filter(a=>a.boxId!==s.selId),view:'fleet'})),
+      pauseAll:()=>this.setState(s=>({boxes:s.boxes.map(b=>b.id!==s.selId?b:{...b,up:0,down:0,torrentList:b.torrentList.map(x=>({...x,state:'paused',up:0,down:0}))})})),
+      resumeAll:()=>this.setState(s=>({boxes:s.boxes.map(b=>b.id!==s.selId?b:{...b,up:300,down:40,torrentList:b.torrentList.map(x=>({...x,state:x.pct<100?'leeching':'seeding',up:x.pct<100?0:1.2,down:x.pct<100?3.4:0}))})})),
+      form:S.form,setFormName:fset('name'),setFormHost:fset('host'),setFormUser:fset('user'),setFormPass:fset('pass'),setFormType:fset('type'),
+      hostBorder:bd('host'),userBorder:bd('user'),passBorder:bd('pass'),hostError:E.host||null,
+      addStep1:S.addStep===1,addStep2:S.addStep===2,addStep3:S.addStep===3,step1Color:stepColor(1),step2Color:stepColor(2),step3Color:stepColor(3),
+      detectLog:S.detectLog,detectDone:S.detectDone,
+      addNext:()=>{if(S.addStep===1){const f=S.form,err={};if(!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(f.host.trim()))err.host='enter a valid hostname';if(!f.user.trim())err.user='required';if(!f.pass)err.pass='required';if(Object.keys(err).length){this.setState({errors:err});return;}this.setState({addStep:2},()=>this.runDetect());}else if(S.addStep===2){const f=S.form,st=f.type==='storage';const id=Math.max(0,...S.boxes.map(b=>b.id))+1;this.setState({addStep:3,pending:{id,name:f.name.trim()||f.host.split('.')[0],type:f.type,plan:st?'Storage 10TB':'M10G 2TB',dc:'Helsinki, FI',hostname:f.host.trim(),ip:'95.216.'+(40+id)+'.'+(10+id*7),user:f.user,status:'online',client:st?'—':'rTorrent 0.9.8 / ruTorrent',diskUsed:0,diskQuota:st?10000:2000,trafficUsed:0,trafficLimit:st?0:8,up:0,down:0,port:st?'1 Gbit/s':'10 Gbit/s',cpu:1,ram:4,ramGB:'0.3 / 8 GB',torrents:0,seeding:0,leeching:0,ratio:'—',uptime:0.01,renewal:'2026-11-16',fs:st?'zfs':'ext4',inodes:'0.0%',history:Array.from({length:30},()=>({up:0,down:0})),torrentList:[],dirs:[]}});}},
+      addBack:()=>{clearTimeout(this.d);this.setState(s=>({addStep:s.addStep-1}));},
+      addConfirm:()=>this.setState(s=>({boxes:[...s.boxes,s.pending],view:'box',selId:s.pending.id,tab:'overview',addStep:1,pending:null,form:{name:'',host:'',user:'',pass:'',type:'seedbox'},errors:{}})),
+      alerts:S.alerts.map(a=>({...a,color:alertColor[a.sev],box:(S.boxes.find(b=>b.id===a.boxId)||{}).name||'removed',opacity:a.active?1:.5,ack:()=>this.setState(s=>({alerts:s.alerts.map(x=>x.id===a.id?{...x,active:false}:x)})),openBox:()=>this.setState({view:'box',selId:a.boxId,tab:'overview'})})),
+      noAlerts:S.alerts.length===0,ackAll:()=>this.setState(s=>({alerts:s.alerts.map(x=>({...x,active:false}))})),
+      interval:S.interval,setInterval:e=>this.setState({interval:e.target.value}),diskThreshold:S.diskThreshold,setDiskThreshold:e=>this.setState({diskThreshold:e.target.value}),trafficThreshold:S.trafficThreshold,setTrafficThreshold:e=>this.setState({trafficThreshold:e.target.value})
+    };
+  }
+}
+</script>
+</body>
+</html>

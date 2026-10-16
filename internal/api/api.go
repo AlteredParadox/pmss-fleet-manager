@@ -1,0 +1,699 @@
+// Package api serves the JSON API, the SSE stream and the embedded frontend.
+package api
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"pmss-fleet-manager/internal/collect"
+	"pmss-fleet-manager/internal/store"
+	"pmss-fleet-manager/internal/web"
+)
+
+// Server holds the dependencies for the handlers.
+type Server struct {
+	st   *store.Store
+	m    *collect.Manager
+	log  *slog.Logger
+	auth string // "user:pass" or ""
+	mux  *http.ServeMux
+	// instance identifies this process; the UI reloads itself when it
+	// changes after an SSE reconnect so a rebuilt server never runs stale JS.
+	instance string
+}
+
+// New builds the handler tree.
+func New(st *store.Store, m *collect.Manager, log *slog.Logger, basicAuth string) *Server {
+	s := &Server{st: st, m: m, log: log, auth: basicAuth, mux: http.NewServeMux(),
+		instance: strconv.FormatInt(time.Now().UnixNano(), 36)}
+	s.routes()
+	return s
+}
+
+func (s *Server) routes() {
+	mux := s.mux
+	mux.HandleFunc("GET /api/state", s.handleState)
+	mux.HandleFunc("GET /api/events", s.handleEvents)
+	mux.HandleFunc("GET /api/boxes", s.handleListBoxes)
+	mux.HandleFunc("POST /api/boxes", s.handleCreateBox)
+	mux.HandleFunc("GET /api/boxes/{id}", s.handleGetBox)
+	mux.HandleFunc("PUT /api/boxes/{id}", s.handleUpdateBox)
+	mux.HandleFunc("DELETE /api/boxes/{id}", s.handleDeleteBox)
+	mux.HandleFunc("GET /api/boxes/{id}/history", s.handleHistory)
+	mux.HandleFunc("GET /api/boxes/{id}/probe", s.handleProbe)
+	mux.HandleFunc("POST /api/boxes/{id}/refresh", s.handleRefresh)
+	mux.HandleFunc("POST /api/boxes/{id}/du", s.handleDu)
+	mux.HandleFunc("POST /api/boxes/{id}/qbt/{action}", s.handleQbtAction)
+	mux.HandleFunc("POST /api/boxes/{id}/containers/{cid}/{action}", s.handleContainerAction)
+	mux.HandleFunc("POST /api/detect", s.handleDetect)
+	mux.HandleFunc("GET /api/alerts", s.handleAlerts)
+	mux.HandleFunc("POST /api/alerts/ack-all", s.handleAckAll)
+	mux.HandleFunc("POST /api/alerts/{id}/ack", s.handleAck)
+	mux.HandleFunc("DELETE /api/alerts/{id}", s.handleDeleteAlert)
+	mux.HandleFunc("POST /api/alerts/clear-resolved", s.handleClearResolved)
+	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
+	mux.HandleFunc("PUT /api/settings", s.handleSetSettings)
+	mux.HandleFunc("GET /api/services", s.handleServices)
+	mux.HandleFunc("POST /api/services/sync", s.handleServicesSync)
+
+	static, _ := fs.Sub(web.FS, "static")
+	fileServer := http.FileServer(http.FS(static))
+	mux.Handle("GET /static/", http.StripPrefix("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		fileServer.ServeHTTP(w, r)
+	})))
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" && !strings.HasPrefix(r.URL.Path, "/#") {
+			http.NotFound(w, r)
+			return
+		}
+		b, err := fs.ReadFile(static, "index.html")
+		if err != nil {
+			http.Error(w, "index missing", 500)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(b)
+	})
+}
+
+// ServeHTTP applies auth and security headers then dispatches.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.auth != "" {
+		u, p, ok := r.BasicAuth()
+		if !ok || subtle.ConstantTimeCompare([]byte(u+":"+p), []byte(s.auth)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="pmss-fleet-manager"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet {
+		// Same-origin check against CSRF from other sites in the browser.
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !sameOrigin(origin, r.Host) {
+				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+				return
+			}
+		} else if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
+			http.Error(w, "cross-site request rejected", http.StatusForbidden)
+			return
+		}
+	}
+	s.mux.ServeHTTP(w, r)
+}
+
+func sameOrigin(origin, host string) bool {
+	origin = strings.TrimPrefix(strings.TrimPrefix(origin, "http://"), "https://")
+	return strings.EqualFold(origin, host)
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(code)
+	enc := json.NewEncoder(w)
+	_ = enc.Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, code int, err error) {
+	writeJSON(w, code, map[string]string{"error": err.Error()})
+}
+
+func idParam(r *http.Request) (int64, error) {
+	return strconv.ParseInt(r.PathValue("id"), 10, 64)
+}
+
+// Totals are the fleet-wide headline numbers.
+type Totals struct {
+	Count      int     `json:"count"`
+	Online     int     `json:"online"`
+	DiskUsed   int64   `json:"disk_used"`
+	DiskQuota  int64   `json:"disk_quota"`
+	TrafficOut int64   `json:"traffic_out"`
+	TrafficIn  int64   `json:"traffic_in"`
+	UpBps      float64 `json:"up_bps"`
+	DownBps    float64 `json:"down_bps"`
+	Torrents   int     `json:"torrents"`
+	Seeding    int     `json:"seeding"`
+	Containers int     `json:"containers"`
+	NextRenew  string  `json:"next_renewal"`
+	LastPoll   string  `json:"last_poll"`
+	// From the Pulsed Media customer API when configured: monthly cost of
+	// the matched boxes and of every active service on the account.
+	MonthlyCost      float64 `json:"monthly_cost"`
+	MonthlyCostFleet float64 `json:"monthly_cost_fleet"`
+	Currency         string  `json:"currency,omitempty"`
+}
+
+func totals(states []collect.BoxState) Totals {
+	var t Totals
+	var last time.Time
+	for _, b := range states {
+		t.Count++
+		if b.Status == "online" || b.Status == "degraded" {
+			t.Online++
+		}
+		t.DiskUsed += b.Disk.UsedBytes
+		t.DiskQuota += b.Disk.QuotaBytes
+		t.TrafficOut += b.Traffic.OutMonthBytes
+		t.TrafficIn += b.Traffic.InMonthBytes
+		t.UpBps += b.Rates.UpBps
+		t.DownBps += b.Rates.DownBps
+		t.Torrents += b.Qbt.Total
+		t.Seeding += b.Qbt.Seeding
+		t.Containers += b.Docker.Running
+		if r := b.EffectiveRenewal(); r != "" && (t.NextRenew == "" || r < t.NextRenew) {
+			t.NextRenew = r
+		}
+		if b.Service != nil {
+			t.MonthlyCost += b.Service.Monthly
+			t.Currency = b.Service.Currency
+		}
+		if b.LastPoll.After(last) {
+			last = b.LastPoll
+		}
+	}
+	if !last.IsZero() {
+		t.LastPoll = last.UTC().Format(time.RFC3339)
+	}
+	return t
+}
+
+func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	states := s.m.States()
+	sums := make([]collect.BoxState, len(states))
+	for i, st := range states {
+		sums[i] = st.Summary()
+	}
+	unacked, _ := s.st.CountUnacked(r.Context())
+	tot := totals(states)
+	svc := s.m.Services()
+	tot.MonthlyCostFleet = svc.MonthlyCost
+	if tot.Currency == "" {
+		tot.Currency = svc.Currency
+	}
+	writeJSON(w, 200, map[string]any{
+		"boxes":          sums,
+		"totals":         tot,
+		"alerts_unacked": unacked,
+		"settings":       s.m.Settings().Public(),
+		"instance":       s.instance,
+		"now":            time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(200)
+	fmt.Fprint(w, "retry: 3000\n\n")
+	fl.Flush()
+	ch, cancel := s.m.Bus().Subscribe()
+	defer cancel()
+	ping := time.NewTicker(25 * time.Second)
+	defer ping.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ping.C:
+			fmt.Fprint(w, ": ping\n\n")
+			fl.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			b, _ := json.Marshal(ev)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, b)
+			fl.Flush()
+		}
+	}
+}
+
+// boxInput is the writable box shape, including secrets.
+type boxInput struct {
+	Name          string `json:"name"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	User          string `json:"user"`
+	AuthMethod    string `json:"auth_method"`
+	KeyPath       string `json:"key_path"`
+	Password      string `json:"password"`
+	Type          string `json:"type"`
+	Plan          string `json:"plan"`
+	Datacenter    string `json:"datacenter"`
+	Renewal       string `json:"renewal"`
+	QbtEnabled    bool   `json:"qbt_enabled"`
+	QbtPort       int    `json:"qbt_port"`
+	QbtUser       string `json:"qbt_user"`
+	QbtPass       string `json:"qbt_pass"`
+	QbtStartCmd   string `json:"qbt_start_cmd"`
+	DockerEnabled bool   `json:"docker_enabled"`
+	DuEnabled     *bool  `json:"du_enabled"`
+	Enabled       *bool  `json:"enabled"`
+	HostKey       string `json:"host_key"`
+}
+
+func (in boxInput) validate() error {
+	in.Host = strings.TrimSpace(in.Host)
+	if in.Host == "" || strings.ContainsAny(in.Host, " /") {
+		return errors.New("hostname is required")
+	}
+	if strings.TrimSpace(in.User) == "" {
+		return errors.New("username is required")
+	}
+	if in.Port < 0 || in.Port > 65535 {
+		return errors.New("invalid port")
+	}
+	switch in.Type {
+	case "", "seedbox", "storage":
+	default:
+		return errors.New("type must be seedbox or storage")
+	}
+	switch in.AuthMethod {
+	case "", "key", "agent", "password":
+	default:
+		return errors.New("auth_method must be key, agent or password")
+	}
+	if in.Renewal != "" {
+		if _, err := time.Parse("2006-01-02", in.Renewal); err != nil {
+			return errors.New("renewal must be YYYY-MM-DD")
+		}
+	}
+	return nil
+}
+
+func (in boxInput) apply(b *store.Box) {
+	b.Name = strings.TrimSpace(in.Name)
+	b.Host = strings.TrimSpace(in.Host)
+	b.Port = in.Port
+	if b.Port == 0 {
+		b.Port = 22
+	}
+	b.User = strings.TrimSpace(in.User)
+	b.AuthMethod = in.AuthMethod
+	b.KeyPath = strings.TrimSpace(in.KeyPath)
+	b.Password = in.Password
+	b.Type = in.Type
+	if b.Type == "" {
+		b.Type = "seedbox"
+	}
+	b.Plan, b.Datacenter, b.Renewal = strings.TrimSpace(in.Plan), strings.TrimSpace(in.Datacenter), in.Renewal
+	b.QbtEnabled, b.QbtPort, b.QbtUser, b.QbtPass, b.QbtStartCmd = in.QbtEnabled, in.QbtPort, in.QbtUser, in.QbtPass, in.QbtStartCmd
+	b.DockerEnabled = in.DockerEnabled
+	if in.DuEnabled != nil {
+		b.DuEnabled = *in.DuEnabled
+	}
+	if in.Enabled != nil {
+		b.Enabled = *in.Enabled
+	}
+	if in.HostKey != "" {
+		b.HostKey = in.HostKey
+	}
+	if b.Name == "" {
+		b.Name = strings.SplitN(b.Host, ".", 2)[0]
+	}
+}
+
+func decode(r *http.Request, v any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+	return dec.Decode(v)
+}
+
+func (s *Server) handleListBoxes(w http.ResponseWriter, r *http.Request) {
+	boxes, err := s.st.ListBoxes(r.Context())
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, boxes)
+}
+
+func (s *Server) handleCreateBox(w http.ResponseWriter, r *http.Request) {
+	var in boxInput
+	if err := decode(r, &in); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := in.validate(); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	b := &store.Box{Enabled: true, DuEnabled: true}
+	in.apply(b)
+	if err := s.m.AddBox(r.Context(), b); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 201, b)
+}
+
+func (s *Server) handleGetBox(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	b, err := s.st.GetBox(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, 404, err)
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	st, _ := s.m.State(id)
+	writeJSON(w, 200, map[string]any{"box": b, "state": st})
+}
+
+func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	b, err := s.st.GetBox(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, 404, err)
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	var in boxInput
+	if err := decode(r, &in); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := in.validate(); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	prevHost, prevPort := b.Host, b.Port
+	in.apply(b)
+	if b.Host != prevHost || b.Port != prevPort {
+		b.HostKey = in.HostKey // re-pin on next connect unless supplied
+	}
+	if err := s.m.UpdateBox(r.Context(), b); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	fresh, _ := s.st.GetBox(r.Context(), id)
+	writeJSON(w, 200, fresh)
+}
+
+func (s *Server) handleDeleteBox(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.m.RemoveBox(r.Context(), id); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	hours, _ := strconv.Atoi(r.URL.Query().Get("hours"))
+	if hours <= 0 || hours > 24*31 {
+		hours = 24
+	}
+	smps, err := s.st.Samples(r.Context(), id, time.Now().Add(-time.Duration(hours)*time.Hour))
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	if smps == nil {
+		smps = []store.Sample{}
+	}
+	writeJSON(w, 200, smps)
+}
+
+func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	secs, err := s.m.RawProbe(ctx, id)
+	if err != nil {
+		writeErr(w, 502, err)
+		return
+	}
+	writeJSON(w, 200, secs)
+}
+
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.m.Refresh(id); err != nil {
+		writeErr(w, 404, err)
+		return
+	}
+	writeJSON(w, 202, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleDu(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.m.RunDu(id); err != nil {
+		writeErr(w, 404, err)
+		return
+	}
+	writeJSON(w, 202, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleQbtAction(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	action := r.PathValue("action")
+	switch action {
+	case "pause", "resume", "start", "stop", "restart", "install", "autostart":
+	default:
+		writeErr(w, 400, fmt.Errorf("unknown action %q", action))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Minute)
+	defer cancel()
+	out, err := s.m.QbtAction(ctx, id, action)
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error(), "output": out})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "output": out})
+}
+
+func (s *Server) handleContainerAction(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	cid, action := r.PathValue("cid"), r.PathValue("action")
+	switch action {
+	case "start", "stop", "restart":
+	default:
+		writeErr(w, 400, fmt.Errorf("unknown action %q", action))
+		return
+	}
+	if len(cid) < 12 || len(cid) > 64 || strings.Trim(cid, "0123456789abcdef") != "" {
+		writeErr(w, 400, errors.New("invalid container id"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	if err := s.m.ContainerAction(ctx, id, cid, action); err != nil {
+		writeErr(w, 502, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleDetect(w http.ResponseWriter, r *http.Request) {
+	var in boxInput
+	if err := decode(r, &in); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := in.validate(); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	b := store.Box{Enabled: true, DuEnabled: true}
+	in.apply(&b)
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	res := collect.Detect(ctx, b)
+	writeJSON(w, 200, res)
+}
+
+func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
+	al, err := s.st.ListAlerts(r.Context(), 200)
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	if al == nil {
+		al = []store.Alert{}
+	}
+	writeJSON(w, 200, al)
+}
+
+func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.st.AckAlert(r.Context(), id); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	s.m.Publish(collect.Event{Type: "alerts"})
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleDeleteAlert(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.st.DeleteAlert(r.Context(), id); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	s.m.Publish(collect.Event{Type: "alerts"})
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleClearResolved(w http.ResponseWriter, r *http.Request) {
+	if err := s.st.ClearResolved(r.Context()); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	s.m.Publish(collect.Event{Type: "alerts"})
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleAckAll(w http.ResponseWriter, r *http.Request) {
+	if err := s.st.AckAll(r.Context()); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	s.m.Publish(collect.Event{Type: "alerts"})
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, s.m.Settings().Public())
+}
+
+func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, s.m.Services())
+}
+
+func (s *Server) handleServicesSync(w http.ResponseWriter, r *http.Request) {
+	if err := s.m.SyncServices(r.Context()); err != nil {
+		writeErr(w, 502, err)
+		return
+	}
+	writeJSON(w, 200, s.m.Services())
+}
+
+func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
+	in := s.m.Settings()
+	prevKey := in.PMAPIKey
+	in.PMAPIKey = ""
+	if err := decode(r, &in); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	// The browser never sees the stored key, so an empty field means "keep".
+	in.PMAPIKey = strings.TrimSpace(in.PMAPIKey)
+	switch {
+	case in.ClearPMAPIKey:
+		in.PMAPIKey = ""
+	case in.PMAPIKey == "":
+		in.PMAPIKey = prevKey
+	case strings.ContainsAny(in.PMAPIKey, " \t\r\n\"'"):
+		writeErr(w, 400, errors.New("API key contains whitespace or quotes"))
+		return
+	}
+	in.ClearPMAPIKey = false
+	if in.PollIntervalSec < 5 || in.PollIntervalSec > 3600 {
+		writeErr(w, 400, errors.New("poll interval must be 5..3600 seconds"))
+		return
+	}
+	for _, v := range []int{in.DiskThresholdPct, in.TrafficThreshold} {
+		if v < 1 || v > 100 {
+			writeErr(w, 400, errors.New("thresholds must be 1..100"))
+			return
+		}
+	}
+	if in.RenewalWarnDays < 0 || in.RenewalWarnDays > 365 || in.DuIntervalHours < 0 || in.DuIntervalHours > 720 {
+		writeErr(w, 400, errors.New("out of range"))
+		return
+	}
+	if in.QbtDownloadURL == "" {
+		in.QbtDownloadURL = store.DefaultQbtDownloadURL
+	}
+	if !strings.HasPrefix(in.QbtDownloadURL, "https://") || strings.ContainsAny(in.QbtDownloadURL, " '\"") {
+		writeErr(w, 400, errors.New("qbt_download_url must be an https URL"))
+		return
+	}
+	if in.CardMinPx < 240 || in.CardMinPx > 900 {
+		in.CardMinPx = 340
+	}
+	if in.Theme != "dark" && in.Theme != "light" {
+		in.Theme = "dark"
+	}
+	if in.FleetView != "cards" && in.FleetView != "table" {
+		in.FleetView = "cards"
+	}
+	if err := s.st.SaveSettings(r.Context(), in); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	s.m.SetSettings(in)
+	writeJSON(w, 200, in.Public())
+}

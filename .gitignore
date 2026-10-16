@@ -1,0 +1,14 @@
+# binaries
+/pmss-fleet-manager
+/bin/
+/dist/
+# local data
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+config.local.yaml
+# editor / os
+.DS_Store
+*.swp
