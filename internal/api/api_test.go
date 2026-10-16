@@ -1,3 +1,19 @@
+// pmss-fleet-manager — a single-pane dashboard for Pulsed Media seedboxes.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 package api
 
 import (
@@ -90,5 +106,23 @@ func TestAlertAckFlow(t *testing.T) {
 	_ = json.Unmarshal([]byte(body), &alerts)
 	if len(alerts) != 0 {
 		t.Fatalf("not cleared: %s", body)
+	}
+}
+
+func TestSourceURLPinning(t *testing.T) {
+	s := &Server{}
+	cases := map[string]string{
+		"dev":               sourceBaseURL,
+		"":                  sourceBaseURL,
+		"v1.2.3":            sourceBaseURL + "/tree/v1.2.3",
+		"ac08e55":           sourceBaseURL + "/tree/ac08e55",
+		"ac08e55-dirty":     sourceBaseURL,
+		"v1.2.3-4-gabc1234": sourceBaseURL,
+	}
+	for v, want := range cases {
+		s.SetVersion(v)
+		if got := s.sourceURL(); got != want {
+			t.Errorf("version %q: got %s, want %s", v, got, want)
+		}
 	}
 }

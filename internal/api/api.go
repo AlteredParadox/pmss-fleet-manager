@@ -1,3 +1,19 @@
+// pmss-fleet-manager — a single-pane dashboard for Pulsed Media seedboxes.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // Package api serves the JSON API, the SSE stream and the embedded frontend.
 package api
 
@@ -29,6 +45,9 @@ type Server struct {
 	// instance identifies this process; the UI reloads itself when it
 	// changes after an SSE reconnect so a rebuilt server never runs stale JS.
 	instance string
+
+	license, thirdParty []byte
+	version             string
 }
 
 // New builds the handler tree.
@@ -62,6 +81,11 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST /api/alerts/clear-resolved", s.handleClearResolved)
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleSetSettings)
+	// AGPL §13: the license, the third-party notices and the Corresponding
+	// Source offer are served WITHOUT basic auth (see isPublicPath).
+	mux.HandleFunc("GET /license", s.serveLegalText(func() []byte { return s.license }, "license text unavailable"))
+	mux.HandleFunc("GET /third-party-licenses", s.serveLegalText(func() []byte { return s.thirdParty }, "third-party notices unavailable"))
+	mux.HandleFunc("GET /source", s.handleSource)
 	mux.HandleFunc("GET /api/services", s.handleServices)
 	mux.HandleFunc("POST /api/services/sync", s.handleServicesSync)
 
@@ -89,7 +113,7 @@ func (s *Server) routes() {
 
 // ServeHTTP applies auth and security headers then dispatches.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.auth != "" {
+	if s.auth != "" && !isPublicPath(r.URL.Path) {
 		u, p, ok := r.BasicAuth()
 		if !ok || subtle.ConstantTimeCompare([]byte(u+":"+p), []byte(s.auth)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="pmss-fleet-manager"`)
@@ -211,6 +235,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"alerts_unacked": unacked,
 		"settings":       s.m.Settings().Public(),
 		"instance":       s.instance,
+		"version":        s.Version(),
+		"source_url":     s.sourceURL(),
 		"now":            time.Now().UTC().Format(time.RFC3339),
 	})
 }

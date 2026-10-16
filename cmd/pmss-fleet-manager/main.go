@@ -1,3 +1,19 @@
+// pmss-fleet-manager — a single-pane dashboard for Pulsed Media seedboxes.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // Command pmss-fleet-manager serves the fleet dashboard.
 package main
 
@@ -11,6 +27,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	legal "pmss-fleet-manager"
 	"strings"
 	"syscall"
 	"time"
@@ -81,6 +98,8 @@ func main() {
 	}
 
 	handler := api.New(st, mgr, log, *auth)
+	handler.SetLegal(legal.License, legal.ThirdPartyLicenses)
+	handler.SetVersion(version)
 	var servers []*http.Server
 	for _, a := range addrs {
 		srv := &http.Server{Addr: a, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
