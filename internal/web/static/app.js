@@ -707,11 +707,20 @@ function tabStorage(b) {
       <div class="panel rows"><div class="tile-label">access</div>
         <div><span>sftp</span><span>${esc(b.user)}@${esc(b.hostname || b.host)}:${b.port}</span></div>
         <div><span>ftps</span><span>${esc(b.hostname || b.host)}:21</span></div>
-        <div><span>panel</span><a href="https://${esc(b.hostname || b.host)}/user-${esc(b.user)}/" target="_blank" rel="noopener">${esc(b.hostname || b.host)}/user-${esc(b.user)}/</a></div>
-        ${b.qbt.enabled && b.qbt.port ? `<div><span>qbittorrent</span><span class="muted">127.0.0.1:${b.qbt.port} on the box (tunnelled)</span></div>` : ''}
+        ${userLinkRow(b, 'panel', '')}
+        ${userLinkRow(b, 'data', 'data/')}
+        ${b.type === 'seedbox' ? userLinkRow(b, 'qbittorrent', 'qbittorrent') : ''}
+        ${b.qbt.enabled && b.qbt.port ? `<div><span>qbt port</span><span class="muted">127.0.0.1:${b.qbt.port} on the box (tunnelled)</span></div>` : ''}
       </div>
     </div>
   </div>`;
+}
+// One row of the access panel: a per-user link on the box's own web server.
+// Every tenant path hangs off https://<host>/user-<name>/, so only the tail
+// differs ('' for the panel, 'data/', 'qbittorrent').
+function userLinkRow(b, label, tail) {
+  const path = `${esc(b.hostname || b.host)}/user-${esc(b.user)}/${tail}`;
+  return `<div><span>${label}</span><a href="https://${path}" target="_blank" rel="noopener">${path}</a></div>`;
 }
 function tabHost(b) {
   const h = b.host_sys;
