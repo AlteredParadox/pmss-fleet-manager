@@ -177,6 +177,7 @@ func (m *Manager) startPoller(b *store.Box) {
 	m.mu.Lock()
 	m.states[b.ID] = &st
 	p := newPoller(m, b)
+	p.ctx, p.cancel = context.WithCancel(m.ctx)
 	var auth qbt.AuthState
 	if _, err := m.st.GetCache(m.ctx, b.ID, authCacheKind, &auth); err == nil {
 		p.guard.Restore(auth)
@@ -187,7 +188,7 @@ func (m *Manager) startPoller(b *store.Box) {
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			p.run(m.ctx)
+			p.run(p.ctx)
 		}()
 	}
 }

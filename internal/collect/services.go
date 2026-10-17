@@ -204,8 +204,12 @@ func (m *Manager) reattachServices() {
 		m.decorate(&cp)
 		m.mu.Lock()
 		if cur, ok := m.states[id]; ok {
-			cur.Service = cp.Service
-			cp = *cur
+			// Replace the stored snapshot rather than writing into it: the
+			// object may be in a hook's hands on another goroutine.
+			ncp := *cur
+			ncp.Service = cp.Service
+			m.states[id] = &ncp
+			cp = ncp
 		}
 		m.mu.Unlock()
 		for _, h := range m.hooks {

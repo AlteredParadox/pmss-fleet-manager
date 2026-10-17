@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -109,7 +110,8 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 	}
 	if renewal := s.EffectiveRenewal(); renewal != "" {
 		if d, err := time.Parse("2006-01-02", renewal); err == nil {
-			days := int(time.Until(d.Add(24*time.Hour)).Hours() / 24)
+			// Floor: for the day after the due date this is -1, not 0.
+			days := int(math.Floor(time.Until(d.Add(24*time.Hour)).Hours() / 24))
 			switch {
 			case days < 0:
 				active = append(active, want{"renewal", "bad", fmt.Sprintf("%s renewal date %s has passed", name, renewal)})
