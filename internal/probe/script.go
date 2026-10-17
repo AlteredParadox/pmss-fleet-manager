@@ -50,7 +50,7 @@ scratch="${XDG_RUNTIME_DIR:-/run/user/$uid}"
 [ -d "$scratch" ] && [ -w "$scratch" ] || scratch="$home"
 # A probe killed at its deadline mid-bounded leaves its scratch file; sweep
 # old ones (not a concurrent probe's) rather than letting them pile up.
-find "$scratch" -maxdepth 1 -name '.pmss-probe.*' -mmin +2 -delete 2>/dev/null
+find "$scratch" -maxdepth 1 -type f -name '.pmss-probe.*' -mmin +2 -delete 2>/dev/null
 bounded(){
   secs=$1; shift
   # The scratch file lives in the tenant's own runtime dir or home, never

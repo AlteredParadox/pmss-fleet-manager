@@ -83,7 +83,8 @@ func (m *Manager) Publish(e Event) {
 // Settings returns the current settings snapshot.
 func (m *Manager) Settings() store.Settings { return *m.settings.Load() }
 
-// SetSettings swaps the settings used by pollers and wakes them.
+// SetSettings swaps the settings used by pollers; a changed poll interval
+// wakes them so they re-sleep with it. Thresholds apply at the next poll.
 func (m *Manager) SetSettings(s store.Settings) {
 	prev := m.settings.Swap(&s)
 	if prev.PMAPIKey != s.PMAPIKey && m.ctx != nil {
@@ -180,7 +181,7 @@ func (m *Manager) startPoller(bp *store.Box) {
 		authKnown = true
 	}
 	if !b.Enabled {
-		st.Status = "disabled"
+		st.Status, st.StatusReason = "disabled", "" // the cached reason belongs to the last poll
 	}
 	m.decorate(&st)
 	m.mu.Lock()
@@ -335,14 +336,16 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 			keep.adoptIdentity(*cur)
 			keep.Service = cur.Service
 			keep.resetVolatile() // port/creds may have changed: re-verify before any action
-			// The old poller's retry schedule died with it: the new one polls
-			// at once, and a disabled box has nothing to retry.
-			keep.Failures, keep.NextPoll, keep.Backoff = 0, time.Time{}, false
+			// The old poller's retry schedule died with it (the new one polls
+			// at once), but the failure count did not: it feeds the
+			// offline/degraded decision, and a box that has been down for
+			// hours must not dip to "degraded" on its first post-edit poll.
+			keep.NextPoll, keep.Backoff = time.Time{}, false
 			switch {
 			case !fresh.Enabled:
-				keep.Status, keep.StatusReason = "disabled", ""
+				keep.Status, keep.StatusReason, keep.Failures = "disabled", "", 0 // nothing to retry
 			case keep.Status == "disabled":
-				keep.Status, keep.StatusReason, keep.LastError = "pending", "", "" // re-enabled: the first poll decides
+				keep.Status, keep.StatusReason, keep.LastError, keep.Failures = "pending", "", "", 0 // re-enabled: the first poll decides
 			}
 			m.states[fresh.ID] = &keep
 		}

@@ -112,6 +112,12 @@ func main() {
 	for _, a := range addrs {
 		// WriteTimeout stays 0: /api/events is a long-lived SSE stream.
 		srv := &http.Server{Addr: a, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+		// Shutdown waits for handlers, and the SSE stream only ends with its
+		// request context: cancel that on shutdown or every stop takes the
+		// full grace period while a tab is open.
+		base, cancelBase := context.WithCancel(context.Background())
+		srv.BaseContext = func(net.Listener) context.Context { return base }
+		srv.RegisterOnShutdown(cancelBase)
 		servers = append(servers, srv)
 		go func(srv *http.Server) {
 			log.Info("pmss-fleet-manager listening", "addr", "http://"+srv.Addr, "version", version)

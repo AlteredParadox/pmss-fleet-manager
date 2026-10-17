@@ -617,7 +617,11 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.m.Refresh(id); err != nil {
-		writeErr(w, 404, err)
+		code := 409
+		if errors.Is(err, store.ErrNotFound) {
+			code = 404
+		}
+		writeErr(w, code, err)
 		return
 	}
 	writeJSON(w, 202, map[string]bool{"ok": true})

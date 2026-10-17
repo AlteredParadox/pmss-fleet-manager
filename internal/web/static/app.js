@@ -384,7 +384,7 @@ function viewBox() {
       <div>
         <div style="display:flex;align-items:center;gap:10px"><span class="led ${b.status}" style="width:10px;height:10px"></span><h1 style="margin:0">${esc(b.name)}</h1><span class="tag">${esc(b.type)}</span></div>
         <div class="meta"><span>${esc(b.hostname || b.host)}</span><span>${esc(b.user)}@${esc(b.host)}:${b.port}</span>${b.datacenter ? `<span>${esc(b.datacenter)}</span>` : ''}${planOf(b) ? `<span>${esc(planOf(b))}</span>` : ''}</div>
-        ${b.status_reason ? `<div class="meta"><span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(statusLabel(b.status))} — ${esc(b.status_reason)}</span>${b.failures ? `<span class="muted" title="${b.backoff ? 'after repeated failures the dashboard retries less often, up to every 10 minutes; use retry now to reconnect immediately' : 'retrying at the normal interval'}">${esc(retryNote(b))} · ${b.failures} failed</span>` : ''}</div>` : ''}
+        ${b.status_reason ? `<div class="meta"><span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(statusLabel(b.status))} — ${esc(b.status_reason)}</span>${b.failures ? `<span class="muted" title="${b.backoff ? 'after repeated failures the dashboard retries less often, up to every 10 minutes; use retry now to reconnect immediately' : 'retrying at the normal interval'}">${retryNote(b) ? esc(retryNote(b)) + ' · ' : ''}${b.failures} failed</span>` : ''}</div>` : ''}
       </div>
       <div class="actions">
         <button data-act="refresh" title="${b.failures ? 'reconnect and poll now, ignoring the backoff' : 'poll now'}">${b.failures ? 'retry now' : 'refresh'}</button>

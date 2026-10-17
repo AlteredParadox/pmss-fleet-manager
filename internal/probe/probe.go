@@ -168,8 +168,9 @@ func lastSection(raw []byte, tag string) string {
 	return last
 }
 
-// PortOwnerNow evaluates ListenScript's output (uid on the first line, then
-// listen lines) for one port, with the same rules as Snapshot.PortOwner.
+// PortOwnerNow evaluates ListenScript's output (a "uid N" line, the listen
+// lines, and a closing "end" marker) for one port, with the same rules as
+// Snapshot.PortOwner.
 func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
 	// The script ends with a marker line: a session that was cut off (or
 	// a Run that returned partial output with an error) must not pass on

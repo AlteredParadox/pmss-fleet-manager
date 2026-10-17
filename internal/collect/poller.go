@@ -395,7 +395,10 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 	st.Unpolled = false // a failed poll is still a verified observation
 	st.LastError = describeErr(err)
 	st.PollMs = time.Since(start).Milliseconds()
-	if st.Failures >= 2 || st.LastOK.IsZero() {
+	// A box already offline stays offline: after a restart or an edit the
+	// failure count starts over, and one "degraded" poll in between would
+	// resolve the unreachable alert only to raise it again.
+	if st.Failures >= 2 || st.LastOK.IsZero() || st.Status == "offline" {
 		st.Status = "offline"
 	} else {
 		st.Status = "degraded"
@@ -589,7 +592,10 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		BinaryVersion: snap.Qbt.BinaryVersion, StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0}
 	defer func() { // runs after st.Qbt is set below
 		q := &st.Qbt
-		q.RestartNeeded = q.ProcessUp && q.Version != "" && q.BinaryVersion != "" && q.Version != q.BinaryVersion
+		// Version is carried over from the last reachable poll; only compare
+		// it when this poll confirmed it, or a restarted-but-unreachable
+		// client would keep "restart to apply" lit.
+		q.RestartNeeded = q.Reachable && q.ProcessUp && q.Version != "" && q.BinaryVersion != "" && q.Version != q.BinaryVersion
 		// Last, so a slow GitHub lookup (cached six hours) cannot eat into
 		// the time budget of the WebUI calls above.
 		q.LatestVersion = p.m.latest.get(ctx)
