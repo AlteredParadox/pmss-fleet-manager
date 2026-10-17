@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,6 +49,7 @@ func main() {
 		return
 	}
 	listen := flag.String("listen", envOr("PMSS_LISTEN", "127.0.0.1:8080"), "address(es) to listen on, comma-separated")
+	allowedHosts := flag.String("allowed-hosts", os.Getenv("PMSS_ALLOWED_HOSTS"), "extra Host header names to serve (e.g. a reverse-proxy name), comma-separated; the listen addresses and localhost are always allowed")
 	dataDir := flag.String("data", envOr("PMSS_DATA", "./data"), "directory for the SQLite database")
 	auth := flag.String("auth", os.Getenv("PMSS_AUTH"), "optional HTTP basic auth as user:password")
 	logLevel := flag.String("log", envOr("PMSS_LOG", "info"), "log level: debug, info, warn, error")
@@ -100,9 +102,16 @@ func main() {
 	handler := api.New(st, mgr, log, *auth)
 	handler.SetLegal(legal.License, legal.ThirdPartyLicenses)
 	handler.SetVersion(version)
+	hosts, wildcard := allowedHostList(addrs, *allowedHosts)
+	if wildcard && *allowedHosts == "" {
+		log.Warn("listening on a wildcard address without -allowed-hosts: Host header validation is off, so a DNS-rebinding page could reach the API; set -allowed-hosts")
+	} else {
+		handler.SetAllowedHosts(hosts)
+	}
 	var servers []*http.Server
 	for _, a := range addrs {
-		srv := &http.Server{Addr: a, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+		// WriteTimeout stays 0: /api/events is a long-lived SSE stream.
+		srv := &http.Server{Addr: a, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 		servers = append(servers, srv)
 		go func(srv *http.Server) {
 			log.Info("pmss-fleet-manager listening", "addr", "http://"+srv.Addr, "version", version)
@@ -121,6 +130,32 @@ func main() {
 		_ = srv.Shutdown(sctx)
 	}
 	mgr.Stop()
+}
+
+// allowedHostList derives the Host header allow-list: every listen address's
+// host part plus loopback names, plus the -allowed-hosts extras. wildcard
+// reports a listen address with no specific host (0.0.0.0, ::, empty), which
+// cannot be enumerated.
+func allowedHostList(addrs []string, extra string) (hosts []string, wildcard bool) {
+	hosts = []string{"localhost", "127.0.0.1", "::1"}
+	for _, a := range addrs {
+		h, _, err := net.SplitHostPort(a)
+		if err != nil {
+			h = a
+		}
+		h = strings.Trim(h, "[]")
+		if h == "" || h == "0.0.0.0" || h == "::" {
+			wildcard = true
+			continue
+		}
+		hosts = append(hosts, h)
+	}
+	for _, h := range strings.Split(extra, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts, wildcard
 }
 
 func envOr(k, def string) string {

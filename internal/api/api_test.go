@@ -19,6 +19,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -124,5 +125,71 @@ func TestSourceURLPinning(t *testing.T) {
 		if got := s.sourceURL(); got != want {
 			t.Errorf("version %q: got %s, want %s", v, got, want)
 		}
+	}
+}
+
+func TestHostAllowList(t *testing.T) {
+	s, _ := newTestServer(t)
+	// No list: any Host is served (the test helper uses dash.local).
+	if code, _ := do(t, s, "GET", "/api/state", "", nil); code != 200 {
+		t.Fatalf("no allow-list: %d", code)
+	}
+	s.SetAllowedHosts([]string{"localhost", "127.0.0.1", "Dash.Local"})
+	cases := map[string]int{"dash.local:8080": 200, "localhost": 200, "127.0.0.1:9": 200, "attacker.example:8080": 421, "": 421}
+	for host, want := range cases {
+		req := httptest.NewRequest("GET", "/api/state", nil)
+		req.Host = host
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Errorf("host %q: got %d want %d", host, rr.Code, want)
+		}
+	}
+	// The legal routes are public but still subject to the Host check.
+	req := httptest.NewRequest("GET", "/license", nil)
+	req.Host = "attacker.example"
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != 421 {
+		t.Fatalf("license with bad host: %d", rr.Code)
+	}
+	if got := rr.Header().Get("Content-Security-Policy"); got != "" {
+		t.Fatal("rejected request should not carry app headers")
+	}
+}
+
+func TestEditClearsHostKeyOnHostChangeOrForget(t *testing.T) {
+	s, st := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	code, body := do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","host_key":"ssh-ed25519 AAAA"}`, hdr)
+	if code != 201 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	boxes, _ := st.ListBoxes(context.Background())
+	id := boxes[0].ID
+	if boxes[0].HostKey == "" {
+		t.Fatal("pin not stored")
+	}
+	// Edit without touching host/port and without the key: pin kept.
+	code, body = do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u"}`, hdr)
+	if code != 200 {
+		t.Fatalf("edit: %d %s", code, body)
+	}
+	b, _ := st.GetBox(context.Background(), id)
+	if b.HostKey == "" {
+		t.Fatal("pin must survive an unrelated edit")
+	}
+	// Host change: pin cleared.
+	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"b.example","user":"u"}`, hdr)
+	b, _ = st.GetBox(context.Background(), id)
+	if b.HostKey != "" {
+		t.Fatal("pin must clear when the host changes")
+	}
+	// Re-pin, then explicit forget.
+	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"b.example","user":"u","host_key":"ssh-ed25519 BBBB"}`, hdr)
+	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"b.example","user":"u","forget_host_key":true}`, hdr)
+	b, _ = st.GetBox(context.Background(), id)
+	if b.HostKey != "" {
+		t.Fatal("forget_host_key must clear the pin")
 	}
 }

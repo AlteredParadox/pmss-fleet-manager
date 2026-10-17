@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -48,7 +49,49 @@ type Server struct {
 
 	license, thirdParty []byte
 	version             string
+
+	// allowedHosts, when set, is the only set of Host header values served.
+	// Without it a page on an attacker's domain whose DNS is rebound to the
+	// dashboard's IP is same-origin from the browser's point of view and
+	// passes the Origin check with full API access on a no-auth loopback
+	// install. Hostnames only, lower-case, no port.
+	allowedHosts map[string]bool
 }
+
+// SetAllowedHosts restricts served Host headers to the given hostnames
+// (ports are ignored). An empty list disables the check.
+func (s *Server) SetAllowedHosts(hosts []string) {
+	s.allowedHosts = nil
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if s.allowedHosts == nil {
+			s.allowedHosts = map[string]bool{}
+		}
+		s.allowedHosts[h] = true
+	}
+}
+
+// hostAllowed checks the request's Host header against the allow-list.
+func (s *Server) hostAllowed(hostport string) bool {
+	if s.allowedHosts == nil {
+		return true
+	}
+	h := strings.ToLower(hostport)
+	if hp, _, err := net.SplitHostPort(hostport); err == nil {
+		h = strings.ToLower(hp)
+	}
+	h = strings.Trim(h, "[]")
+	return s.allowedHosts[h]
+}
+
+// csp is the Content-Security-Policy for the embedded UI: own origin only,
+// plus Google Fonts for the stylesheet and font files. Inline styles are
+// used for widths and the like, hence 'unsafe-inline' on styles only.
+const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+	"font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 // New builds the handler tree.
 func New(st *store.Store, m *collect.Manager, log *slog.Logger, basicAuth string) *Server {
@@ -68,7 +111,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("PUT /api/boxes/{id}", s.handleUpdateBox)
 	mux.HandleFunc("DELETE /api/boxes/{id}", s.handleDeleteBox)
 	mux.HandleFunc("GET /api/boxes/{id}/history", s.handleHistory)
-	mux.HandleFunc("GET /api/boxes/{id}/probe", s.handleProbe)
+	mux.HandleFunc("POST /api/boxes/{id}/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
 	mux.HandleFunc("POST /api/boxes/{id}/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/boxes/{id}/du", s.handleDu)
 	mux.HandleFunc("POST /api/boxes/{id}/qbt/{action}", s.handleQbtAction)
@@ -113,6 +156,10 @@ func (s *Server) routes() {
 
 // ServeHTTP applies auth and security headers then dispatches.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.hostAllowed(r.Host) {
+		http.Error(w, "unexpected Host header; start with -allowed-hosts to serve this name", http.StatusMisdirectedRequest)
+		return
+	}
 	if s.auth != "" && !isPublicPath(r.URL.Path) {
 		u, p, ok := r.BasicAuth()
 		if !ok || subtle.ConstantTimeCompare([]byte(u+":"+p), []byte(s.auth)) != 1 {
@@ -124,6 +171,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", csp)
 	if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet {
 		// Same-origin check against CSRF from other sites in the browser.
 		if origin := r.Header.Get("Origin"); origin != "" {
@@ -297,6 +345,9 @@ type boxInput struct {
 	DuEnabled     *bool  `json:"du_enabled"`
 	Enabled       *bool  `json:"enabled"`
 	HostKey       string `json:"host_key"`
+	// ForgetHostKey drops the pinned SSH host key so the next connect
+	// re-pins (trust on first use); needed after a box is reinstalled.
+	ForgetHostKey bool `json:"forget_host_key"`
 }
 
 func (in boxInput) validate() error {
@@ -438,8 +489,11 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 	}
 	prevHost, prevPort := b.Host, b.Port
 	in.apply(b)
-	if b.Host != prevHost || b.Port != prevPort {
-		b.HostKey = in.HostKey // re-pin on next connect unless supplied
+	if b.Host != prevHost || b.Port != prevPort || in.ForgetHostKey {
+		// A different endpoint has a different key; re-pin on next connect
+		// unless the wizard supplied the one it just saw. (The edit form
+		// never sends the stored key back, so this really clears it.)
+		b.HostKey = in.HostKey
 	}
 	if err := s.m.UpdateBox(r.Context(), b); err != nil {
 		writeErr(w, 500, err)
