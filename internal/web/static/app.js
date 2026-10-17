@@ -415,7 +415,7 @@ function tabOverview(b, renewDays) {
     <div class="panel"><div class="tile-label">cpu / ram</div>
       <div class="tile-value">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} <small>cpu${b.cpu.quota_cpus ? ` · of ${b.cpu.quota_cpus.toFixed(1)} cores` : b.cpu.host_cpus ? ` · of ${b.cpu.host_cpus} host cores` : ''}</small></div>
       <div class="meter thick"><i style="width:${Math.min(100, b.cpu.pct || 0)}%"></i></div>
-      <div class="note" style="display:flex;justify-content:space-between;gap:8px"><span>ram ${b.ram.ok ? fmtPct(b.ram.pct) : '—'} · ${fmtBytes(b.ram.used_bytes, 1)} / ${b.ram.limit_bytes ? fmtBytes(b.ram.limit_bytes, 1) : '?'}</span><span>${b.ram.pids ? `${b.ram.pids} proc` : ''}</span></div>
+      <div class="note" style="display:flex;justify-content:space-between;gap:8px"><span title="process memory (rss) against the slice limit; page cache is charged to the slice too but is reclaimed, not OOM-killed">ram ${b.ram.ok ? fmtPct(b.ram.pct) : '—'} · ${b.ram.rss_bytes ? `${fmtBytes(b.ram.rss_bytes, 1)} proc + ${fmtBytes(b.ram.cache_bytes, 1)} cache` : fmtBytes(b.ram.used_bytes, 1)} / ${b.ram.limit_bytes ? fmtBytes(b.ram.limit_bytes, 1) : '?'}${b.ram.last_oom ? ` · <span class="bad" title="${esc(b.ram.last_oom)}">OOM kill</span>` : ''}</span><span>${b.ram.pids ? `${b.ram.pids} proc` : ''}</span></div>
       <div class="meter" style="margin-top:4px"><i class="${levelClass(b.ram.pct, 95)}" style="width:${Math.min(100, b.ram.pct || 0)}%"></i></div></div>
   </div>
   <div class="grid wide">
@@ -617,7 +617,7 @@ function tabHost(b) {
     <div class="panel"><div class="tile-label">host memory</div>
       <div class="tile-value">${fmtPct(memPct)} <small>used · ${fmtBytes(h.mem_total - h.mem_avail, 1)} / ${fmtBytes(h.mem_total, 0)}</small></div>
       <div class="meter thick"><i class="${levelClass(memPct, 95)}" style="width:${memPct}%"></i></div>
-      <div class="note">all tenants combined · your slice: ${fmtBytes(b.ram.used_bytes, 1)}${b.ram.limit_bytes ? ` of ${fmtBytes(b.ram.limit_bytes, 0)}` : ''}</div></div>
+      <div class="note">all tenants combined · your slice: ${b.ram.rss_bytes ? `${fmtBytes(b.ram.rss_bytes, 1)} process + ${fmtBytes(b.ram.cache_bytes, 1)} page cache` : fmtBytes(b.ram.used_bytes, 1)}${b.ram.limit_bytes ? ` of ${fmtBytes(b.ram.limit_bytes, 0)}` : ''}${b.ram.oom_kills ? ` · ${b.ram.oom_kills} OOM kills` : ''}</div></div>
     <div class="panel"><div class="tile-label">host /home</div>
       <div class="tile-value">${fmtPct(homePct)} <small>used · ${fmtBytes(h.home_used, 1)} / ${fmtBytes(h.home_size, 1)}</small></div>
       <div class="meter thick"><i class="${levelClass(homePct, 95)}" style="width:${homePct}%"></i></div>

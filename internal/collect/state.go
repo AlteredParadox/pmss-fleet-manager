@@ -118,10 +118,14 @@ type CPUState struct {
 // RAMState is the slice's memory accounting.
 type RAMState struct {
 	OK         bool    `json:"ok"`
-	UsedBytes  int64   `json:"used_bytes"`
+	UsedBytes  int64   `json:"used_bytes"`  // charged to the slice, page cache included
+	RSSBytes   int64   `json:"rss_bytes"`   // process memory; what pressure is measured on
+	CacheBytes int64   `json:"cache_bytes"` // reclaimable page cache (torrent data the kernel keeps around)
 	LimitBytes int64   `json:"limit_bytes"`
-	Pct        float64 `json:"pct"`
+	Pct        float64 `json:"pct"` // process memory vs limit (charged usage when the split is unknown)
 	Pids       int64   `json:"pids"`
+	OOMKills   int64   `json:"oom_kills"`          // cumulative kernel OOM kills in the slice
+	LastOOM    string  `json:"last_oom,omitempty"` // RFC3339, when the counter was last seen rising
 }
 
 // HostState is shared-host information.
