@@ -683,7 +683,7 @@ function discoveryNote(q, b) {
 // input cannot be refilled, and the chosen names are listed beside it.
 function torAddForm(b, list) {
   const a = S.torAdd;
-  const cats = [...new Set(list.map((t) => t.category).filter(Boolean))].sort();
+  const cats = [...new Set(list.map((t) => t.category).filter(Boolean))].sort((x, y) => x.localeCompare(y));
   return `<form class="tor-add" data-tor-add>
     <label class="f" style="grid-column:1/-1">magnet links or .torrent URLs, one per line
       <textarea rows="3" data-ta="urls" placeholder="magnet:?xt=urn:btih:…" spellcheck="false">${esc(a.urls)}</textarea></label>

@@ -467,20 +467,28 @@ func (c *Client) Add(ctx context.Context, req AddRequest) error {
 	return nil
 }
 
-// TorrentActions are the per-torrent operations TorrentAction accepts.
-var TorrentActions = map[string]bool{"stop": true, "start": true, "remove": true, "remove-data": true}
+// Per-torrent operations TorrentAction accepts.
+const (
+	ActionStop       = "stop"
+	ActionStart      = "start"
+	ActionRemove     = "remove"      // keeps the downloaded files
+	ActionRemoveData = "remove-data" // deletes them too
+)
+
+// TorrentActions is the set of accepted per-torrent operations.
+var TorrentActions = map[string]bool{ActionStop: true, ActionStart: true, ActionRemove: true, ActionRemoveData: true}
 
 // TorrentAction stops, starts or removes one torrent. "remove" keeps the
 // downloaded files on disk; "remove-data" deletes them too. The caller has
 // already checked that hash is a bare hex info-hash.
 func (c *Client) TorrentAction(ctx context.Context, action, hash string) error {
 	switch action {
-	case "stop":
+	case ActionStop:
 		return c.stopStart(ctx, false, hash)
-	case "start":
+	case ActionStart:
 		return c.stopStart(ctx, true, hash)
-	case "remove", "remove-data":
-		form := url.Values{"hashes": {hash}, "deleteFiles": {strconv.FormatBool(action == "remove-data")}}
+	case ActionRemove, ActionRemoveData:
+		form := url.Values{"hashes": {hash}, "deleteFiles": {strconv.FormatBool(action == ActionRemoveData)}}
 		return c.call(ctx, http.MethodPost, "/api/v2/torrents/delete", form, nil)
 	}
 	return fmt.Errorf("unknown torrent action %q", action)
