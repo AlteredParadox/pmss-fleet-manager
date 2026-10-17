@@ -299,7 +299,7 @@ function renderMain() {
     const b = curBox();
     if (b?.status === 'disabled') {
       // Polling is off: the server refuses every action, so say so up front.
-      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
+      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="disc:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
         el.disabled = true;
         el.title = 'polling is disabled for this box; enable it to run actions';
       });
@@ -633,7 +633,7 @@ function tabTorrents(b) {
   const kindColor = { seeding: 'var(--ok)', leeching: 'var(--accent)', paused: 'var(--dim)', checking: 'var(--warn)', error: 'var(--bad)', unknown: 'var(--dim)' };
   return `<div class="table tor-table" style="overflow:hidden">
     <div class="thead-tools">
-      <div style="font-size:12px"><b>qBittorrent ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${discoveryNote(q)}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
+      <div style="font-size:12px"><b>qBittorrent ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${discoveryNote(q, b)}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
       <div class="actions">
         <input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">
         <button class="small" data-act="qbt:pause" data-confirm="Pause all torrents on ${esc(b.name)}?">pause all</button>
@@ -668,10 +668,15 @@ function discoveryTag(q) {
   const on = discoveryOn(q);
   return on.length ? `<span class="tag discovery" title="peer discovery enabled: ${esc(on.join(', '))} — private trackers usually forbid these">${esc(on.join(' · '))}</span>` : '';
 }
-// Torrents header: every mechanism with its state, so "all off" is visible too.
-function discoveryNote(q) {
+// Torrents header: every mechanism with its state, so "all off" is visible
+// too. Each is a toggle; enabling asks first, since that is the direction
+// that breaks private-tracker rules.
+function discoveryNote(q, b) {
   if (!q.discovery?.known) return q.reachable ? ' · <span class="muted">discovery settings not read</span>' : '';
-  return ' · ' + DISCOVERY.map(([k, l]) => `<span class="${q.discovery[k] ? 'warn' : ''}" title="${l} ${q.discovery[k] ? 'enabled' : 'disabled'}">${l} ${q.discovery[k] ? 'on' : 'off'}</span>`).join(' · ');
+  return ' · ' + DISCOVERY.map(([k, l]) => {
+    const on = q.discovery[k];
+    return `<button class="disc ${on ? 'warn' : ''}" data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(b.name)}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
+  }).join(' · ');
 }
 // The add-torrent form. Its draft lives in S.torAdd because every state
 // event re-renders the tab; File objects are kept there too, since a file
@@ -1185,6 +1190,13 @@ async function torrentAction(a, act) {
   await api('POST', `/api/boxes/${S.selId}/qbt/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
   toast(`torrent ${{ stop: 'stopped', start: 'started', remove: 'removed', 'remove-data': 'removed with its files' }[what]}`, 'ok');
 }
+async function discoveryAction(a, act) {
+  const k = a.slice(5), on = !act.dataset.on;
+  act.disabled = true;
+  await api('POST', `/api/boxes/${S.selId}/qbt/discovery`, { [k]: on });
+  toast(`${k.toUpperCase()} ${on ? 'enabled' : 'disabled'}`, 'ok');
+  await loadDetail(S.selId);
+}
 async function torAddAction(a) {
   if (a === 'tor-add:toggle') { S.torAdd = S.torAdd ? null : { urls: '', category: '', stopped: false, files: [], busy: false }; render(); return; }
   const d = S.torAdd;
@@ -1250,6 +1262,7 @@ async function runAction(a, act) {
   else if (a.startsWith('qbt:')) await qbtAction(a, act);
   else if (a.startsWith('tor:')) await torrentAction(a, act);
   else if (a.startsWith('tor-add:')) await torAddAction(a);
+  else if (a.startsWith('disc:')) await discoveryAction(a, act);
   else if (a.startsWith('ctr:')) await containerAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
   else if (a.startsWith('settings:')) await settingsAction(a);

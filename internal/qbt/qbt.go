@@ -356,6 +356,16 @@ func (c *Client) Preferences(ctx context.Context) (*Prefs, error) {
 	return &p, nil
 }
 
+// SetPreferences writes the given keys via app/setPreferences; keys not
+// present are left as they are.
+func (c *Client) SetPreferences(ctx context.Context, prefs map[string]any) error {
+	b, err := json.Marshal(prefs)
+	if err != nil {
+		return err
+	}
+	return c.call(ctx, http.MethodPost, "/api/v2/app/setPreferences", url.Values{"json": {string(b)}}, nil)
+}
+
 // MainData is one full sync snapshot.
 type MainData struct {
 	ServerState ServerState        `json:"server_state"`

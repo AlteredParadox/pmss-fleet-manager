@@ -127,6 +127,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST /api/boxes/{id}/qbt/{action}", s.handleQbtAction)
 	mux.HandleFunc("POST /api/boxes/{id}/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
 	mux.HandleFunc("POST /api/boxes/{id}/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
+	mux.HandleFunc("POST /api/boxes/{id}/qbt/discovery", s.handleSetDiscovery)
 	mux.HandleFunc("POST /api/boxes/{id}/containers/{cid}/{action}", s.handleContainerAction)
 	mux.HandleFunc("POST /api/detect", s.handleDetect)
 	mux.HandleFunc("GET /api/alerts", s.handleAlerts)
@@ -784,6 +785,39 @@ func clipStr(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// handleSetDiscovery takes {"dht":bool,"pex":bool,"lsd":bool} (any subset).
+func (s *Server) handleSetDiscovery(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	var want map[string]bool
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&want); err != nil {
+		writeErr(w, 400, fmt.Errorf("bad body: %v", err))
+		return
+	}
+	for k := range want {
+		if !collect.DiscoveryKeys[k] {
+			writeErr(w, 400, fmt.Errorf("unknown setting %q", k))
+			return
+		}
+	}
+	if len(want) == 0 {
+		writeErr(w, 400, errors.New("nothing to change"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	if err := s.m.SetDiscovery(ctx, id, want); err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (s *Server) handleAddTorrents(w http.ResponseWriter, r *http.Request) {
