@@ -203,6 +203,14 @@ request; `check` is the required status on `main`. Pushing a `vX.Y.Z` tag
 builds linux amd64 and arm64 binaries and publishes a GitHub Release with
 checksums. Dependabot keeps Go modules and pinned actions current weekly.
 
+[SonarCloud](https://sonarcloud.io/project/overview?id=AlteredParadox_pmss-fleet-manager)
+analyses every push and pull request and is kept at zero open issues. Rules
+the project deliberately does not follow are listed in
+`sonar-project.properties` with a reason each (the escaped-innerHTML rendering
+style of the single-file frontend, the two loopback `http://` URLs, and
+cognitive complexity in the 17-25 band for parsers and view renderers);
+anything scoring higher than that has been split.
+
 The frontend is vanilla JS and CSS in `internal/web/static`, embedded into the
 binary; there is no build step. `docs/ARCHITECTURE.md` lists the tenant-readable
 data sources on a PMSS box and the package layout. The design mockup the UI
@@ -246,8 +254,11 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.0.0 is the first release. It was written against five real Pulsed Media
-boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with qBittorrent
-5.2.x and reviewed as described under *Security and hardening*. Other setups
-should work but have not been tried. Issues and pull requests welcome.
-Releases on GitHub carry linux amd64 and arm64 binaries with checksums.
+1.1.0 is the current release. The code was written against five real Pulsed
+Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
+qBittorrent 5.2.x and reviewed as described under *Security and hardening*;
+1.1.0 adds the SonarCloud clean-up (mechanical fixes, pure-extraction
+refactors of the most complex functions, documented exceptions) with no
+behaviour change. Other setups should work but have not been tried. Issues
+and pull requests welcome. Releases on GitHub carry linux amd64 and arm64
+binaries with checksums.
