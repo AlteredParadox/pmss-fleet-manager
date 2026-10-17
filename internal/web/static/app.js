@@ -61,7 +61,7 @@ function safeHref(u) { return /^https?:\/\//i.test(String(u || '')) ? u : '#'; }
 function retryNote(b) {
   // next_poll is the zero time ("0001-01-01…", a truthy string) when no retry is scheduled.
   const due = Date.parse(b.next_poll);
-  if (b.status === 'disabled' || !b.failures || !(due > 0)) return '';
+  if (b.status === 'disabled' || !b.failures || !Number.isFinite(due) || due <= 0) return '';
   const s = Math.max(0, Math.round((due - Date.now()) / 1000));
   return `retry ${s < 5 ? 'now' : s < 90 ? `in ${s}s` : `in ${Math.round(s / 60)} min`}${b.backoff ? ', backed off' : ''}`;
 }
@@ -89,7 +89,7 @@ function fmtAgo(iso) {
 function daysUntil(ymd) {
   if (!ymd) return null;
   const d = new Date(ymd + 'T23:59:59');
-  return Math.ceil((d - new Date()) / 86400e3);
+  return Math.ceil((d - Date.now()) / 86400e3);
 }
 function levelClass(pct, threshold) {
   if (pct >= 100 || pct >= threshold) return 'bad';
@@ -126,15 +126,15 @@ function route() {
     S.selId = Number(parts[1]) || null;
     S.tab = parts[2] || 'overview';
     if (S.detail && S.detail.id !== S.selId) S.detail = null; // never show one box's page under another's URL
-    loadDetail(S.selId);
+    void loadDetail(S.selId);
   } else if (S.view === 'edit') {
     S.selId = Number(parts[1]) || null;
-    startEdit(S.selId);
+    void startEdit(S.selId);
   } else if (S.view === 'add' && S.add.mode !== 'add') {
     resetAdd();
   }
-  if (S.view === 'alerts') loadAlerts();
-  if (S.view === 'settings') { S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; loadServices(); }
+  if (S.view === 'alerts') void loadAlerts();
+  if (S.view === 'settings') { S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; void loadServices(); }
   S.filter = '';
   render();
 }
@@ -179,7 +179,7 @@ async function loadAlerts() {
   try { S.alerts = await api('GET', '/api/alerts'); render(); } catch (e) { toast(`alerts: ${e.message}`, 'bad'); }
 }
 function applyTheme(t) {
-  document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+  document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
 }
 function connectEvents() {
   const es = new EventSource('/api/events');
@@ -188,7 +188,7 @@ function connectEvents() {
     S.live = true;
     if (wasDown) { // resync everything missed while disconnected (e.g. a server restart)
       await loadState();
-      if (S.view === 'box' && S.selId) loadDetail(S.selId); else if (S.view === 'alerts') loadAlerts();
+      if (S.view === 'box' && S.selId) void loadDetail(S.selId); else if (S.view === 'alerts') void loadAlerts();
       render();
     } else renderSide();
     wasDown = false;
@@ -201,7 +201,7 @@ function connectEvents() {
     if (i >= 0) S.boxes[i] = e.state; else S.boxes.push(e.state);
     S.boxes.sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
     recomputeTotals();
-    if (S.view === 'box' && S.selId === e.box_id) loadDetail(e.box_id);
+    if (S.view === 'box' && S.selId === e.box_id) void loadDetail(e.box_id);
     else if (S.view === 'fleet') render(); else renderSide();
   });
   es.addEventListener('removed', (ev) => {
@@ -210,14 +210,16 @@ function connectEvents() {
     if (S.detail && S.detail.id === e.box_id) S.detail = null;
     if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
     recomputeTotals();
-    if ((S.view === 'box' || S.view === 'edit') && S.selId === e.box_id) { if (S.removingId !== e.box_id) toast('that box was removed', 'bad'); go('/fleet'); }
-    else if (S.view === 'alerts') loadAlerts(); else render();
+    if ((S.view === 'box' || S.view === 'edit') && S.selId === e.box_id) {
+      if (S.removingId !== e.box_id) { toast('that box was removed', 'bad'); }
+      go('/fleet');
+    } else if (S.view === 'alerts') { void loadAlerts(); } else { render(); }
   });
   es.addEventListener('settings', () => {
     // Saved from another tab: refresh our copy. On the settings form, fields
     // the user has not touched follow the new values so a later save here
     // does not revert them; touched fields and the theme preview stay.
-    loadState().then(() => {
+    void loadState().then(() => {
       if (S.view !== 'settings') { render(); return; }
       for (const k of Object.keys(S.settings)) if (!S.settingsTouched[k] && k !== 'pm_api_key') S.settingsDraft[k] = S.settings[k];
       applyTheme(S.settingsDraft.theme);
@@ -228,14 +230,14 @@ function connectEvents() {
     const e = JSON.parse(ev.data);
     if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
     await loadState();
-    if (S.view === 'settings') loadServices();
-    else if (S.view === 'box' && S.selId) loadDetail(S.selId);
+    if (S.view === 'settings') void loadServices();
+    else if (S.view === 'box' && S.selId) void loadDetail(S.selId);
     else render();
   });
   es.addEventListener('alerts', (ev) => {
     const e = JSON.parse(ev.data);
     if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
-    if (S.view === 'alerts') loadAlerts(); else renderSide();
+    if (S.view === 'alerts') void loadAlerts(); else renderSide();
   });
 }
 function recomputeTotals() {
@@ -963,14 +965,18 @@ document.addEventListener('click', async (e) => {
   const tab = e.target.closest('[data-tab]');
   if (tab) { S.tab = tab.dataset.tab; S.filter = ''; history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); render(); return; }
   const seg = e.target.closest('[data-s-seg]');
-  if (seg) { S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; S.settingsTouched[seg.dataset.sSeg] = true; if (seg.dataset.sSeg === 'theme') applyTheme(seg.dataset.v); render(); return; }
+  if (seg) {
+    S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; S.settingsTouched[seg.dataset.sSeg] = true;
+    if (seg.dataset.sSeg === 'theme') { applyTheme(seg.dataset.v); }
+    render(); return;
+  }
   const act = e.target.closest('[data-act]');
   if (!act) return;
   e.preventDefault();
   if (act.dataset.confirm && !confirm(act.dataset.confirm)) return;
   const a = act.dataset.act;
   try {
-    if (a === 'refresh-all') { for (const b of S.boxes) api('POST', `/api/boxes/${b.id}/refresh`).catch(() => {}); toast('refreshing all boxes'); }
+    if (a === 'refresh-all') { for (const b of S.boxes) { api('POST', `/api/boxes/${b.id}/refresh`).catch(() => {}); } toast('refreshing all boxes'); }
     else if (a === 'refresh') { await api('POST', `/api/boxes/${S.selId}/refresh`); toast('refresh requested'); }
     else if (a === 'du') { const id = S.selId; await api('POST', `/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
     else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
@@ -1004,13 +1010,13 @@ document.addEventListener('click', async (e) => {
     }
     else if (a === 'add:next') {
       const A = S.add;
-      if (A.step === 1) { A.errors = validateForm(A.form); if (Object.keys(A.errors).length) { render(); return; } A.step = 2; runDetect(); }
+      if (A.step === 1) { A.errors = validateForm(A.form); if (Object.keys(A.errors).length) { render(); return; } A.step = 2; void runDetect(); }
       else if (A.step === 2) { A.step = 3; render(); }
     }
-    else if (a === 'add:retry') { runDetect(); }
+    else if (a === 'add:retry') { void runDetect(); }
     else if (a === 'add:back') { S.add.step = Math.max(1, S.add.step - 1); render(); }
-    else if (a === 'add:confirm') { confirmAdd(); }
-    else if (a === 'edit:save') { const A = S.add; A.errors = validateForm(A.form); if (Object.keys(A.errors).length) { render(); return; } confirmAdd(); }
+    else if (a === 'add:confirm') { void confirmAdd(); }
+    else if (a === 'edit:save') { const A = S.add; A.errors = validateForm(A.form); if (Object.keys(A.errors).length) { render(); return; } void confirmAdd(); }
   } catch (err) {
     toast(err.message, 'bad');
     act.disabled = false;
@@ -1042,7 +1048,7 @@ document.addEventListener('input', (e) => {
 window.addEventListener('hashchange', route);
 
 /* ---------- boot ---------- */
-(async () => {
+void (async () => {
   await loadState();
   resetAdd();
   route();

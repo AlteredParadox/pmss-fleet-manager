@@ -892,7 +892,7 @@ func (p *poller) runDu(ctx context.Context) {
 	dctx, cancel := context.WithTimeout(ctx, duTimeout)
 	defer cancel()
 	out, _, err := cli.Run(dctx, "sh", strings.NewReader(probe.DuScript))
-	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+	sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second) // the write outlives a retired poll; cancellation is checked below
 	defer scancel()
 	res := DirsState{Enabled: true, At: time.Now()}
 	if errors.Is(err, context.Canceled) || ctx.Err() != nil {

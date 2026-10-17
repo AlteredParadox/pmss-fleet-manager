@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -109,7 +110,7 @@ func parseAmount(s string) float64 {
 		s = strings.ReplaceAll(s, ",", "")
 	}
 	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || f != f || f > 1e12 || f < -1e12 {
+	if err != nil || math.IsNaN(f) || f > 1e12 || f < -1e12 {
 		return 0 // unparsable or absurd: no real invoice is anywhere near this
 	}
 	return f
