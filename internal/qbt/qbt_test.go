@@ -18,6 +18,8 @@ package qbt
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -209,5 +211,58 @@ func TestTorrentAction(t *testing.T) {
 	}
 	if err := c.TorrentAction(ctx, "recheck", h); err == nil {
 		t.Fatal("unknown action accepted")
+	}
+}
+
+// Add posts a multipart torrents/add with links, files and options, and
+// reads qBittorrent's "Fails." / 415 answers as ErrBadTorrent.
+func TestAdd(t *testing.T) {
+	answer := "Ok."
+	var seen map[string]string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	mux.HandleFunc("/api/v2/torrents/add", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		seen = map[string]string{"urls": r.FormValue("urls"), "category": r.FormValue("category"), "stopped": r.FormValue("stopped"), "paused": r.FormValue("paused")}
+		for _, fh := range r.MultipartForm.File["torrents"] {
+			f, _ := fh.Open()
+			b, _ := io.ReadAll(f)
+			f.Close()
+			seen["file:"+fh.Filename] = string(b)
+		}
+		if answer == "415" {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		w.Write([]byte(answer))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:8080", "admin", "secret")
+	ctx := context.Background()
+	req := AddRequest{URLs: []string{"magnet:?xt=urn:btih:abc", "https://x/y.torrent"}, Files: []TorrentFile{{Name: "a.torrent", Data: []byte("d4:infoe")}}, Category: "linux", Stopped: true}
+	if err := c.Add(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"urls": "magnet:?xt=urn:btih:abc\nhttps://x/y.torrent", "category": "linux", "stopped": "true", "paused": "true", "file:a.torrent": "d4:infoe"}
+	for k, v := range want {
+		if seen[k] != v {
+			t.Errorf("%s = %q, want %q", k, seen[k], v)
+		}
+	}
+	answer = "Fails."
+	if err := c.Add(ctx, req); !errors.Is(err, ErrBadTorrent) {
+		t.Fatalf("Fails. → %v", err)
+	}
+	answer = "415"
+	if err := c.Add(ctx, req); !errors.Is(err, ErrBadTorrent) {
+		t.Fatalf("415 → %v", err)
+	}
+	if err := c.Add(ctx, AddRequest{}); err == nil {
+		t.Fatal("empty add accepted")
 	}
 }

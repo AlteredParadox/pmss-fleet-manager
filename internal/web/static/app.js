@@ -22,6 +22,7 @@ const S = {
   view: 'fleet', fleetView: 'cards', tab: 'overview', selId: null,
   boxes: [], totals: {}, unacked: 0, settings: {}, detail: null,
   alerts: [], filter: '', live: false,
+  torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
 };
@@ -108,7 +109,8 @@ function toast(msg, kind = '') {
 }
 async function api(method, path, body) {
   const opts = { method, headers: {} };
-  if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  if (body instanceof FormData) opts.body = body; // multipart: the browser sets the boundary
+  else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(path, opts);
   let data = null;
   try { data = await r.json(); } catch (e) { /* no body */ }
@@ -136,6 +138,7 @@ function route() {
   if (S.view === 'alerts') void loadAlerts();
   if (S.view === 'settings') { S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; void loadServices(); }
   S.filter = '';
+  S.torAdd = null;
   render();
 }
 const go = (hash) => { location.hash = hash; };
@@ -296,7 +299,7 @@ function renderMain() {
     const b = curBox();
     if (b?.status === 'disabled') {
       // Polling is off: the server refuses every action, so say so up front.
-      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
+      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
         el.disabled = true;
         el.title = 'polling is disabled for this box; enable it to run actions';
       });
@@ -635,8 +638,10 @@ function tabTorrents(b) {
         <input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">
         <button class="small" data-act="qbt:pause" data-confirm="Pause all torrents on ${esc(b.name)}?">pause all</button>
         <button class="small" data-act="qbt:resume">resume all</button>
+        <button class="small ${S.torAdd ? 'on' : ''}" data-act="tor-add:toggle">${S.torAdd ? 'close' : 'add'}</button>
       </div>
     </div>
+    ${S.torAdd ? torAddForm(b, list) : ''}
     <div style="overflow:auto">
       <div class="trow head"><span>name</span><span>size</span><span>progress</span><span>up</span><span>down</span><span>ratio</span><span></span></div>
       ${shown.length === 0 ? `<div class="trow"><span class="muted">${q.total === 0 ? 'no torrents' : 'no matches'}</span></div>` : shown.map((t) => `
@@ -652,6 +657,28 @@ function tabTorrents(b) {
       ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
     </div>
   </div>`;
+}
+// The add-torrent form. Its draft lives in S.torAdd because every state
+// event re-renders the tab; File objects are kept there too, since a file
+// input cannot be refilled, and the chosen names are listed beside it.
+function torAddForm(b, list) {
+  const a = S.torAdd;
+  const cats = [...new Set(list.map((t) => t.category).filter(Boolean))].sort();
+  return `<form class="tor-add" data-tor-add>
+    <label class="f" style="grid-column:1/-1">magnet links or .torrent URLs, one per line
+      <textarea rows="3" data-ta="urls" placeholder="magnet:?xt=urn:btih:…" spellcheck="false">${esc(a.urls)}</textarea></label>
+    <label class="f">.torrent files
+      <input type="file" accept=".torrent,application/x-bittorrent" multiple data-ta-files>
+      ${a.files.length ? `<span class="hint">${a.files.length} chosen: ${esc(a.files.map((f) => f.name).join(', '))}</span>` : ''}</label>
+    <label class="f">category <span class="muted">(optional)</span>
+      <input data-ta="category" list="tor-cats" value="${esc(a.category)}" placeholder="${cats.length ? 'existing or new' : 'new'}">
+      <datalist id="tor-cats">${cats.map((c) => `<option value="${esc(c)}">`).join('')}</datalist></label>
+    <label class="row" style="align-self:end"><input type="checkbox" data-ta="stopped" ${a.stopped ? 'checked' : ''}> add stopped</label>
+    <div class="actions" style="align-self:end">
+      <button type="submit" class="small" data-act="tor-add:submit" ${a.busy ? 'disabled' : ''}>${a.busy ? 'adding…' : 'add to ' + esc(b.name)}</button>
+      <button type="button" class="small ghost" data-act="tor-add:toggle">cancel</button>
+    </div>
+  </form>`;
 }
 // Per-torrent controls. Removal always confirms; removing the data as well
 // names the size so the two cannot be mistaken for each other.
@@ -1103,7 +1130,7 @@ document.addEventListener('click', async (e) => {
   const fv = e.target.closest('[data-fleetview]');
   if (fv) { S.fleetView = fv.dataset.fleetview; S.fleetViewTouched = true; render(); return; }
   const tab = e.target.closest('[data-tab]');
-  if (tab) { S.tab = tab.dataset.tab; S.filter = ''; history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); render(); return; }
+  if (tab) { S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); render(); return; }
   const seg = e.target.closest('[data-s-seg]');
   if (seg) {
     S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; S.settingsTouched[seg.dataset.sSeg] = true;
@@ -1142,6 +1169,26 @@ async function torrentAction(a, act) {
   act.disabled = true;
   await api('POST', `/api/boxes/${S.selId}/qbt/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
   toast(`torrent ${{ stop: 'stopped', start: 'started', remove: 'removed', 'remove-data': 'removed with its files' }[what]}`, 'ok');
+}
+async function torAddAction(a) {
+  if (a === 'tor-add:toggle') { S.torAdd = S.torAdd ? null : { urls: '', category: '', stopped: false, files: [], busy: false }; render(); return; }
+  const d = S.torAdd;
+  if (!d || d.busy) return;
+  const fd = new FormData();
+  fd.append('urls', d.urls);
+  fd.append('category', d.category);
+  fd.append('stopped', String(d.stopped));
+  d.files.forEach((f) => fd.append('torrents', f, f.name));
+  d.busy = true; render();
+  try {
+    const r = await api('POST', `/api/boxes/${S.selId}/qbt/torrents`, fd);
+    const n = (r?.links || 0) + (r?.files || 0);
+    toast(`${n} torrent${n === 1 ? '' : 's'} sent to qBittorrent${d.stopped ? ' (stopped)' : ''}`, 'ok');
+    S.torAdd = null;
+  } finally {
+    if (S.torAdd) S.torAdd.busy = false;
+    render();
+  }
 }
 async function containerAction(a, act) {
   act.disabled = true; await api('POST', `/api/boxes/${S.selId}/containers/${act.dataset.cid}/${a.slice(4)}`); toast(`container ${a.slice(4)} ok`, 'ok');
@@ -1187,13 +1234,23 @@ async function runAction(a, act) {
   if (a === 'refresh-all' || a === 'refresh' || a === 'du' || a === 'remove') await boxAction(a);
   else if (a.startsWith('qbt:')) await qbtAction(a, act);
   else if (a.startsWith('tor:')) await torrentAction(a, act);
+  else if (a.startsWith('tor-add:')) await torAddAction(a);
   else if (a.startsWith('ctr:')) await containerAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
   else if (a.startsWith('settings:')) await settingsAction(a);
   else if (a.startsWith('svc:')) await servicesAction(a, act);
   else if (a.startsWith('add:') || a === 'edit:save') await wizardAction(a);
 }
+document.addEventListener('submit', (e) => {
+  if (e.target.closest('[data-tor-add]')) e.preventDefault(); // the submit button's click runs tor-add:submit
+});
+document.addEventListener('change', (e) => {
+  const fi = e.target.closest('[data-ta-files]');
+  if (fi && S.torAdd) { S.torAdd.files = [...fi.files]; render(); }
+});
 document.addEventListener('input', (e) => {
+  const ta = e.target.closest('[data-ta]');
+  if (ta && S.torAdd) { S.torAdd[ta.dataset.ta] = ta.type === 'checkbox' ? ta.checked : ta.value; return; }
   const f = e.target.closest('[data-f]');
   if (f && S.add.form) {
     const k = f.dataset.f;

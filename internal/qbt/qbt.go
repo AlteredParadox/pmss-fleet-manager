@@ -19,6 +19,7 @@
 package qbt
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -183,17 +185,27 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values) (
 	return code, body, err
 }
 
+// doResp sends a URL-encoded form (or a bare request when form is nil).
 func (c *Client) doResp(ctx context.Context, method, path string, form url.Values) (int, []byte, *http.Response, error) {
-	var body io.Reader
-	if form != nil {
-		body = strings.NewReader(form.Encode())
+	if form == nil {
+		return c.send(ctx, method, path, "", nil)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	return c.send(ctx, method, path, "application/x-www-form-urlencoded", []byte(form.Encode()))
+}
+
+// send is the one place a request leaves the client: cookie, Referer and
+// Origin are set here, and the response body is capped. body may be nil.
+func (c *Client) send(ctx context.Context, method, path, ctype string, body []byte) (int, []byte, *http.Response, error) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
 		return 0, nil, nil, err
 	}
-	if form != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if ctype != "" {
+		req.Header.Set("Content-Type", ctype)
 	}
 	req.Header.Set("Referer", c.base+"/")
 	req.Header.Set("Origin", c.base)
@@ -250,9 +262,18 @@ func (c *Client) credsKey() string { return CredsKey(c.user, c.pass) }
 // AuthBlocked reports whether login attempts are currently suspended after a failure.
 func (c *Client) AuthBlocked() (error, bool) { return c.guard.Blocked(c.credsKey()) }
 
-// call performs an API request, logging in once on 401/403.
+// call performs a form API request, logging in once on 401/403.
 func (c *Client) call(ctx context.Context, method, path string, form url.Values, out any) error {
-	code, body, err := c.do(ctx, method, path, form)
+	ctype, payload := "", []byte(nil)
+	if form != nil {
+		ctype, payload = "application/x-www-form-urlencoded", []byte(form.Encode())
+	}
+	return c.callBody(ctx, method, path, ctype, payload, out)
+}
+
+// callBody is call for an arbitrary request body (multipart uploads).
+func (c *Client) callBody(ctx context.Context, method, path, ctype string, payload []byte, out any) error {
+	code, body, _, err := c.send(ctx, method, path, ctype, payload)
 	if err != nil {
 		return err
 	}
@@ -264,13 +285,16 @@ func (c *Client) call(ctx context.Context, method, path string, form url.Values,
 		if err := c.Login(ctx); err != nil {
 			return err
 		}
-		code, body, err = c.do(ctx, method, path, form)
+		code, body, _, err = c.send(ctx, method, path, ctype, payload)
 		if err != nil {
 			return err
 		}
 	}
 	if code == http.StatusNotFound {
 		return errNotFound
+	}
+	if code == http.StatusUnsupportedMediaType {
+		return ErrBadTorrent
 	}
 	if code < 200 || code >= 300 {
 		return fmt.Errorf("qbittorrent: %s http %d: %s", path, code, strings.TrimSpace(string(body)))
@@ -355,6 +379,65 @@ func (c *Client) stopStart(ctx context.Context, start bool, hashes string) error
 		err = c.call(ctx, http.MethodPost, v4, form, nil)
 	}
 	return err
+}
+
+// ErrBadTorrent is returned when qBittorrent rejects an upload as not a
+// torrent file (HTTP 415) or answers "Fails." to an add.
+var ErrBadTorrent = errors.New("qbittorrent: not a valid torrent or magnet")
+
+// TorrentFile is one uploaded .torrent for Add.
+type TorrentFile struct {
+	Name string
+	Data []byte
+}
+
+// AddRequest is what Add sends: links and/or files, with the options the
+// dashboard exposes. Category "" keeps qBittorrent's default.
+type AddRequest struct {
+	URLs     []string
+	Files    []TorrentFile
+	Category string
+	Stopped  bool // add without starting (qBittorrent 5 "stopped", 4.x "paused")
+}
+
+// Add posts torrents/add as multipart. qBittorrent answers 200 "Ok." when it
+// accepted the request and 200 "Fails." when nothing in it was usable, so
+// the body is checked as well as the status.
+func (c *Client) Add(ctx context.Context, req AddRequest) error {
+	if len(req.URLs) == 0 && len(req.Files) == 0 {
+		return errors.New("nothing to add")
+	}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if len(req.URLs) > 0 {
+		_ = mw.WriteField("urls", strings.Join(req.URLs, "\n"))
+	}
+	if req.Category != "" {
+		_ = mw.WriteField("category", req.Category)
+	}
+	stopped := strconv.FormatBool(req.Stopped)
+	_ = mw.WriteField("stopped", stopped) // 5.x name
+	_ = mw.WriteField("paused", stopped)  // 4.x name; unknown fields are ignored
+	for _, f := range req.Files {
+		fw, err := mw.CreateFormFile("torrents", f.Name)
+		if err != nil {
+			return err
+		}
+		if _, err := fw.Write(f.Data); err != nil {
+			return err
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return err
+	}
+	var out string
+	if err := c.callBody(ctx, http.MethodPost, "/api/v2/torrents/add", mw.FormDataContentType(), buf.Bytes(), &out); err != nil {
+		return err
+	}
+	if strings.HasPrefix(strings.TrimSpace(out), "Fails") {
+		return ErrBadTorrent
+	}
+	return nil
 }
 
 // TorrentActions are the per-torrent operations TorrentAction accepts.
