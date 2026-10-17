@@ -370,13 +370,13 @@ func (p *poller) poll(ctx context.Context) {
 // every interval. On a shared host a fail2ban-style guard would otherwise
 // ban the dashboard for every tenant. A manual retry bypasses it.
 func retryInterval(base time.Duration, failures int) time.Duration {
-	const backoffAfter, cap = 5, 10 * time.Minute
+	const backoffAfter, ceiling = 5, 10 * time.Minute
 	if failures < backoffAfter {
 		return base
 	}
 	back := base << uint(min(failures-backoffAfter+1, 10))
-	if back > cap {
-		back = cap
+	if back > ceiling {
+		back = ceiling
 	}
 	if back < base {
 		return base
@@ -587,11 +587,13 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: snap.Qbt.SubnetList, ConfUser: snap.Qbt.Username,
 		HasCreds:      p.box.QbtUser != "" || p.box.QbtPass != "",
 		BinaryVersion: snap.Qbt.BinaryVersion, StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0}
-	qs.LatestVersion = p.m.latest.get(ctx)
-	qs.UpdateAvail = qs.BinaryVersion != "" && qs.LatestVersion != "" && versionLess(qs.BinaryVersion, qs.LatestVersion)
 	defer func() { // runs after st.Qbt is set below
 		q := &st.Qbt
 		q.RestartNeeded = q.ProcessUp && q.Version != "" && q.BinaryVersion != "" && q.Version != q.BinaryVersion
+		// Last, so a slow GitHub lookup (cached six hours) cannot eat into
+		// the time budget of the WebUI calls above.
+		q.LatestVersion = p.m.latest.get(ctx)
+		q.UpdateAvail = q.BinaryVersion != "" && q.LatestVersion != "" && versionLess(q.BinaryVersion, q.LatestVersion)
 	}()
 	if !snap.Qbt.Running {
 		qs.Error = "qbittorrent-nox is not running"
@@ -833,7 +835,7 @@ func (p *poller) runDu(ctx context.Context) {
 	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer scancel()
 	res := DirsState{Enabled: true, At: time.Now()}
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 		// Retired by an edit/removal/shutdown mid-run: leave the cache and
 		// the (new poller's) state alone; nothing was measured.
 		return

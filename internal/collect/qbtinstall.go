@@ -76,8 +76,9 @@ fi
 command -v screen >/dev/null 2>&1 || echo "warning: 'screen' not found on this box; qbt-start needs it"
 # Read the existing crontab first and distinguish "none yet" from a real
 # failure: piping a failed crontab -l into crontab - would wipe every entry.
-if ! cur=$(crontab -l 2>&1); then
-  case "$cur" in *"no crontab"*) cur="" ;; *) echo "crontab -l failed: $cur"; exit 1 ;; esac
+if ! cur=$(crontab -l 2>/dev/null); then
+  msg=$(crontab -l 2>&1 >/dev/null)
+  case "$msg" in *"no crontab"*) cur="" ;; *) echo "crontab -l failed: $msg"; exit 1 ;; esac
 fi
 ( printf '%s\n' "$cur" | grep -vF "$HOME/bin/qbt-start" | grep -v '^$'
   echo "@reboot     sleep 30; $HOME/bin/qbt-start"

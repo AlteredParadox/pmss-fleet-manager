@@ -114,6 +114,7 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 	if b.Port == 0 {
 		b.Port = 22
 	}
+	b.HasPassword, b.HasQbtPass = b.Password != "", b.QbtPass != "" // shown by the wizard on every path
 	cctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	cli, err := sshx.Dial(cctx, sshConfig(&b))
@@ -259,7 +260,6 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 		b.Name = strings.SplitN(b.Host, ".", 2)[0]
 	}
 	res.OK = true
-	b.HasPassword, b.HasQbtPass = b.Password != "", b.QbtPass != ""
 	res.Box = &b
 	return res
 }

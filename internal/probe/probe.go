@@ -171,13 +171,27 @@ func lastSection(raw []byte, tag string) string {
 // PortOwnerNow evaluates ListenScript's output (uid on the first line, then
 // listen lines) for one port, with the same rules as Snapshot.PortOwner.
 func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
-	uidLine, rest, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-	uid, err := strconv.Atoi(strings.TrimSpace(uidLine))
-	if err != nil {
+	// The script ends with a marker line: a session that was cut off (or
+	// a Run that returned partial output with an error) must not pass on
+	// a table missing the co-tenant's socket.
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if strings.TrimSpace(lines[len(lines)-1]) != "end" {
+		return false, "the box's socket table came back incomplete"
+	}
+	uid := -1
+	for _, l := range lines {
+		if n, found := strings.CutPrefix(strings.TrimSpace(l), "uid "); found {
+			if v, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
+				uid = v
+			}
+			break
+		}
+	}
+	if uid < 0 {
 		return false, "could not read the account's uid on the box"
 	}
 	s := &Snapshot{UID: uid}
-	s.Listeners, s.ListenersKnown = parseListeners(rest)
+	s.Listeners, s.ListenersKnown = parseListeners(strings.Join(lines, "\n"))
 	return s.PortOwner(port)
 }
 
