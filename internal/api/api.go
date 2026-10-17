@@ -607,10 +607,22 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	secs, err := s.m.RawProbe(ctx, id)
 	if err != nil {
-		writeErr(w, 502, err)
+		writeErr(w, actionCode(err), err)
 		return
 	}
 	writeJSON(w, 200, secs)
+}
+
+// actionCode maps a box action's failure to a status: the box is missing
+// (404), its polling is off (409), or the box itself did not cooperate (502).
+func actionCode(err error) int {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return 404
+	case errors.Is(err, collect.ErrDisabled):
+		return 409
+	}
+	return 502
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
@@ -620,11 +632,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.m.Refresh(id); err != nil {
-		code := 409
-		if errors.Is(err, store.ErrNotFound) {
-			code = 404
-		}
-		writeErr(w, code, err)
+		writeErr(w, actionCode(err), err)
 		return
 	}
 	writeJSON(w, 202, map[string]bool{"ok": true})
@@ -637,11 +645,7 @@ func (s *Server) handleDu(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.m.RunDu(id); err != nil {
-		code := 409 // polling disabled for the box
-		if errors.Is(err, store.ErrNotFound) {
-			code = 404
-		}
-		writeErr(w, code, err)
+		writeErr(w, actionCode(err), err)
 		return
 	}
 	writeJSON(w, 202, map[string]bool{"ok": true})
@@ -664,7 +668,7 @@ func (s *Server) handleQbtAction(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out, err := s.m.QbtAction(ctx, id, action)
 	if err != nil {
-		writeJSON(w, 502, map[string]string{"error": err.Error(), "output": out})
+		writeJSON(w, actionCode(err), map[string]string{"error": err.Error(), "output": out})
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "output": out})
@@ -690,7 +694,7 @@ func (s *Server) handleContainerAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	if err := s.m.ContainerAction(ctx, id, cid, action); err != nil {
-		writeErr(w, 502, err)
+		writeErr(w, actionCode(err), err)
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})

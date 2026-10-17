@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	legal "pmss-fleet-manager"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -109,6 +110,7 @@ func main() {
 		handler.SetAllowedHosts(hosts)
 	}
 	var servers []*http.Server
+	var listenFailed atomic.Bool
 	for _, a := range addrs {
 		// WriteTimeout stays 0: /api/events is a long-lived SSE stream.
 		srv := &http.Server{Addr: a, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
@@ -123,12 +125,16 @@ func main() {
 			log.Info("pmss-fleet-manager listening", "addr", "http://"+srv.Addr, "version", version)
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("http", "addr", srv.Addr, "err", err)
+				listenFailed.Store(true)
 				stop()
 			}
 		}(srv)
 	}
 
 	<-ctx.Done()
+	if listenFailed.Load() {
+		defer os.Exit(1) // after the deferred store close: a supervisor must see the failure
+	}
 	log.Info("shutting down")
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

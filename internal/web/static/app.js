@@ -125,6 +125,7 @@ function route() {
   if (S.view === 'box') {
     S.selId = Number(parts[1]) || null;
     S.tab = parts[2] || 'overview';
+    if (S.detail && S.detail.id !== S.selId) S.detail = null; // never show one box's page under another's URL
     loadDetail(S.selId);
   } else if (S.view === 'edit') {
     S.selId = Number(parts[1]) || null;
@@ -266,7 +267,7 @@ function renderMain() {
     default: m.innerHTML = viewFleet();
   }
   if (S.view === 'box') {
-    const b = S.detail || S.boxes.find((x) => x.id === S.selId);
+    const b = curBox();
     if (b && b.status === 'disabled') {
       // Polling is off: the server refuses every action, so say so up front.
       m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
@@ -366,8 +367,13 @@ function fleetTable() {
 }
 
 /* ----- box detail ----- */
+// The selected box: its loaded detail when it is for this id, else the fleet summary.
+function curBox() {
+  const d = S.detail && S.detail.id === S.selId ? S.detail : null;
+  return d || S.boxes.find((x) => x.id === S.selId);
+}
 function viewBox() {
-  const b = S.detail || S.boxes.find((x) => x.id === S.selId);
+  const b = curBox();
   if (!b) return `<button class="crumb" data-go="/fleet">← fleet</button><div class="empty">box not found</div>`;
   const tabs = [['overview', 'overview'], ['traffic', 'traffic']];
   if (b.qbt.enabled || b.qbt.installed) tabs.push(['torrents', 'torrents']);
@@ -584,7 +590,7 @@ function tabStorage(b) {
     <div class="panel">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap">
         <div><div class="tile-label">usage by directory</div><div style="font-size:18px;font-weight:600;margin:2px 0 14px">${fmtBytes(b.disk.used_bytes, 2)} <small class="muted" style="font-size:12px;font-weight:400">of ${b.disk.quota_bytes ? fmtBytes(b.disk.quota_bytes, 1) : 'n/a'}</small></div></div>
-        <div class="actions"><span class="hint">${dirs.running ? '<span class="pulse">measuring…</span>' : dirs.at && new Date(dirs.at).getTime() > 0 ? `measured ${fmtAgo(dirs.at)}` : 'not measured yet'}</span><button class="small" data-act="du" ${dirs.running ? 'disabled' : ''}>measure now</button></div>
+        <div class="actions"><span class="hint">${dirs.running ? '<span class="pulse">measuring…</span>' : dirs.at && new Date(dirs.at).getTime() > 0 ? `measured ${fmtAgo(dirs.at)}` : 'not measured yet'}</span><button class="small" data-act="du" ${dirs.running || !dirs.enabled ? 'disabled' : ''}${!dirs.enabled ? ' title="directory measurement is off for this box; enable it in the box settings"' : ''}>measure now</button></div>
       </div>
       ${!dirs.enabled ? `<div class="hint">directory measurement is off for this box.</div>` : ''}
       ${dirs.error ? `<div class="err-box">${esc(dirs.error)}</div>` : ''}
@@ -704,7 +710,7 @@ function viewAdd() {
           <label class="f">WebUI user<input data-f="qbt_user" value="${esc(f.qbt_user)}" autocomplete="off"></label>
           <label class="f">WebUI password${edit ? ` <span class="hint">${f.has_qbt_pass ? '(blank keeps saved)' : '(none saved)'}</span>` : ''}<input data-f="qbt_pass" type="password" value="${esc(f.qbt_pass)}" autocomplete="new-password"></label>
         </div>
-        <label class="f">start command <span class="hint">(used by “start client”)</span><input data-f="qbt_start_cmd" value="${esc(f.qbt_start_cmd)}" placeholder='cd "$HOME" && ( "$HOME/bin/qbittorrent-nox" -d </dev/null >/dev/null 2>&1 )'></label>
+        <label class="f">start command <span class="hint">(used by “start client”; it must detach, e.g. -d or the qbt-start helper: a command left in the foreground is killed after 30 s)</span><input data-f="qbt_start_cmd" value="${esc(f.qbt_start_cmd)}" placeholder='cd "$HOME" && ( "$HOME/bin/qbittorrent-nox" -d </dev/null >/dev/null 2>&1 )'></label>
         <label class="check"><input type="checkbox" data-f="docker_enabled" ${f.docker_enabled ? 'checked' : ''}> monitor rootless docker containers</label>
         <label class="check"><input type="checkbox" data-f="du_enabled" ${f.du_enabled ? 'checked' : ''}> measure directory usage periodically (du at lowest I/O priority)</label>
         ${edit ? `<label class="check"><input type="checkbox" data-f="enabled" ${f.enabled ? 'checked' : ''}> polling enabled</label>` : ''}

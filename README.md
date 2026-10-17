@@ -121,6 +121,16 @@ shared host another tenant could bind it while your client is down.
 "Start client" runs the per-box start command; when none is set it uses
 `~/bin/qbt-start` if present, else `"$HOME/bin/qbittorrent-nox" -d`.
 
+### Failures and backoff
+
+A box that fails to poll is retried at the normal interval for the first few
+failures, then the retry interval doubles up to ten minutes. The card shows
+when the next try is due and offers "retry now", which reconnects at once.
+The failure count and status survive edits and dashboard restarts, so a box
+that is down stays "offline" (and its alert stays acknowledged) across them.
+Disabling a box stops polling, resolves its open alerts and greys out its
+actions; enabling it again starts from a clean slate.
+
 ## Security notes
 
 - Box credentials (SSH password, qBittorrent password) and the Pulsed Media

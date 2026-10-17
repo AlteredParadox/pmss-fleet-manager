@@ -85,6 +85,9 @@ func clip(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
+	if len(s) > 4*max {
+		s = s[:4*max] // the first max runes fit in 4*max bytes; avoids a rune copy of a huge body
+	}
 	r := []rune(s)
 	if len(r) <= max {
 		return s
