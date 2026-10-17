@@ -88,6 +88,17 @@ WebUI port, Docker socket, CPU) before you confirm. SSH auth can be a key file,
 your ssh-agent, or a password; with "auto" it tries `~/.ssh/id_ed25519`,
 `id_ecdsa` and `id_rsa`, then the agent, then a password if one is set.
 
+### Editing a box
+
+Blank password fields keep the saved passwords. They are only ever used for
+the host, port and user they were saved for: moving a box to a different
+endpoint with a blank SSH password is refused until you re-enter it, both
+on save and on "test connection". Switching SSH auth to a key or the agent
+removes the saved SSH password; a checkbox removes the saved WebUI password.
+The pinned host key belongs to the host and port: it is kept while they are
+unchanged, cleared when they change or when you tick "forget the pinned SSH
+host key", and a key the wizard saw never replaces an existing pin.
+
 ### qBittorrent access
 
 The WebUI port is read from `~/.config/qBittorrent/qBittorrent.conf` on the

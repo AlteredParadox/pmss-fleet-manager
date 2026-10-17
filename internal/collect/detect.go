@@ -132,7 +132,7 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 	tag := probe.NewTag()
 	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)))
 	if err != nil && len(out) == 0 {
-		add("fail", "probe failed: %v %s", err, strings.TrimSpace(string(stderr)))
+		add("fail", "probe failed: %v %s", explainSessionError(err), strings.TrimSpace(string(stderr)))
 		res.Box = &b
 		return res
 	}

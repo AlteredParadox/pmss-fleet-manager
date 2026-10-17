@@ -673,7 +673,7 @@ function viewAdd() {
       </div>
       <div class="f2">
         <label class="f">key path <span class="hint">(empty = ~/.ssh/id_*)</span><input data-f="key_path" value="${esc(f.key_path)}" placeholder="~/.ssh/id_ed25519" ${f.auth_method === 'password' || f.auth_method === 'agent' ? 'disabled' : ''}></label>
-        <label class="f">ssh password${edit ? ' <span class="hint">(blank keeps saved)</span>' : ''}<input data-f="password" type="password" class="${E.password ? 'err' : ''}" value="${esc(f.password)}" autocomplete="new-password" ${f.auth_method === 'key' || f.auth_method === 'agent' ? 'disabled' : ''}>${E.password ? `<span class="err-box">${esc(E.password)}</span>` : ''}</label>
+        <label class="f">ssh password${edit ? ` <span class="hint">${f.has_password ? '(blank keeps saved)' : '(none saved)'}</span>` : ''}<input data-f="password" type="password" class="${E.password ? 'err' : ''}" value="${esc(f.password)}" autocomplete="new-password" ${f.auth_method === 'key' || f.auth_method === 'agent' ? 'disabled' : ''}>${E.password ? `<span class="err-box">${esc(E.password)}</span>` : ''}</label>
       </div>
       <div class="f3">
         <label class="f">plan <span class="hint">(optional)</span><input data-f="plan" value="${esc(f.plan)}" placeholder="Dragon-R 2TB"></label>
@@ -685,14 +685,14 @@ function viewAdd() {
         <div class="f3">
           <label class="f">WebUI port <span class="hint">(0 = detect from config)</span><input data-f="qbt_port" type="number" min="0" max="65535" value="${f.qbt_port || 0}"></label>
           <label class="f">WebUI user<input data-f="qbt_user" value="${esc(f.qbt_user)}" autocomplete="off"></label>
-          <label class="f">WebUI password${edit ? ' <span class="hint">(blank keeps saved)</span>' : ''}<input data-f="qbt_pass" type="password" value="${esc(f.qbt_pass)}" autocomplete="new-password"></label>
+          <label class="f">WebUI password${edit ? ` <span class="hint">${f.has_qbt_pass ? '(blank keeps saved)' : '(none saved)'}</span>` : ''}<input data-f="qbt_pass" type="password" value="${esc(f.qbt_pass)}" autocomplete="new-password"></label>
         </div>
         <label class="f">start command <span class="hint">(used by “start client”)</span><input data-f="qbt_start_cmd" value="${esc(f.qbt_start_cmd)}" placeholder='cd "$HOME" && ( "$HOME/bin/qbittorrent-nox" -d </dev/null >/dev/null 2>&1 )'></label>
         <label class="check"><input type="checkbox" data-f="docker_enabled" ${f.docker_enabled ? 'checked' : ''}> monitor rootless docker containers</label>
         <label class="check"><input type="checkbox" data-f="du_enabled" ${f.du_enabled ? 'checked' : ''}> measure directory usage periodically (du at lowest I/O priority)</label>
         ${edit ? `<label class="check"><input type="checkbox" data-f="enabled" ${f.enabled ? 'checked' : ''}> polling enabled</label>` : ''}
         ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins the new key)</span></label>` : ''}
-        ${edit ? `<label class="check"><input type="checkbox" data-f="clear_qbt_pass" ${f.clear_qbt_pass ? 'checked' : ''}> remove the saved WebUI password <span class="hint">(the SSH password is removed automatically when auth is switched to key or agent)</span></label>` : ''}
+        ${edit && f.has_qbt_pass ? `<label class="check"><input type="checkbox" data-f="clear_qbt_pass" ${f.clear_qbt_pass ? 'checked' : ''}> remove the saved WebUI password <span class="hint">(the SSH password is removed automatically when auth is switched to key or agent)</span></label>` : ''}
       </div></details>
       <div class="form-foot">
         <button data-go="${back}">cancel</button>
@@ -745,13 +745,16 @@ function validateForm(f) {
   const E = {};
   if (!/^[a-z0-9.-]+$/i.test(f.host.trim())) E.host = 'enter a valid hostname';
   if (!f.user.trim()) E.user = 'required';
+  const needsPw = f.auth_method === 'password' || f.auth_method === '';
   if (f.auth_method === 'password' && !f.password && S.add.mode === 'add') E.password = 'required for password auth';
+  if (S.add.mode === 'edit' && needsPw && !f.password && !f.has_password && f.auth_method === 'password') E.password = 'no password is saved for this box; enter one';
   return E;
 }
 function payload(f) {
   const p = { ...f };
   p.port = Number(p.port) || 22; p.qbt_port = Number(p.qbt_port) || 0;
   p.host = p.host.trim(); p.user = p.user.trim();
+  if (p.auth_method === 'key' || p.auth_method === 'agent') p.password = ''; // typed before switching auth: not used, not stored
   return p;
 }
 async function runDetect() {
@@ -969,6 +972,9 @@ document.addEventListener('input', (e) => {
   if (f && S.add.form) {
     const k = f.dataset.f;
     S.add.form[k] = f.type === 'checkbox' ? f.checked : f.value;
+    // A host key belongs to host:port; anything detect saw for a previous
+    // endpoint must not be carried to a new one (or saved as its pin).
+    if (k === 'host' || k === 'port' || k === 'user') S.add.form.host_key = '';
     if (S.add.errors[k]) { delete S.add.errors[k]; f.classList.remove('err'); }
     if (k === 'auth_method') render();
     return;

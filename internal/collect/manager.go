@@ -50,6 +50,7 @@ type Manager struct {
 	hooks  []Hook
 	latest latestRelease
 
+	boxMu sync.Mutex // serialises AddBox/UpdateBox/RemoveBox
 	pmapi *pmapi.Client
 	svcMu sync.RWMutex
 	svc   servicesCache
@@ -265,6 +266,8 @@ func (m *Manager) setState(s *BoxState) {
 
 // AddBox persists and starts polling a new box.
 func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
+	m.boxMu.Lock()
+	defer m.boxMu.Unlock()
 	if err := m.st.CreateBox(ctx, b); err != nil {
 		return err
 	}
@@ -278,6 +281,8 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 
 // UpdateBox persists changes and restarts the poller with fresh connections.
 func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
+	m.boxMu.Lock()
+	defer m.boxMu.Unlock()
 	if err := m.st.UpdateBox(ctx, b); err != nil {
 		return err
 	}
@@ -323,9 +328,9 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 			keep.resetVolatile() // port/creds may have changed: re-verify before any action
 			switch {
 			case !fresh.Enabled:
-				keep.Status = "disabled"
+				keep.Status, keep.StatusReason = "disabled", ""
 			case keep.Status == "disabled":
-				keep.Status = "pending" // re-enabled: the first poll decides
+				keep.Status, keep.StatusReason, keep.LastError = "pending", "", "" // re-enabled: the first poll decides
 			}
 			m.states[fresh.ID] = &keep
 		}
@@ -343,6 +348,8 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 
 // RemoveBox stops polling and deletes the box, its alerts and its cache.
 func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
+	m.boxMu.Lock()
+	defer m.boxMu.Unlock()
 	m.mu.Lock()
 	p := m.pollers[id]
 	delete(m.pollers, id)
@@ -405,11 +412,13 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		// already running, so it does not prove a fresh process.
 		err = p.qbtAction(ctx, action)
 	}
-	if err == nil && (action == "restart" || action == "stop") {
-		// The port is free until the client is back: whoever binds it next
-		// must be verified again before any credential-sending action. The
-		// poller also notes the time, so a poll that was already in flight
-		// cannot store the verification it made before the port was freed.
+	if action == "restart" || action == "stop" {
+		// The port may be free until the client is back, whether or not
+		// the action reported success (a restart can stop the client and
+		// then fail to start it): whoever binds it next must be verified
+		// again before any credential-sending action. The poller also notes
+		// the time, so a poll that was already in flight cannot store the
+		// verification it made before the port was freed.
 		p.noteAction()
 		m.mutateState(id, func(s *BoxState) { s.Qbt.PortOK, s.Qbt.Reachable = false, false })
 	}
@@ -466,7 +475,7 @@ func describeErr(err error) string {
 	if err == nil {
 		return ""
 	}
-	return clip(err.Error(), 200)
+	return clip(err.Error(), 300)
 }
 
 func pct(used, total int64) float64 {

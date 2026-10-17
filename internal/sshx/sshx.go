@@ -229,6 +229,28 @@ func expandHome(p string) string {
 	return p
 }
 
+// maxOutput bounds what a remote command may send back on stdout.
+const maxOutput = 16 << 20
+
+// cappedWriter drops bytes beyond its budget instead of growing without
+// bound; the session keeps draining so the remote side is not blocked.
+type cappedWriter struct {
+	w    *bytes.Buffer
+	left int
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	if c.left > 0 {
+		if len(p) > c.left {
+			p = p[:c.left]
+		}
+		c.w.Write(p)
+		c.left -= len(p)
+	}
+	return n, nil
+}
+
 // Run executes cmd on the remote with optional stdin and returns stdout/stderr.
 // The session is torn down when ctx ends.
 func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
@@ -264,8 +286,10 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 	}
 	defer sess.Close()
 	var out, errb bytes.Buffer
-	sess.Stdout = &out
-	sess.Stderr = &errb
+	// A compromised box could stream without end inside the deadline; the
+	// probe is a few KiB and even a du of a huge home is well under this.
+	sess.Stdout = &cappedWriter{w: &out, left: maxOutput}
+	sess.Stderr = &cappedWriter{w: &errb, left: 1 << 20}
 	if stdin != nil {
 		sess.Stdin = stdin
 	}

@@ -48,9 +48,11 @@ sec(){ printf '\n@@%s%s\n' "${PMSS_TAG:-}" "$1"; }
 # simply empty (the parser falls back to ~/.quota for quota).
 bounded(){
   secs=$1; shift
-  f=$(mktemp 2>/dev/null) || f="${TMPDIR:-/tmp}/.pmss-probe.$$.$secs"
+  # The scratch file lives in the tenant's own home, never in shared /tmp
+  # where a co-tenant could plant a file at a guessable name.
+  f=$(mktemp "$home/.pmss-probe.XXXXXX" 2>/dev/null) || return 0
   ( "$@" >"$f" 2>/dev/null ) & bp=$!
-  i=0; while [ $i -lt "$secs" ] && kill -0 $bp 2>/dev/null; do sleep 1; i=$((i+1)); done
+  i=0; while [ $i -lt $((secs*5)) ] && kill -0 $bp 2>/dev/null; do sleep 0.2; i=$((i+1)); done
   kill -9 $bp 2>/dev/null
   cat "$f" 2>/dev/null; rm -f "$f"
 }
@@ -128,7 +130,7 @@ sec listen
 # with no attacker-controlled text.
 awk '$4=="0A"{x=$2; a=x; sub(/.*:/,"",x); sub(/:.*/,"",a); print "h", x, $8, a}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
 sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
-sec qbt_bin_version; [ -x "$home/bin/qbittorrent-nox" ] && timeout 10 "$home/bin/qbittorrent-nox" --version 2>/dev/null | head -n 1
+sec qbt_bin_version; [ -x "$home/bin/qbittorrent-nox" ] && timeout 10 "$home/bin/qbittorrent-nox" --version </dev/null 2>/dev/null | head -n 1
 sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -c 'bin/qbt-start' 
 sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0

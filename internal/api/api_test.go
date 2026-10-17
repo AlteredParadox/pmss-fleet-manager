@@ -243,3 +243,44 @@ func TestEditClearsSecrets(t *testing.T) {
 		t.Fatalf("secrets not cleared: ssh=%q qbt=%q", b.Password, b.QbtPass)
 	}
 }
+
+func TestUpdateRulesForPinsAndSecrets(t *testing.T) {
+	s, st := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	do(t, s, "POST", "/api/boxes", `{"name":"b","host":"A.example","port":22,"user":"u","auth_method":"password","password":"pw","host_key":"ssh-ed25519 PIN"}`, hdr)
+	boxes, _ := st.ListBoxes(context.Background())
+	id := boxes[0].ID
+	get := func() *store.Box { b, _ := st.GetBox(context.Background(), id); return b }
+	// Changed host with a blank password: refused, nothing changes.
+	code, body := do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b","host":"b.example","user":"u","auth_method":"password"}`, hdr)
+	if code != 400 || !strings.Contains(body, "re-enter") || get().Host != "A.example" {
+		t.Fatalf("host change without password: %d %s host=%s", code, body, get().Host)
+	}
+	// Changed user only: same refusal (secrets are bound to the user too).
+	if code, _ = do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b","host":"a.example","user":"v","auth_method":"password"}`, hdr); code != 400 {
+		t.Fatalf("user change without password: %d", code)
+	}
+	// Same endpoint (host case differs): a supplied key must not replace the pin.
+	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","auth_method":"password","host_key":"ssh-ed25519 OTHER"}`, hdr)
+	if b := get(); b.HostKey != "ssh-ed25519 PIN" || b.Name != "b2" || b.Password != "pw" {
+		t.Fatalf("unchanged endpoint must keep pin and password: %+v", b)
+	}
+	// Forget wins over a supplied key.
+	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","auth_method":"password","host_key":"ssh-ed25519 OTHER","forget_host_key":true}`, hdr)
+	if get().HostKey != "" {
+		t.Fatal("forget_host_key must clear the pin even when a key is supplied")
+	}
+	// Changed host WITH a typed password: allowed, and the fresh detect key is pinned.
+	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"b.example","user":"u","auth_method":"password","password":"pw2","host_key":"ssh-ed25519 NEW"}`, hdr)
+	if b := get(); b.Host != "b.example" || b.HostKey != "ssh-ed25519 NEW" || b.Password != "pw2" {
+		t.Fatalf("host change with password: %+v", b)
+	}
+	// Create with key auth discards a typed password.
+	do(t, s, "POST", "/api/boxes", `{"name":"k","host":"k.example","user":"u","auth_method":"key","password":"leftover"}`, hdr)
+	boxes, _ = st.ListBoxes(context.Background())
+	for _, b := range boxes {
+		if b.Name == "k" && b.Password != "" {
+			t.Fatal("key-auth create must not store a password")
+		}
+	}
+}

@@ -43,10 +43,14 @@ type Box struct {
 	KeyPath    string `json:"key_path"`
 	Password   string `json:"-"`
 	HostKey    string `json:"host_key"`
-	Type       string `json:"type"` // seedbox | storage
-	Plan       string `json:"plan"`
-	Datacenter string `json:"datacenter"`
-	Renewal    string `json:"renewal"` // YYYY-MM-DD or ""
+	// HasPassword/HasQbtPass tell the edit form whether a secret is saved,
+	// since the secrets themselves never leave the server.
+	HasPassword bool   `json:"has_password"`
+	HasQbtPass  bool   `json:"has_qbt_pass"`
+	Type        string `json:"type"` // seedbox | storage
+	Plan        string `json:"plan"`
+	Datacenter  string `json:"datacenter"`
+	Renewal     string `json:"renewal"` // YYYY-MM-DD or ""
 
 	QbtEnabled  bool   `json:"qbt_enabled"`
 	QbtPort     int    `json:"qbt_port"`
@@ -208,6 +212,7 @@ func scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 		return nil, err
 	}
 	b.CreatedAt, _ = time.Parse(time.RFC3339, created)
+	b.HasPassword, b.HasQbtPass = b.Password != "", b.QbtPass != ""
 	b.UpdatedAt, _ = time.Parse(time.RFC3339, updated)
 	return &b, nil
 }

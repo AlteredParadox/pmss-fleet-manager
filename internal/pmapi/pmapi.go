@@ -109,8 +109,8 @@ func parseAmount(s string) float64 {
 		s = strings.ReplaceAll(s, ",", "")
 	}
 	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0
+	if err != nil || f != f || f > 1e12 || f < -1e12 {
+		return 0 // unparsable or absurd: no real invoice is anywhere near this
 	}
 	return f
 }
