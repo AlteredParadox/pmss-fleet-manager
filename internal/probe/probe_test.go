@@ -333,18 +333,25 @@ func TestNonFiniteEverywhere(t *testing.T) {
 }
 
 func TestPortOwnerNow(t *testing.T) {
-	out := []byte("1001\nh 1F90 1001 0100007F\nh 0016 0 00000000\n")
+	out := []byte("uid 1001\nh 1F90 1001 0100007F\nh 0016 0 00000000\nend\n")
 	if ok, reason := PortOwnerNow(out, 8080); !ok {
 		t.Fatalf("own port: %q", reason)
 	}
 	if ok, _ := PortOwnerNow(out, 22); ok {
 		t.Fatal("root's port must be refused")
 	}
-	if ok, reason := PortOwnerNow([]byte("garbage\n"), 8080); ok || !strings.Contains(reason, "uid") {
+	if ok, reason := PortOwnerNow([]byte("garbage\nend\n"), 8080); ok || !strings.Contains(reason, "uid") {
 		t.Fatalf("bad uid line: %v %q", ok, reason)
 	}
-	if ok, _ := PortOwnerNow([]byte("1001\n"), 8080); ok {
+	if ok, _ := PortOwnerNow([]byte("uid 1001\nend\n"), 8080); ok {
 		t.Fatal("empty table must refuse")
+	}
+	// Cut off before the marker: the co-tenant's line may be the missing one.
+	if ok, reason := PortOwnerNow([]byte("uid 1001\nh 1F90 1001 0100007F\n"), 8080); ok || !strings.Contains(reason, "incomplete") {
+		t.Fatalf("truncated table: %v %q", ok, reason)
+	}
+	if ok, _ := PortOwnerNow(nil, 8080); ok {
+		t.Fatal("no output must refuse")
 	}
 	// The live script must produce exactly this shape locally.
 	if _, err := exec.LookPath("sh"); err == nil {
@@ -354,9 +361,12 @@ func TestPortOwnerNow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		first, _, _ := strings.Cut(string(raw), "\n")
-		if _, err := strconv.Atoi(strings.TrimSpace(first)); err != nil {
-			t.Fatalf("first line should be the uid: %q", first)
+		lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+		if _, err := strconv.Atoi(strings.TrimPrefix(lines[0], "uid ")); err != nil || !strings.HasPrefix(lines[0], "uid ") {
+			t.Fatalf("first line should be the uid: %q", lines[0])
+		}
+		if lines[len(lines)-1] != "end" {
+			t.Fatalf("last line should be the marker: %q", lines[len(lines)-1])
 		}
 	}
 }

@@ -52,8 +52,8 @@ type BoxState struct {
 	LastPoll     time.Time `json:"last_poll"`
 	LastOK       time.Time `json:"last_ok"`
 	Failures     int       `json:"failures"`
-	NextPoll     time.Time `json:"next_poll,omitempty"` // when the next retry is due after a failure
-	Backoff      bool      `json:"backoff"`             // retries are spaced out (see retryInterval)
+	NextPoll     time.Time `json:"next_poll"` // when the next retry is due after a failure (zero when none)
+	Backoff      bool      `json:"backoff"`   // retries are spaced out (see retryInterval)
 	LastError    string    `json:"last_error,omitempty"`
 	PollMs       int64     `json:"poll_ms"`
 	HostKeyFP    string    `json:"host_key_fp,omitempty"`

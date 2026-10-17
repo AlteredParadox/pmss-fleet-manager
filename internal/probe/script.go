@@ -149,8 +149,9 @@ sec end
 // right before an action that sends credentials.
 const ListenScript = `#!/bin/sh
 LC_ALL=C; export LC_ALL
-id -u
+echo "uid $(id -u)"
 awk '$4=="0A"{x=$2; a=x; sub(/.*:/,"",x); sub(/:.*/,"",a); print "h", x, $8, a}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+echo end
 `
 
 // ScriptWithTag returns Script with the section tag set on its first line.

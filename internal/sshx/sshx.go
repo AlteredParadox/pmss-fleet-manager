@@ -103,6 +103,10 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	}()
 	select {
 	case <-ctx.Done():
+		// The handshake may be blocked on the agent (a signer request it
+		// never answers), not the box: close that socket too, or <-done
+		// never comes and every poller on agent auth hangs here.
+		cleanup()
 		conn.Close()
 		<-done
 		return nil, ctx.Err()
@@ -184,7 +188,7 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 	}
 	if useAgent {
 		if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-			if conn, err := net.Dial("unix", sock); err == nil {
+			if conn, err := net.DialTimeout("unix", sock, 5*time.Second); err == nil {
 				ag := agent.NewClient(conn)
 				methods = append(methods, ssh.PublicKeysCallback(ag.Signers))
 				cleanup = func() { conn.Close() } // only needed during the handshake

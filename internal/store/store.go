@@ -301,7 +301,6 @@ func (s *Store) ClearSecrets(ctx context.Context, id int64, ssh, qbt bool) error
 	return nil
 }
 
-// SetHostKey pins the host key after a trust-on-first-use connect.
 // SetHostKey pins a key seen while dialling host:port onto the box, only if
 // the record still names that endpoint and has no pin: an edit that moved
 // the box meanwhile must not end up pinned to the old host's key.

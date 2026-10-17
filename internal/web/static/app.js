@@ -59,7 +59,7 @@ function fmtMoney(v, cur) { const n = Number(v) || 0; return `${CUR[cur] || (cur
 function cycleShort(c) { return ({ monthly: 'mo', quarterly: 'qtr', 'semi-annually': '6 mo', annually: 'yr', biennially: '2 yr', triennially: '3 yr' })[String(c || '').toLowerCase()] || (c || ''); }
 function safeHref(u) { return /^https?:\/\//i.test(String(u || '')) ? u : '#'; } // never render javascript: or data: links from API data
 function retryNote(b) {
-  if (!b.failures || !b.next_poll) return '';
+  if (b.status === 'disabled' || !b.failures || !b.next_poll) return '';
   const s = Math.max(0, Math.round((Date.parse(b.next_poll) - Date.now()) / 1000));
   return `retry ${s < 5 ? 'now' : s < 90 ? `in ${s}s` : `in ${Math.round(s / 60)} min`}${b.backoff ? ', backed off' : ''}`;
 }

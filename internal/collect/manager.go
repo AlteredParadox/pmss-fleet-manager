@@ -89,10 +89,13 @@ func (m *Manager) SetSettings(s store.Settings) {
 	if prev.PMAPIKey != s.PMAPIKey && m.ctx != nil {
 		go m.SyncServices(m.ctx)
 	}
+	if prev.PollIntervalSec == s.PollIntervalSec {
+		return // thresholds and keys are read on the next poll anyway
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, p := range m.pollers {
-		p.wake()
+		p.wake() // re-sleep with the new interval
 	}
 }
 
@@ -332,6 +335,9 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 			keep.adoptIdentity(*cur)
 			keep.Service = cur.Service
 			keep.resetVolatile() // port/creds may have changed: re-verify before any action
+			// The old poller's retry schedule died with it: the new one polls
+			// at once, and a disabled box has nothing to retry.
+			keep.Failures, keep.NextPoll, keep.Backoff = 0, time.Time{}, false
 			switch {
 			case !fresh.Enabled:
 				keep.Status, keep.StatusReason = "disabled", ""
@@ -380,6 +386,9 @@ func (m *Manager) Refresh(id int64) error {
 	p := m.poller(id)
 	if p == nil {
 		return store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return errors.New("box is disabled: enable it to poll")
 	}
 	p.wake()
 	return nil

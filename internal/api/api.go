@@ -718,6 +718,11 @@ func (s *Server) handleDetect(w http.ResponseWriter, r *http.Request) {
 			} else if b.Password == "" && (b.AuthMethod == "password" || b.AuthMethod == "") && stored.Password != "" {
 				writeErr(w, 400, errors.New("re-enter the SSH password to test a different host, port or user; the saved one is only used for the saved endpoint"))
 				return
+			} else if b.QbtPass == "" && stored.QbtPass != "" && !in.ClearQbtPass {
+				// Same rule as saving: otherwise the test would log in to the
+				// new host's WebUI with an empty password (a strike toward a ban).
+				writeErr(w, 400, errors.New("re-enter the WebUI password (or tick remove) to test a different host, port or user; the saved one is only used for the saved endpoint"))
+				return
 			}
 		}
 	}
