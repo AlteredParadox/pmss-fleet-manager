@@ -78,7 +78,7 @@ command -v screen >/dev/null 2>&1 || echo "warning: 'screen' not found on this b
 # failure: piping a failed crontab -l into crontab - would wipe every entry.
 if ! cur=$(crontab -l 2>/dev/null); then
   msg=$(crontab -l 2>&1 >/dev/null)
-  case "$msg" in *"no crontab"*) cur="" ;; *) echo "crontab -l failed: $msg"; exit 1 ;; esac
+  case "$msg" in *"no crontab"*) cur="" ;; *) echo "crontab -l failed: ${msg:-no details (try again)}"; exit 1 ;; esac
 fi
 ( printf '%s\n' "$cur" | grep -vF "$HOME/bin/qbt-start" | grep -v '^$'
   echo "@reboot     sleep 30; $HOME/bin/qbt-start"
@@ -203,7 +203,9 @@ func (l *latestRelease) get(ctx context.Context) string {
 	}
 	l.at = time.Now() // also rate-limits failures
 	l.mu.Unlock()
-	rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	// Not tied to the poll's cancellation: a box edit mid-fetch would burn
+	// the six-hour window with an empty result for the whole fleet.
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, "https://api.github.com/repos/userdocs/qbittorrent-nox-static/releases/latest", nil)
 	if err != nil {
