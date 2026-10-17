@@ -637,7 +637,7 @@ func (s *Server) handleDu(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.m.RunDu(id); err != nil {
-		code := 409 // disabled, busy or unreachable
+		code := 409 // polling disabled for the box
 		if errors.Is(err, store.ErrNotFound) {
 			code = 404
 		}

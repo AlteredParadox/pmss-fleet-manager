@@ -327,7 +327,7 @@ func (p *poller) poll(ctx context.Context) {
 		// Monitoring off: still report what the probe saw, including whether
 		// the binary on disk is behind the latest release.
 		qs := QbtState{Enabled: false, Installed: snap.Qbt.BinaryPresent, ProcessUp: snap.Qbt.Running, Port: qbtPortFor(p.box, snap.Qbt.ConfPort),
-			BinaryVersion: snap.Qbt.BinaryVersion, StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0}
+			BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0}
 		qs.LatestVersion = p.m.latest.get(ctx)
 		qs.UpdateAvail = qs.BinaryVersion != "" && qs.LatestVersion != "" && versionLess(qs.BinaryVersion, qs.LatestVersion)
 		st.Qbt = qs
@@ -441,7 +441,7 @@ func classify(st *BoxState) (string, string) {
 }
 
 func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
-	st.Hostname = snap.Hostname
+	st.Hostname = clip(snap.Hostname, 128)
 	st.UID = snap.UID
 
 	q := snap.Quota
@@ -513,12 +513,14 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 		p.prevCPU, p.prevCPUAt = c.CPUUsageNS, snap.At
 	}
 
+	// Identity strings are the box's own text: bound them like every other
+	// remote string, or one hostile box bloats the cache row and every SSE event.
 	h := snap.Host
 	st.HostSys = HostState{UptimeSec: h.UptimeSec, Load1: h.Load1, Load5: h.Load5, Load15: h.Load15,
-		MemTotal: h.MemTotal, MemAvail: h.MemAvail, NCPU: h.NCPU, Kernel: h.Kernel, Debian: h.Debian, PMSSVersion: h.PMSSVersion,
-		HomeFSType: snap.HomeFS.Type, HomeSize: snap.HomeFS.Size, HomeUsed: snap.HomeFS.Used, HomeAvail: snap.HomeFS.Avail,
-		CPUModel: h.CPUModel, CPUShort: h.CPUShort, CPUFlags: strings.Join(h.CPUFlags, " "),
-		GPUPresent: h.GPU.Present, GPUDevice: h.GPU.Device, GPUVendor: h.GPU.Vendor, GPUAccess: h.GPU.Accessible, HWEncode: hwEncodeLabel(h.GPU)}
+		MemTotal: h.MemTotal, MemAvail: h.MemAvail, NCPU: h.NCPU, Kernel: clip(h.Kernel, 128), Debian: clip(h.Debian, 64), PMSSVersion: clip(h.PMSSVersion, 64),
+		HomeFSType: clip(snap.HomeFS.Type, 32), HomeSize: snap.HomeFS.Size, HomeUsed: snap.HomeFS.Used, HomeAvail: snap.HomeFS.Avail,
+		CPUModel: clip(h.CPUModel, 128), CPUShort: clip(h.CPUShort, 64), CPUFlags: clip(strings.Join(h.CPUFlags, " "), 2048),
+		GPUPresent: h.GPU.Present, GPUDevice: clip(h.GPU.Device, 128), GPUVendor: h.GPU.Vendor, GPUAccess: h.GPU.Accessible, HWEncode: hwEncodeLabel(h.GPU)}
 
 	a := snap.Account
 	st.Account = AccountState{OK: a.OK, QuotaGiB: a.QuotaGiB, RAMMiB: a.RAMMiB, DockerEnabled: a.DockerEnabled, Suspended: a.Suspended}
@@ -592,9 +594,9 @@ func qbtPortFor(b *store.Box, confPort int) int {
 func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot) {
 	port := p.qbtPort(snap)
 	qs := QbtState{Enabled: true, Installed: snap.Qbt.BinaryPresent, ProcessUp: snap.Qbt.Running, Port: port, Version: st.Qbt.Version,
-		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: snap.Qbt.SubnetList, ConfUser: snap.Qbt.Username,
+		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: clip(snap.Qbt.SubnetList, 1024), ConfUser: clip(snap.Qbt.Username, 64),
 		HasCreds:      p.box.QbtUser != "" || p.box.QbtPass != "",
-		BinaryVersion: snap.Qbt.BinaryVersion, StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0}
+		BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0}
 	versionOK := false // this poll read the running version (it is otherwise carried over for display)
 	defer func() {     // runs after st.Qbt is set below
 		q := &st.Qbt
@@ -996,7 +998,7 @@ func (p *poller) rawProbe(ctx context.Context) (map[string]string, error) {
 		secs[k] = clip(v, 4096)
 	}
 	if len(stderr) > 0 {
-		secs["_stderr"] = strings.TrimSpace(string(stderr))
+		secs["_stderr"] = clip(strings.TrimSpace(string(stderr)), 4096)
 	}
 	return secs, nil
 }
