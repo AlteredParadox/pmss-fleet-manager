@@ -493,6 +493,20 @@ func (m *Manager) TorrentAction(ctx context.Context, id int64, hash, action stri
 	return err
 }
 
+// AddTorrents adds links and/or .torrent files to the box's qBittorrent.
+func (m *Manager) AddTorrents(ctx context.Context, id int64, req qbt.AddRequest) error {
+	p := m.poller(id)
+	if p == nil {
+		return store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return ErrDisabled
+	}
+	err := p.addTorrents(ctx, req)
+	p.wake()
+	return err
+}
+
 // RunDu forces a directory usage measurement.
 func (m *Manager) RunDu(id int64) error {
 	p := m.poller(id)

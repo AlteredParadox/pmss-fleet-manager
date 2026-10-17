@@ -27,6 +27,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,6 +126,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST /api/boxes/{id}/du", s.handleDu)
 	mux.HandleFunc("POST /api/boxes/{id}/qbt/{action}", s.handleQbtAction)
 	mux.HandleFunc("POST /api/boxes/{id}/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
+	mux.HandleFunc("POST /api/boxes/{id}/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
 	mux.HandleFunc("POST /api/boxes/{id}/containers/{cid}/{action}", s.handleContainerAction)
 	mux.HandleFunc("POST /api/detect", s.handleDetect)
 	mux.HandleFunc("GET /api/alerts", s.handleAlerts)
@@ -685,6 +687,127 @@ func (s *Server) handleQbtAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "output": out})
+}
+
+// Limits on one add request. A .torrent is normally tens of kilobytes; the
+// per-file cap leaves room for very large piece tables without letting a
+// browser push an arbitrary amount through the box's WebUI.
+const (
+	addMaxBody    = 40 << 20
+	addMaxFile    = 8 << 20
+	addMaxFiles   = 20
+	addMaxURLs    = 50
+	addMaxURLLen  = 4000
+	addMaxCatLen  = 100
+	addMaxNameLen = 200
+)
+
+// validTorrentURL accepts magnet links and http(s) URLs to .torrent files,
+// which is what qBittorrent's torrents/add fetches itself.
+func validTorrentURL(u string) bool {
+	if len(u) > addMaxURLLen || strings.ContainsAny(u, " \t\r\n") {
+		return false
+	}
+	l := strings.ToLower(u)
+	return strings.HasPrefix(l, "magnet:?") || strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
+}
+
+// looksLikeTorrent is a cheap shape check (a bencoded dictionary) so junk
+// never reaches the WebUI; qBittorrent does the real parse.
+func looksLikeTorrent(b []byte) bool {
+	return len(b) > 2 && b[0] == 'd' && b[len(b)-1] == 'e'
+}
+
+// addRequestFromForm validates a multipart add: "urls" (one per line),
+// "torrents" files, "category", "stopped".
+func addRequestFromForm(r *http.Request) (qbt.AddRequest, error) {
+	var req qbt.AddRequest
+	r.Body = http.MaxBytesReader(nil, r.Body, addMaxBody)
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		return req, fmt.Errorf("bad upload: %v", err)
+	}
+	for _, line := range strings.Split(r.FormValue("urls"), "\n") {
+		u := strings.TrimSpace(line)
+		if u == "" {
+			continue
+		}
+		if !validTorrentURL(u) {
+			return req, fmt.Errorf("not a magnet or http(s) link: %q", clipStr(u, 60))
+		}
+		req.URLs = append(req.URLs, u)
+	}
+	if len(req.URLs) > addMaxURLs {
+		return req, fmt.Errorf("at most %d links per request", addMaxURLs)
+	}
+	files := r.MultipartForm.File["torrents"]
+	if len(files) > addMaxFiles {
+		return req, fmt.Errorf("at most %d files per request", addMaxFiles)
+	}
+	for _, fh := range files {
+		if fh.Size > addMaxFile {
+			return req, fmt.Errorf("%s: larger than %d MB", clipStr(fh.Filename, 60), addMaxFile>>20)
+		}
+		f, err := fh.Open()
+		if err != nil {
+			return req, err
+		}
+		data, err := io.ReadAll(io.LimitReader(f, addMaxFile+1))
+		f.Close()
+		if err != nil {
+			return req, err
+		}
+		if !looksLikeTorrent(data) {
+			return req, fmt.Errorf("%s is not a .torrent file", clipStr(fh.Filename, 60))
+		}
+		name := clipStr(path.Base(strings.ReplaceAll(fh.Filename, "\\", "/")), addMaxNameLen)
+		if name == "" || name == "." || name == "/" {
+			name = "upload.torrent"
+		}
+		req.Files = append(req.Files, qbt.TorrentFile{Name: name, Data: data})
+	}
+	req.Category = strings.TrimSpace(r.FormValue("category"))
+	if len(req.Category) > addMaxCatLen || strings.ContainsAny(req.Category, "\x00\n\r") {
+		return req, errors.New("invalid category")
+	}
+	switch r.FormValue("stopped") {
+	case "true", "1", "on":
+		req.Stopped = true
+	}
+	if len(req.URLs) == 0 && len(req.Files) == 0 {
+		return req, errors.New("paste at least one magnet or link, or choose a .torrent file")
+	}
+	return req, nil
+}
+
+func clipStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+func (s *Server) handleAddTorrents(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	req, err := addRequestFromForm(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	if err := s.m.AddTorrents(ctx, id, req); err != nil {
+		code := actionCode(err)
+		if errors.Is(err, qbt.ErrBadTorrent) {
+			code = 422
+		}
+		writeErr(w, code, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "links": len(req.URLs), "files": len(req.Files)})
 }
 
 // validTorrentHash accepts a v1 (40 hex) or v2 (64 hex) info-hash, in either

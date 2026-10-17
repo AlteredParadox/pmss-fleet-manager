@@ -28,9 +28,10 @@ aggregate bandwidth, torrents, containers, next renewal and monthly cost.
 - Overview: disk, upload with limit/bonus/throttle state, bandwidth, CPU/RAM,
   client and autostart status, plan and billing.
 - Traffic: daily upload/download bars for the rolling 30 days PMSS tracks.
-- Torrents: the full list from qBittorrent with filter; stop / start / remove
-  (with or without the files) per torrent, pause all / resume all, and start /
-  stop / restart of the client.
+- Torrents: the full list from qBittorrent with filter; add torrents by
+  magnet, URL or `.torrent` file (optionally into a category, or stopped);
+  stop / start / remove (with or without the files) per torrent; pause all /
+  resume all; and start / stop / restart of the client.
 - Containers: rootless Docker containers with CPU and memory, start / stop /
   restart.
 - Storage: usage by top-level directory from a low-priority `du`, every few

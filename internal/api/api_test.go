@@ -17,12 +17,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -308,6 +310,46 @@ func TestValidTorrentHash(t *testing.T) {
 	for h, ok := range map[string]bool{v1: true, v1 + v1[:24]: true, v1[:39]: false, v1[:39] + "g": false, "": false, "all": false, "../x": false} {
 		if validTorrentHash(h) != ok {
 			t.Errorf("%q: want %v", h, ok)
+		}
+	}
+}
+
+func multipartAdd(t *testing.T, fields map[string]string, files map[string][]byte) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		mw.WriteField(k, v)
+	}
+	for name, data := range files {
+		fw, _ := mw.CreateFormFile("torrents", name)
+		fw.Write(data)
+	}
+	mw.Close()
+	r := httptest.NewRequest("POST", "/api/boxes/1/qbt/torrents", &buf)
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	return r
+}
+
+// The add handler's validation: only magnet/http(s) links, only bencoded
+// files, sane names, and never an empty request.
+func TestAddRequestFromForm(t *testing.T) {
+	req, err := addRequestFromForm(multipartAdd(t, map[string]string{"urls": "magnet:?xt=urn:btih:abc\n\n  https://x/y.torrent  \n", "category": " tv ", "stopped": "true"}, map[string][]byte{"C:\\dl\\ok.torrent": []byte("d4:infoe")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.URLs) != 2 || req.URLs[1] != "https://x/y.torrent" || req.Category != "tv" || !req.Stopped || len(req.Files) != 1 || req.Files[0].Name != "ok.torrent" {
+		t.Fatalf("parsed %+v", req)
+	}
+	for name, r := range map[string]*http.Request{
+		"javascript url": multipartAdd(t, map[string]string{"urls": "javascript:alert(1)"}, nil),
+		"file url":       multipartAdd(t, map[string]string{"urls": "file:///etc/passwd"}, nil),
+		"junk file":      multipartAdd(t, nil, map[string][]byte{"x.torrent": []byte("<html>")}),
+		"empty":          multipartAdd(t, map[string]string{"urls": "\n \n"}, nil),
+		"bad category":   multipartAdd(t, map[string]string{"urls": "magnet:?x", "category": "a\nb"}, nil),
+	} {
+		if _, err := addRequestFromForm(r); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }
