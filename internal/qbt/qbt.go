@@ -339,6 +339,23 @@ type ServerState struct {
 	GlobalRatio string `json:"global_ratio"`
 }
 
+// Prefs is the subset of app/preferences the dashboard shows: the three
+// peer-discovery mechanisms private trackers forbid.
+type Prefs struct {
+	DHT bool `json:"dht"`
+	PeX bool `json:"pex"`
+	LSD bool `json:"lsd"`
+}
+
+// Preferences reads the client's settings.
+func (c *Client) Preferences(ctx context.Context) (*Prefs, error) {
+	var p Prefs
+	if err := c.call(ctx, http.MethodGet, "/api/v2/app/preferences", nil, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
 // MainData is one full sync snapshot.
 type MainData struct {
 	ServerState ServerState        `json:"server_state"`

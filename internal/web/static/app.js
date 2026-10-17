@@ -360,7 +360,7 @@ function fleetCards() {
       <div class="card-head">
         <div class="card-title"><span class="led ${b.status}" title="${esc(statusLabel(b.status))}${b.status_reason ? ' — ' + esc(b.status_reason) : ''}"></span><span class="n">${esc(b.name)}</span></div>
         <div class="sub">${esc(b.hostname || b.host)}${b.status_reason ? ` · <span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(b.status_reason)}</span>` : ''}${(() => { const n = retryNote(b); return n ? ` · <span class="muted">${esc(n)}</span>` : ''; })()}</div>
-        <div class="tags"><span class="tag">${esc(b.type)}</span>${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}</div>
+        <div class="tags"><span class="tag">${esc(b.type)}</span>${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}${discoveryTag(b.qbt)}</div>
       </div>
       <div style="display:grid;gap:8px">
         <div><div class="kv"><span>disk</span><b>${b.disk.ok || b.disk.quota_bytes ? `${fmtBytes(b.disk.used_bytes, 1)} / ${fmtBytes(b.disk.quota_bytes, 1)}` : 'n/a'}</b></div>
@@ -633,7 +633,7 @@ function tabTorrents(b) {
   const kindColor = { seeding: 'var(--ok)', leeching: 'var(--accent)', paused: 'var(--dim)', checking: 'var(--warn)', error: 'var(--bad)', unknown: 'var(--dim)' };
   return `<div class="table tor-table" style="overflow:hidden">
     <div class="thead-tools">
-      <div style="font-size:12px"><b>qBittorrent ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
+      <div style="font-size:12px"><b>qBittorrent ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${discoveryNote(q)}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
       <div class="actions">
         <input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">
         <button class="small" data-act="qbt:pause" data-confirm="Pause all torrents on ${esc(b.name)}?">pause all</button>
@@ -657,6 +657,21 @@ function tabTorrents(b) {
       ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
     </div>
   </div>`;
+}
+/* ---------- peer discovery (DHT / PeX / LSD) ---------- */
+const DISCOVERY = [['dht', 'DHT'], ['pex', 'PeX'], ['lsd', 'LSD']];
+const discoveryOn = (q) => DISCOVERY.filter(([k]) => q.discovery?.[k]).map(([, l]) => l);
+// Card tag: only when something is on, since that is what matters before
+// adding a private-tracker torrent. Silent when the settings were not read.
+function discoveryTag(q) {
+  if (!q.enabled || !q.discovery?.known) return '';
+  const on = discoveryOn(q);
+  return on.length ? `<span class="tag discovery" title="peer discovery enabled: ${esc(on.join(', '))} — private trackers usually forbid these">${esc(on.join(' · '))}</span>` : '';
+}
+// Torrents header: every mechanism with its state, so "all off" is visible too.
+function discoveryNote(q) {
+  if (!q.discovery?.known) return q.reachable ? ' · <span class="muted">discovery settings not read</span>' : '';
+  return ' · ' + DISCOVERY.map(([k, l]) => `<span class="${q.discovery[k] ? 'warn' : ''}" title="${l} ${q.discovery[k] ? 'enabled' : 'disabled'}">${l} ${q.discovery[k] ? 'on' : 'off'}</span>`).join(' · ');
 }
 // The add-torrent form. Its draft lives in S.torAdd because every state
 // event re-renders the tab; File objects are kept there too, since a file

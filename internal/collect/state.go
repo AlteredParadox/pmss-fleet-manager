@@ -216,7 +216,18 @@ type QbtState struct {
 	Paused        int           `json:"paused"`
 	Errored       int           `json:"errored"`
 	GlobalRatio   float64       `json:"global_ratio"`
+	Discovery     Discovery     `json:"discovery"`
 	Torrents      []TorrentView `json:"torrents,omitempty"`
+}
+
+// Discovery is the client's peer-discovery configuration. Known is false
+// until app/preferences has been read this poll, so the UI can tell "all
+// off" from "not read".
+type Discovery struct {
+	Known bool `json:"known"`
+	DHT   bool `json:"dht"`
+	PeX   bool `json:"pex"`
+	LSD   bool `json:"lsd"`
 }
 
 // ContainerView is one container for the UI.
