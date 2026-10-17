@@ -154,7 +154,7 @@ func TestHostAllowList(t *testing.T) {
 	if rr.Code != 421 {
 		t.Fatalf("license with bad host: %d", rr.Code)
 	}
-	if got := rr.Header().Get("Content-Security-Policy"); got != "" {
+	if rr.Header().Get("Content-Security-Policy") != "" {
 		t.Fatal("rejected request should not carry app headers")
 	}
 }

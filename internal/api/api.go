@@ -38,6 +38,12 @@ import (
 )
 
 // Server holds the dependencies for the handlers.
+const (
+	hdrContentType  = "Content-Type"
+	hdrCacheControl = "Cache-Control"
+	noStore         = "no-store"
+)
+
 type Server struct {
 	st   *store.Store
 	m    *collect.Manager
@@ -141,7 +147,7 @@ func (s *Server) routes() {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set(hdrCacheControl, "no-cache")
 		fileServer.ServeHTTP(w, r)
 	})))
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -154,8 +160,8 @@ func (s *Server) routes() {
 			http.Error(w, "index missing", 500)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set(hdrContentType, "text/html; charset=utf-8")
+		w.Header().Set(hdrCacheControl, noStore)
 		w.Write(b)
 	})
 }
@@ -206,8 +212,8 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(hdrContentType, "application/json")
+	w.Header().Set(hdrCacheControl, noStore)
 	w.WriteHeader(code)
 	w.Write(append(b, '\n'))
 }
@@ -308,8 +314,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", 500)
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(hdrContentType, "text/event-stream")
+	w.Header().Set(hdrCacheControl, noStore)
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(200)
 	fmt.Fprint(w, "retry: 3000\n\n")

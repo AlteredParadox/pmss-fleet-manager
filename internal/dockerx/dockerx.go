@@ -126,7 +126,7 @@ func (c Container) Name() string {
 // Containers lists all containers, including stopped ones.
 func (c *Client) Containers(ctx context.Context) ([]Container, error) {
 	var out []Container
-	return out, c.do(ctx, http.MethodGet, "/containers/json?all=1", &out)
+	return out, c.do(ctx, http.MethodGet, containersPath+"json?all=1", &out)
 }
 
 // Stats is a reduced one-shot resource sample for a container.
@@ -135,30 +135,36 @@ type Stats struct {
 	MemUsage int64
 }
 
+const containersPath = "/containers/"
+
+// rawCPUUsage is the Engine API's cpu_usage block.
+type rawCPUUsage struct {
+	TotalUsage int64 `json:"total_usage"`
+}
+
+// rawCPUStats is one cpu_stats / precpu_stats sample.
+type rawCPUStats struct {
+	CPUUsage    rawCPUUsage `json:"cpu_usage"`
+	SystemUsage int64       `json:"system_cpu_usage"`
+	OnlineCPUs  int         `json:"online_cpus"`
+}
+
+// rawMemoryStats is the memory_stats block.
+type rawMemoryStats struct {
+	Usage int64            `json:"usage"`
+	Stats map[string]int64 `json:"stats"`
+}
+
 type rawStats struct {
-	CPUStats struct {
-		CPUUsage struct {
-			TotalUsage int64 `json:"total_usage"`
-		} `json:"cpu_usage"`
-		SystemUsage int64 `json:"system_cpu_usage"`
-		OnlineCPUs  int   `json:"online_cpus"`
-	} `json:"cpu_stats"`
-	PreCPUStats struct {
-		CPUUsage struct {
-			TotalUsage int64 `json:"total_usage"`
-		} `json:"cpu_usage"`
-		SystemUsage int64 `json:"system_cpu_usage"`
-	} `json:"precpu_stats"`
-	MemoryStats struct {
-		Usage int64            `json:"usage"`
-		Stats map[string]int64 `json:"stats"`
-	} `json:"memory_stats"`
+	CPUStats    rawCPUStats    `json:"cpu_stats"`
+	PreCPUStats rawCPUStats    `json:"precpu_stats"`
+	MemoryStats rawMemoryStats `json:"memory_stats"`
 }
 
 // Stats takes one two-sample stats reading (about one second).
 func (c *Client) Stats(ctx context.Context, id string) (*Stats, error) {
 	var r rawStats
-	if err := c.do(ctx, http.MethodGet, "/containers/"+id+"/stats?stream=false", &r); err != nil {
+	if err := c.do(ctx, http.MethodGet, containersPath+id+"/stats?stream=false", &r); err != nil {
 		return nil, err
 	}
 	s := &Stats{MemUsage: r.MemoryStats.Usage}
@@ -205,15 +211,15 @@ func (c *Client) StatsAll(ctx context.Context, ids []string, concurrency int) ma
 
 // Start starts a container.
 func (c *Client) Start(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodPost, "/containers/"+id+"/start", nil)
+	return c.do(ctx, http.MethodPost, containersPath+id+"/start", nil)
 }
 
 // Stop stops a container with a 10 second grace period.
 func (c *Client) Stop(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodPost, "/containers/"+id+"/stop?t=10", nil)
+	return c.do(ctx, http.MethodPost, containersPath+id+"/stop?t=10", nil)
 }
 
 // Restart restarts a container.
 func (c *Client) Restart(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodPost, "/containers/"+id+"/restart?t=10", nil)
+	return c.do(ctx, http.MethodPost, containersPath+id+"/restart?t=10", nil)
 }

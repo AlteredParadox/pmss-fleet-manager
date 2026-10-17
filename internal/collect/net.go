@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/sshx"
@@ -46,12 +47,12 @@ func HumanBytes(n int64) string {
 // mibToBytes converts a MiB figure from the box to bytes, clamped so a
 // corrupt value cannot wrap to a negative int64.
 func mibToBytes(mib float64) int64 {
-	const max = float64(1 << 62)
+	const ceiling = float64(1 << 62)
 	b := mib * 1048576
 	switch {
-	case b != b || b < 0: // NaN or negative
+	case math.IsNaN(b) || b < 0:
 		return 0
-	case b > max:
+	case b > ceiling:
 		return 1 << 62
 	}
 	return int64(b)
@@ -81,20 +82,20 @@ func verifyPortNow(ctx context.Context, cli *sshx.Client, port int) error {
 
 // clip bounds a remote-supplied string so a hostile box cannot bloat state,
 // the database or every SSE event. Cuts on a rune boundary.
-func clip(s string, max int) string {
-	if max < 0 {
-		max = 0
+func clip(s string, limit int) string {
+	if limit < 0 {
+		limit = 0
 	}
-	if len(s) <= max {
+	if len(s) <= limit {
 		return s
 	}
 	cut := false
-	if len(s) > 4*max {
-		s, cut = s[:4*max], true // the first max runes fit in 4*max bytes; avoids a rune copy of a huge body
+	if len(s) > 4*limit {
+		s, cut = s[:4*limit], true // the first limit runes fit in 4*limit bytes; avoids a rune copy of a huge body
 	}
 	r := []rune(s)
-	if len(r) > max {
-		r, cut = r[:max], true
+	if len(r) > limit {
+		r, cut = r[:limit], true
 	}
 	if !cut {
 		return s

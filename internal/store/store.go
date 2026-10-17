@@ -29,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // registers the "sqlite" driver with database/sql
 )
 
 // Box is one managed seedbox or storage box.
@@ -219,6 +219,12 @@ func (s *Store) migrate() error {
 const boxCols = `id, name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
 	qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at`
 
+// The box queries are constants: nothing from a request is ever spliced in.
+const (
+	listBoxesSQL = "SELECT " + boxCols + " FROM boxes ORDER BY name COLLATE NOCASE, id"
+	getBoxSQL    = "SELECT " + boxCols + " FROM boxes WHERE id = ?"
+)
+
 func scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 	var b Box
 	var created, updated string
@@ -236,7 +242,7 @@ func scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 
 // ListBoxes returns all boxes ordered by name.
 func (s *Store) ListBoxes(ctx context.Context) ([]*Box, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+boxCols+` FROM boxes ORDER BY name COLLATE NOCASE, id`)
+	rows, err := s.db.QueryContext(ctx, listBoxesSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +263,7 @@ var ErrNotFound = errors.New("not found")
 
 // GetBox loads one box.
 func (s *Store) GetBox(ctx context.Context, id int64) (*Box, error) {
-	b, err := scanBox(s.db.QueryRowContext(ctx, `SELECT `+boxCols+` FROM boxes WHERE id = ?`, id))
+	b, err := scanBox(s.db.QueryRowContext(ctx, getBoxSQL, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

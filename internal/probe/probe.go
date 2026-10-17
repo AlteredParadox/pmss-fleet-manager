@@ -563,7 +563,7 @@ func parseQuotaLine(text string) (vals [6]int64, ok bool) {
 					mult = float64(int64(1) << (10 * uint(strings.Index(" KMGTP", m[2]))))
 				}
 				b := n * mult
-				if b != b || b < 0 || b > 1<<62 { // NaN, negative or absurd: unparsable column
+				if math.IsNaN(b) || b < 0 || b > 1<<62 { // negative or absurd: unparsable column
 					break
 				}
 				got = append(got, int64(b))

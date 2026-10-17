@@ -147,7 +147,7 @@ func Fingerprint(authorizedKey string) string {
 
 func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 	var methods []ssh.AuthMethod
-	cleanup := func() {}
+	cleanup := func() {} // replaced when an agent socket is opened; nothing to release otherwise
 	useKey := cfg.AuthMethod == "key" || cfg.AuthMethod == ""
 	useAgent := cfg.AuthMethod == "agent" || cfg.AuthMethod == ""
 	usePass := cfg.AuthMethod == "password" || (cfg.AuthMethod == "" && cfg.Password != "")
