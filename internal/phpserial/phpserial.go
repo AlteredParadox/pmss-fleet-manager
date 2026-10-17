@@ -81,9 +81,18 @@ func ToFloat(v any) (float64, bool) {
 }
 
 type decoder struct {
-	b   []byte
-	pos int
+	b     []byte
+	pos   int
+	depth int
 }
+
+// Limits on remote-sourced input. PMSS traffic files are a few KiB with two
+// levels of nesting; anything beyond these is malformed or hostile.
+const (
+	maxDepth     = 32
+	maxMapHint   = 1024 // the declared count is only a size hint, never trusted
+	minElemBytes = 4    // "i:0;" is the shortest possible array element
+)
 
 // Unserialize decodes a PHP serialized value. Supported types: i, d, s, b, N, a.
 func Unserialize(b []byte) (any, error) {
@@ -115,6 +124,9 @@ func (d *decoder) readUntil(c byte) (string, error) {
 func (d *decoder) value() (any, error) {
 	if d.pos >= len(d.b) {
 		return nil, errors.New("phpserial: unexpected end of input")
+	}
+	if d.depth > maxDepth {
+		return nil, errors.New("phpserial: nesting too deep")
 	}
 	typ := d.b[d.pos]
 	d.pos++
@@ -164,7 +176,9 @@ func (d *decoder) value() (any, error) {
 		if err := d.expect('"'); err != nil {
 			return nil, err
 		}
-		if d.pos+n > len(d.b) {
+		// Compare against the remaining length rather than d.pos+n, which
+		// overflows for a hostile length near MaxInt and then passes the check.
+		if n > len(d.b)-d.pos {
 			return nil, errors.New("phpserial: string overruns input")
 		}
 		s := string(d.b[d.pos : d.pos+n])
@@ -188,7 +202,12 @@ func (d *decoder) value() (any, error) {
 		if err := d.expect('{'); err != nil {
 			return nil, err
 		}
-		arr := &Array{Values: make(map[any]any, cnt)}
+		if cnt > (len(d.b)-d.pos)/minElemBytes {
+			return nil, fmt.Errorf("phpserial: array length %d exceeds input", cnt)
+		}
+		arr := &Array{Values: make(map[any]any, min(cnt, maxMapHint))}
+		d.depth++
+		defer func() { d.depth-- }()
 		for i := 0; i < cnt; i++ {
 			k, err := d.value()
 			if err != nil {

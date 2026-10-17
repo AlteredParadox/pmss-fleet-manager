@@ -81,11 +81,14 @@ echo "cron: @reboot and */5 entries set"
 // restartScript asks a running qbittorrent-nox to exit (SIGTERM saves resume
 // data), waits for it, then starts it again with the given command.
 const restartScript = `#!/bin/sh
-if pgrep -x qbittorrent-nox >/dev/null 2>&1; then
-  pkill -TERM -x qbittorrent-nox
+# Shared host: other tenants run qbittorrent-nox too. Without -u the wait
+# loop would see their processes forever and give up after SIGTERMing ours.
+me=$(id -u)
+if pgrep -u "$me" -x qbittorrent-nox >/dev/null 2>&1; then
+  pkill -u "$me" -TERM -x qbittorrent-nox
   i=0
-  while pgrep -x qbittorrent-nox >/dev/null 2>&1 && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done
-  if pgrep -x qbittorrent-nox >/dev/null 2>&1; then echo "qbittorrent-nox did not exit within 60s; not starting a second copy"; exit 1; fi
+  while pgrep -u "$me" -x qbittorrent-nox >/dev/null 2>&1 && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done
+  if pgrep -u "$me" -x qbittorrent-nox >/dev/null 2>&1; then echo "qbittorrent-nox did not exit within 60s; not starting a second copy"; exit 1; fi
   echo "stopped after ${i}s"
 else
   echo "was not running"

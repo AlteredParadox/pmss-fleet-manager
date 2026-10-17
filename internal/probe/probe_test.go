@@ -17,6 +17,8 @@
 package probe
 
 import (
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -135,7 +137,7 @@ func TestQuotaHumanized(t *testing.T) {
 	if !ok {
 		t.Fatal("no parse")
 	}
-	if v[0] != 1659<<30 || v[1] != 2000<<30 || v[3] != 12345 || v[4] != 1000<<10 {
+	if v[0] != 1659<<30 || v[1] != 2000<<30 || v[3] != 12345 || v[4] != 1000000 || v[5] != 1250000 {
 		t.Fatalf("%v", v)
 	}
 }
@@ -174,5 +176,53 @@ func TestParseDu(t *testing.T) {
 func TestTruncated(t *testing.T) {
 	if _, err := Parse([]byte("@@uid\n1\n"), time.Now()); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+func TestSectionsTaggedRejectsForgedHeaders(t *testing.T) {
+	// A co-tenant's process argument lands inside a section; without the
+	// tag it must not open a new section, and a duplicate must not overwrite.
+	raw := "\n@@t0kuid\n1001\n@@qbt_conf\nWebUI\\Port=9999\n@@t0kuid\n6666\n@@t0kend\n"
+	s := SectionsTagged([]byte(raw), "t0k")
+	// The forged lines stay inside the uid section as content; the later
+	// genuine-looking duplicate "@@t0kuid" must not overwrite the first.
+	if !strings.HasPrefix(s["uid"], "1001") || strings.Contains(s["uid"], "6666") {
+		t.Fatalf("uid = %q, want first occurrence kept", s["uid"])
+	}
+	if _, ok := s["qbt_conf"]; ok {
+		t.Fatal("untagged header must not open a section")
+	}
+	if _, ok := s["end"]; !ok {
+		t.Fatal("end missing")
+	}
+	if _, err := ParseTagged([]byte("\n@@end\n"), "t0k", time.Now()); err == nil {
+		t.Fatal("untagged output must not parse as tagged")
+	}
+}
+
+func TestScriptWithTag(t *testing.T) {
+	tag := NewTag()
+	if len(tag) != 24 || strings.Trim(tag, "0123456789abcdef") != "" {
+		t.Fatalf("bad tag %q", tag)
+	}
+	src := ScriptWithTag(tag)
+	if !strings.HasPrefix(src, "PMSS_TAG='"+tag+"'\n#!/bin/sh") {
+		t.Fatalf("tag line missing: %q", src[:60])
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(src)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("script: %v", err)
+	}
+	snap, err := ParseTagged(out, tag, time.Now())
+	if err != nil || snap.UID == 0 {
+		t.Fatalf("tagged parse: %v %+v", err, snap)
+	}
+	if _, err := ParseTagged(out, "wrong", time.Now()); err == nil {
+		t.Fatal("wrong tag must not parse")
 	}
 }

@@ -111,7 +111,7 @@ func (p *poller) run(ctx context.Context) {
 		return
 	}
 	for {
-		p.poll(ctx)
+		p.safePoll(ctx)
 		interval := time.Duration(p.m.Settings().PollIntervalSec) * time.Second
 		if interval < 5*time.Second {
 			interval = 5 * time.Second
@@ -196,6 +196,19 @@ func (p *poller) sshDialUnix(path string) dockerx.Dialer {
 	}
 }
 
+// safePoll turns a panic in a poll (a parser bug on hostile box output) into
+// a failed poll for that one box instead of taking the whole dashboard down.
+func (p *poller) safePoll(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.m.log.Error("poll panicked", "box", p.box.Name, "panic", fmt.Sprint(r))
+			st, _ := p.m.State(p.box.ID)
+			p.fail(&st, fmt.Errorf("internal error: %v", r), time.Now())
+		}
+	}()
+	p.poll(ctx)
+}
+
 func (p *poller) poll(ctx context.Context) {
 	start := time.Now()
 	st, _ := p.m.State(p.box.ID)
@@ -207,8 +220,9 @@ func (p *poller) poll(ctx context.Context) {
 		p.fail(&st, err, start)
 		return
 	}
+	tag := probe.NewTag()
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.Script))
+	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)))
 	cancel()
 	if err != nil && len(out) == 0 {
 		p.mu.Lock()
@@ -220,7 +234,7 @@ func (p *poller) poll(ctx context.Context) {
 		p.fail(&st, fmt.Errorf("probe: %v %s", err, strings.TrimSpace(string(stderr))), start)
 		return
 	}
-	snap, err := probe.Parse(out, time.Now())
+	snap, err := probe.ParseTagged(out, tag, time.Now())
 	if err != nil {
 		p.fail(&st, err, start)
 		return
@@ -458,7 +472,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	// Always re-read the running version: it is how "restart to apply" clears
 	// after an update, and the call is one tiny request.
 	if v, err := cli.Version(actx); err == nil {
-		qs.Version = v
+		qs.Version = clip(v, 64)
 	}
 	qs.Reachable = true
 	ss := md.ServerState
@@ -488,9 +502,9 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 			qs.Active++
 		}
 		qs.Torrents = append(qs.Torrents, TorrentView{
-			Hash: t.Hash, Name: t.Name, Size: t.Size, Progress: t.Progress, UpBps: t.UPSpeed, DownBps: t.DLSpeed,
+			Hash: clip(t.Hash, 64), Name: clip(t.Name, 400), Size: t.Size, Progress: t.Progress, UpBps: t.UPSpeed, DownBps: t.DLSpeed,
 			Ratio: t.Ratio, State: t.State, Kind: kind, ETA: t.ETA, AddedOn: t.AddedOn, Uploaded: t.Uploaded,
-			Category: t.Category, Seeds: t.NumSeeds, Leechs: t.NumLeechs,
+			Category: clip(t.Category, 100), Seeds: t.NumSeeds, Leechs: t.NumLeechs,
 		})
 	}
 	qs.Total = len(qs.Torrents)
@@ -543,7 +557,7 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 	defer cancel()
 	if ds.Version == "" {
 		if v, err := cli.Version(actx); err == nil {
-			ds.Version = v.Version
+			ds.Version = clip(v.Version, 64)
 		}
 	}
 	cs, err := cli.Containers(actx)
@@ -555,7 +569,7 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 	ds.Reachable = true
 	var running []string
 	for _, c := range cs {
-		cv := ContainerView{ID: c.ID, Name: c.Name(), Image: c.Image, State: c.State, Status: c.Status, Created: c.Created}
+		cv := ContainerView{ID: clip(c.ID, 64), Name: clip(c.Name(), 200), Image: clip(c.Image, 300), State: clip(c.State, 32), Status: clip(c.Status, 100), Created: c.Created}
 		for _, pt := range c.Ports {
 			if pt.PublicPort > 0 {
 				ip := pt.IP
@@ -665,7 +679,7 @@ func (p *poller) runDu(ctx context.Context) {
 		res.Error = describeErr(err)
 	}
 	for _, d := range probe.ParseDu(out) {
-		res.Entries = append(res.Entries, DirEntry{Name: d.Name, Bytes: d.Bytes})
+		res.Entries = append(res.Entries, DirEntry{Name: clip(d.Name, 255), Bytes: d.Bytes})
 	}
 	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer scancel()

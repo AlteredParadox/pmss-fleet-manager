@@ -76,21 +76,38 @@ type Usage struct {
 	Torrents       int    `json:"torrents"`
 }
 
-// Amount decodes a money value sent as a string ("11.94") or a number.
+// Amount decodes a money value sent as a string ("11.94", "€11.94",
+// "1,234.56", "11,94") or a number. It never fails: one odd amount must not
+// reject the whole feed and with it every renewal date, so an unparsable
+// value decodes as 0.
 type Amount float64
 
 func (a *Amount) UnmarshalJSON(b []byte) error {
-	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
-	if s == "" || s == "null" {
-		*a = 0
-		return nil
-	}
-	f, err := strconv.ParseFloat(strings.ReplaceAll(s, ",", ""), 64)
-	if err != nil {
-		return fmt.Errorf("amount %q: %w", s, err)
-	}
-	*a = Amount(f)
+	*a = Amount(parseAmount(strings.Trim(strings.TrimSpace(string(b)), `"`)))
 	return nil
+}
+
+func parseAmount(s string) float64 {
+	s = strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' || r == '.' || r == ',' || r == '-' {
+			return r
+		}
+		return -1
+	}, s)
+	if strings.Contains(s, ",") {
+		if strings.Contains(s, ".") {
+			s = strings.ReplaceAll(s, ",", "") // thousands separator
+		} else if i := strings.LastIndex(s, ","); len(s)-i-1 <= 2 {
+			s = s[:i] + "." + s[i+1:] // European decimal comma
+		} else {
+			s = strings.ReplaceAll(s, ",", "")
+		}
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return f
 }
 
 // MonthsPerCycle maps a WHMCS billing cycle name to months; 0 = not recurring.
