@@ -160,19 +160,10 @@ func (p *poller) run(ctx context.Context) {
 		if interval < 5*time.Second {
 			interval = 5 * time.Second
 		}
-		// Back off a box that keeps failing: a wrong password would
-		// otherwise hit sshd every interval forever, and on a shared host a
-		// fail2ban-style guard would ban the dashboard for every tenant.
-		// Doubles per failure after the second, capped at 10 minutes; a
-		// manual refresh (wake) still polls immediately.
-		if st, ok := p.m.State(p.box.ID); ok && st.Failures >= 3 {
-			back := interval << uint(min(st.Failures-2, 6))
-			if back > 10*time.Minute {
-				back = 10 * time.Minute
-			}
-			if back > interval {
-				interval = back
-			}
+		// Back off a box that keeps failing (see retryInterval); a manual
+		// refresh (wake) still polls immediately.
+		if st, ok := p.m.State(p.box.ID); ok {
+			interval = retryInterval(interval, st.Failures)
 		}
 		select {
 		case <-ctx.Done():
@@ -360,6 +351,7 @@ func (p *poller) poll(ctx context.Context) {
 	}
 	st.Unpolled = false
 	st.Failures = 0
+	st.NextPoll, st.Backoff = time.Time{}, false
 	st.LastError = ""
 	st.LastOK = time.Now()
 	st.PollMs = time.Since(start).Milliseconds()
@@ -370,11 +362,36 @@ func (p *poller) poll(ctx context.Context) {
 	p.m.setState(&st)
 }
 
+// retryInterval is the poll interval for a box with the given number of
+// consecutive failures. The first few retries run at the normal rate (a
+// box rebooting or a transient drop recovers in minutes); after that the
+// interval doubles per failure up to ten minutes, so a box that is down
+// for the night or has a wrong password is not hit with an SSH handshake
+// every interval. On a shared host a fail2ban-style guard would otherwise
+// ban the dashboard for every tenant. A manual retry bypasses it.
+func retryInterval(base time.Duration, failures int) time.Duration {
+	const backoffAfter, cap = 5, 10 * time.Minute
+	if failures < backoffAfter {
+		return base
+	}
+	back := base << uint(min(failures-backoffAfter+1, 10))
+	if back > cap {
+		back = cap
+	}
+	if back < base {
+		return base
+	}
+	return back
+}
+
 func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.Time) {
 	if ctx.Err() != nil {
 		return // aborted by stop/edit, not a failure of the box
 	}
 	st.Failures++
+	base := time.Duration(max(p.m.Settings().PollIntervalSec, 5)) * time.Second
+	next := retryInterval(base, st.Failures)
+	st.NextPoll, st.Backoff = time.Now().Add(next), next > base
 	st.Unpolled = false // a failed poll is still a verified observation
 	st.LastError = describeErr(err)
 	st.PollMs = time.Since(start).Milliseconds()
