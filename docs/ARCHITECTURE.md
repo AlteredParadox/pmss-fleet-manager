@@ -25,7 +25,7 @@ browser  <-- HTTP/JSON + SSE -->  pmss-fleet-manager  <-- SSH -->  box (tenant s
 | client install state | `~/bin/qbittorrent-nox --version`, `~/bin/qbt-start`, `crontab -l` | drives "update available", "restart to apply" and the autostart hint |
 | torrents | qBittorrent Web API over SSH tunnel | user-installed `~/bin/qbittorrent-nox`; port from `~/.config/qBittorrent/qBittorrent.conf` or box setting |
 | containers | Docker Engine API on `/run/user/<uid>/docker.sock` over SSH | rootless dockerd |
-| usage by directory | `du` on top-level home entries, low priority, every few hours | optional, heavy |
+| usage by directory | `du` on top-level home entries, low priority, every few hours | optional, heavy; the 500 largest entries are kept, the rest summed into one |
 | plan / price / renewal / PM usage | Pulsed Media customer API `https://pulsedmedia.com/remote/pmapi-feed.php` (`X-API-Key`) | optional; synced every 6 h and on demand; cached in the settings table; matched to boxes by host+user, then unique host, then unique user. Manual plan / renewal on a box override it; datacenter is manual only |
 
 PMSS "month" counters are a rolling 30-day window, not a billing cycle. The UI says so.

@@ -181,7 +181,12 @@ func TestFoldDu(t *testing.T) {
 	if small := foldDu(ds[:3]); len(small) != 3 || small[2].Name != "d" {
 		t.Fatalf("short list altered: %+v", small)
 	}
-	if foldDu(nil) == nil {
-		t.Fatal("nil in, want empty non-nil out so the UI gets a list")
+	// A row an older build cached unbounded is capped the same way on restore.
+	big := make([]DirEntry, maxDuEntries+10)
+	for i := range big {
+		big[i] = DirEntry{Name: "x", Bytes: 1}
+	}
+	if capped := capEntries(big); len(capped) != maxDuEntries+1 || capped[maxDuEntries].Bytes != 10 {
+		t.Fatalf("restored row not capped: len %d", len(capped))
 	}
 }

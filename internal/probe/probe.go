@@ -780,7 +780,7 @@ func ParseDu(raw []byte) []DirUsage {
 			f = []string{f[0], strings.Join(f[1:], " ")}
 		}
 		n, err := strconv.ParseInt(f[0], 10, 64)
-		if err != nil {
+		if err != nil || n < 0 || n > 1<<60 { // du never prints these; a forged line must not skew totals
 			continue
 		}
 		out = append(out, DirUsage{Name: f[1], Bytes: n})

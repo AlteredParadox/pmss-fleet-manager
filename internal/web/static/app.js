@@ -23,7 +23,7 @@ const S = {
   boxes: [], totals: {}, unacked: 0, settings: {}, detail: null,
   alerts: [], filter: '', live: false,
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
-  settingsDraft: null,
+  settingsDraft: null, settingsTouched: {},
 };
 
 /* ---------- helpers ---------- */
@@ -134,7 +134,7 @@ function route() {
     resetAdd();
   }
   if (S.view === 'alerts') loadAlerts();
-  if (S.view === 'settings') { S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; loadServices(); }
+  if (S.view === 'settings') { S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; loadServices(); }
   S.filter = '';
   render();
 }
@@ -210,11 +210,19 @@ function connectEvents() {
     if (S.detail && S.detail.id === e.box_id) S.detail = null;
     if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
     recomputeTotals();
-    if (S.view === 'box' && S.selId === e.box_id) go('/fleet'); else if (S.view === 'alerts') loadAlerts(); else render();
+    if ((S.view === 'box' || S.view === 'edit') && S.selId === e.box_id) { toast('that box was removed', 'bad'); go('/fleet'); }
+    else if (S.view === 'alerts') loadAlerts(); else render();
   });
   es.addEventListener('settings', () => {
-    // Saved from another tab: refresh our copy (the settings form's draft is left alone).
-    loadState().then(() => { if (S.view !== 'settings') render(); else renderSide(); });
+    // Saved from another tab: refresh our copy. On the settings form, fields
+    // the user has not touched follow the new values so a later save here
+    // does not revert them; touched fields and the theme preview stay.
+    loadState().then(() => {
+      if (S.view !== 'settings') { render(); return; }
+      for (const k of Object.keys(S.settings)) if (!S.settingsTouched[k] && k !== 'pm_api_key') S.settingsDraft[k] = S.settings[k];
+      applyTheme(S.settingsDraft.theme);
+      render();
+    });
   });
   es.addEventListener('services', async (ev) => {
     const e = JSON.parse(ev.data);
@@ -304,7 +312,7 @@ function viewFleet() {
     : (S.fleetView === 'table' ? fleetTable() : fleetCards());
   return `
     <div class="head">
-      <div><div class="eyebrow">pulsedmedia.com</div><h1>Fleet overview</h1></div>
+      <div><div class="eyebrow">PMSS</div><h1>Fleet overview</h1></div>
       <div class="actions">
         <div class="seg">
           <button class="${S.fleetView === 'cards' ? 'on' : ''}" data-fleetview="cards">cards</button>
@@ -598,7 +606,7 @@ function tabStorage(b) {
   const quota = b.disk.quota_bytes || b.disk.used_bytes || 1;
   const top = entries.slice(0, 7);
   const rest = entries.slice(7).reduce((a, e) => a + e.bytes, 0);
-  if (rest > 0) top.push({ name: `other (${entries.length - 7} entries)`, bytes: rest });
+  if (rest > 0) top.push({ name: entries.some((e) => e.name === '(smaller entries)') ? `other (${entries.length - 8}+ entries)` : `other (${entries.length - 7} entries)`, bytes: rest });
   const cols = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c5)', 'var(--c6)', 'var(--c7)', 'var(--dim)'];
   const measured = entries.reduce((a, e) => a + e.bytes, 0);
   const free = Math.max(0, b.disk.quota_bytes - b.disk.used_bytes);
@@ -955,7 +963,7 @@ document.addEventListener('click', async (e) => {
   const tab = e.target.closest('[data-tab]');
   if (tab) { S.tab = tab.dataset.tab; S.filter = ''; history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); render(); return; }
   const seg = e.target.closest('[data-s-seg]');
-  if (seg) { S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; if (seg.dataset.sSeg === 'theme') applyTheme(seg.dataset.v); render(); return; }
+  if (seg) { S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; S.settingsTouched[seg.dataset.sSeg] = true; if (seg.dataset.sSeg === 'theme') applyTheme(seg.dataset.v); render(); return; }
   const act = e.target.closest('[data-act]');
   if (!act) return;
   e.preventDefault();
@@ -982,7 +990,7 @@ document.addEventListener('click', async (e) => {
       const d = { ...S.settingsDraft };
       for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px']) d[k] = Number(d[k]);
       const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
-      S.settings = await api('PUT', '/api/settings', d); S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
+      S.settings = await api('PUT', '/api/settings', d); S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
       if (keyChanged) { S.services = null; setTimeout(loadServices, 1500); }
     }
     else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; render(); }
@@ -1021,7 +1029,7 @@ document.addEventListener('input', (e) => {
     return;
   }
   const s = e.target.closest('[data-s]');
-  if (s && S.settingsDraft) { S.settingsDraft[s.dataset.s] = s.value; return; }
+  if (s && S.settingsDraft) { S.settingsDraft[s.dataset.s] = s.value; S.settingsTouched[s.dataset.s] = true; return; }
   const fl = e.target.closest('[data-filter]');
   if (fl) {
     S.filter = fl.value;

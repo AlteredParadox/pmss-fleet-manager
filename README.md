@@ -129,7 +129,10 @@ when the next try is due and offers "retry now", which reconnects at once.
 The failure count and status survive edits and dashboard restarts, so a box
 that is down stays "offline" (and its alert stays acknowledged) across them.
 Disabling a box stops polling, resolves its open alerts and greys out its
-actions; enabling it again starts from a clean slate.
+actions; enabling it again starts from a clean slate. An alert whose source
+could not be read on an otherwise good poll (quota command hung, traffic
+file missing, docker daemon down) is kept rather than resolved and re-raised;
+switching a source off for the box resolves its alerts.
 
 ## Security notes
 

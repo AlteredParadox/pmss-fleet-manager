@@ -239,12 +239,14 @@ const maxOutput = 16 << 20
 // cappedWriter drops bytes beyond its budget instead of growing without
 // bound; the session keeps draining so the remote side is not blocked.
 type cappedWriter struct {
-	w    *bytes.Buffer
+	mu   sync.Mutex // the session's copier writes; Run reads after a timeout
+	w    bytes.Buffer
 	left int
 }
 
 func (c *cappedWriter) Write(p []byte) (int, error) {
 	n := len(p)
+	c.mu.Lock()
 	if c.left > 0 {
 		if len(p) > c.left {
 			p = p[:c.left]
@@ -252,7 +254,15 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 		c.w.Write(p)
 		c.left -= len(p)
 	}
+	c.mu.Unlock()
 	return n, nil
+}
+
+// snapshot returns a copy of what has been written so far.
+func (c *cappedWriter) snapshot() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.w.Bytes()...)
 }
 
 // Run executes cmd on the remote with optional stdin and returns stdout/stderr.
@@ -289,11 +299,11 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 		sess = r.s
 	}
 	defer sess.Close()
-	var out, errb bytes.Buffer
 	// A compromised box could stream without end inside the deadline; the
 	// probe is a few KiB and even a du of a huge home is well under this.
-	sess.Stdout = &cappedWriter{w: &out, left: maxOutput}
-	sess.Stderr = &cappedWriter{w: &errb, left: 1 << 20}
+	out := &cappedWriter{left: maxOutput}
+	errb := &cappedWriter{left: 1 << 20}
+	sess.Stdout, sess.Stderr = out, errb
 	if stdin != nil {
 		sess.Stdin = stdin
 	}
@@ -307,14 +317,13 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 		// buffers are read (bounded: a dead peer must not hold us).
 		select {
 		case <-done:
-			return out.Bytes(), errb.Bytes(), ctx.Err()
 		case <-time.After(2 * time.Second):
-			// Gave up on the copiers: they may still write, so hand back
-			// copies rather than slices aliasing the live buffers.
-			return append([]byte(nil), out.Bytes()...), append([]byte(nil), errb.Bytes()...), ctx.Err()
+			// Gave up on the copiers; snapshot() copies under the lock
+			// they write under, so a late write cannot tear the result.
 		}
+		return out.snapshot(), errb.snapshot(), ctx.Err()
 	case err := <-done:
-		return out.Bytes(), errb.Bytes(), err
+		return out.snapshot(), errb.snapshot(), err
 	}
 }
 

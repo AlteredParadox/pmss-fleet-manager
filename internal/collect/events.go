@@ -20,7 +20,7 @@ import "sync"
 
 // Event is pushed to subscribers after every poll or box change.
 type Event struct {
-	Type    string    `json:"type"` // state | removed | alerts | services
+	Type    string    `json:"type"` // state | removed | alerts | services | settings
 	BoxID   int64     `json:"box_id,omitempty"`
 	State   *BoxState `json:"state,omitempty"`
 	Unacked int       `json:"alerts_unacked"` // current unacknowledged alert count, on every event

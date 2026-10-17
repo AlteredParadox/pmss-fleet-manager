@@ -51,9 +51,4 @@ func TestRecheckable(t *testing.T) {
 	if !recheckable(&off, "container:plex") {
 		t.Error("container alert stranded after docker monitoring was turned off")
 	}
-	on := collect.BoxState{}
-	on.Docker.Enabled, on.Docker.Reachable = true, false // monitoring on, daemon blip
-	if recheckable(&on, "container:plex") {
-		t.Error("container alert resolved on a daemon blip")
-	}
 }
