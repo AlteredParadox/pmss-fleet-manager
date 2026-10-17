@@ -42,6 +42,10 @@ aggregate bandwidth, torrents, containers, next renewal and monthly cost.
 - Host: uptime, load, memory and CPU of the shared host, GPU/render node
   access, PMSS account settings.
 
+![Box overview: disk, upload, bandwidth and CPU/RAM tiles, box status and client details, plan and billing with per-box links](docs/screenshot-box.png)
+
+![Torrents tab: client version and counts with DHT / PeX / LSD toggles, filter, pause all / resume all / add, and stop / remove / remove with files per torrent](docs/screenshot-torrents.png)
+
 **qBittorrent lifecycle.** Install or update `~/bin/qbittorrent-nox` from the
 [userdocs static build](https://github.com/userdocs/qbittorrent-nox-static)
 (URL configurable), with an ELF and `--version` check before the binary is
