@@ -249,9 +249,6 @@ func (c *Client) credsKey() string { return CredsKey(c.user, c.pass) }
 // AuthBlocked reports whether login attempts are currently suspended after a failure.
 func (c *Client) AuthBlocked() (error, bool) { return c.guard.Blocked(c.credsKey()) }
 
-// Guard returns the client's auth guard.
-func (c *Client) Guard() *AuthGuard { return c.guard }
-
 // call performs an API request, logging in once on 401/403.
 func (c *Client) call(ctx context.Context, method, path string, form url.Values, out any) error {
 	code, body, err := c.do(ctx, method, path, form)

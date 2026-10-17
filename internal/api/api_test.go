@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -191,5 +192,18 @@ func TestEditClearsHostKeyOnHostChangeOrForget(t *testing.T) {
 	b, _ = st.GetBox(context.Background(), id)
 	if b.HostKey != "" {
 		t.Fatal("forget_host_key must clear the pin")
+	}
+}
+
+func TestWriteJSONRefusesNonFinite(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeJSON(rr, 200, map[string]float64{"x": math.Inf(1)})
+	if rr.Code != 500 {
+		t.Fatalf("got %d, want 500 for an unencodable value", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	writeJSON(rr, 201, map[string]int{"ok": 1})
+	if rr.Code != 201 || !strings.Contains(rr.Body.String(), `"ok":1`) {
+		t.Fatalf("normal encode: %d %s", rr.Code, rr.Body.String())
 	}
 }

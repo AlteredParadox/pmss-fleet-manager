@@ -207,7 +207,8 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 			// into an OTP or verification prompt.
 			answers := make([]string, len(questions))
 			for i, q := range questions {
-				if (i < len(echos) && !echos[i]) || strings.Contains(strings.ToLower(q), "password") {
+				lq := strings.ToLower(q)
+				if strings.Contains(lq, "password") && !strings.Contains(lq, "code") && !strings.Contains(lq, "token") && !strings.Contains(lq, "verif") {
 					answers[i] = pw
 				}
 			}
@@ -254,6 +255,12 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 	case <-ctx.Done():
 		_ = sess.Signal(ssh.SIGKILL)
 		sess.Close()
+		// Let the session's stdout/stderr copiers finish before the
+		// buffers are read (bounded: a dead peer must not hold us).
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
 		return out.Bytes(), errb.Bytes(), ctx.Err()
 	case err := <-done:
 		return out.Bytes(), errb.Bytes(), err

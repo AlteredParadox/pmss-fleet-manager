@@ -32,7 +32,7 @@ PMSS "month" counters are a rolling 30-day window, not a billing cycle. The UI s
 
 - `cmd/pmss-fleet-manager` flags, wiring, graceful shutdown
 - `internal/store` SQLite (modernc, pure Go): boxes, settings, alerts, per-box caches
-- `internal/sshx` SSH client with reconnect, command runner, unix/tcp dialer
+- `internal/sshx` SSH client (TOFU host keys, bounded dial/run), unix/tcp dialer; reconnects are the poller's job
 - `internal/phpserial` minimal PHP `unserialize`
 - `internal/probe` the remote shell probe and its parser -> `probe.Snapshot`
 - `internal/qbt` qBittorrent Web API client over an arbitrary dialer

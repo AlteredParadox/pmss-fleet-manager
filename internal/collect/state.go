@@ -170,7 +170,7 @@ type TorrentView struct {
 	Ratio    float64 `json:"ratio"`
 	State    string  `json:"state"`
 	Kind     string  `json:"kind"` // seeding | leeching | paused | checking | error | unknown
-	AddedOn  int64   `json:"added_on"`
+	AddedOn  int64   `json:"-"`    // sort key only
 	Category string  `json:"category,omitempty"`
 }
 
@@ -200,9 +200,7 @@ type QbtState struct {
 	Seeding       int           `json:"seeding"`
 	Leeching      int           `json:"leeching"`
 	Paused        int           `json:"paused"`
-	Checking      int           `json:"checking"`
 	Errored       int           `json:"errored"`
-	Active        int           `json:"active"` // transferring right now
 	GlobalRatio   float64       `json:"global_ratio"`
 	Torrents      []TorrentView `json:"torrents,omitempty"`
 }
@@ -270,6 +268,16 @@ func (s *BoxState) adoptIdentity(from BoxState) {
 	s.Name, s.Host, s.Port, s.User, s.Type = from.Name, from.Host, from.Port, from.User, from.Type
 	s.Plan, s.Datacenter, s.Renewal, s.Enabled, s.HostKeyFP = from.Plan, from.Datacenter, from.Renewal, from.Enabled, from.HostKeyFP
 	s.Qbt.Enabled, s.Docker.Enabled, s.Dirs.Enabled = from.Qbt.Enabled, from.Docker.Enabled, from.Dirs.Enabled
+}
+
+// resetVolatile clears what only a fresh poll by the current poller may
+// assert: port ownership (a credential-send gate), reachability, and the
+// du-running flag. Called when a state is restored from cache or carried
+// across an edit.
+func (s *BoxState) resetVolatile() {
+	s.Qbt.PortOK, s.Qbt.Reachable, s.Qbt.AuthHold = false, false, false
+	s.Docker.Reachable = false
+	s.Dirs.Running = false
 }
 
 // Summary strips the large lists for the fleet view and SSE events.

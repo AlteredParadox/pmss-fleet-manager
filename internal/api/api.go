@@ -132,6 +132,10 @@ func (s *Server) routes() {
 	static, _ := fs.Sub(web.FS, "static")
 	fileServer := http.FileServer(http.FS(static))
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/") { // no directory listings
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Cache-Control", "no-cache")
 		fileServer.ServeHTTP(w, r)
 	})))
@@ -190,11 +194,17 @@ func sameOrigin(origin, host string) bool {
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
+	// Encode first: a value json cannot represent (NaN/Inf from a bad
+	// number on one box) must be a visible 500, not a 200 with an empty body.
+	b, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
-	enc := json.NewEncoder(w)
-	_ = enc.Encode(v)
+	w.Write(append(b, '\n'))
 }
 
 func writeErr(w http.ResponseWriter, code int, err error) {
@@ -229,6 +239,7 @@ type Totals struct {
 
 func totals(states []collect.BoxState) Totals {
 	var t Totals
+	seenSvc := map[int64]bool{}
 	var last time.Time
 	for _, b := range states {
 		t.Count++
@@ -247,7 +258,8 @@ func totals(states []collect.BoxState) Totals {
 		if r := b.EffectiveRenewal(); r != "" && (t.NextRenew == "" || r < t.NextRenew) {
 			t.NextRenew = r
 		}
-		if b.Service != nil {
+		if b.Service != nil && !seenSvc[b.Service.ID] {
+			seenSvc[b.Service.ID] = true // two boxes on one service count it once
 			t.MonthlyCost += b.Service.Monthly
 			t.Currency = b.Service.Currency
 		}
@@ -356,6 +368,9 @@ func (in boxInput) validate() error {
 	}
 	if in.Port < 0 || in.Port > 65535 {
 		return errors.New("invalid port")
+	}
+	if in.QbtPort < 0 || in.QbtPort > 65535 {
+		return errors.New("qbt_port must be 0..65535")
 	}
 	switch in.Type {
 	case "", "seedbox", "storage":

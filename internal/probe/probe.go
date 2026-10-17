@@ -69,15 +69,25 @@ func (s *Snapshot) PortOwner(port int) (ok bool, reason string) {
 	if !s.ListenersKnown {
 		return true, ""
 	}
+	if s.UID <= 0 {
+		return false, "own uid unknown; cannot verify who owns the port"
+	}
 	uid, found := s.Listeners[port]
 	switch {
 	case !found:
 		return false, fmt.Sprintf("nothing is listening on port %d", port)
+	case uid == contestedPort:
+		return false, fmt.Sprintf("port %d has listeners owned by more than one account; refusing to connect or send credentials to it", port)
 	case uid != s.UID:
 		return false, fmt.Sprintf("port %d is owned by uid %d, not by this account; refusing to connect or send credentials to it", port, uid)
 	}
 	return true, ""
 }
+
+// contestedPort marks a port with listeners (v4 and v6, or several
+// addresses) owned by different uids: whichever one we would reach, it is
+// not safely ours.
+const contestedPort = -1
 
 // AccountSummary renders the parsed fields of ~/.config/pmss-user.json for
 // diagnostics, so the raw file (which may grow fields we do not use) is
@@ -108,6 +118,15 @@ func parseTZ(z string) *time.Location {
 	return time.FixedZone("box"+z, off)
 }
 
+// finite drops NaN/Inf (which encoding/json refuses, blanking the whole
+// fleet response) and absurd magnitudes; PMSS never writes either.
+func finite(f float64, _ bool) float64 {
+	if math.IsNaN(f) || math.IsInf(f, 0) || math.Abs(f) > 1e15 {
+		return 0
+	}
+	return f
+}
+
 // lastSection returns the name of the last section header in raw.
 func lastSection(raw []byte, tag string) string {
 	prefix := "@@" + tag
@@ -121,8 +140,8 @@ func lastSection(raw []byte, tag string) string {
 }
 
 // parseListeners reads the probe's listen section: one listening socket per
-// line as "d <port> <uid>" (decimal, from ss) or "h <hexport> <uid>" (from
-// /proc/net/tcp). The script reduces the data on the box; see Script.
+// line as "h <hexport> <uid>" from /proc/net/tcp (or "d <port> <uid>"
+// decimal). A port listed with different owners becomes contestedPort.
 func parseListeners(text string) (map[int]int, bool) {
 	out := map[int]int{}
 	known := false
@@ -146,9 +165,13 @@ func parseListeners(text string) (map[int]int, bool) {
 			continue
 		}
 		known = true
-		if _, dup := out[int(port)]; !dup {
-			out[int(port)] = uid
+		if prev, dup := out[int(port)]; dup {
+			if prev != uid {
+				out[int(port)] = contestedPort
+			}
+			continue
 		}
+		out[int(port)] = uid
 	}
 	return out, known
 }
@@ -268,6 +291,13 @@ func Sections(raw []byte) map[string]string { return SectionsTagged(raw, "") }
 // influence cannot forge one. The first occurrence of a section wins, so a
 // forged duplicate can never overwrite a real section either.
 func SectionsTagged(raw []byte, tag string) map[string]string {
+	out, _ := sectionsTagged(raw, tag)
+	return out
+}
+
+// sectionsTagged also reports whether the whole input was scanned (false
+// when a single line exceeded the scanner's limit).
+func sectionsTagged(raw []byte, tag string) (map[string]string, bool) {
 	out := map[string]string{}
 	prefix := "@@" + tag
 	var cur string
@@ -293,7 +323,7 @@ func SectionsTagged(raw []byte, tag string) map[string]string {
 		buf.WriteByte('\n')
 	}
 	flush()
-	return out
+	return out, sc.Err() == nil
 }
 
 // Parse turns untagged probe output into a Snapshot (tests and diagnostics).
@@ -302,7 +332,10 @@ func Parse(raw []byte, now time.Time) (*Snapshot, error) { return ParseTagged(ra
 // ParseTagged turns raw probe output produced by ScriptWithTag(tag) into a
 // Snapshot.
 func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
-	s := SectionsTagged(raw, tag)
+	s, complete := sectionsTagged(raw, tag)
+	if !complete {
+		return nil, fmt.Errorf("probe: a section line exceeded the 8 MiB limit (%d bytes total)", len(raw))
+	}
 	if _, ok := s["end"]; !ok {
 		// Name the last section that did arrive: it points at the command
 		// that hung when the probe hit its timeout on a slow box.
@@ -507,9 +540,9 @@ func parseSeries(raw string) TrafficSeries {
 		return ts
 	}
 	ts.OK = true
-	ts.MonthMiB, _ = r.Float("month")
-	ts.DayMiB, _ = r.Float("day")
-	ts.Min15MiB, _ = r.Float("15min")
+	ts.MonthMiB = finite(r.Float("month"))
+	ts.DayMiB = finite(r.Float("day"))
+	ts.Min15MiB = finite(r.Float("15min"))
 	if d := arr.Array("daily"); d != nil {
 		for _, k := range d.Keys {
 			ks, ok := k.(string)

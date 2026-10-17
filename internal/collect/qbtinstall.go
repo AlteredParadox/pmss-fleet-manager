@@ -57,7 +57,7 @@ echo "previous: ${old:-none}"
 // qbtStartHelper is the user's standard launcher, written to ~/bin/qbt-start.
 const qbtStartHelper = `#!/bin/bash
 # start qbittorrent-nox in a screen session if not already running
-if ! pgrep -u "$USER" -f "$HOME/bin/qbittorrent-nox" >/dev/null; then
+if ! pgrep -u "$(id -u)" -x qbittorrent-nox >/dev/null; then
     screen -dmS qbt "$HOME/bin/qbittorrent-nox"
 fi
 `
@@ -111,7 +111,7 @@ func shellQuote(s string) string {
 
 func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, error) {
 	if !safeURL.MatchString(downloadURL) {
-		return "", errors.New("download URL must be https and contain no spaces or quotes")
+		return "", errors.New("download URL must be https and contain only URL characters")
 	}
 	cli, err := p.conn(ctx)
 	if err != nil {
@@ -251,7 +251,12 @@ func versionParts(v string) []int {
 	}
 	out := make([]int, 3)
 	for i, s := range f {
-		n, err := strconv.Atoi(strings.TrimFunc(s, func(r rune) bool { return r < '0' || r > '9' }))
+		// Keep the leading digits only: "4-1" (distro suffix) and "3rc1" compare as 4 and 3.
+		digits := strings.TrimLeftFunc(s, func(r rune) bool { return r < '0' || r > '9' })
+		if j := strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }); j >= 0 {
+			digits = digits[:j]
+		}
+		n, err := strconv.Atoi(digits)
 		if err != nil {
 			return nil
 		}
