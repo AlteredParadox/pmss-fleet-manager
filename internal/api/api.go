@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"pmss-fleet-manager/internal/collect"
+	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/store"
 	"pmss-fleet-manager/internal/web"
 )
@@ -123,6 +124,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST /api/boxes/{id}/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/boxes/{id}/du", s.handleDu)
 	mux.HandleFunc("POST /api/boxes/{id}/qbt/{action}", s.handleQbtAction)
+	mux.HandleFunc("POST /api/boxes/{id}/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
 	mux.HandleFunc("POST /api/boxes/{id}/containers/{cid}/{action}", s.handleContainerAction)
 	mux.HandleFunc("POST /api/detect", s.handleDetect)
 	mux.HandleFunc("GET /api/alerts", s.handleAlerts)
@@ -683,6 +685,39 @@ func (s *Server) handleQbtAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "output": out})
+}
+
+// validTorrentHash accepts a v1 (40 hex) or v2 (64 hex) info-hash, in either
+// case; anything else never reaches the WebUI.
+func validTorrentHash(h string) bool {
+	if len(h) != 40 && len(h) != 64 {
+		return false
+	}
+	return strings.Trim(strings.ToLower(h), "0123456789abcdef") == ""
+}
+
+func (s *Server) handleTorrentAction(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	hash, action := strings.ToLower(r.PathValue("hash")), r.PathValue("action")
+	if !qbt.TorrentActions[action] {
+		writeErr(w, 400, fmt.Errorf("unknown action %q", action))
+		return
+	}
+	if !validTorrentHash(hash) {
+		writeErr(w, 400, errors.New("invalid torrent hash"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	if err := s.m.TorrentAction(ctx, id, hash, action); err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (s *Server) handleContainerAction(w http.ResponseWriter, r *http.Request) {

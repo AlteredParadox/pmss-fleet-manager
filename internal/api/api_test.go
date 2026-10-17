@@ -302,3 +302,12 @@ func TestMoveRequiresWebUIPasswordToo(t *testing.T) {
 		t.Fatalf("after move: %+v", b)
 	}
 }
+
+func TestValidTorrentHash(t *testing.T) {
+	v1 := "0123456789abcdef0123456789ABCDEF01234567"
+	for h, ok := range map[string]bool{v1: true, v1 + v1[:24]: true, v1[:39]: false, v1[:39] + "g": false, "": false, "all": false, "../x": false} {
+		if validTorrentHash(h) != ok {
+			t.Errorf("%q: want %v", h, ok)
+		}
+	}
+}

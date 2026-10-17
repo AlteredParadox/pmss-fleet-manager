@@ -296,7 +296,7 @@ function renderMain() {
     const b = curBox();
     if (b?.status === 'disabled') {
       // Polling is off: the server refuses every action, so say so up front.
-      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
+      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
         el.disabled = true;
         el.title = 'polling is disabled for this box; enable it to run actions';
       });
@@ -638,7 +638,7 @@ function tabTorrents(b) {
       </div>
     </div>
     <div style="overflow:auto">
-      <div class="trow head"><span>name</span><span>size</span><span>progress</span><span>up</span><span>down</span><span>ratio</span></div>
+      <div class="trow head"><span>name</span><span>size</span><span>progress</span><span>up</span><span>down</span><span>ratio</span><span></span></div>
       ${shown.length === 0 ? `<div class="trow"><span class="muted">${q.total === 0 ? 'no torrents' : 'no matches'}</span></div>` : shown.map((t) => `
       <div class="trow">
         <div style="min-width:0;display:flex;align-items:center;gap:8px" title="${esc(t.name)}"><span class="led" style="width:6px;height:6px;background:${kindColor[t.kind] || 'var(--dim)'}"></span><span class="ellip">${esc(t.name)}</span></div>
@@ -647,10 +647,23 @@ function tabTorrents(b) {
         <span class="num ${t.up_bps ? 'up' : 'dim'}">${fmtBps(t.up_bps)}</span>
         <span class="num ${t.down_bps ? 'down' : 'dim'}">${fmtBps(t.down_bps)}</span>
         <span class="num">${t.ratio >= 0 ? t.ratio.toFixed(2) : '∞'}</span>
+        <div class="actions">${torrentButtons(b, t)}</div>
       </div>`).join('')}
       ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
     </div>
   </div>`;
+}
+// Per-torrent controls. Removal always confirms; removing the data as well
+// names the size so the two cannot be mistaken for each other.
+function torrentButtons(b, t) {
+  if (!t.hash) return '';
+  const h = `data-hash="${esc(t.hash)}"`;
+  const name = esc(t.name);
+  return `${t.kind === 'paused'
+    ? `<button class="small" data-act="tor:start" ${h}>start</button>`
+    : `<button class="small" data-act="tor:stop" ${h} data-confirm="Stop ${name} on ${esc(b.name)}?">stop</button>`}
+    <button class="small ghost" data-act="tor:remove" ${h} data-confirm="Remove ${name} from qBittorrent on ${esc(b.name)}? The downloaded files stay on disk.">remove</button>
+    <button class="small ghost" data-act="tor:remove-data" ${h} data-confirm="Remove ${name} AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? This cannot be undone.">+ files</button>`;
 }
 function tabContainers(b) {
   const d = b.docker;
@@ -1124,6 +1137,12 @@ async function qbtAction(a, act) {
   const r = await api('POST', `/api/boxes/${S.selId}/qbt/${what}`);
   toast(`qBittorrent ${what}: ok${r?.output ? ' — ' + r.output.split('\n').slice(0, 2).join(' · ') : ''}`, 'ok');
 }
+async function torrentAction(a, act) {
+  const what = a.slice(4);
+  act.disabled = true;
+  await api('POST', `/api/boxes/${S.selId}/qbt/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
+  toast(`torrent ${{ stop: 'stopped', start: 'started', remove: 'removed', 'remove-data': 'removed with its files' }[what]}`, 'ok');
+}
 async function containerAction(a, act) {
   act.disabled = true; await api('POST', `/api/boxes/${S.selId}/containers/${act.dataset.cid}/${a.slice(4)}`); toast(`container ${a.slice(4)} ok`, 'ok');
 }
@@ -1167,6 +1186,7 @@ async function wizardAction(a) {
 async function runAction(a, act) {
   if (a === 'refresh-all' || a === 'refresh' || a === 'du' || a === 'remove') await boxAction(a);
   else if (a.startsWith('qbt:')) await qbtAction(a, act);
+  else if (a.startsWith('tor:')) await torrentAction(a, act);
   else if (a.startsWith('ctr:')) await containerAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
   else if (a.startsWith('settings:')) await settingsAction(a);

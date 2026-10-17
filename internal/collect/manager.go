@@ -478,6 +478,21 @@ func (m *Manager) ContainerAction(ctx context.Context, id int64, cid, action str
 	return err
 }
 
+// TorrentAction performs one qbt.TorrentActions entry on a single torrent
+// and wakes the poller so the list reflects it promptly.
+func (m *Manager) TorrentAction(ctx context.Context, id int64, hash, action string) error {
+	p := m.poller(id)
+	if p == nil {
+		return store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return ErrDisabled
+	}
+	err := p.torrentAction(ctx, hash, action)
+	p.wake()
+	return err
+}
+
 // RunDu forces a directory usage measurement.
 func (m *Manager) RunDu(id int64) error {
 	p := m.poller(id)

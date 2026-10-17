@@ -175,7 +175,7 @@ type AccountState struct {
 
 // TorrentView is one torrent for the UI.
 type TorrentView struct {
-	Hash     string  `json:"-"` // identity for sorting/dedup only; the UI never shows it
+	Hash     string  `json:"hash"` // addresses the torrent in per-torrent actions
 	Name     string  `json:"name"`
 	Size     int64   `json:"size"`
 	Progress float64 `json:"progress"`
