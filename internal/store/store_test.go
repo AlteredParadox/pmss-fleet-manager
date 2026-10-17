@@ -20,7 +20,6 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestRoundTrip(t *testing.T) {
@@ -36,7 +35,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := s.GetBox(ctx, b.ID)
-	if err != nil || got.Port != 22 || got.Password != "pw" || !got.HasPassword || got.Type != "seedbox" {
+	if err != nil || got.Port != 22 || got.Password != "pw" || got.Type != "seedbox" {
 		t.Fatalf("get: %+v %v", got, err)
 	}
 	got.Password = "" // keep
@@ -61,17 +60,6 @@ func TestRoundTrip(t *testing.T) {
 	st, _ = s.GetSettings(ctx)
 	if st.PollIntervalSec != 60 || st.Theme != "light" || st.DiskThresholdPct != 90 {
 		t.Fatalf("settings: %+v", st)
-	}
-
-	now := time.Now()
-	for i := 0; i < 3; i++ {
-		if err := s.AddSample(ctx, b.ID, Sample{At: now.Add(time.Duration(i) * time.Minute), OK: true, DiskUsed: int64(i), Torrents: i}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	smps, _ := s.Samples(ctx, b.ID, now.Add(-time.Hour))
-	if len(smps) != 3 || smps[2].Torrents != 2 {
-		t.Fatalf("samples: %+v", smps)
 	}
 
 	created, err := s.RaiseAlert(ctx, b.ID, "disk", "warn", "disk at 95%")

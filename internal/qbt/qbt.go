@@ -160,10 +160,9 @@ func NewWithGuard(dial Dialer, hostport, user, pass string, g *AuthGuard) *Clien
 		g = &AuthGuard{}
 	}
 	tr := &http.Transport{
-		DialContext:       func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
-		DisableKeepAlives: false,
-		MaxIdleConns:      2,
-		IdleConnTimeout:   60 * time.Second,
+		DialContext:     func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
+		MaxIdleConns:    2,
+		IdleConnTimeout: 60 * time.Second,
 	}
 	if hostport == "" {
 		hostport = "127.0.0.1"
@@ -299,36 +298,23 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 
 // Torrent is the subset of torrent fields the dashboard uses.
 type Torrent struct {
-	Hash       string  `json:"hash"`
-	Name       string  `json:"name"`
-	Size       int64   `json:"size"`
-	Progress   float64 `json:"progress"`
-	DLSpeed    int64   `json:"dlspeed"`
-	UPSpeed    int64   `json:"upspeed"`
-	Ratio      float64 `json:"ratio"`
-	State      string  `json:"state"`
-	ETA        int64   `json:"eta"`
-	AddedOn    int64   `json:"added_on"`
-	Uploaded   int64   `json:"uploaded"`
-	Downloaded int64   `json:"downloaded"`
-	Category   string  `json:"category"`
-	NumSeeds   int     `json:"num_seeds"`
-	NumLeechs  int     `json:"num_leechs"`
-	Tracker    string  `json:"tracker"`
+	Hash     string  `json:"hash"`
+	Name     string  `json:"name"`
+	Size     int64   `json:"size"`
+	Progress float64 `json:"progress"`
+	DLSpeed  int64   `json:"dlspeed"`
+	UPSpeed  int64   `json:"upspeed"`
+	Ratio    float64 `json:"ratio"`
+	State    string  `json:"state"`
+	AddedOn  int64   `json:"added_on"`
+	Category string  `json:"category"`
 }
 
 // ServerState is the global state block from sync/maindata.
 type ServerState struct {
-	DLInfoSpeed      int64  `json:"dl_info_speed"`
-	UPInfoSpeed      int64  `json:"up_info_speed"`
-	DLInfoData       int64  `json:"dl_info_data"`
-	UPInfoData       int64  `json:"up_info_data"`
-	AllTimeDL        int64  `json:"alltime_dl"`
-	AllTimeUL        int64  `json:"alltime_ul"`
-	GlobalRatio      string `json:"global_ratio"`
-	FreeSpaceOnDisk  int64  `json:"free_space_on_disk"`
-	ConnectionStatus string `json:"connection_status"`
-	DHTNodes         int    `json:"dht_nodes"`
+	DLInfoSpeed int64  `json:"dl_info_speed"`
+	UPInfoSpeed int64  `json:"up_info_speed"`
+	GlobalRatio string `json:"global_ratio"`
 }
 
 // MainData is one full sync snapshot.

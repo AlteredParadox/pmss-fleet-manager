@@ -48,7 +48,7 @@ func TestContainersAndStats(t *testing.T) {
 	}
 	st := c.StatsAll(ctx, []string{cs[0].ID}, 2)
 	s := st[cs[0].ID]
-	if s == nil || s.MemUsage != 800 || s.NetTx != 7 || s.CPUPct < 39.9 || s.CPUPct > 40.1 {
+	if s == nil || s.MemUsage != 800 || s.CPUPct < 39.9 || s.CPUPct > 40.1 {
 		t.Fatalf("%+v", s)
 	}
 	if err := c.Start(ctx, cs[0].ID); err != nil {

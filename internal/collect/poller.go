@@ -319,9 +319,6 @@ func (p *poller) fail(st *BoxState, err error, start time.Time) {
 	st.Qbt.Reachable = false
 	st.Docker.Reachable = false
 	p.m.log.Warn("poll failed", "box", p.box.Name, "failures", st.Failures, "err", err)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = p.m.st.AddSample(ctx, p.box.ID, store.Sample{At: start, OK: false})
 	p.m.setState(st)
 }
 
@@ -413,7 +410,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 		GPUPresent: h.GPU.Present, GPUDevice: h.GPU.Device, GPUVendor: h.GPU.Vendor, GPUAccess: h.GPU.Accessible, HWEncode: hwEncodeLabel(h.GPU)}
 
 	a := snap.Account
-	st.Account = AccountState{OK: a.OK, QuotaGiB: a.QuotaGiB, RAMMiB: a.RAMMiB, DockerEnabled: a.DockerEnabled, TrafficCapMbit: a.TrafficCapMbit, Suspended: a.Suspended}
+	st.Account = AccountState{OK: a.OK, QuotaGiB: a.QuotaGiB, RAMMiB: a.RAMMiB, DockerEnabled: a.DockerEnabled, Suspended: a.Suspended}
 }
 
 // hwEncodeLabel summarises hardware encoding availability for tags.
@@ -465,8 +462,17 @@ func (p *poller) qbtPort(snap *probe.Snapshot) int {
 	if p.box.QbtPort > 0 {
 		return p.box.QbtPort
 	}
-	if snap != nil && snap.Qbt.ConfPort > 0 {
-		return snap.Qbt.ConfPort
+	return qbtPortFor(p.box, snap.Qbt.ConfPort)
+}
+
+// qbtPortFor is the WebUI port to use: the box setting, else the port from
+// qBittorrent.conf, else qBittorrent's default.
+func qbtPortFor(b *store.Box, confPort int) int {
+	if b.QbtPort > 0 {
+		return b.QbtPort
+	}
+	if confPort > 0 {
+		return confPort
 	}
 	return 8080
 }
@@ -525,10 +531,6 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	}
 	qs.Reachable = true
 	ss := md.ServerState
-	qs.AllTimeUL, qs.AllTimeDL = ss.AllTimeUL, ss.AllTimeDL
-	qs.SessionUL, qs.SessionDL = ss.UPInfoData, ss.DLInfoData
-	qs.Connection = ss.ConnectionStatus
-	qs.FreeSpaceDisk = ss.FreeSpaceOnDisk
 	fmt.Sscanf(ss.GlobalRatio, "%f", &qs.GlobalRatio)
 	st.Rates = RateState{UpBps: float64(ss.UPInfoSpeed), DownBps: float64(ss.DLInfoSpeed), Source: "qbt"}
 
@@ -552,8 +554,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		}
 		qs.Torrents = append(qs.Torrents, TorrentView{
 			Hash: clip(t.Hash, 64), Name: clip(t.Name, 400), Size: t.Size, Progress: t.Progress, UpBps: t.UPSpeed, DownBps: t.DLSpeed,
-			Ratio: t.Ratio, State: t.State, Kind: kind, ETA: t.ETA, AddedOn: t.AddedOn, Uploaded: t.Uploaded,
-			Category: clip(t.Category, 100), Seeds: t.NumSeeds, Leechs: t.NumLeechs,
+			Ratio: t.Ratio, State: t.State, Kind: kind, AddedOn: t.AddedOn, Category: clip(t.Category, 100),
 		})
 	}
 	qs.Total = len(qs.Torrents)
@@ -618,7 +619,7 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 	ds.Reachable = true
 	var running []string
 	for _, c := range cs {
-		cv := ContainerView{ID: clip(c.ID, 64), Name: clip(c.Name(), 200), Image: clip(c.Image, 300), State: clip(c.State, 32), Status: clip(c.Status, 100), Created: c.Created}
+		cv := ContainerView{ID: clip(c.ID, 64), Name: clip(c.Name(), 200), Image: clip(c.Image, 300), State: clip(c.State, 32), Status: clip(c.Status, 100)}
 		for _, pt := range c.Ports {
 			if pt.PublicPort > 0 {
 				ip := pt.IP
@@ -648,7 +649,7 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 		scancel()
 		for i := range ds.Containers {
 			if s, ok := stats[ds.Containers[i].ID]; ok {
-				ds.Containers[i].CPUPct, ds.Containers[i].MemUsage, ds.Containers[i].MemLimit, ds.Containers[i].HasStats = s.CPUPct, s.MemUsage, s.MemLimit, true
+				ds.Containers[i].CPUPct, ds.Containers[i].MemUsage, ds.Containers[i].HasStats = s.CPUPct, s.MemUsage, true
 			}
 		}
 	}
@@ -757,14 +758,6 @@ func (p *poller) runDu(ctx context.Context) {
 func (p *poller) record(ctx context.Context, st *BoxState) {
 	sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	err := p.m.st.AddSample(sctx, p.box.ID, store.Sample{
-		At: st.LastPoll, OK: true, DiskUsed: st.Disk.UsedBytes, DiskQuota: st.Disk.QuotaBytes,
-		TrafficOutMiB: float64(st.Traffic.OutMonthBytes) / (1 << 20), TrafficInMiB: float64(st.Traffic.InMonthBytes) / (1 << 20),
-		UpBps: st.Rates.UpBps, DownBps: st.Rates.DownBps, CPUPct: st.CPU.Pct, RAMPct: st.RAM.Pct, Torrents: st.Qbt.Total,
-	})
-	if err != nil {
-		p.m.log.Warn("store sample", "box", p.box.Name, "err", err)
-	}
 	if err := p.m.st.SetCache(sctx, p.box.ID, "state", st.Summary()); err != nil {
 		p.m.log.Warn("cache state", "box", p.box.Name, "err", err)
 	}
@@ -804,14 +797,7 @@ func (p *poller) qbtAction(ctx context.Context, action string) error {
 		if !st.Qbt.PortOK {
 			return errors.New("the WebUI port has not been verified as owned by this account yet (see the client error on the overview); not sending credentials")
 		}
-		port := p.box.QbtPort
-		if port == 0 {
-			port = st.Qbt.Port
-		}
-		if port == 0 {
-			port = 8080
-		}
-		cli := p.qbtClient(port)
+		cli := p.qbtClient(qbtPortFor(p.box, st.Qbt.Port))
 		switch action {
 		case "stop":
 			return cli.Shutdown(actx)

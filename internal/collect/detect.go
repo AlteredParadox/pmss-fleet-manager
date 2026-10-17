@@ -117,10 +117,10 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 	}
 	if snap.Quota.OK {
 		res.Facts.QuotaBytes, res.Facts.DiskUsedBytes = snap.Quota.SoftBytes, snap.Quota.UsedBytes
-		add("ok", "disk quota %s · %s used (%s)", fmtBytes(snap.Quota.SoftBytes), fmtBytes(snap.Quota.UsedBytes), snap.Quota.Source)
+		add("ok", "disk quota %s · %s used (%s)", HumanBytes(snap.Quota.SoftBytes), HumanBytes(snap.Quota.UsedBytes), snap.Quota.Source)
 	} else if snap.Account.QuotaGiB > 0 {
 		res.Facts.QuotaBytes = int64(snap.Account.QuotaGiB * (1 << 30))
-		add("warn", "quota command unavailable; plan quota %s from account config", fmtBytes(res.Facts.QuotaBytes))
+		add("warn", "quota command unavailable; plan quota %s from account config", HumanBytes(res.Facts.QuotaBytes))
 	} else {
 		add("warn", "no quota information readable")
 	}
@@ -128,15 +128,15 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 		res.Facts.TrafficLimit = int64(snap.Traffic.EffectiveLimitGiB * (1 << 30))
 		lim := "unlimited"
 		if res.Facts.TrafficLimit > 0 {
-			lim = fmtBytes(res.Facts.TrafficLimit) + " / 30 days"
+			lim = HumanBytes(res.Facts.TrafficLimit) + " / 30 days"
 		}
-		add("ok", "traffic stats present · %s used in last 30 days · limit %s", fmtBytes(int64(snap.Traffic.Out.MonthMiB*(1<<20))), lim)
+		add("ok", "traffic stats present · %s used in last 30 days · limit %s", HumanBytes(int64(snap.Traffic.Out.MonthMiB*(1<<20))), lim)
 	} else {
 		add("warn", "no ~/.trafficData yet (PMSS writes it twice an hour)")
 	}
 	if snap.Cgroup.MemLimit > 0 || snap.Cgroup.CPUQuota > 0 {
 		res.Facts.RAMLimit, res.Facts.CPUQuota = snap.Cgroup.MemLimit, snap.Cgroup.CPUQuota
-		add("ok", "resource slice: %s RAM · %.1f CPUs", fmtBytes(snap.Cgroup.MemLimit), snap.Cgroup.CPUQuota)
+		add("ok", "resource slice: %s RAM · %.1f CPUs", HumanBytes(snap.Cgroup.MemLimit), snap.Cgroup.CPUQuota)
 	} else {
 		add("info", "cgroup limits not readable; CPU/RAM will show as unknown")
 	}
@@ -144,20 +144,13 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 	// qBittorrent
 	if b.Type == "storage" && !b.QbtEnabled && !snap.Qbt.BinaryPresent && !snap.Qbt.Running {
 		add("info", "storage box: no torrent client expected")
-		b.QbtEnabled = false
 	} else {
-		port := b.QbtPort
-		if port == 0 {
-			port = snap.Qbt.ConfPort
-		}
-		if port == 0 {
-			port = 8080
-		}
+		port := qbtPortFor(&b, snap.Qbt.ConfPort)
 		res.Facts.QbtPort = port
 		switch {
 		case !snap.Qbt.BinaryPresent && !snap.Qbt.Running:
 			add("warn", "qbittorrent-nox not found in ~/bin and not running")
-			b.QbtEnabled = b.QbtEnabled && false
+			b.QbtEnabled = false
 		case !snap.Qbt.Running:
 			add("warn", "qbittorrent-nox present in ~/bin but not running (WebUI port %d)", port)
 			b.QbtEnabled = true
@@ -220,17 +213,4 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 	res.OK = true
 	res.Box = &b
 	return res
-}
-
-func fmtBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for n/div >= unit && exp < 5 {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

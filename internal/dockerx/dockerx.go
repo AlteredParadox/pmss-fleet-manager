@@ -88,10 +88,7 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 
 // Version is the daemon version block.
 type Version struct {
-	Version    string `json:"Version"`
-	APIVersion string `json:"ApiVersion"`
-	Os         string `json:"Os"`
-	Arch       string `json:"Arch"`
+	Version string `json:"Version"`
 }
 
 // Version pings the daemon.
@@ -110,14 +107,12 @@ type Port struct {
 
 // Container is one row from /containers/json.
 type Container struct {
-	ID      string            `json:"Id"`
-	Names   []string          `json:"Names"`
-	Image   string            `json:"Image"`
-	State   string            `json:"State"`  // running, exited, created, paused, restarting, dead
-	Status  string            `json:"Status"` // "Up 3 days", "Exited (1) 2 hours ago"
-	Created int64             `json:"Created"`
-	Ports   []Port            `json:"Ports"`
-	Labels  map[string]string `json:"Labels"`
+	ID     string   `json:"Id"`
+	Names  []string `json:"Names"`
+	Image  string   `json:"Image"`
+	State  string   `json:"State"`  // running, exited, created, paused, restarting, dead
+	Status string   `json:"Status"` // "Up 3 days", "Exited (1) 2 hours ago"
+	Ports  []Port   `json:"Ports"`
 }
 
 // Name returns the primary container name without the leading slash.
@@ -138,9 +133,6 @@ func (c *Client) Containers(ctx context.Context) ([]Container, error) {
 type Stats struct {
 	CPUPct   float64 `json:"cpu_pct"`
 	MemUsage int64   `json:"mem_usage"`
-	MemLimit int64   `json:"mem_limit"`
-	NetRx    int64   `json:"net_rx"`
-	NetTx    int64   `json:"net_tx"`
 }
 
 type rawStats struct {
@@ -174,7 +166,7 @@ func (c *Client) Stats(ctx context.Context, id string) (*Stats, error) {
 	if err := c.do(ctx, http.MethodGet, "/containers/"+id+"/stats?stream=false", &r); err != nil {
 		return nil, err
 	}
-	s := &Stats{MemUsage: r.MemoryStats.Usage, MemLimit: r.MemoryStats.Limit}
+	s := &Stats{MemUsage: r.MemoryStats.Usage}
 	// Subtract page cache like `docker stats` does.
 	if cache, ok := r.MemoryStats.Stats["inactive_file"]; ok && cache < s.MemUsage {
 		s.MemUsage -= cache
@@ -189,10 +181,6 @@ func (c *Client) Stats(ctx context.Context, id string) (*Stats, error) {
 			n = 1
 		}
 		s.CPUPct = cpuDelta / sysDelta * float64(n) * 100
-	}
-	for _, nw := range r.Networks {
-		s.NetRx += nw.RxBytes
-		s.NetTx += nw.TxBytes
 	}
 	return s, nil
 }

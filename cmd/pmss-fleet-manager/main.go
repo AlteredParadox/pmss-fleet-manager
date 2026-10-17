@@ -99,7 +99,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	handler := api.New(st, mgr, log, *auth)
+	handler := api.New(st, mgr, *auth)
 	handler.SetLegal(legal.License, legal.ThirdPartyLicenses)
 	handler.SetVersion(version)
 	hosts, wildcard := allowedHostList(addrs, *allowedHosts)

@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// Package store persists boxes, settings, samples and alerts in SQLite.
+// Package store persists boxes, settings, alerts and per-box caches in SQLite.
 package store
 
 import (
@@ -58,9 +58,6 @@ type Box struct {
 	DuEnabled     bool `json:"du_enabled"`
 	Enabled       bool `json:"enabled"`
 
-	HasPassword bool `json:"has_password"`
-	HasQbtPass  bool `json:"has_qbt_pass"`
-
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -74,7 +71,6 @@ type Settings struct {
 	DuIntervalHours  int    `json:"du_interval_hours"`
 	Theme            string `json:"theme"`
 	FleetView        string `json:"fleet_view"`
-	BillingEmail     string `json:"billing_email"`
 	ClientAreaURL    string `json:"client_area_url"`
 	QbtDownloadURL   string `json:"qbt_download_url"`
 	CardMinPx        int    `json:"card_min_px"` // fleet card minimum width
@@ -112,21 +108,6 @@ func DefaultSettings() Settings {
 		QbtDownloadURL:   DefaultQbtDownloadURL,
 		CardMinPx:        340,
 	}
-}
-
-// Sample is one poll result kept for history.
-type Sample struct {
-	At            time.Time `json:"at"`
-	OK            bool      `json:"ok"`
-	DiskUsed      int64     `json:"disk_used"`
-	DiskQuota     int64     `json:"disk_quota"`
-	TrafficOutMiB float64   `json:"traffic_out_mib"`
-	TrafficInMiB  float64   `json:"traffic_in_mib"`
-	UpBps         float64   `json:"up_bps"`
-	DownBps       float64   `json:"down_bps"`
-	CPUPct        float64   `json:"cpu_pct"`
-	RAMPct        float64   `json:"ram_pct"`
-	Torrents      int       `json:"torrents"`
 }
 
 // Alert is a persisted alert. Key dedups by box and rule.
@@ -187,13 +168,8 @@ func (s *Store) migrate() error {
 			enabled INTEGER NOT NULL DEFAULT 1,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS samples (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			box_id INTEGER NOT NULL REFERENCES boxes(id) ON DELETE CASCADE,
-			at TEXT NOT NULL, ok INTEGER NOT NULL,
-			disk_used INTEGER, disk_quota INTEGER, traffic_out_mib REAL, traffic_in_mib REAL,
-			up_bps REAL, down_bps REAL, cpu_pct REAL, ram_pct REAL, torrents INTEGER)`,
-		`CREATE INDEX IF NOT EXISTS samples_box_at ON samples(box_id, at)`,
+		// Poll samples were recorded from the first version but nothing ever read them.
+		`DROP TABLE IF EXISTS samples`,
 		`CREATE TABLE IF NOT EXISTS alerts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			box_id INTEGER NOT NULL REFERENCES boxes(id) ON DELETE CASCADE,
@@ -233,8 +209,6 @@ func scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 	}
 	b.CreatedAt, _ = time.Parse(time.RFC3339, created)
 	b.UpdatedAt, _ = time.Parse(time.RFC3339, updated)
-	b.HasPassword = b.Password != ""
-	b.HasQbtPass = b.QbtPass != ""
 	return &b, nil
 }
 
@@ -311,7 +285,7 @@ func (s *Store) SetHostKey(ctx context.Context, id int64, key string) error {
 	return err
 }
 
-// DeleteBox removes a box and its samples, alerts and cache.
+// DeleteBox removes a box and its alerts and cache.
 func (s *Store) DeleteBox(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM boxes WHERE id=?`, id)
 	return err
@@ -353,7 +327,6 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 	geti("card_min_px", &out.CardMinPx)
 	gets("theme", &out.Theme)
 	gets("fleet_view", &out.FleetView)
-	gets("billing_email", &out.BillingEmail)
 	gets("client_area_url", &out.ClientAreaURL)
 	gets("qbt_download_url", &out.QbtDownloadURL)
 	gets("pm_api_key", &out.PMAPIKey)
@@ -373,7 +346,6 @@ func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
 		"du_interval_hours":     strconv.Itoa(st.DuIntervalHours),
 		"theme":                 st.Theme,
 		"fleet_view":            st.FleetView,
-		"billing_email":         st.BillingEmail,
 		"client_area_url":       st.ClientAreaURL,
 		"qbt_download_url":      st.QbtDownloadURL,
 		"card_min_px":           strconv.Itoa(st.CardMinPx),
@@ -408,48 +380,6 @@ func (s *Store) SetValue(ctx context.Context, key, value string) error {
 	return err
 }
 
-// AddSample appends a poll sample.
-func (s *Store) AddSample(ctx context.Context, boxID int64, smp Sample) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO samples (box_id, at, ok, disk_used, disk_quota, traffic_out_mib, traffic_in_mib, up_bps, down_bps, cpu_pct, ram_pct, torrents)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, boxID, smp.At.UTC().Format(time.RFC3339), smp.OK, smp.DiskUsed, smp.DiskQuota,
-		smp.TrafficOutMiB, smp.TrafficInMiB, smp.UpBps, smp.DownBps, smp.CPUPct, smp.RAMPct, smp.Torrents)
-	return err
-}
-
-// Samples returns samples for a box since a time, oldest first.
-func (s *Store) Samples(ctx context.Context, boxID int64, since time.Time) ([]Sample, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT at, ok, disk_used, disk_quota, traffic_out_mib, traffic_in_mib, up_bps, down_bps, cpu_pct, ram_pct, torrents
-		FROM samples WHERE box_id=? AND at>=? ORDER BY at`, boxID, since.UTC().Format(time.RFC3339))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Sample
-	for rows.Next() {
-		var smp Sample
-		var at string
-		var du, dq sql.NullInt64
-		var to, ti, up, dn, cpu, ram sql.NullFloat64
-		var tor sql.NullInt64
-		if err := rows.Scan(&at, &smp.OK, &du, &dq, &to, &ti, &up, &dn, &cpu, &ram, &tor); err != nil {
-			return nil, err
-		}
-		smp.At, _ = time.Parse(time.RFC3339, at)
-		smp.DiskUsed, smp.DiskQuota = du.Int64, dq.Int64
-		smp.TrafficOutMiB, smp.TrafficInMiB = to.Float64, ti.Float64
-		smp.UpBps, smp.DownBps, smp.CPUPct, smp.RAMPct = up.Float64, dn.Float64, cpu.Float64, ram.Float64
-		smp.Torrents = int(tor.Int64)
-		out = append(out, smp)
-	}
-	return out, rows.Err()
-}
-
-// PruneSamples drops samples older than keep.
-func (s *Store) PruneSamples(ctx context.Context, keep time.Duration) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM samples WHERE at < ?`, time.Now().Add(-keep).UTC().Format(time.RFC3339))
-	return err
-}
-
 // RaiseAlert creates an active alert for (box, key) or refreshes its title. It
 // returns true when a new alert row was created.
 func (s *Store) RaiseAlert(ctx context.Context, boxID int64, key, severity, title string) (bool, error) {
@@ -476,7 +406,7 @@ func (s *Store) ResolveAlert(ctx context.Context, boxID int64, key string) error
 	return err
 }
 
-// ListAlerts returns alerts, newest first. activeOnly limits to unresolved ones.
+// ListAlerts returns alerts, newest first, active before resolved.
 func (s *Store) ListAlerts(ctx context.Context, limit int) ([]Alert, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, box_id, key, severity, title, active, acked, created_at, updated_at, resolved_at
 		FROM alerts ORDER BY active DESC, updated_at DESC LIMIT ?`, limit)

@@ -66,17 +66,17 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 		if s.Disk.OK && s.Disk.QuotaBytes > 0 {
 			switch {
 			case s.Disk.UsedBytes >= s.Disk.QuotaBytes:
-				active = append(active, want{"disk", "bad", fmt.Sprintf("%s disk at %.0f%% — over quota (%s of %s)", name, s.Disk.Pct, hb(s.Disk.UsedBytes), hb(s.Disk.QuotaBytes))})
+				active = append(active, want{"disk", "bad", fmt.Sprintf("%s disk at %.0f%% — over quota (%s of %s)", name, s.Disk.Pct, collect.HumanBytes(s.Disk.UsedBytes), collect.HumanBytes(s.Disk.QuotaBytes))})
 			case s.Disk.Pct >= float64(set.DiskThresholdPct):
-				active = append(active, want{"disk", "warn", fmt.Sprintf("%s disk at %.0f%% of %s quota", name, s.Disk.Pct, hb(s.Disk.QuotaBytes))})
+				active = append(active, want{"disk", "warn", fmt.Sprintf("%s disk at %.0f%% of %s quota", name, s.Disk.Pct, collect.HumanBytes(s.Disk.QuotaBytes))})
 			}
 		}
 		if s.Traffic.OK && s.Traffic.LimitBytes > 0 {
 			switch {
 			case s.Traffic.Pct >= 100:
-				active = append(active, want{"traffic", "bad", fmt.Sprintf("%s traffic at %.0f%% of %s 30-day limit", name, s.Traffic.Pct, hb(s.Traffic.LimitBytes))})
+				active = append(active, want{"traffic", "bad", fmt.Sprintf("%s traffic at %.0f%% of %s 30-day limit", name, s.Traffic.Pct, collect.HumanBytes(s.Traffic.LimitBytes))})
 			case s.Traffic.Pct >= float64(set.TrafficThreshold):
-				active = append(active, want{"traffic", "warn", fmt.Sprintf("%s traffic at %.0f%% of %s 30-day limit", name, s.Traffic.Pct, hb(s.Traffic.LimitBytes))})
+				active = append(active, want{"traffic", "warn", fmt.Sprintf("%s traffic at %.0f%% of %s 30-day limit", name, s.Traffic.Pct, collect.HumanBytes(s.Traffic.LimitBytes))})
 			}
 		}
 		if s.Traffic.Throttled {
@@ -105,7 +105,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 			}
 		}
 		if s.RAM.OK && s.RAM.LimitBytes > 0 && s.RAM.Pct >= 95 {
-			active = append(active, want{"ram", "warn", fmt.Sprintf("%s RAM at %.0f%% of %s slice limit", name, s.RAM.Pct, hb(s.RAM.LimitBytes))})
+			active = append(active, want{"ram", "warn", fmt.Sprintf("%s RAM at %.0f%% of %s slice limit", name, s.RAM.Pct, collect.HumanBytes(s.RAM.LimitBytes))})
 		}
 	}
 	if renewal := s.EffectiveRenewal(); renewal != "" {
@@ -155,17 +155,4 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 	if changed && e.notify != nil {
 		e.notify()
 	}
-}
-
-func hb(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for n/div >= unit && exp < 5 {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

@@ -85,7 +85,7 @@ func (m *Manager) Settings() store.Settings { return *m.settings.Load() }
 // SetSettings swaps the settings used by pollers and wakes them.
 func (m *Manager) SetSettings(s store.Settings) {
 	prev := m.settings.Swap(&s)
-	if (prev == nil || prev.PMAPIKey != s.PMAPIKey) && m.ctx != nil {
+	if prev.PMAPIKey != s.PMAPIKey && m.ctx != nil {
 		go m.SyncServices(m.ctx)
 	}
 	m.mu.RLock()
@@ -147,9 +147,6 @@ func (m *Manager) housekeeping() {
 			return
 		case <-t.C:
 			ctx, cancel := context.WithTimeout(m.ctx, time.Minute)
-			if err := m.st.PruneSamples(ctx, 31*24*time.Hour); err != nil {
-				m.log.Warn("prune samples", "err", err)
-			}
 			if err := m.st.PruneAlerts(ctx, 30*24*time.Hour); err != nil {
 				m.log.Warn("prune alerts", "err", err)
 			}
@@ -165,9 +162,7 @@ func (m *Manager) startPoller(b *store.Box) {
 	if _, err := m.st.GetCache(m.ctx, b.ID, "state", &cached); err == nil && cached.ID == b.ID {
 		keep := st
 		st = cached
-		st.Name, st.Host, st.Port, st.User, st.Type = keep.Name, keep.Host, keep.Port, keep.User, keep.Type
-		st.Plan, st.Datacenter, st.Renewal, st.Enabled, st.HostKeyFP = keep.Plan, keep.Datacenter, keep.Renewal, keep.Enabled, keep.HostKeyFP
-		st.Qbt.Enabled, st.Docker.Enabled, st.Dirs.Enabled = keep.Qbt.Enabled, keep.Docker.Enabled, keep.Dirs.Enabled
+		st.adoptIdentity(keep)
 		st.Qbt.Torrents, st.Docker.Containers = nil, nil
 	}
 	if !b.Enabled {
@@ -284,10 +279,8 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 		m.mu.Lock()
 		cur := m.states[fresh.ID]
 		keep := *prev
-		keep.Name, keep.Host, keep.Port, keep.User, keep.Type = cur.Name, cur.Host, cur.Port, cur.User, cur.Type
-		keep.Plan, keep.Datacenter, keep.Renewal, keep.Enabled = cur.Plan, cur.Datacenter, cur.Renewal, cur.Enabled
-		keep.Qbt.Enabled, keep.Docker.Enabled, keep.Dirs.Enabled = cur.Qbt.Enabled, cur.Docker.Enabled, cur.Dirs.Enabled
-		keep.HostKeyFP, keep.Service = cur.HostKeyFP, cur.Service
+		keep.adoptIdentity(*cur)
+		keep.Service = cur.Service
 		if !fresh.Enabled {
 			keep.Status = "disabled"
 		}
@@ -326,15 +319,6 @@ func (m *Manager) Refresh(id int64) error {
 	}
 	p.wake()
 	return nil
-}
-
-// RefreshAll wakes every poller.
-func (m *Manager) RefreshAll() {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	for _, p := range m.pollers {
-		p.wake()
-	}
 }
 
 func (m *Manager) poller(id int64) *poller {

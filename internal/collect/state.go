@@ -152,12 +152,11 @@ type HostState struct {
 
 // AccountState mirrors the PMSS account config.
 type AccountState struct {
-	OK             bool    `json:"ok"`
-	QuotaGiB       float64 `json:"quota_gib"`
-	RAMMiB         float64 `json:"ram_mib"`
-	DockerEnabled  bool    `json:"docker_enabled"`
-	TrafficCapMbit float64 `json:"traffic_cap_mbit"`
-	Suspended      bool    `json:"suspended"`
+	OK            bool    `json:"ok"`
+	QuotaGiB      float64 `json:"quota_gib"`
+	RAMMiB        float64 `json:"ram_mib"`
+	DockerEnabled bool    `json:"docker_enabled"`
+	Suspended     bool    `json:"suspended"`
 }
 
 // TorrentView is one torrent for the UI.
@@ -171,12 +170,8 @@ type TorrentView struct {
 	Ratio    float64 `json:"ratio"`
 	State    string  `json:"state"`
 	Kind     string  `json:"kind"` // seeding | leeching | paused | checking | error | unknown
-	ETA      int64   `json:"eta"`
 	AddedOn  int64   `json:"added_on"`
-	Uploaded int64   `json:"uploaded"`
 	Category string  `json:"category,omitempty"`
-	Seeds    int     `json:"seeds"`
-	Leechs   int     `json:"leechs"`
 }
 
 // QbtState is the torrent client view.
@@ -209,12 +204,6 @@ type QbtState struct {
 	Errored       int           `json:"errored"`
 	Active        int           `json:"active"` // transferring right now
 	GlobalRatio   float64       `json:"global_ratio"`
-	AllTimeUL     int64         `json:"alltime_ul"`
-	AllTimeDL     int64         `json:"alltime_dl"`
-	SessionUL     int64         `json:"session_ul"`
-	SessionDL     int64         `json:"session_dl"`
-	Connection    string        `json:"connection,omitempty"`
-	FreeSpaceDisk int64         `json:"free_space_disk"`
 	Torrents      []TorrentView `json:"torrents,omitempty"`
 }
 
@@ -225,11 +214,9 @@ type ContainerView struct {
 	Image    string   `json:"image"`
 	State    string   `json:"state"`
 	Status   string   `json:"status"`
-	Created  int64    `json:"created"`
 	Ports    []string `json:"ports"`
 	CPUPct   float64  `json:"cpu_pct"`
 	MemUsage int64    `json:"mem_usage"`
-	MemLimit int64    `json:"mem_limit"`
 	HasStats bool     `json:"has_stats"`
 }
 
@@ -274,6 +261,15 @@ func (s BoxState) EffectiveRenewal() string {
 		return s.Renewal
 	}
 	return s.Service.NextDue
+}
+
+// adoptIdentity copies the fields that come from the box record (not from a
+// poll) out of from, so measured data can be kept across an edit or restart
+// while name, host, plan and feature switches reflect the current record.
+func (s *BoxState) adoptIdentity(from BoxState) {
+	s.Name, s.Host, s.Port, s.User, s.Type = from.Name, from.Host, from.Port, from.User, from.Type
+	s.Plan, s.Datacenter, s.Renewal, s.Enabled, s.HostKeyFP = from.Plan, from.Datacenter, from.Renewal, from.Enabled, from.HostKeyFP
+	s.Qbt.Enabled, s.Docker.Enabled, s.Dirs.Enabled = from.Qbt.Enabled, from.Docker.Enabled, from.Dirs.Enabled
 }
 
 // Summary strips the large lists for the fleet view and SSE events.

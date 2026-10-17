@@ -37,7 +37,6 @@ type Snapshot struct {
 	At       time.Time
 	UID      int
 	User     string
-	Home     string
 	Hostname string
 
 	Host    HostInfo
@@ -133,7 +132,6 @@ type GPUInfo struct {
 	Accessible bool   // this account can open it read/write
 	Vendor     string // intel | amd | nvidia | other | ""
 	VendorID   string
-	DeviceID   string
 }
 
 // FSInfo is df output for the filesystem holding the home.
@@ -152,7 +150,6 @@ type QuotaInfo struct {
 	HardBytes int64
 	FilesUsed int64
 	FilesSoft int64
-	FilesHard int64
 	Source    string // "quota" or "file"
 	Age       time.Duration
 }
@@ -161,9 +158,7 @@ type QuotaInfo struct {
 type TrafficSeries struct {
 	OK       bool
 	MonthMiB float64 // rolling 30 days
-	WeekMiB  float64
 	DayMiB   float64
-	HourMiB  float64
 	Min15MiB float64
 	Daily    map[string]float64 // "2006/01/02" -> MiB
 }
@@ -191,7 +186,6 @@ type CgroupInfo struct {
 type AccountInfo struct {
 	OK             bool
 	QuotaGiB       float64
-	QuotaBurstGiB  float64
 	RAMMiB         float64
 	DockerEnabled  bool
 	TrafficCapMbit float64
@@ -202,15 +196,12 @@ type AccountInfo struct {
 type QbtInfo struct {
 	BinaryPresent bool
 	Running       bool
-	PIDs          []int
 	ConfPort      int
-	ConfAddress   string
 	LocalHostAuth bool // true = auth is bypassed for localhost (WebUI\LocalHostAuth=false)
 	ConfFound     bool
 	SubnetBypass  bool   // WebUI\AuthSubnetWhitelistEnabled=true
 	SubnetList    string // WebUI\AuthSubnetWhitelist
 	Username      string
-	ReverseProxy  bool
 	BinaryVersion string // "v5.2.3" from ~/bin/qbittorrent-nox --version
 	StartHelper   bool   // ~/bin/qbt-start exists
 	CronEntries   int    // crontab lines mentioning qbt-start
@@ -219,7 +210,6 @@ type QbtInfo struct {
 // DockerInfo reports the rootless daemon's presence.
 type DockerInfo struct {
 	SocketPresent bool
-	Running       bool
 }
 
 // Sections splits untagged probe output into named sections (tests and
@@ -272,7 +262,6 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap := &Snapshot{At: now}
 	snap.UID, _ = strconv.Atoi(strings.TrimSpace(s["uid"]))
 	snap.User = strings.TrimSpace(s["user"])
-	snap.Home = strings.TrimSpace(s["home"])
 	snap.Hostname = strings.TrimSpace(s["hostname"])
 	if ts, err := strconv.ParseInt(strings.TrimSpace(s["now"]), 10, 64); err == nil && ts > 0 {
 		snap.At = time.Unix(ts, 0)
@@ -287,7 +276,6 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap.Listeners, snap.ListenersKnown = parseListeners(s["listen"])
 	snap.Docker = DockerInfo{
 		SocketPresent: strings.TrimSpace(s["docker_sock"]) == "1",
-		Running:       strings.TrimSpace(s["docker_pid"]) != "",
 	}
 	return snap, nil
 }
@@ -333,7 +321,6 @@ func parseHost(s map[string]string) HostInfo {
 			g.VendorID = f[2]
 		}
 		if len(f) > 3 {
-			g.DeviceID = f[3]
 		}
 		switch strings.ToLower(g.VendorID) {
 		case "0x8086":
@@ -437,13 +424,13 @@ func parseQuota(s map[string]string, now time.Time) QuotaInfo {
 	if v, ok := parseQuotaLine(s["quota"]); ok {
 		q.OK, q.Source = true, "quota"
 		q.UsedBytes, q.SoftBytes, q.HardBytes = v[0], v[1], v[2]
-		q.FilesUsed, q.FilesSoft, q.FilesHard = v[3], v[4], v[5]
+		q.FilesUsed, q.FilesSoft = v[3], v[4]
 		return q
 	}
 	if v, ok := parseQuotaLine(s["quota_file"]); ok {
 		q.OK, q.Source = true, "file"
 		q.UsedBytes, q.SoftBytes, q.HardBytes = v[0], v[1], v[2]
-		q.FilesUsed, q.FilesSoft, q.FilesHard = v[3], v[4], v[5]
+		q.FilesUsed, q.FilesSoft = v[3], v[4]
 		if mt, err := strconv.ParseInt(strings.TrimSpace(s["quota_mtime"]), 10, 64); err == nil && mt > 0 {
 			q.Age = now.Sub(time.Unix(mt, 0))
 		}
@@ -471,9 +458,7 @@ func parseSeries(raw string) TrafficSeries {
 	}
 	ts.OK = true
 	ts.MonthMiB, _ = r.Float("month")
-	ts.WeekMiB, _ = r.Float("week")
 	ts.DayMiB, _ = r.Float("day")
-	ts.HourMiB, _ = r.Float("hour")
 	ts.Min15MiB, _ = r.Float("15min")
 	if d := arr.Array("daily"); d != nil {
 		for _, k := range d.Keys {
@@ -566,7 +551,6 @@ func parseAccount(raw string) AccountInfo {
 	}
 	a.OK = true
 	a.QuotaGiB = num("quota")
-	a.QuotaBurstGiB = num("quotaBurst")
 	a.RAMMiB = num("ramMiB")
 	if a.RAMMiB == 0 {
 		a.RAMMiB = num("rtorrentRam")
@@ -579,12 +563,7 @@ func parseAccount(raw string) AccountInfo {
 
 func parseQbt(s map[string]string) QbtInfo {
 	q := QbtInfo{BinaryPresent: strings.TrimSpace(s["qbt_bin"]) != ""}
-	for _, p := range strings.Fields(s["qbt_pid"]) {
-		if n, err := strconv.Atoi(p); err == nil {
-			q.PIDs = append(q.PIDs, n)
-		}
-	}
-	q.Running = len(q.PIDs) > 0
+	q.Running = len(strings.Fields(s["qbt_pid"])) > 0
 	q.BinaryVersion = qbtVersionString(s["qbt_bin_version"])
 	q.StartHelper = strings.TrimSpace(s["qbt_start_helper"]) == "1"
 	q.CronEntries, _ = strconv.Atoi(strings.TrimSpace(s["qbt_cron"]))
@@ -597,8 +576,6 @@ func parseQbt(s map[string]string) QbtInfo {
 		switch k {
 		case `WebUI\Port`:
 			q.ConfPort, _ = strconv.Atoi(v)
-		case `WebUI\Address`:
-			q.ConfAddress = v
 		case `WebUI\LocalHostAuth`:
 			q.LocalHostAuth = strings.EqualFold(v, "false")
 		case `WebUI\AuthSubnetWhitelistEnabled`:
@@ -607,8 +584,6 @@ func parseQbt(s map[string]string) QbtInfo {
 			q.SubnetList = v
 		case `WebUI\Username`:
 			q.Username = v
-		case `WebUI\ReverseProxySupportEnabled`:
-			q.ReverseProxy = strings.EqualFold(v, "true")
 		}
 	}
 	return q

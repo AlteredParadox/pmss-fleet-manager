@@ -40,13 +40,12 @@ import (
 
 // Config describes how to reach one box.
 type Config struct {
-	Host          string
-	Port          int
-	User          string
-	AuthMethod    string // "key", "agent", "password", "" = try everything available
-	KeyPath       string
-	KeyPassphrase string
-	Password      string
+	Host       string
+	Port       int
+	User       string
+	AuthMethod string // "key", "agent", "password", "" = try everything available
+	KeyPath    string
+	Password   string
 	// HostKey is the pinned public key in authorized_keys format ("ssh-ed25519 AAAA...").
 	// Empty means trust on first use; the key seen is then available via Client.HostKey().
 	HostKey string
@@ -166,12 +165,7 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, error) {
 				}
 				continue
 			}
-			var s ssh.Signer
-			if cfg.KeyPassphrase != "" {
-				s, err = ssh.ParsePrivateKeyWithPassphrase(pem, []byte(cfg.KeyPassphrase))
-			} else {
-				s, err = ssh.ParsePrivateKey(pem)
-			}
+			s, err := ssh.ParsePrivateKey(pem)
 			if err != nil {
 				if cfg.KeyPath != "" {
 					return nil, fmt.Errorf("parse key %s: %w", p, err)

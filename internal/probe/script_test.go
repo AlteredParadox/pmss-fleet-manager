@@ -45,7 +45,7 @@ func TestScriptRunsLocally(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v\n%s", err, out.String())
 	}
-	if snap.UID == 0 || snap.User == "" || snap.Home == "" {
+	if snap.UID == 0 || snap.User == "" {
 		t.Fatalf("identity missing: %+v", snap)
 	}
 	if snap.Host.UptimeSec <= 0 || snap.Host.NCPU <= 0 || snap.Host.MemTotal <= 0 {
