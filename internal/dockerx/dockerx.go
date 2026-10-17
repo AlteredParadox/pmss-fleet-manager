@@ -131,8 +131,8 @@ func (c *Client) Containers(ctx context.Context) ([]Container, error) {
 
 // Stats is a reduced one-shot resource sample for a container.
 type Stats struct {
-	CPUPct   float64 `json:"cpu_pct"`
-	MemUsage int64   `json:"mem_usage"`
+	CPUPct   float64
+	MemUsage int64
 }
 
 type rawStats struct {

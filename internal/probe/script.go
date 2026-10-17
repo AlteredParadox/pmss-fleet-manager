@@ -80,13 +80,13 @@ if [ -f "/sys/fs/cgroup/memory/$S/memory.usage_in_bytes" ]; then
   m=/sys/fs/cgroup/memory/$S
   echo "mem_usage=$(cat $m/memory.usage_in_bytes)"
   echo "mem_limit=$(cat $m/memory.limit_in_bytes)"
-  awk '$1=="total_rss"{print "mem_rss="$2} $1=="total_cache"{print "mem_cache="$2} $1=="total_inactive_file"{print "mem_inactive_file="$2}' $m/memory.stat 2>/dev/null
+  awk '$1=="total_rss"{print "mem_rss="$2} $1=="total_cache"{print "mem_cache="$2}' $m/memory.stat 2>/dev/null
   awk '$1=="oom_kill"{print "oom_kill="$2}' $m/memory.oom_control 2>/dev/null
 elif [ -f "/sys/fs/cgroup/$S/memory.current" ]; then
   m=/sys/fs/cgroup/$S
   echo "mem_usage=$(cat $m/memory.current)"
   echo "mem_limit=$(cat $m/memory.max)"
-  awk '$1=="anon"{print "mem_rss="$2} $1=="file"{print "mem_cache="$2} $1=="inactive_file"{print "mem_inactive_file="$2}' $m/memory.stat 2>/dev/null
+  awk '$1=="anon"{print "mem_rss="$2} $1=="file"{print "mem_cache="$2}' $m/memory.stat 2>/dev/null
   awk '$1=="oom_kill"{print "oom_kill="$2}' $m/memory.events 2>/dev/null
 fi
 for d in "/sys/fs/cgroup/cpu,cpuacct/$S" "/sys/fs/cgroup/cpuacct/$S"; do
@@ -112,7 +112,7 @@ sec listen
 # directory name the socket's owner chooses, which can contain "uid:<ours>"
 # or even a newline and a fabricated row. /proc/net/tcp is kernel-formatted
 # with no attacker-controlled text.
-awk '$4=="0A"{x=$2; sub(/.*:/,"",x); print "h", x, $8}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+awk '$4=="0A"{x=$2; a=x; sub(/.*:/,"",x); sub(/:.*/,"",a); print "h", x, $8, a}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
 sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version; [ -x "$home/bin/qbittorrent-nox" ] && timeout 10 "$home/bin/qbittorrent-nox" --version 2>/dev/null | head -n 1
 sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0

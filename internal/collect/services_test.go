@@ -88,3 +88,14 @@ func TestBusDropsSlowSubscriber(t *testing.T) {
 	}
 	cancel() // must be safe after the bus already dropped the subscriber
 }
+
+func TestMibToBytesClamps(t *testing.T) {
+	if mibToBytes(1) != 1048576 || mibToBytes(-1) != 0 || mibToBytes(1e300) != 1<<62 {
+		t.Fatalf("%d %d %d", mibToBytes(1), mibToBytes(-1), mibToBytes(1e300))
+	}
+	nan := 0.0
+	nan = nan / nan
+	if mibToBytes(nan) != 0 {
+		t.Fatal("NaN must clamp to 0")
+	}
+}

@@ -128,7 +128,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 		}
 		// The definitive signal that memory ran out: the kernel killed something.
 		if t, err := time.Parse(time.RFC3339, s.RAM.LastOOM); err == nil && time.Since(t) < 24*time.Hour {
-			active = append(active, want{"oom", "bad", fmt.Sprintf("%s: the kernel OOM-killed a process at %s (%d kills in total)", name, t.Local().Format("Jan 2 15:04"), s.RAM.OOMKills)})
+			active = append(active, want{"oom", "bad", fmt.Sprintf("%s: the kernel OOM-killed a process in the slice (noticed %s; %d kills in total)", name, t.Local().Format("Jan 2 15:04"), s.RAM.OOMKills)})
 		}
 	}
 	if renewal := s.EffectiveRenewal(); renewal != "" {

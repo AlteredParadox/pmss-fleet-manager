@@ -46,7 +46,8 @@ crontab lines.
 
 **Alerts.** Unreachable box, suspended account, disk at threshold or over
 quota, traffic at threshold, throttled, qBittorrent or Docker down, container
-exited non-zero, RAM near its limit, renewal within N days or overdue. Alerts
+exited non-zero, process memory near the slice limit, a kernel OOM kill in
+the slice, renewal within N days or overdue. Alerts
 auto-resolve, can be acknowledged or dismissed, and the count shows in the
 sidebar. Live updates arrive over server-sent events.
 

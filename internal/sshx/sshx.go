@@ -238,9 +238,29 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 	if cli == nil {
 		return nil, nil, errors.New("ssh: not connected")
 	}
-	sess, err := cli.NewSession()
-	if err != nil {
-		return nil, nil, err
+	// NewSession blocks until the peer answers the channel open; bound it
+	// by ctx too, or a connection that died after the keepalive hangs the
+	// poll for the TCP retransmit timeout.
+	type sessRes struct {
+		s   *ssh.Session
+		err error
+	}
+	sch := make(chan sessRes, 1)
+	go func() { s, err := cli.NewSession(); sch <- sessRes{s, err} }()
+	var sess *ssh.Session
+	select {
+	case <-ctx.Done():
+		go func() { // release the session if it does arrive later
+			if r := <-sch; r.s != nil {
+				r.s.Close()
+			}
+		}()
+		return nil, nil, ctx.Err()
+	case r := <-sch:
+		if r.err != nil {
+			return nil, nil, r.err
+		}
+		sess = r.s
 	}
 	defer sess.Close()
 	var out, errb bytes.Buffer

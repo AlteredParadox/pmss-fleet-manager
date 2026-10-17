@@ -301,22 +301,27 @@ func (p *poller) poll(ctx context.Context) {
 	if p.box.QbtEnabled {
 		p.pollQbt(ctx, &st, snap)
 	} else {
-		st.Qbt = QbtState{Enabled: false, Installed: snap.Qbt.BinaryPresent, ProcessUp: snap.Qbt.Running, Port: snap.Qbt.ConfPort,
+		// Monitoring off: still report what the probe saw, including whether
+		// the binary on disk is behind the latest release.
+		qs := QbtState{Enabled: false, Installed: snap.Qbt.BinaryPresent, ProcessUp: snap.Qbt.Running, Port: qbtPortFor(p.box, snap.Qbt.ConfPort),
 			BinaryVersion: snap.Qbt.BinaryVersion, StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0}
+		qs.LatestVersion = p.m.latest.get(ctx)
+		qs.UpdateAvail = qs.BinaryVersion != "" && qs.LatestVersion != "" && versionLess(qs.BinaryVersion, qs.LatestVersion)
+		st.Qbt = qs
 	}
 	if p.box.DockerEnabled {
 		p.pollDocker(ctx, &st, snap)
 	} else {
 		st.Docker = DockerState{Enabled: false, SocketUp: snap.Docker.SocketPresent}
 	}
-	p.maybeDu(ctx, &st)
-
 	if ctx.Err() != nil {
 		// Cancelled by an edit/removal/shutdown part-way through: whatever
 		// the qbt/docker stages reported is an artefact of the cancel, not
-		// a real failure. Do not classify, record or alert on it.
+		// a real failure. Do not schedule a du, classify, record or alert.
 		return
 	}
+	p.maybeDu(ctx, &st)
+	st.Unpolled = false
 	st.Failures = 0
 	st.LastError = ""
 	st.LastOK = time.Now()
@@ -387,10 +392,10 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	const mib = 1 << 20
 	st.Traffic = TrafficState{
 		OK:             t.Out.OK,
-		OutMonthBytes:  int64(t.Out.MonthMiB * mib),
-		InMonthBytes:   int64(t.In.MonthMiB * mib),
-		OutDayBytes:    int64(t.Out.DayMiB * mib),
-		InDayBytes:     int64(t.In.DayMiB * mib),
+		OutMonthBytes:  mibToBytes(t.Out.MonthMiB),
+		InMonthBytes:   mibToBytes(t.In.MonthMiB),
+		OutDayBytes:    mibToBytes(t.Out.DayMiB),
+		InDayBytes:     mibToBytes(t.In.DayMiB),
 		LimitBytes:     int64(t.EffectiveLimitGiB * (1 << 30)),
 		BaseLimitBytes: int64(t.LimitGiB * (1 << 30)),
 		BonusBytes:     int64(t.BonusGiB * (1 << 30)),
@@ -408,13 +413,16 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 
 	c := snap.Cgroup
 	ram := RAMState{OK: c.MemUsage > 0, UsedBytes: c.MemUsage, RSSBytes: c.MemRSS, CacheBytes: c.MemCache, LimitBytes: c.MemLimit, Pids: c.Pids,
-		OOMKills: c.OOMKills, LastOOM: st.RAM.LastOOM}
-	if st.RAM.OK && c.OOMKills > st.RAM.OOMKills {
-		ram.LastOOM = time.Now().UTC().Format(time.RFC3339) // the kernel really ran out since last poll
+		OOMKills: c.OOMKills, OOMKnown: c.OOMKnown, LastOOM: st.RAM.LastOOM}
+	// Only a rise against a KNOWN baseline is a kill: a state cached by an
+	// older build or a box that only now reports the counter has no
+	// baseline, and the lifetime count would alert on upgrade.
+	if st.RAM.OK && st.RAM.OOMKnown && c.OOMKnown && c.OOMKills > st.RAM.OOMKills {
+		ram.LastOOM = time.Now().UTC().Format(time.RFC3339)
 	}
 	st.RAM = ram
 	if st.RAM.LimitBytes == 0 && snap.Account.RAMMiB > 0 {
-		st.RAM.LimitBytes = int64(snap.Account.RAMMiB * mib)
+		st.RAM.LimitBytes = mibToBytes(snap.Account.RAMMiB)
 	}
 	// Pressure is process memory against the limit. The charged figure
 	// includes page cache, which on a seedbox is simply every torrent byte
@@ -706,6 +714,9 @@ func (p *poller) forceDu() {
 }
 
 func (p *poller) maybeDu(ctx context.Context, st *BoxState) {
+	if ctx.Err() != nil {
+		return
+	}
 	st.Dirs.Enabled = p.box.DuEnabled
 	// The persisted state keeps Dirs.At but drops the entries (Summary), and
 	// a du finishing mid-poll is overwritten by that poll's stale copy, so

@@ -37,6 +37,20 @@ func HumanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// mibToBytes converts a MiB figure from the box to bytes, clamped so a
+// corrupt value cannot wrap to a negative int64.
+func mibToBytes(mib float64) int64 {
+	const max = float64(1 << 62)
+	b := mib * 1048576
+	switch {
+	case b != b || b < 0: // NaN or negative
+		return 0
+	case b > max:
+		return 1 << 62
+	}
+	return int64(b)
+}
+
 // clip bounds a remote-supplied string so a hostile box cannot bloat state,
 // the database or every SSE event. Cuts on a rune boundary.
 func clip(s string, max int) string {

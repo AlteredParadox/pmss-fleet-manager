@@ -168,7 +168,6 @@ func (m *Manager) startPoller(bp *store.Box) {
 		keep := st
 		st = cached
 		st.adoptIdentity(keep)
-		st.Qbt.Torrents, st.Docker.Containers = nil, nil
 		st.resetVolatile()
 	}
 	var auth qbt.AuthState
@@ -187,6 +186,11 @@ func (m *Manager) startPoller(bp *store.Box) {
 	if authKnown {
 		p.guard.Restore(auth)
 	}
+	// A login the add/edit wizard already saw rejected must not be retried
+	// by the first poll; seed before the run loop can start.
+	if ds, ok := detectGuardState(b.Host, b.QbtPort, b.QbtUser, b.QbtPass); ok {
+		p.guard.Restore(ds)
+	}
 	m.pollers[b.ID] = p
 	m.mu.Unlock()
 	if b.Enabled {
@@ -195,6 +199,17 @@ func (m *Manager) startPoller(bp *store.Box) {
 			defer m.wg.Done()
 			p.run(p.ctx)
 		}()
+	} else {
+		// No poll will ever run the hooks: let the alert rules see the
+		// disabled status now so open alerts for this box resolve.
+		m.runHooks(st)
+	}
+}
+
+// runHooks evaluates the hooks on a copy of a state outside any lock.
+func (m *Manager) runHooks(st BoxState) {
+	for _, h := range m.hooks {
+		h(m.ctx, &st)
 	}
 }
 
@@ -255,10 +270,6 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 		return err
 	}
 	m.startPoller(b)
-	if p := m.poller(b.ID); p != nil {
-		// A login the add wizard already saw rejected must not be retried.
-		p.guard.Restore(detectGuard(b.Host, b.QbtPort, b.QbtUser, b.QbtPass).State())
-	}
 	if s, ok := m.State(b.ID); ok {
 		sum := s.Summary()
 		m.Publish(Event{Type: "state", BoxID: b.ID, State: &sum})
@@ -271,16 +282,19 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 	if err := m.st.UpdateBox(ctx, b); err != nil {
 		return err
 	}
-	fresh, err := m.st.GetBox(ctx, b.ID)
-	if err != nil {
-		return err
-	}
 	m.mu.Lock()
 	p := m.pollers[b.ID]
 	prev := m.states[b.ID]
 	m.mu.Unlock()
 	if p != nil {
 		p.stopAndWait()
+	}
+	// Read the record only after the old poller is gone: its last
+	// successful dial could otherwise pin a host key onto the record
+	// between our write and this read.
+	fresh, err := m.st.GetBox(ctx, b.ID)
+	if err != nil {
+		return err
 	}
 	if b.QbtPass != "" {
 		// A password was typed in: treat it as an explicit request to try
@@ -303,6 +317,9 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 		}
 		m.states[fresh.ID] = &keep
 		m.mu.Unlock()
+		if !fresh.Enabled {
+			m.runHooks(keep) // resolve open alerts: nothing will poll this box now
+		}
 	}
 	if s, ok := m.State(fresh.ID); ok {
 		sum := s.Summary()
@@ -366,6 +383,7 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		out, err = p.qbtRestart(ctx)
 		if err == nil {
 			p.guard.Clear() // a fresh qbittorrent-nox has a fresh failed-login counter
+			detectGuard(p.box.Host, p.box.QbtPort, p.box.QbtUser, p.box.QbtPass).Clear()
 		}
 	case "autostart":
 		out, err = p.qbtAutostart(ctx)
@@ -374,8 +392,24 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		// already running, so it does not prove a fresh process.
 		err = p.qbtAction(ctx, action)
 	}
+	if err == nil && (action == "restart" || action == "stop") {
+		// The port is free until the client is back: whoever binds it next
+		// must be verified again before any credential-sending action.
+		m.mutateState(id, func(s *BoxState) { s.Qbt.PortOK, s.Qbt.Reachable = false, false })
+	}
 	p.wake()
 	return out, err
+}
+
+// mutateState applies fn to a copy of the stored state and stores the copy.
+func (m *Manager) mutateState(id int64, fn func(*BoxState)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cur, ok := m.states[id]; ok {
+		cp := *cur
+		fn(&cp)
+		m.states[id] = &cp
+	}
 }
 
 // ContainerAction performs start|stop|restart on a container.
@@ -383,6 +417,9 @@ func (m *Manager) ContainerAction(ctx context.Context, id int64, cid, action str
 	p := m.poller(id)
 	if p == nil {
 		return store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return errors.New("polling is disabled for this box; enable it before running actions")
 	}
 	err := p.containerAction(ctx, cid, action)
 	p.wake()
@@ -394,6 +431,9 @@ func (m *Manager) RunDu(id int64) error {
 	p := m.poller(id)
 	if p == nil {
 		return store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return errors.New("polling is disabled for this box; enable it before running actions")
 	}
 	p.forceDu()
 	return nil
@@ -426,6 +466,9 @@ func (m *Manager) RawProbe(ctx context.Context, id int64) (map[string]string, er
 	p := m.poller(id)
 	if p == nil {
 		return nil, store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return nil, errors.New("polling is disabled for this box; enable it before running actions")
 	}
 	return p.rawProbe(ctx)
 }
