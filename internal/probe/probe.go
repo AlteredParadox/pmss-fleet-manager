@@ -48,6 +48,63 @@ type Snapshot struct {
 	Account AccountInfo
 	Qbt     QbtInfo
 	Docker  DockerInfo
+
+	// Listeners maps a listening TCP port to the uid that owns the socket,
+	// from /proc/net/tcp{,6}. On a shared host any tenant can bind a free
+	// loopback port, so before sending WebUI credentials the poller checks
+	// the port is ours. ListenersKnown is false when /proc/net/tcp could not
+	// be read, in which case nothing can be verified.
+	Listeners      map[int]int
+	ListenersKnown bool
+}
+
+// PortOwner reports who listens on port: our uid, another uid, or nobody.
+// ok is true only when the port is verifiably ours or ownership cannot be
+// determined at all; reason explains a refusal.
+func (s *Snapshot) PortOwner(port int) (ok bool, reason string) {
+	if !s.ListenersKnown {
+		return true, ""
+	}
+	uid, found := s.Listeners[port]
+	switch {
+	case !found:
+		return false, fmt.Sprintf("nothing is listening on port %d", port)
+	case uid != s.UID:
+		return false, fmt.Sprintf("port %d is owned by uid %d, not by this account; refusing to connect or send credentials to it", port, uid)
+	}
+	return true, ""
+}
+
+// parseListeners reads /proc/net/tcp and tcp6 rows in state 0A (LISTEN).
+func parseListeners(text string) (map[int]int, bool) {
+	out := map[int]int{}
+	known := false
+	for _, line := range strings.Split(text, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 8 || f[0] == "sl" {
+			continue
+		}
+		known = true
+		if f[3] != "0A" {
+			continue
+		}
+		i := strings.LastIndexByte(f[1], ':')
+		if i < 0 {
+			continue
+		}
+		port, err := strconv.ParseInt(f[1][i+1:], 16, 32)
+		if err != nil {
+			continue
+		}
+		uid, err := strconv.Atoi(f[7])
+		if err != nil {
+			continue
+		}
+		if _, dup := out[int(port)]; !dup {
+			out[int(port)] = uid
+		}
+	}
+	return out, known
 }
 
 // HostInfo is shared-host information from /proc and /etc.
@@ -227,6 +284,7 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap.Cgroup = parseCgroup(s["cgroup"])
 	snap.Account = parseAccount(s["pmss_user"])
 	snap.Qbt = parseQbt(s)
+	snap.Listeners, snap.ListenersKnown = parseListeners(s["listen"])
 	snap.Docker = DockerInfo{
 		SocketPresent: strings.TrimSpace(s["docker_sock"]) == "1",
 		Running:       strings.TrimSpace(s["docker_pid"]) != "",

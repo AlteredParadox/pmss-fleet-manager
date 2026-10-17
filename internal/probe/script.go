@@ -95,6 +95,7 @@ if [ -f "/sys/fs/cgroup/pids/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/c
 elif [ -f "/sys/fs/cgroup/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/cgroup/$S/pids.current)"; fi
 sec qbt_conf; grep -E '^WebUI\\(Port|Address|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|HostHeaderValidation|ReverseProxySupportEnabled|TrustedReverseProxiesList|Username|MaxAuthenticationFailCount|BanDuration)=' "$home/.config/qBittorrent/qBittorrent.conf" 2>/dev/null
 sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
+sec listen; cat /proc/net/tcp /proc/net/tcp6 2>/dev/null
 sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version; [ -x "$home/bin/qbittorrent-nox" ] && timeout 10 "$home/bin/qbittorrent-nox" --version 2>/dev/null | head -n 1
 sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
