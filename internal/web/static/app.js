@@ -553,14 +553,25 @@ function ovPlanBillingPanel(b, renewDays) {
       <div><span>renews</span><span class="${renewDays !== null && renewDays <= (S.settings.renewal_warn_days || 7) ? 'warn' : ''}">${renewalOf(b) ? `${esc(renewalOf(b))} (${renewDays < 0 ? 'overdue' : renewDays + 'd'})` : '—'}</span></div>
       ${b.service ? billingRows(b.service) : `<div><span>billing</span><span class="muted">${S.settings.has_pm_api_key ? 'no matching service in the API feed' : 'set a Pulsed Media API key in settings'}</span></div>`}
       <div><span>datacenter</span><span>${esc(b.datacenter || '—')}</span></div>
+      <div><span>links</span><span>${boxLinks(b).map(([l, u]) => `<a href="${esc(safeHref(u))}" target="_blank" rel="noopener">${l} ↗</a>`).join(' · ')}</span></div>
     </div>`;
+}
+// [label, url] pairs for the links row: the Pulsed Media API's service links
+// when a service is matched, then the box's own per-user pages.
+function boxLinks(b) {
+  const sv = b.service || {};
+  const out = [];
+  if (sv.login_url) out.push(['web ui', sv.login_url]);
+  if (sv.permanent_address) out.push(['permanent address', sv.permanent_address]);
+  out.push(['data', userUrl(b, 'data/')]);
+  if (b.type === 'seedbox') out.push(['qbittorrent', userUrl(b, 'qbittorrent')]);
+  return out;
 }
 function billingRows(sv) {
   const u = sv.usage;
   return `
       <div><span>billing</span><span>${fmtMoney(sv.recurring_amount, sv.currency)} / ${esc(cycleShort(sv.billing_cycle))}${sv.monthly && cycleShort(sv.billing_cycle) !== 'mo' ? ` <span class="muted">· ${fmtMoney(sv.monthly, sv.currency)}/mo</span>` : ''}${sv.status && sv.status !== 'Active' ? ` · <span class="warn">${esc(sv.status)}</span>` : ''}</span></div>
       <div><span>service</span><span><span class="muted">#${sv.id}${sv.registered ? ` · since ${esc(sv.registered)}` : ''}</span></span></div>
-      <div><span>links</span><span>${sv.login_url ? `<a href="${esc(safeHref(sv.login_url))}" target="_blank" rel="noopener">web ui ↗</a>` : ''}${sv.permanent_address ? ` · <a href="${esc(safeHref(sv.permanent_address))}" target="_blank" rel="noopener">permanent address ↗</a>` : ''}</span></div>
       ${u ? `<div><span>pm traffic</span><span class="muted" title="as tracked by Pulsed Media since ${esc(u.tracked_since || '?')}">↑ ${fmtBytes(u.sent_bytes, 1)} · ↓ ${fmtBytes(u.received_bytes, 1)}</span></div>
       <div><span>pm usage</span><span class="muted">${fmtBytes(u.disk_used_bytes, 1)} disk · ${u.cpu_hours} cpu h · ${u.torrents} torrents</span></div>` : ''}`;
 }
@@ -718,9 +729,10 @@ function tabStorage(b) {
 // One row of the access panel: a per-user link on the box's own web server.
 // Every tenant path hangs off https://<host>/user-<name>/, so only the tail
 // differs ('' for the panel, 'data/', 'qbittorrent').
+function userUrl(b, tail) { return `https://${b.hostname || b.host}/user-${b.user}/${tail}`; }
 function userLinkRow(b, label, tail) {
-  const path = `${esc(b.hostname || b.host)}/user-${esc(b.user)}/${tail}`;
-  return `<div><span>${label}</span><a href="https://${path}" target="_blank" rel="noopener">${path}</a></div>`;
+  const u = esc(userUrl(b, tail));
+  return `<div><span>${label}</span><a href="${u}" target="_blank" rel="noopener">${u.replace(/^https:\/\//, '')}</a></div>`;
 }
 function tabHost(b) {
   const h = b.host_sys;
