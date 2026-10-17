@@ -124,3 +124,15 @@ func TestSanitizeFloats(t *testing.T) {
 		t.Fatalf("gib: %d %d %d", gibToBytes(1), gibToBytes(1e12), gibToBytes(-3))
 	}
 }
+
+func TestRetryInterval(t *testing.T) {
+	base := 30 * time.Second
+	for failures, want := range map[int]time.Duration{0: base, 1: base, 4: base, 5: 60 * time.Second, 6: 2 * time.Minute, 7: 4 * time.Minute, 8: 8 * time.Minute, 9: 10 * time.Minute, 50: 10 * time.Minute} {
+		if got := retryInterval(base, failures); got != want {
+			t.Errorf("failures=%d: got %s want %s", failures, got, want)
+		}
+	}
+	if got := retryInterval(15*time.Minute, 9); got != 15*time.Minute {
+		t.Fatalf("a base above the cap must not be shortened: %s", got)
+	}
+}
