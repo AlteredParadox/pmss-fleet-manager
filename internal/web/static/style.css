@@ -123,8 +123,8 @@ h1{margin:2px 0 0;font-size:22px;font-weight:600;letter-spacing:-.01em}
 .trow.click{cursor:pointer}.trow.click:hover{background:var(--panel2)}
 .fleet-table .trow{grid-template-columns:minmax(170px,1.5fr) 80px minmax(120px,1fr) minmax(130px,1fr) minmax(130px,1fr) 160px 100px 90px 80px;min-width:1120px}
 .fleet-table .trow>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tor-table .trow{grid-template-columns:minmax(240px,2fr) 90px 130px 100px 100px 70px 190px;min-width:950px;padding:10px 16px}
-.tor-table .trow .actions{justify-content:flex-end}
+.tor-table .trow{grid-template-columns:minmax(240px,2fr) 90px 130px 100px 100px 70px 210px;min-width:970px;padding:10px 16px}
+.tor-table .trow .actions,.tor-table .thead-tools .actions{flex-wrap:nowrap;justify-content:flex-end} /* filter + pause/resume on one line, stop/remove/+files on one line */
 .tor-table .trow.head{padding:8px 16px;font-size:10.5px}
 .ctr-table .trow{grid-template-columns:minmax(160px,1.3fr) minmax(200px,1.5fr) 110px minmax(140px,1fr) 90px 110px 150px;min-width:960px;padding:10px 16px}
 .ctr-table .trow.head{padding:8px 16px;font-size:10.5px}
