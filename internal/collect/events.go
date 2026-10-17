@@ -51,7 +51,10 @@ func (b *Bus) Subscribe() (<-chan Event, func()) {
 	}
 }
 
-// Publish sends to every subscriber without blocking.
+// Publish sends to every subscriber without blocking. A subscriber whose
+// buffer is full is dropped and its channel closed: silently losing an
+// event would leave that client's view stale until the next poll, whereas
+// ending the stream makes the browser reconnect and resync everything.
 func (b *Bus) Publish(e Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -59,6 +62,8 @@ func (b *Bus) Publish(e Event) {
 		select {
 		case ch <- e:
 		default:
+			delete(b.subs, ch)
+			close(ch)
 		}
 	}
 }

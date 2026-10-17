@@ -370,7 +370,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 		BonusBytes:     int64(t.BonusGiB * (1 << 30)),
 		Throttled:      t.Throttled,
 		CapMbit:        snap.Account.TrafficCapMbit,
-		Daily:          dailySeries(t.Out.Daily, t.In.Daily, snap.At),
+		Daily:          dailySeries(t.Out.Daily, t.In.Daily, snap.At.In(snap.Location)),
 	}
 	st.Traffic.Pct = pct(st.Traffic.OutMonthBytes, st.Traffic.LimitBytes)
 
@@ -432,7 +432,8 @@ func hwEncodeLabel(g probe.GPUInfo) string {
 	return "GPU"
 }
 
-// dailySeries builds the last 30 days, oldest first, zero-filled.
+// dailySeries builds the last 30 days, oldest first, zero-filled. now must
+// be in the box's zone: PMSS writes the keys with PHP date('Y/m/d') there.
 func dailySeries(out, in map[string]float64, now time.Time) []DayPoint {
 	pts := make([]DayPoint, 0, 30)
 	for i := 29; i >= 0; i-- {
@@ -842,11 +843,17 @@ func (p *poller) rawProbe(ctx context.Context) (map[string]string, error) {
 	}
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.Script))
+	tag := probe.NewTag()
+	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)))
 	if err != nil && len(out) == 0 {
 		return nil, fmt.Errorf("probe: %v %s", err, strings.TrimSpace(string(stderr)))
 	}
-	secs := probe.Sections(out)
+	secs := probe.SectionsTagged(out, tag)
+	// The account config is shown as the fields the parser uses, not the
+	// raw file: PMSS may add fields there that are not ours to display.
+	if raw, ok := secs["pmss_user"]; ok {
+		secs["pmss_user"] = probe.AccountSummary(raw)
+	}
 	for k, v := range secs {
 		if len(v) > 4096 {
 			secs[k] = v[:4096] + "…"
