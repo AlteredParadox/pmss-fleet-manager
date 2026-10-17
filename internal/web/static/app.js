@@ -20,10 +20,10 @@
 
 const S = {
   view: 'fleet', fleetView: 'cards', tab: 'overview', selId: null,
-  boxes: [], totals: {}, unacked: 0, settings: {}, detail: null, detailBox: null,
+  boxes: [], totals: {}, unacked: 0, settings: {}, detail: null,
   alerts: [], filter: '', live: false,
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
-  settingsDraft: null, busy: {},
+  settingsDraft: null,
 };
 
 /* ---------- helpers ---------- */
@@ -153,7 +153,6 @@ async function loadDetail(id) {
     const d = await api('GET', `/api/boxes/${id}`);
     if (S.selId !== id) return;
     S.detail = d.state;
-    S.detailBox = d.box;
     render();
   } catch (e) { toast(`box: ${e.message}`, 'bad'); }
 }
@@ -233,7 +232,7 @@ function render() { renderSide(); renderMain(); }
 
 function renderSide() {
   const t = S.totals || {};
-  const navActive = (v) => (S.view === v || (v === 'fleet' && (S.view === 'box' || S.view === 'edit')) || (v === 'add' && S.view === 'add')) ? 'active' : '';
+  const navActive = (v) => (S.view === v || (v === 'fleet' && (S.view === 'box' || S.view === 'edit'))) ? 'active' : '';
   $('#side').innerHTML = `
     <div class="brand"><div class="led"></div><div class="name">FLEET<span>.ctl</span></div></div>
     <button class="nav ${navActive('fleet')}" data-go="/fleet"><span>fleet</span></button>
@@ -277,7 +276,7 @@ function viewFleet() {
           <button class="${S.fleetView === 'cards' ? 'on' : ''}" data-fleetview="cards">cards</button>
           <button class="${S.fleetView === 'table' ? 'on' : ''}" data-fleetview="table">table</button>
         </div>
-        ${S.fleetView === 'cards' ? `<div class="seg" title="card size">${[[280, 'S'], [340, 'M'], [420, 'L'], [520, 'XL']].map(([px, l]) => `<button class="${cardMin() === px ? 'on' : ''}" data-cardsize="${px}">${l}</button>`).join('')}</div>` : ''}
+        ${S.fleetView === 'cards' ? `<div class="seg" title="card size">${CARD_SIZES.map(([px, l]) => `<button class="${cardMin() === px ? 'on' : ''}" data-cardsize="${px}">${l}</button>`).join('')}</div>` : ''}
         <button data-act="refresh-all">refresh all</button>
         <button class="primary" data-go="/add">+ add box</button>
       </div>
@@ -293,6 +292,7 @@ function viewFleet() {
     </div>
     ${body}`;
 }
+const CARD_SIZES = [[280, 'S'], [340, 'M'], [420, 'L'], [520, 'XL']];
 function cardMin() { return Number(S.settings.card_min_px) || 340; }
 function trafficLabel(b) {
   const tr = b.traffic;
@@ -796,7 +796,7 @@ function viewAlerts() {
   const open = S.alerts.filter((a) => a.active && !a.acked);
   const acked = S.alerts.filter((a) => a.active && a.acked);
   const done = S.alerts.filter((a) => !a.active).slice(0, 50);
-  const color = { bad: 'var(--bad)', warn: 'var(--warn)', ok: 'var(--ok)' };
+  const color = { bad: 'var(--bad)', warn: 'var(--warn)' };
   const row = (a) => `<div class="alert ${a.active && !a.acked ? '' : 'done'}">
       <span class="led" style="background:${color[a.severity] || 'var(--dim)'};box-shadow:0 0 8px ${color[a.severity] || 'transparent'}"></span>
       <div style="min-width:0"><div class="t">${esc(a.title)}</div>
@@ -824,7 +824,7 @@ function viewSettings() {
     <h1 style="margin:0 0 6px">Settings</h1>
     <div class="panel"><div class="tile-label">appearance</div>
       <div class="row"><span>theme</span><div class="seg"><button class="${s.theme !== 'light' ? 'on' : ''}" data-s-seg="theme" data-v="dark">dark</button><button class="${s.theme === 'light' ? 'on' : ''}" data-s-seg="theme" data-v="light">light</button></div></div>
-      <div class="row"><span>card size</span><div class="seg">${[[280, 'S'], [340, 'M'], [420, 'L'], [520, 'XL']].map(([px, l]) => `<button class="${Number(s.card_min_px) === px ? 'on' : ''}" data-s-seg="card_min_px" data-v="${px}">${l}</button>`).join('')}</div></div>
+      <div class="row"><span>card size</span><div class="seg">${CARD_SIZES.map(([px, l]) => `<button class="${Number(s.card_min_px) === px ? 'on' : ''}" data-s-seg="card_min_px" data-v="${px}">${l}</button>`).join('')}</div></div>
       <div class="row"><span>default fleet view</span><div class="seg"><button class="${s.fleet_view !== 'table' ? 'on' : ''}" data-s-seg="fleet_view" data-v="cards">cards</button><button class="${s.fleet_view === 'table' ? 'on' : ''}" data-s-seg="fleet_view" data-v="table">table</button></div></div>
     </div>
     <div class="panel"><div class="tile-label">polling &amp; alerts</div>
@@ -839,7 +839,6 @@ function viewSettings() {
       <div class="hint">Default is the userdocs static x86_64 build. Installed to ~/bin/qbittorrent-nox, mode 700, after an ELF and --version check.</div>
     </div>
     <div class="panel"><div class="tile-label">pulsedmedia account</div>
-      <label class="row">billing email<input data-s="billing_email" value="${esc(s.billing_email || '')}" placeholder="me@example.com"></label>
       <label class="row">client area<input data-s="client_area_url" value="${esc(s.client_area_url || '')}"></label>
       ${s.client_area_url ? `<div class="row"><span></span><a href="${esc(safeHref(s.client_area_url))}" target="_blank" rel="noopener">open client area ↗</a></div>` : ''}
       <label class="row">API key<input data-s="pm_api_key" type="password" autocomplete="off" value="${esc(s.pm_api_key || '')}" placeholder="${s.clear_pm_api_key ? 'will be removed on save' : S.settings.has_pm_api_key ? '•••••••• (stored)' : 'paste key'}"></label>
@@ -983,10 +982,6 @@ document.addEventListener('input', (e) => {
     const nf = $('[data-filter]');
     if (nf) { nf.focus(); nf.setSelectionRange(pos, pos); }
   }
-});
-document.addEventListener('change', (e) => {
-  const f = e.target.closest('[data-f]');
-  if (f && S.add.form && f.tagName === 'SELECT') { S.add.form[f.dataset.f] = f.value; if (f.dataset.f === 'auth_method') render(); }
 });
 window.addEventListener('hashchange', route);
 

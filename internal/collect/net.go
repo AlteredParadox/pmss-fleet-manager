@@ -16,9 +16,26 @@
 
 package collect
 
-import "net"
+import (
+	"fmt"
+	"net"
+)
 
 type netConn = net.Conn
+
+// HumanBytes formats a byte count for messages ("1.5 TiB").
+func HumanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
 
 // clip bounds a remote-supplied string so a hostile box cannot bloat state,
 // the database or every SSE event. Cuts on a rune boundary.

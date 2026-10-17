@@ -84,8 +84,6 @@ WebUI\LocalHostAuth=false
 /home/ragnar/bin/qbittorrent-nox
 @@docker_sock
 1
-@@docker_pid
-4300
 @@end
 `
 
@@ -104,7 +102,7 @@ func TestParse(t *testing.T) {
 		t.Fatalf("fs: %+v", snap.HomeFS)
 	}
 	q := snap.Quota
-	if !q.OK || q.Source != "quota" || q.UsedBytes != 1739461632*1024 || q.SoftBytes != 2097152000*1024 || q.FilesUsed != 12345 || q.FilesHard != 1250000 {
+	if !q.OK || q.Source != "quota" || q.UsedBytes != 1739461632*1024 || q.SoftBytes != 2097152000*1024 || q.FilesUsed != 12345 {
 		t.Fatalf("quota: %+v", q)
 	}
 	tr := snap.Traffic
@@ -123,7 +121,7 @@ func TestParse(t *testing.T) {
 	if !snap.Qbt.Running || snap.Qbt.ConfPort != 8089 || !snap.Qbt.LocalHostAuth || !snap.Qbt.BinaryPresent {
 		t.Fatalf("qbt: %+v", snap.Qbt)
 	}
-	if !snap.Docker.SocketPresent || !snap.Docker.Running {
+	if !snap.Docker.SocketPresent {
 		t.Fatalf("docker: %+v", snap.Docker)
 	}
 }

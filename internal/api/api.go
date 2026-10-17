@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -40,7 +39,6 @@ import (
 type Server struct {
 	st   *store.Store
 	m    *collect.Manager
-	log  *slog.Logger
 	auth string // "user:pass" or ""
 	mux  *http.ServeMux
 	// instance identifies this process; the UI reloads itself when it
@@ -94,8 +92,8 @@ const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inl
 	"font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 // New builds the handler tree.
-func New(st *store.Store, m *collect.Manager, log *slog.Logger, basicAuth string) *Server {
-	s := &Server{st: st, m: m, log: log, auth: basicAuth, mux: http.NewServeMux(),
+func New(st *store.Store, m *collect.Manager, basicAuth string) *Server {
+	s := &Server{st: st, m: m, auth: basicAuth, mux: http.NewServeMux(),
 		instance: strconv.FormatInt(time.Now().UnixNano(), 36)}
 	s.routes()
 	return s
@@ -110,7 +108,6 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/boxes/{id}", s.handleGetBox)
 	mux.HandleFunc("PUT /api/boxes/{id}", s.handleUpdateBox)
 	mux.HandleFunc("DELETE /api/boxes/{id}", s.handleDeleteBox)
-	mux.HandleFunc("GET /api/boxes/{id}/history", s.handleHistory)
 	mux.HandleFunc("POST /api/boxes/{id}/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
 	mux.HandleFunc("POST /api/boxes/{id}/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/boxes/{id}/du", s.handleDu)
@@ -139,7 +136,7 @@ func (s *Server) routes() {
 		fileServer.ServeHTTP(w, r)
 	})))
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" && !strings.HasPrefix(r.URL.Path, "/#") {
+		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
@@ -285,7 +282,6 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"instance":       s.instance,
 		"version":        s.Version(),
 		"source_url":     s.sourceURL(),
-		"now":            time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
@@ -514,27 +510,6 @@ func (s *Server) handleDeleteBox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
-}
-
-func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	id, err := idParam(r)
-	if err != nil {
-		writeErr(w, 400, err)
-		return
-	}
-	hours, _ := strconv.Atoi(r.URL.Query().Get("hours"))
-	if hours <= 0 || hours > 24*31 {
-		hours = 24
-	}
-	smps, err := s.st.Samples(r.Context(), id, time.Now().Add(-time.Duration(hours)*time.Hour))
-	if err != nil {
-		writeErr(w, 500, err)
-		return
-	}
-	if smps == nil {
-		smps = []store.Sample{}
-	}
-	writeJSON(w, 200, smps)
 }
 
 func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {

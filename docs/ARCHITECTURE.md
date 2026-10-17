@@ -31,7 +31,7 @@ PMSS "month" counters are a rolling 30-day window, not a billing cycle. The UI s
 ## Packages
 
 - `cmd/pmss-fleet-manager` flags, wiring, graceful shutdown
-- `internal/store` SQLite (modernc, pure Go): boxes, settings, samples, alerts
+- `internal/store` SQLite (modernc, pure Go): boxes, settings, alerts, per-box caches
 - `internal/sshx` SSH client with reconnect, command runner, unix/tcp dialer
 - `internal/phpserial` minimal PHP `unserialize`
 - `internal/probe` the remote shell probe and its parser -> `probe.Snapshot`

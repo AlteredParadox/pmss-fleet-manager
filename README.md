@@ -25,8 +25,7 @@ aggregate bandwidth, torrents, containers, next renewal and monthly cost.
 
 - Overview: disk, upload with limit/bonus/throttle state, bandwidth, CPU/RAM,
   client and autostart status, plan and billing.
-- Traffic: daily upload/download bars for the last 30 days and the history the
-  dashboard has recorded itself.
+- Traffic: daily upload/download bars for the rolling 30 days PMSS tracks.
 - Torrents: the full list from qBittorrent with filter, plus pause all / resume
   all / start / stop / restart of the client.
 - Containers: rootless Docker containers with CPU and memory, start / stop /
