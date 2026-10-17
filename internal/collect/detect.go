@@ -103,12 +103,16 @@ func detectGuardState(host, user, pass string) (qbt.AuthState, bool) {
 	return g.State(), true
 }
 
+// addStep appends one line to the detection log; see Detect for the clipping
+// it applies to its arguments.
+type addStep func(status, format string, args ...any)
+
 // Detect connects once with the given box settings and reports what it finds.
 // The returned Box has detection-derived fields filled in (host key, qbt port,
 // docker flag, name).
 func Detect(ctx context.Context, b store.Box) *DetectResult {
 	res := &DetectResult{}
-	add := func(status, format string, args ...any) {
+	var add addStep = func(status, format string, args ...any) {
 		// Every string or error here is box- or client-supplied: bound them
 		// like the poller does, or one hostile box inflates this response.
 		for i, a := range args {
@@ -153,6 +157,22 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 		res.Box = &b
 		return res
 	}
+	detectHostFacts(snap, res, add)
+	detectLimitFacts(snap, res, add)
+	detectQbt(ctx, cli, snap, &b, res, add)
+	detectDocker(ctx, cli, snap, &b, res, add)
+
+	if b.Name == "" {
+		b.Name = strings.SplitN(b.Host, ".", 2)[0]
+	}
+	res.OK = true
+	res.Box = &b
+	return res
+}
+
+// detectHostFacts reports the host identity: PMSS version, Debian release
+// and CPU/GPU.
+func detectHostFacts(snap *probe.Snapshot, res *DetectResult, add addStep) {
 	res.Facts.Hostname, res.Facts.User, res.Facts.UID = clip(snap.Hostname, 128), clip(snap.User, 64), snap.UID
 	res.Facts.PMSSVersion, res.Facts.Debian = clip(snap.Host.PMSSVersion, 64), clip(snap.Host.Debian, 64)
 	if snap.Host.PMSSVersion != "" {
@@ -167,6 +187,11 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 		}
 		add("ok", "cpu: %s · %d cores on host · %s", snap.Host.CPUShort, snap.Host.NCPU, hw)
 	}
+}
+
+// detectLimitFacts reports the account limits: disk quota, traffic and the
+// cgroup resource slice.
+func detectLimitFacts(snap *probe.Snapshot, res *DetectResult, add addStep) {
 	if snap.Quota.OK {
 		res.Facts.QuotaBytes, res.Facts.DiskUsedBytes = snap.Quota.SoftBytes, snap.Quota.UsedBytes
 		add("ok", "disk quota %s · %s used (%s)", HumanBytes(snap.Quota.SoftBytes), HumanBytes(snap.Quota.UsedBytes), snap.Quota.Source)
@@ -192,56 +217,64 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 	} else {
 		add("info", "cgroup limits not readable; CPU/RAM will show as unknown")
 	}
+}
 
+// detectQbt reports the qBittorrent state and sets the box's QbtEnabled and
+// QbtPort from what it finds.
+func detectQbt(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *store.Box, res *DetectResult, add addStep) {
 	// qBittorrent
 	if b.Type == "storage" && !b.QbtEnabled && !snap.Qbt.BinaryPresent && !snap.Qbt.Running {
 		add("info", "storage box: no torrent client expected")
-	} else {
-		port := qbtPortFor(&b, snap.Qbt.ConfPort)
-		res.Facts.QbtPort = port
-		switch {
-		case !snap.Qbt.BinaryPresent && !snap.Qbt.Running:
-			add("warn", "qbittorrent-nox not found in ~/bin and not running")
-			b.QbtEnabled = false
-		case !snap.Qbt.Running:
-			add("warn", "qbittorrent-nox present in ~/bin but not running (WebUI port %d)", port)
-			b.QbtEnabled = true
-			b.QbtPort = port
-		case qbtNeedsCreds(snap, &b) != "":
-			add("warn", "qBittorrent on port %d requires a WebUI login (localhost bypass is off) — enter the WebUI user/password, or enable 'Bypass authentication for clients on localhost'; not attempting a login to avoid an IP ban", port)
-			b.QbtEnabled = true
-			b.QbtPort = port
-		default:
-			if ok, reason := snap.PortOwner(port); !ok {
-				add("warn", "not connecting to the WebUI: %s", reason)
-				b.QbtEnabled = true
-				b.QbtPort = port
-				break
-			}
-			g := detectGuard(b.Host, b.QbtUser, b.QbtPass)
-			if err, held := g.Blocked(qbt.CredsKey(b.QbtUser, b.QbtPass)); held {
-				add("warn", "not retrying the WebUI login: %v", err)
-				b.QbtEnabled = true
-				b.QbtPort = port
-				break
-			}
-			qctx, qcancel := context.WithTimeout(ctx, 15*time.Second)
-			hp := fmt.Sprintf("127.0.0.1:%d", port)
-			qc := qbt.NewWithGuard(func(ctx context.Context) (netConn, error) { return cli.DialTCP(ctx, hp) }, hp, b.QbtUser, b.QbtPass, g)
-			v, err := qc.Version(qctx)
-			qcancel()
-			qc.Close()
-			if err != nil {
-				add("warn", "qbittorrent-nox running but Web API on 127.0.0.1:%d failed: %v", port, err)
-			} else {
-				res.Facts.QbtVersion = clip(v, 64)
-				add("ok", "qBittorrent %s responding on port %d", v, port)
-			}
-			b.QbtEnabled = true
-			b.QbtPort = port
-		}
+		return
 	}
+	port := qbtPortFor(b, snap.Qbt.ConfPort)
+	res.Facts.QbtPort = port
+	switch {
+	case !snap.Qbt.BinaryPresent && !snap.Qbt.Running:
+		add("warn", "qbittorrent-nox not found in ~/bin and not running")
+		b.QbtEnabled = false
+	case !snap.Qbt.Running:
+		add("warn", "qbittorrent-nox present in ~/bin but not running (WebUI port %d)", port)
+		b.QbtEnabled = true
+		b.QbtPort = port
+	case qbtNeedsCreds(snap, b) != "":
+		add("warn", "qBittorrent on port %d requires a WebUI login (localhost bypass is off) — enter the WebUI user/password, or enable 'Bypass authentication for clients on localhost'; not attempting a login to avoid an IP ban", port)
+		b.QbtEnabled = true
+		b.QbtPort = port
+	default:
+		if ok, reason := snap.PortOwner(port); !ok {
+			add("warn", "not connecting to the WebUI: %s", reason)
+			b.QbtEnabled = true
+			b.QbtPort = port
+			break
+		}
+		g := detectGuard(b.Host, b.QbtUser, b.QbtPass)
+		if err, held := g.Blocked(qbt.CredsKey(b.QbtUser, b.QbtPass)); held {
+			add("warn", "not retrying the WebUI login: %v", err)
+			b.QbtEnabled = true
+			b.QbtPort = port
+			break
+		}
+		qctx, qcancel := context.WithTimeout(ctx, 15*time.Second)
+		hp := fmt.Sprintf("127.0.0.1:%d", port)
+		qc := qbt.NewWithGuard(func(ctx context.Context) (netConn, error) { return cli.DialTCP(ctx, hp) }, hp, b.QbtUser, b.QbtPass, g)
+		v, err := qc.Version(qctx)
+		qcancel()
+		qc.Close()
+		if err != nil {
+			add("warn", "qbittorrent-nox running but Web API on 127.0.0.1:%d failed: %v", port, err)
+		} else {
+			res.Facts.QbtVersion = clip(v, 64)
+			add("ok", "qBittorrent %s responding on port %d", v, port)
+		}
+		b.QbtEnabled = true
+		b.QbtPort = port
+	}
+}
 
+// detectDocker reports the rootless docker state and sets the box's
+// DockerEnabled from what it finds.
+func detectDocker(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *store.Box, res *DetectResult, add addStep) {
 	// Docker
 	if snap.Docker.SocketPresent {
 		dctx, dcancel := context.WithTimeout(ctx, 15*time.Second)
@@ -265,11 +298,4 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 	} else {
 		add("info", "no rootless docker socket")
 	}
-
-	if b.Name == "" {
-		b.Name = strings.SplitN(b.Host, ".", 2)[0]
-	}
-	res.OK = true
-	res.Box = &b
-	return res
 }

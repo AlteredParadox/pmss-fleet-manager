@@ -145,84 +145,143 @@ func Fingerprint(authorizedKey string) string {
 	return "SHA256:" + strings.TrimRight(base64.StdEncoding.EncodeToString(sum[:]), "=")
 }
 
+// authMethods assembles the auth methods cfg allows, in the order key, agent,
+// password. The returned cleanup releases the agent socket when one was
+// opened and is a no-op otherwise; it is returned on every path so callers
+// can always call it.
 func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 	var methods []ssh.AuthMethod
-	cleanup := func() {} // replaced when an agent socket is opened; nothing to release otherwise
+	cleanup := func() { /* nothing to release until an agent socket is opened */ }
 	useKey := cfg.AuthMethod == "key" || cfg.AuthMethod == ""
 	useAgent := cfg.AuthMethod == "agent" || cfg.AuthMethod == ""
 	usePass := cfg.AuthMethod == "password" || (cfg.AuthMethod == "" && cfg.Password != "")
 
 	if useKey {
-		paths := []string{}
-		if cfg.KeyPath != "" {
-			paths = append(paths, expandHome(cfg.KeyPath))
-		} else {
-			home, _ := os.UserHomeDir()
-			for _, n := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
-				paths = append(paths, filepath.Join(home, ".ssh", n))
-			}
+		m, err := keyMethods(cfg)
+		if err != nil {
+			return nil, cleanup, err
 		}
-		var signers []ssh.Signer
-		for _, p := range paths {
-			pem, err := os.ReadFile(p)
-			if err != nil {
-				if cfg.KeyPath != "" {
-					return nil, cleanup, fmt.Errorf("read key %s: %w", p, err)
-				}
-				continue
-			}
-			s, err := ssh.ParsePrivateKey(pem)
-			if err != nil {
-				if cfg.KeyPath != "" {
-					return nil, cleanup, fmt.Errorf("parse key %s: %w", p, err)
-				}
-				continue
-			}
-			signers = append(signers, s)
-		}
-		if len(signers) > 0 {
-			methods = append(methods, ssh.PublicKeys(signers...))
-		} else if cfg.AuthMethod == "key" {
-			return nil, cleanup, errors.New("ssh: no usable private key in ~/.ssh (set a key path, or the key needs a passphrase)")
-		}
+		methods = append(methods, m...)
 	}
 	if useAgent {
-		if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-			if conn, err := net.DialTimeout("unix", sock, 5*time.Second); err == nil {
-				ag := agent.NewClient(conn)
-				methods = append(methods, ssh.PublicKeysCallback(ag.Signers))
-				cleanup = func() { conn.Close() } // only needed during the handshake
-			} else if cfg.AuthMethod == "agent" {
-				return nil, cleanup, fmt.Errorf("ssh agent: %w", err)
-			}
-		} else if cfg.AuthMethod == "agent" {
-			return nil, cleanup, errors.New("ssh agent: SSH_AUTH_SOCK not set")
+		m, release, err := agentMethod(cfg)
+		if err != nil {
+			return nil, cleanup, err
 		}
+		methods = append(methods, m...)
+		cleanup = release
 	}
 	if usePass {
-		if cfg.Password == "" {
-			return nil, cleanup, errors.New("ssh: password auth selected but no password set")
+		m, err := passwordMethods(cfg)
+		if err != nil {
+			return nil, cleanup, err
 		}
-		methods = append(methods, ssh.Password(cfg.Password))
-		pw := cfg.Password
-		methods = append(methods, ssh.KeyboardInteractive(func(_, _ string, questions []string, echos []bool) ([]string, error) {
-			// Answer only prompts that look like a password prompt (hidden
-			// input, or "password" in the text); never type the password
-			// into an OTP or verification prompt.
-			answers := make([]string, len(questions))
-			for i, q := range questions {
-				lq := strings.ToLower(q)
-				if strings.Contains(lq, "password") && !strings.Contains(lq, "code") && !strings.Contains(lq, "token") && !strings.Contains(lq, "verif") {
-					answers[i] = pw
-				}
-			}
-			return answers, nil
-		}))
+		methods = append(methods, m...)
 	}
 	if len(methods) == 0 {
 		return nil, cleanup, errors.New("ssh: no authentication method available (set a key, agent or password)")
 	}
 	return methods, cleanup, nil
+}
+
+// keyPaths lists the private key files to try: the configured path, or the
+// usual ~/.ssh names.
+func keyPaths(cfg Config) []string {
+	paths := []string{}
+	if cfg.KeyPath != "" {
+		paths = append(paths, expandHome(cfg.KeyPath))
+	} else {
+		home, _ := os.UserHomeDir()
+		for _, n := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
+			paths = append(paths, filepath.Join(home, ".ssh", n))
+		}
+	}
+	return paths
+}
+
+// keySigners loads the usable private keys. An unreadable or unparsable
+// file is an error only for an explicitly configured key path; the default
+// names are skipped silently.
+func keySigners(cfg Config) ([]ssh.Signer, error) {
+	var signers []ssh.Signer
+	for _, p := range keyPaths(cfg) {
+		pem, err := os.ReadFile(p)
+		if err != nil {
+			if cfg.KeyPath != "" {
+				return nil, fmt.Errorf("read key %s: %w", p, err)
+			}
+			continue
+		}
+		s, err := ssh.ParsePrivateKey(pem)
+		if err != nil {
+			if cfg.KeyPath != "" {
+				return nil, fmt.Errorf("parse key %s: %w", p, err)
+			}
+			continue
+		}
+		signers = append(signers, s)
+	}
+	return signers, nil
+}
+
+// keyMethods returns public-key auth from the loaded signers; none is an
+// error only when key auth was selected explicitly.
+func keyMethods(cfg Config) ([]ssh.AuthMethod, error) {
+	signers, err := keySigners(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(signers) > 0 {
+		return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, nil
+	} else if cfg.AuthMethod == "key" {
+		return nil, errors.New("ssh: no usable private key in ~/.ssh (set a key path, or the key needs a passphrase)")
+	}
+	return nil, nil
+}
+
+// agentMethod returns public-key auth through the agent at SSH_AUTH_SOCK
+// with the function that closes the agent socket; without an agent the
+// methods are empty and the cleanup a no-op, unless agent auth was selected
+// explicitly, which is an error.
+func agentMethod(cfg Config) ([]ssh.AuthMethod, func(), error) {
+	noop := func() { /* no agent socket was opened */ }
+	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+		if conn, err := net.DialTimeout("unix", sock, 5*time.Second); err == nil {
+			ag := agent.NewClient(conn)
+			cleanup := func() { conn.Close() } // only needed during the handshake
+			return []ssh.AuthMethod{ssh.PublicKeysCallback(ag.Signers)}, cleanup, nil
+		} else if cfg.AuthMethod == "agent" {
+			return nil, noop, fmt.Errorf("ssh agent: %w", err)
+		}
+	} else if cfg.AuthMethod == "agent" {
+		return nil, noop, errors.New("ssh agent: SSH_AUTH_SOCK not set")
+	}
+	return nil, noop, nil
+}
+
+// passwordMethods returns password auth plus a keyboard-interactive method
+// that answers password prompts with the same secret.
+func passwordMethods(cfg Config) ([]ssh.AuthMethod, error) {
+	if cfg.Password == "" {
+		return nil, errors.New("ssh: password auth selected but no password set")
+	}
+	var methods []ssh.AuthMethod
+	methods = append(methods, ssh.Password(cfg.Password))
+	pw := cfg.Password
+	methods = append(methods, ssh.KeyboardInteractive(func(_, _ string, questions []string, echos []bool) ([]string, error) {
+		// Answer only prompts that look like a password prompt (hidden
+		// input, or "password" in the text); never type the password
+		// into an OTP or verification prompt.
+		answers := make([]string, len(questions))
+		for i, q := range questions {
+			lq := strings.ToLower(q)
+			if strings.Contains(lq, "password") && !strings.Contains(lq, "code") && !strings.Contains(lq, "token") && !strings.Contains(lq, "verif") {
+				answers[i] = pw
+			}
+		}
+		return answers, nil
+	}))
+	return methods, nil
 }
 
 func expandHome(p string) string {

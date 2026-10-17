@@ -736,22 +736,7 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 	ds.Reachable = true
 	var running []string
 	for _, c := range cs {
-		cv := ContainerView{ID: clip(c.ID, 64), Name: clip(c.Name(), 200), Image: clip(c.Image, 300), State: clip(c.State, 32), Status: clip(c.Status, 100)}
-		for _, pt := range c.Ports {
-			if pt.PublicPort > 0 {
-				ip := pt.IP
-				if ip == "0.0.0.0" || ip == "::" {
-					ip = ""
-				}
-				if ip != "" {
-					ip += ":"
-				}
-				cv.Ports = append(cv.Ports, fmt.Sprintf("%s%d->%d/%s", clip(ip, 64), pt.PublicPort, pt.PrivatePort, clip(pt.Type, 16)))
-			} else {
-				cv.Ports = append(cv.Ports, fmt.Sprintf("%d/%s", pt.PrivatePort, clip(pt.Type, 16)))
-			}
-		}
-		sort.Strings(cv.Ports)
+		cv := containerView(c)
 		if c.State == "running" {
 			ds.Running++
 			running = append(running, c.ID)
@@ -760,16 +745,7 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 		}
 		ds.Containers = append(ds.Containers, cv)
 	}
-	if len(running) > 0 && len(running) <= 12 {
-		sctx, scancel := context.WithTimeout(ctx, 20*time.Second)
-		stats := cli.StatsAll(sctx, running, 4)
-		scancel()
-		for i := range ds.Containers {
-			if s, ok := stats[ds.Containers[i].ID]; ok {
-				ds.Containers[i].CPUPct, ds.Containers[i].MemUsage, ds.Containers[i].HasStats = s.CPUPct, s.MemUsage, true
-			}
-		}
-	}
+	mergeContainerStats(ctx, cli, ds.Containers, running)
 	sort.Slice(ds.Containers, func(i, j int) bool {
 		a, b := ds.Containers[i], ds.Containers[j]
 		if (a.State == "running") != (b.State == "running") {
@@ -778,6 +754,44 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 		return a.Name < b.Name
 	})
 	st.Docker = ds
+}
+
+// containerView builds the dashboard view of one container, every
+// daemon-supplied string clipped, with its port list sorted.
+func containerView(c dockerx.Container) ContainerView {
+	cv := ContainerView{ID: clip(c.ID, 64), Name: clip(c.Name(), 200), Image: clip(c.Image, 300), State: clip(c.State, 32), Status: clip(c.Status, 100)}
+	for _, pt := range c.Ports {
+		if pt.PublicPort > 0 {
+			ip := pt.IP
+			if ip == "0.0.0.0" || ip == "::" {
+				ip = ""
+			}
+			if ip != "" {
+				ip += ":"
+			}
+			cv.Ports = append(cv.Ports, fmt.Sprintf("%s%d->%d/%s", clip(ip, 64), pt.PublicPort, pt.PrivatePort, clip(pt.Type, 16)))
+		} else {
+			cv.Ports = append(cv.Ports, fmt.Sprintf("%d/%s", pt.PrivatePort, clip(pt.Type, 16)))
+		}
+	}
+	sort.Strings(cv.Ports)
+	return cv
+}
+
+// mergeContainerStats fills CPU and memory usage into the views of the
+// running containers; it makes no stats call when nothing runs or when more
+// than twelve containers do.
+func mergeContainerStats(ctx context.Context, cli *dockerx.Client, views []ContainerView, running []string) {
+	if len(running) > 0 && len(running) <= 12 {
+		sctx, scancel := context.WithTimeout(ctx, 20*time.Second)
+		stats := cli.StatsAll(sctx, running, 4)
+		scancel()
+		for i := range views {
+			if s, ok := stats[views[i].ID]; ok {
+				views[i].CPUPct, views[i].MemUsage, views[i].HasStats = s.CPUPct, s.MemUsage, true
+			}
+		}
+	}
 }
 
 func (p *poller) forceDu() {

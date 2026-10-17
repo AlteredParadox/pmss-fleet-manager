@@ -78,21 +78,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 	set := e.settings()
 	var active []want
 	if s.Status == "disabled" {
-		// Nothing is being checked any more: resolve whatever was open so
-		// a disabled box does not keep an "unreachable" alert forever.
-		keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
-		if err != nil {
-			return
-		}
-		changed := false
-		for _, k := range keys {
-			if err := e.st.ResolveAlert(ctx, s.ID, k); err == nil {
-				changed = true
-			}
-		}
-		if changed && e.notify != nil {
-			e.notify()
-		}
+		e.resolveDisabled(ctx, s)
 		return
 	}
 	name := s.Name
@@ -102,59 +88,138 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 	}
 	probeOK := s.Status == "online" || s.Status == "degraded" && s.Failures == 0
 	if probeOK {
-		if s.Account.Suspended {
-			active = append(active, want{"suspended", "bad", fmt.Sprintf("%s account is suspended by PMSS", name)})
-		}
-		if s.Disk.OK && s.Disk.QuotaBytes > 0 {
-			switch {
-			case s.Disk.UsedBytes >= s.Disk.QuotaBytes:
-				active = append(active, want{"disk", "bad", fmt.Sprintf("%s disk at %.0f%% — over quota (%s of %s)", name, s.Disk.Pct, collect.HumanBytes(s.Disk.UsedBytes), collect.HumanBytes(s.Disk.QuotaBytes))})
-			case s.Disk.Pct >= float64(set.DiskThresholdPct):
-				active = append(active, want{"disk", "warn", fmt.Sprintf("%s disk at %.0f%% of %s quota", name, s.Disk.Pct, collect.HumanBytes(s.Disk.QuotaBytes))})
-			}
-		}
-		if s.Traffic.OK && s.Traffic.LimitBytes > 0 {
-			switch {
-			case s.Traffic.Pct >= 100:
-				active = append(active, want{"traffic", "bad", fmt.Sprintf("%s traffic at %.0f%% of %s 30-day limit", name, s.Traffic.Pct, collect.HumanBytes(s.Traffic.LimitBytes))})
-			case s.Traffic.Pct >= float64(set.TrafficThreshold):
-				active = append(active, want{"traffic", "warn", fmt.Sprintf("%s traffic at %.0f%% of %s 30-day limit", name, s.Traffic.Pct, collect.HumanBytes(s.Traffic.LimitBytes))})
-			}
-		}
-		if s.Traffic.Throttled {
-			active = append(active, want{"throttled", "bad", fmt.Sprintf("%s is being throttled by PMSS for traffic overage", name)})
-		}
-		if s.Qbt.Enabled && !s.Qbt.Reachable {
-			what := "qBittorrent Web API not responding"
-			if !s.Qbt.ProcessUp {
-				what = "qbittorrent-nox is not running"
-			}
-			msg := fmt.Sprintf("%s — %s", name, what)
-			if s.Qbt.Error != "" {
-				msg += " (" + s.Qbt.Error + ")"
-			}
-			active = append(active, want{"qbt", "warn", msg})
-		}
-		if s.Docker.Enabled && !s.Docker.Reachable {
-			active = append(active, want{"docker", "warn", fmt.Sprintf("%s — rootless docker not responding (%s)", name, s.Docker.Error)})
-		}
-		for _, c := range s.Docker.Containers {
-			if c.State == "exited" || c.State == "dead" {
-				if strings.HasPrefix(c.Status, "Exited (0)") {
-					continue // clean exit, probably on purpose
-				}
-				active = append(active, want{"container:" + c.Name, "warn", fmt.Sprintf("%s — container %s %s", name, c.Name, strings.ToLower(c.Status))})
-			}
-		}
-		// Pct is process memory (not page cache) against the slice limit.
-		if s.RAM.OK && s.RAM.LimitBytes > 0 && s.RAM.Pct >= 95 {
-			active = append(active, want{"ram", "warn", fmt.Sprintf("%s process memory at %.0f%% of the %s slice limit", name, s.RAM.Pct, collect.HumanBytes(s.RAM.LimitBytes))})
-		}
-		// The definitive signal that memory ran out: the kernel killed something.
-		if t, err := time.Parse(time.RFC3339, s.RAM.LastOOM); err == nil && time.Since(t) < 24*time.Hour {
-			active = append(active, want{"oom", "bad", fmt.Sprintf("%s: the kernel OOM-killed a process in the slice (noticed %s; %d kills in total)", name, t.Local().Format("Jan 2 15:04"), s.RAM.OOMKills)})
+		active = append(active, wantProbeRules(s, set)...)
+	}
+	active = append(active, wantRenewal(s, set)...)
+	e.reconcile(ctx, s, active, probeOK)
+}
+
+// resolveDisabled handles a disabled box.
+func (e *Evaluator) resolveDisabled(ctx context.Context, s *collect.BoxState) {
+	// Nothing is being checked any more: resolve whatever was open so
+	// a disabled box does not keep an "unreachable" alert forever.
+	keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
+	if err != nil {
+		return
+	}
+	changed := false
+	for _, k := range keys {
+		if err := e.st.ResolveAlert(ctx, s.ID, k); err == nil {
+			changed = true
 		}
 	}
+	if changed && e.notify != nil {
+		e.notify()
+	}
+}
+
+// wantProbeRules collects the alerts that need a successful probe, in the
+// order the rules have always run: suspension, disk, traffic, qBittorrent,
+// docker and containers, memory.
+func wantProbeRules(s *collect.BoxState, set store.Settings) []want {
+	var active []want
+	name := s.Name
+	if s.Account.Suspended {
+		active = append(active, want{"suspended", "bad", fmt.Sprintf("%s account is suspended by PMSS", name)})
+	}
+	active = append(active, wantDisk(s, set)...)
+	active = append(active, wantTraffic(s, set)...)
+	active = append(active, wantQbt(s)...)
+	active = append(active, wantDocker(s)...)
+	active = append(active, wantRAM(s)...)
+	return active
+}
+
+// wantDisk raises the disk alert against the quota.
+func wantDisk(s *collect.BoxState, set store.Settings) []want {
+	var active []want
+	name := s.Name
+	if s.Disk.OK && s.Disk.QuotaBytes > 0 {
+		switch {
+		case s.Disk.UsedBytes >= s.Disk.QuotaBytes:
+			active = append(active, want{"disk", "bad", fmt.Sprintf("%s disk at %.0f%% — over quota (%s of %s)", name, s.Disk.Pct, collect.HumanBytes(s.Disk.UsedBytes), collect.HumanBytes(s.Disk.QuotaBytes))})
+		case s.Disk.Pct >= float64(set.DiskThresholdPct):
+			active = append(active, want{"disk", "warn", fmt.Sprintf("%s disk at %.0f%% of %s quota", name, s.Disk.Pct, collect.HumanBytes(s.Disk.QuotaBytes))})
+		}
+	}
+	return active
+}
+
+// wantTraffic raises the 30-day traffic alert and the throttling alert.
+func wantTraffic(s *collect.BoxState, set store.Settings) []want {
+	var active []want
+	name := s.Name
+	if s.Traffic.OK && s.Traffic.LimitBytes > 0 {
+		switch {
+		case s.Traffic.Pct >= 100:
+			active = append(active, want{"traffic", "bad", fmt.Sprintf("%s traffic at %.0f%% of %s 30-day limit", name, s.Traffic.Pct, collect.HumanBytes(s.Traffic.LimitBytes))})
+		case s.Traffic.Pct >= float64(set.TrafficThreshold):
+			active = append(active, want{"traffic", "warn", fmt.Sprintf("%s traffic at %.0f%% of %s 30-day limit", name, s.Traffic.Pct, collect.HumanBytes(s.Traffic.LimitBytes))})
+		}
+	}
+	if s.Traffic.Throttled {
+		active = append(active, want{"throttled", "bad", fmt.Sprintf("%s is being throttled by PMSS for traffic overage", name)})
+	}
+	return active
+}
+
+// wantQbt raises the alert for a monitored qBittorrent that does not answer.
+func wantQbt(s *collect.BoxState) []want {
+	var active []want
+	name := s.Name
+	if s.Qbt.Enabled && !s.Qbt.Reachable {
+		what := "qBittorrent Web API not responding"
+		if !s.Qbt.ProcessUp {
+			what = "qbittorrent-nox is not running"
+		}
+		msg := fmt.Sprintf("%s — %s", name, what)
+		if s.Qbt.Error != "" {
+			msg += " (" + s.Qbt.Error + ")"
+		}
+		active = append(active, want{"qbt", "warn", msg})
+	}
+	return active
+}
+
+// wantDocker raises the alerts for an unreachable rootless docker and for
+// containers that stopped with a non-zero exit.
+func wantDocker(s *collect.BoxState) []want {
+	var active []want
+	name := s.Name
+	if s.Docker.Enabled && !s.Docker.Reachable {
+		active = append(active, want{"docker", "warn", fmt.Sprintf("%s — rootless docker not responding (%s)", name, s.Docker.Error)})
+	}
+	for _, c := range s.Docker.Containers {
+		if c.State == "exited" || c.State == "dead" {
+			if strings.HasPrefix(c.Status, "Exited (0)") {
+				continue // clean exit, probably on purpose
+			}
+			active = append(active, want{"container:" + c.Name, "warn", fmt.Sprintf("%s — container %s %s", name, c.Name, strings.ToLower(c.Status))})
+		}
+	}
+	return active
+}
+
+// wantRAM raises the slice memory alert and the OOM-kill alert.
+func wantRAM(s *collect.BoxState) []want {
+	var active []want
+	name := s.Name
+	// Pct is process memory (not page cache) against the slice limit.
+	if s.RAM.OK && s.RAM.LimitBytes > 0 && s.RAM.Pct >= 95 {
+		active = append(active, want{"ram", "warn", fmt.Sprintf("%s process memory at %.0f%% of the %s slice limit", name, s.RAM.Pct, collect.HumanBytes(s.RAM.LimitBytes))})
+	}
+	// The definitive signal that memory ran out: the kernel killed something.
+	if t, err := time.Parse(time.RFC3339, s.RAM.LastOOM); err == nil && time.Since(t) < 24*time.Hour {
+		active = append(active, want{"oom", "bad", fmt.Sprintf("%s: the kernel OOM-killed a process in the slice (noticed %s; %d kills in total)", name, t.Local().Format("Jan 2 15:04"), s.RAM.OOMKills)})
+	}
+	return active
+}
+
+// wantRenewal raises the renewal alert from the effective renewal date; it
+// does not need a probe.
+func wantRenewal(s *collect.BoxState, set store.Settings) []want {
+	var active []want
+	name := s.Name
 	if renewal := s.EffectiveRenewal(); renewal != "" {
 		if d, err := time.Parse("2006-01-02", renewal); err == nil {
 			// Floor: for the day after the due date this is -1, not 0.
@@ -167,9 +232,31 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 			}
 		}
 	}
+	return active
+}
 
-	changed := false
-	wanted := map[string]bool{}
+// reconcile persists the wanted alerts, resolves the open ones this poll no
+// longer wants and could re-check, and notifies when anything changed.
+func (e *Evaluator) reconcile(ctx context.Context, s *collect.BoxState, active []want, probeOK bool) {
+	wanted, changed := e.raise(ctx, s, active)
+	keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
+	if err != nil {
+		e.log.Warn("list alerts", "err", err)
+		return
+	}
+	if e.resolveStale(ctx, s, keys, wanted, probeOK) {
+		changed = true
+	}
+	if changed && e.notify != nil {
+		e.notify()
+	}
+}
+
+// raise persists every wanted alert and returns the set of wanted keys and
+// whether any alert was newly created.
+func (e *Evaluator) raise(ctx context.Context, s *collect.BoxState, active []want) (wanted map[string]bool, changed bool) {
+	name := s.Name
+	wanted = map[string]bool{}
 	for _, w := range active {
 		wanted[w.key] = true
 		created, err := e.st.RaiseAlert(ctx, s.ID, w.key, w.sev, w.title)
@@ -182,11 +269,12 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 			e.log.Info("alert", "box", name, "key", w.key, "title", w.title)
 		}
 	}
-	keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
-	if err != nil {
-		e.log.Warn("list alerts", "err", err)
-		return
-	}
+	return wanted, changed
+}
+
+// resolveStale resolves the active alerts that are no longer wanted and
+// whose rule this poll could re-check; it reports whether any was resolved.
+func (e *Evaluator) resolveStale(ctx context.Context, s *collect.BoxState, keys []string, wanted map[string]bool, probeOK bool) (changed bool) {
 	for _, k := range keys {
 		if wanted[k] {
 			continue
@@ -202,7 +290,5 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 			changed = true
 		}
 	}
-	if changed && e.notify != nil {
-		e.notify()
-	}
+	return changed
 }
