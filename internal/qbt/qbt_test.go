@@ -61,6 +61,8 @@ func TestClientFlow(t *testing.T) {
 	mux.HandleFunc("/api/v2/app/preferences", auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"dht":true,"pex":false,"lsd":true,"max_ratio":2}`))
 	}))
+	var setPrefs string
+	mux.HandleFunc("/api/v2/app/setPreferences", auth(func(w http.ResponseWriter, r *http.Request) { setPrefs = r.FormValue("json") }))
 	mux.HandleFunc("/api/v2/torrents/pause", auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.FormValue("hashes") != "all" {
 			w.WriteHeader(400)
@@ -81,6 +83,9 @@ func TestClientFlow(t *testing.T) {
 	}
 	if pr, err := c.Preferences(ctx); err != nil || !pr.DHT || pr.PeX || !pr.LSD {
 		t.Fatalf("preferences %+v %v", pr, err)
+	}
+	if err := c.SetPreferences(ctx, map[string]any{"dht": false}); err != nil || setPrefs != `{"dht":false}` {
+		t.Fatalf("setPreferences sent %q, %v", setPrefs, err)
 	}
 	if err := c.PauseAll(ctx); err != nil { // /stop is 404 here, falls back to /pause
 		t.Fatal(err)

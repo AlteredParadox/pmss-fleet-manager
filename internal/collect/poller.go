@@ -1036,6 +1036,17 @@ func (p *poller) torrentAction(ctx context.Context, hash, action string) error {
 	return cli.TorrentAction(actx, action, hash)
 }
 
+// setDiscovery writes the given DHT/PeX/LSD switches (keys dht, pex, lsd).
+func (p *poller) setDiscovery(ctx context.Context, prefs map[string]any) error {
+	actx, cancel := context.WithTimeout(ctx, apiTimeout)
+	defer cancel()
+	cli, err := p.qbtWebUI(actx)
+	if err != nil {
+		return err
+	}
+	return cli.SetPreferences(actx, prefs)
+}
+
 // addTorrents uploads links and files to the box's WebUI after the same
 // preflight as every other credential-sending action.
 func (p *poller) addTorrents(ctx context.Context, req qbt.AddRequest) error {

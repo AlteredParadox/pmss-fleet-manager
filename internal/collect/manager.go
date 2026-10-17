@@ -20,6 +20,7 @@ package collect
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"sort"
@@ -489,6 +490,51 @@ func (m *Manager) TorrentAction(ctx context.Context, id int64, hash, action stri
 		return ErrDisabled
 	}
 	err := p.torrentAction(ctx, hash, action)
+	p.wake()
+	return err
+}
+
+// DiscoveryKeys are the preferences SetDiscovery may change.
+var DiscoveryKeys = map[string]bool{"dht": true, "pex": true, "lsd": true}
+
+// SetDiscovery flips peer-discovery switches on the box's qBittorrent and
+// reflects them in the cached state at once; the next poll re-reads them.
+func (m *Manager) SetDiscovery(ctx context.Context, id int64, want map[string]bool) error {
+	p := m.poller(id)
+	if p == nil {
+		return store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return ErrDisabled
+	}
+	prefs := make(map[string]any, len(want))
+	for k, v := range want {
+		if !DiscoveryKeys[k] {
+			return fmt.Errorf("unknown discovery setting %q", k)
+		}
+		prefs[k] = v
+	}
+	if len(prefs) == 0 {
+		return errors.New("nothing to change")
+	}
+	err := p.setDiscovery(ctx, prefs)
+	if err == nil {
+		m.mutateState(id, func(s *BoxState) {
+			if !s.Qbt.Discovery.Known {
+				return
+			}
+			for k, v := range want {
+				switch k {
+				case "dht":
+					s.Qbt.Discovery.DHT = v
+				case "pex":
+					s.Qbt.Discovery.PeX = v
+				case "lsd":
+					s.Qbt.Discovery.LSD = v
+				}
+			}
+		})
+	}
 	p.wake()
 	return err
 }
