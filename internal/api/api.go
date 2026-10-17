@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -826,12 +827,19 @@ func (s *Server) handleServicesSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
+	// Read the body first: a client trickling bytes must not hold the lock
+	// that every other settings save waits on.
+	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, 1<<20))
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
 	s.settingsMu.Lock()
 	defer s.settingsMu.Unlock()
 	in := s.m.Settings()
 	prevKey := in.PMAPIKey
 	in.PMAPIKey = ""
-	if err := decode(r, &in); err != nil {
+	if err := json.Unmarshal(body, &in); err != nil {
 		writeErr(w, 400, err)
 		return
 	}

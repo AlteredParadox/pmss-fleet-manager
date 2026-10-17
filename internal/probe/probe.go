@@ -343,7 +343,7 @@ type QbtInfo struct {
 	Username      string
 	BinaryVersion string // "v5.2.3" from ~/bin/qbittorrent-nox --version
 	StartHelper   bool   // ~/bin/qbt-start exists
-	CronEntries   int    // crontab lines mentioning qbt-start
+	CronEntries   int    // live crontab lines that run bin/qbt-start (comments and look-alike names excluded)
 }
 
 // DockerInfo reports the rootless daemon's presence.

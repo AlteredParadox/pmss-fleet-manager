@@ -151,7 +151,7 @@ async function loadState() {
     S.totals = d.totals || {};
     S.unacked = d.alerts_unacked || 0;
     S.settings = d.settings || {};
-    applyTheme(S.settings.theme);
+    applyTheme(S.view === 'settings' && S.settingsDraft && S.settingsTouched.theme ? S.settingsDraft.theme : S.settings.theme); // keep an unsaved preview
     if (!S.fleetViewTouched) S.fleetView = S.settings.fleet_view || 'cards';
   } catch (e) { toast(`state: ${e.message}`, 'bad'); }
 }
@@ -210,7 +210,7 @@ function connectEvents() {
     if (S.detail && S.detail.id === e.box_id) S.detail = null;
     if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
     recomputeTotals();
-    if ((S.view === 'box' || S.view === 'edit') && S.selId === e.box_id) { toast('that box was removed', 'bad'); go('/fleet'); }
+    if ((S.view === 'box' || S.view === 'edit') && S.selId === e.box_id) { if (S.removingId !== e.box_id) toast('that box was removed', 'bad'); go('/fleet'); }
     else if (S.view === 'alerts') loadAlerts(); else render();
   });
   es.addEventListener('settings', () => {
@@ -973,7 +973,7 @@ document.addEventListener('click', async (e) => {
     if (a === 'refresh-all') { for (const b of S.boxes) api('POST', `/api/boxes/${b.id}/refresh`).catch(() => {}); toast('refreshing all boxes'); }
     else if (a === 'refresh') { await api('POST', `/api/boxes/${S.selId}/refresh`); toast('refresh requested'); }
     else if (a === 'du') { const id = S.selId; await api('POST', `/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
-    else if (a === 'remove') { await api('DELETE', `/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
+    else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
     else if (a.startsWith('qbt:')) {
       const what = a.slice(4);
       act.disabled = true;
