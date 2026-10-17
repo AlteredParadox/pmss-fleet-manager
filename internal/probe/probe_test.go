@@ -290,3 +290,10 @@ func TestFiniteTraffic(t *testing.T) {
 		t.Fatalf("non-finite values must become 0: %+v", ts)
 	}
 }
+
+func TestCgroupMemorySplit(t *testing.T) {
+	c := parseCgroup("mem_usage=15000000000\nmem_limit=15700000000\nmem_rss=165000000\nmem_cache=13900000000\nmem_inactive_file=13800000000\noom_kill=2\n")
+	if c.MemRSS != 165000000 || c.MemCache != 13900000000 || c.MemInactiveFile != 13800000000 || c.OOMKills != 2 || c.MemUsage != 15000000000 {
+		t.Fatalf("%+v", c)
+	}
+}

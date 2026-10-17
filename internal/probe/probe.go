@@ -245,11 +245,15 @@ type TrafficInfo struct {
 
 // CgroupInfo is the user's systemd slice accounting. Zero means unknown.
 type CgroupInfo struct {
-	MemUsage   int64
-	MemLimit   int64 // 0 = unlimited/unknown
-	CPUUsageNS int64
-	CPUQuota   float64 // fraction of CPUs allowed, 0 = unlimited/unknown
-	Pids       int64
+	MemUsage        int64 // charged to the slice, cache included
+	MemRSS          int64 // process memory (v1 total_rss / v2 anon); 0 = unknown
+	MemCache        int64 // page cache charged to the slice
+	MemInactiveFile int64 // the part of the cache the kernel reclaims first
+	OOMKills        int64 // cumulative kernel OOM kills in the slice
+	MemLimit        int64 // 0 = unlimited/unknown
+	CPUUsageNS      int64
+	CPUQuota        float64 // fraction of CPUs allowed, 0 = unlimited/unknown
+	Pids            int64
 }
 
 // AccountInfo mirrors ~/.config/pmss-user.json.
@@ -592,6 +596,10 @@ func parseCgroup(raw string) CgroupInfo {
 		}
 	}
 	c.MemUsage, _ = strconv.ParseInt(kv["mem_usage"], 10, 64)
+	c.MemRSS, _ = strconv.ParseInt(kv["mem_rss"], 10, 64)
+	c.MemCache, _ = strconv.ParseInt(kv["mem_cache"], 10, 64)
+	c.MemInactiveFile, _ = strconv.ParseInt(kv["mem_inactive_file"], 10, 64)
+	c.OOMKills, _ = strconv.ParseInt(kv["oom_kill"], 10, 64)
 	if lim, err := strconv.ParseInt(kv["mem_limit"], 10, 64); err == nil && lim > 0 && lim < 1<<60 {
 		c.MemLimit = lim
 	}

@@ -407,11 +407,24 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	}
 
 	c := snap.Cgroup
-	st.RAM = RAMState{OK: c.MemUsage > 0, UsedBytes: c.MemUsage, LimitBytes: c.MemLimit, Pids: c.Pids}
+	ram := RAMState{OK: c.MemUsage > 0, UsedBytes: c.MemUsage, RSSBytes: c.MemRSS, CacheBytes: c.MemCache, LimitBytes: c.MemLimit, Pids: c.Pids,
+		OOMKills: c.OOMKills, LastOOM: st.RAM.LastOOM}
+	if st.RAM.OK && c.OOMKills > st.RAM.OOMKills {
+		ram.LastOOM = time.Now().UTC().Format(time.RFC3339) // the kernel really ran out since last poll
+	}
+	st.RAM = ram
 	if st.RAM.LimitBytes == 0 && snap.Account.RAMMiB > 0 {
 		st.RAM.LimitBytes = int64(snap.Account.RAMMiB * mib)
 	}
-	st.RAM.Pct = pct(st.RAM.UsedBytes, st.RAM.LimitBytes)
+	// Pressure is process memory against the limit. The charged figure
+	// includes page cache, which on a seedbox is simply every torrent byte
+	// the kernel still has around and is reclaimed, not OOM-killed, when
+	// the limit is reached.
+	pressure := st.RAM.RSSBytes
+	if pressure == 0 {
+		pressure = st.RAM.UsedBytes
+	}
+	st.RAM.Pct = pct(pressure, st.RAM.LimitBytes)
 
 	st.CPU = CPUState{QuotaCPUs: c.CPUQuota, HostCPUs: snap.Host.NCPU}
 	if c.CPUUsageNS > 0 {

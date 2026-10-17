@@ -72,12 +72,22 @@ sec bonus_traffic; cat "$home/.bonusTraffic" 2>/dev/null
 sec throttle; [ -e "$home/.throttle" ] && echo 1 || echo 0
 sec pmss_user; cat "$home/.config/pmss-user.json" 2>/dev/null
 sec cgroup
+# memory.usage/current charge page cache (every torrent byte read or
+# written) to the slice, so they say nothing about pressure; the stat file
+# splits it into process memory (rss/anon) and reclaimable cache, and the
+# oom counters say whether the kernel actually ran out.
 if [ -f "/sys/fs/cgroup/memory/$S/memory.usage_in_bytes" ]; then
-  echo "mem_usage=$(cat /sys/fs/cgroup/memory/$S/memory.usage_in_bytes)"
-  echo "mem_limit=$(cat /sys/fs/cgroup/memory/$S/memory.limit_in_bytes)"
+  m=/sys/fs/cgroup/memory/$S
+  echo "mem_usage=$(cat $m/memory.usage_in_bytes)"
+  echo "mem_limit=$(cat $m/memory.limit_in_bytes)"
+  awk '$1=="total_rss"{print "mem_rss="$2} $1=="total_cache"{print "mem_cache="$2} $1=="total_inactive_file"{print "mem_inactive_file="$2}' $m/memory.stat 2>/dev/null
+  awk '$1=="oom_kill"{print "oom_kill="$2}' $m/memory.oom_control 2>/dev/null
 elif [ -f "/sys/fs/cgroup/$S/memory.current" ]; then
-  echo "mem_usage=$(cat /sys/fs/cgroup/$S/memory.current)"
-  echo "mem_limit=$(cat /sys/fs/cgroup/$S/memory.max)"
+  m=/sys/fs/cgroup/$S
+  echo "mem_usage=$(cat $m/memory.current)"
+  echo "mem_limit=$(cat $m/memory.max)"
+  awk '$1=="anon"{print "mem_rss="$2} $1=="file"{print "mem_cache="$2} $1=="inactive_file"{print "mem_inactive_file="$2}' $m/memory.stat 2>/dev/null
+  awk '$1=="oom_kill"{print "oom_kill="$2}' $m/memory.events 2>/dev/null
 fi
 for d in "/sys/fs/cgroup/cpu,cpuacct/$S" "/sys/fs/cgroup/cpuacct/$S"; do
   if [ -f "$d/cpuacct.usage" ]; then echo "cpu_usage_ns=$(cat $d/cpuacct.usage)"; break; fi

@@ -122,8 +122,13 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 				active = append(active, want{"container:" + c.Name, "warn", fmt.Sprintf("%s — container %s %s", name, c.Name, strings.ToLower(c.Status))})
 			}
 		}
+		// Pct is process memory (not page cache) against the slice limit.
 		if s.RAM.OK && s.RAM.LimitBytes > 0 && s.RAM.Pct >= 95 {
-			active = append(active, want{"ram", "warn", fmt.Sprintf("%s RAM at %.0f%% of %s slice limit", name, s.RAM.Pct, collect.HumanBytes(s.RAM.LimitBytes))})
+			active = append(active, want{"ram", "warn", fmt.Sprintf("%s process memory at %.0f%% of the %s slice limit", name, s.RAM.Pct, collect.HumanBytes(s.RAM.LimitBytes))})
+		}
+		// The definitive signal that memory ran out: the kernel killed something.
+		if t, err := time.Parse(time.RFC3339, s.RAM.LastOOM); err == nil && time.Since(t) < 24*time.Hour {
+			active = append(active, want{"oom", "bad", fmt.Sprintf("%s: the kernel OOM-killed a process at %s (%d kills in total)", name, t.Local().Format("Jan 2 15:04"), s.RAM.OOMKills)})
 		}
 	}
 	if renewal := s.EffectiveRenewal(); renewal != "" {
