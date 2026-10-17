@@ -86,31 +86,32 @@ func lastSection(raw []byte, tag string) string {
 	return last
 }
 
-// parseListeners reads /proc/net/tcp and tcp6 rows in state 0A (LISTEN).
+// parseListeners reads the probe's listen section: one listening socket per
+// line as "d <port> <uid>" (decimal, from ss) or "h <hexport> <uid>" (from
+// /proc/net/tcp). The script reduces the data on the box; see Script.
 func parseListeners(text string) (map[int]int, bool) {
 	out := map[int]int{}
 	known := false
 	for _, line := range strings.Split(text, "\n") {
 		f := strings.Fields(line)
-		if len(f) < 8 || f[0] == "sl" {
+		if len(f) != 3 {
+			continue
+		}
+		base := 10
+		if f[0] == "h" {
+			base = 16
+		} else if f[0] != "d" {
+			continue
+		}
+		port, err := strconv.ParseInt(f[1], base, 32)
+		if err != nil || port <= 0 || port > 65535 {
+			continue
+		}
+		uid, err := strconv.Atoi(f[2])
+		if err != nil {
 			continue
 		}
 		known = true
-		if f[3] != "0A" {
-			continue
-		}
-		i := strings.LastIndexByte(f[1], ':')
-		if i < 0 {
-			continue
-		}
-		port, err := strconv.ParseInt(f[1][i+1:], 16, 32)
-		if err != nil {
-			continue
-		}
-		uid, err := strconv.Atoi(f[7])
-		if err != nil {
-			continue
-		}
 		if _, dup := out[int(port)]; !dup {
 			out[int(port)] = uid
 		}
