@@ -434,6 +434,16 @@ func (in boxInput) apply(b *store.Box) {
 	}
 }
 
+// endpointChanged compares a stored box with an edited one: hostChanged
+// covers host (DNS is case-insensitive) and port, which is what the SSH host
+// key is bound to; userChanged is additionally what stored secrets are bound
+// to.
+func endpointChanged(stored, edited *store.Box) (hostChanged, userChanged bool) {
+	hostChanged = !strings.EqualFold(stored.Host, edited.Host) || stored.Port != edited.Port
+	userChanged = stored.User != edited.User
+	return
+}
+
 func decode(r *http.Request, v any) error {
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
 	return dec.Decode(v)
@@ -460,6 +470,9 @@ func (s *Server) handleCreateBox(w http.ResponseWriter, r *http.Request) {
 	}
 	b := &store.Box{Enabled: true, DuEnabled: true}
 	in.apply(b)
+	if b.AuthMethod == "key" || b.AuthMethod == "agent" {
+		b.Password = "" // typed before the auth method was switched; not used, not kept
+	}
 	if err := s.m.AddBox(r.Context(), b); err != nil {
 		writeErr(w, 500, err)
 		return
@@ -510,31 +523,48 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err)
 		return
 	}
-	prevHost, prevPort := b.Host, b.Port
+	stored := *b
 	in.apply(b)
+	// The rules shared with detect (see endpointRules): the host-key pin
+	// belongs to host:port and a supplied key never replaces an existing
+	// pin; stored secrets are only ever used for the endpoint they were
+	// saved for, so a changed host/port/user with a blank password is
+	// refused rather than sent to the new host on trust-on-first-use.
+	hostChanged, userChanged := endpointChanged(&stored, b)
+	if (hostChanged || userChanged) && b.Password == "" && stored.Password != "" && (b.AuthMethod == "password" || b.AuthMethod == "") {
+		writeErr(w, 400, errors.New("re-enter the SSH password to move this box to a different host, port or user; the saved one is only used for the saved endpoint"))
+		return
+	}
+	switch {
+	case in.ForgetHostKey:
+		b.HostKey = ""
+	case hostChanged:
+		b.HostKey = in.HostKey // the wizard's fresh detect result, or nothing
+	default:
+		b.HostKey = stored.HostKey
+	}
 	// Secrets: a blank field keeps the saved one, so clearing is explicit.
 	// The SSH password is dropped when the box no longer authenticates with
-	// one; the WebUI password on request.
+	// one; the WebUI password on request, unless a new one was typed.
 	clearSSH := in.AuthMethod == "key" || in.AuthMethod == "agent"
-	if clearSSH || in.ClearQbtPass {
-		if err := s.st.ClearSecrets(r.Context(), id, clearSSH, in.ClearQbtPass); err != nil {
+	clearQbt := in.ClearQbtPass && in.QbtPass == ""
+	if clearSSH || clearQbt {
+		if err := s.st.ClearSecrets(r.Context(), id, clearSSH, clearQbt); err != nil {
 			writeErr(w, 500, err)
 			return
 		}
 		if clearSSH {
 			b.Password = ""
 		}
-		if in.ClearQbtPass {
+		if clearQbt {
 			b.QbtPass = ""
 		}
 	}
-	if b.Host != prevHost || b.Port != prevPort || in.ForgetHostKey {
-		// A different endpoint has a different key; re-pin on next connect
-		// unless the wizard supplied the one it just saw. (The edit form
-		// never sends the stored key back, so this really clears it.)
-		b.HostKey = in.HostKey
-	}
 	if err := s.m.UpdateBox(r.Context(), b); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, 404, err)
+			return
+		}
 		writeErr(w, 500, err)
 		return
 	}
@@ -660,20 +690,20 @@ func (s *Server) handleDetect(w http.ResponseWriter, r *http.Request) {
 	in.apply(&b)
 	if in.ID > 0 {
 		// Edit mode: blank password fields mean "keep the saved one". The
-		// stored secrets are reused ONLY for the endpoint they were saved
-		// for, and under the pinned host key: a different host, or a key
-		// mismatch, must never see them (the poller enforces the pin; the
-		// wizard must not be a way around it).
+		// pin belongs to host:port and is enforced whenever that endpoint
+		// is unchanged; stored secrets are reused only for the saved
+		// host:port AND user (the poller enforces the pin; the wizard must
+		// not be a way around it).
 		if stored, err := s.st.GetBox(r.Context(), in.ID); err == nil {
-			same := strings.EqualFold(b.Host, stored.Host) && b.Port == stored.Port && b.User == stored.User
-			if same && !in.ForgetHostKey && b.HostKey == "" {
+			hostChanged, userChanged := endpointChanged(stored, &b)
+			if !hostChanged && !in.ForgetHostKey {
 				b.HostKey = stored.HostKey
 			}
-			if same {
+			if !hostChanged && !userChanged {
 				if b.Password == "" {
 					b.Password = stored.Password
 				}
-				if b.QbtPass == "" {
+				if b.QbtPass == "" && !in.ClearQbtPass {
 					b.QbtPass = stored.QbtPass
 				}
 			} else if b.Password == "" && (b.AuthMethod == "password" || b.AuthMethod == "") && stored.Password != "" {

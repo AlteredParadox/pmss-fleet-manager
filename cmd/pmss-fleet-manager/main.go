@@ -151,7 +151,11 @@ func allowedHostList(addrs []string, extra string) (hosts []string, wildcard boo
 		hosts = append(hosts, h)
 	}
 	for _, h := range strings.Split(extra, ",") {
-		if h = strings.TrimSpace(h); h != "" {
+		h = strings.TrimSpace(h)
+		if hp, _, err := net.SplitHostPort(h); err == nil {
+			h = hp // "dash.local:8443" means the name dash.local
+		}
+		if h = strings.Trim(h, "[]"); h != "" {
 			hosts = append(hosts, h)
 		}
 	}

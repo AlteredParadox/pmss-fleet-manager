@@ -28,6 +28,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"pmss-fleet-manager/internal/dockerx"
 	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/qbt"
@@ -363,6 +365,7 @@ func (p *poller) poll(ctx context.Context) {
 	st.PollMs = time.Since(start).Milliseconds()
 	st.Status, st.StatusReason = classify(&st)
 
+	st.Sanitize() // before the cache write as well as the in-memory store
 	p.record(ctx, &st)
 	p.m.setState(&st)
 }
@@ -813,7 +816,16 @@ func (p *poller) runDu(ctx context.Context) {
 	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer scancel()
 	res := DirsState{Enabled: true, At: time.Now()}
-	interrupted := err != nil && (len(out) == 0 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+	if errors.Is(err, context.Canceled) {
+		// Retired by an edit/removal/shutdown mid-run: leave the cache and
+		// the (new poller's) state alone; nothing was measured.
+		return
+	}
+	// du exits non-zero for unreadable entries but its output is still a
+	// full measurement; any other failure (timeout, SSH drop, closed
+	// session) means the per-directory lines stopped part-way.
+	var exitErr *ssh.ExitError
+	interrupted := err != nil && (len(out) == 0 || !errors.As(err, &exitErr))
 	if interrupted {
 		// Interrupted (stop, SSH drop, timeout): du prints one line per
 		// directory as it goes, so partial output is NOT a measurement.
