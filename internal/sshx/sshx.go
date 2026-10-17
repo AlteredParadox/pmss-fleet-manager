@@ -307,9 +307,12 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 		// buffers are read (bounded: a dead peer must not hold us).
 		select {
 		case <-done:
+			return out.Bytes(), errb.Bytes(), ctx.Err()
 		case <-time.After(2 * time.Second):
+			// Gave up on the copiers: they may still write, so hand back
+			// copies rather than slices aliasing the live buffers.
+			return append([]byte(nil), out.Bytes()...), append([]byte(nil), errb.Bytes()...), ctx.Err()
 		}
-		return out.Bytes(), errb.Bytes(), ctx.Err()
 	case err := <-done:
 		return out.Bytes(), errb.Bytes(), err
 	}

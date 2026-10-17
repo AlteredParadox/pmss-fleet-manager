@@ -139,7 +139,7 @@ awk '$4=="0A"{x=$2; a=x; sub(/.*:/,"",x); sub(/:.*/,"",a); print "h", x, $8, a}'
 sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version; [ -x "$home/bin/qbittorrent-nox" ] && timeout 10 "$home/bin/qbittorrent-nox" --version </dev/null 2>/dev/null | head -n 1
 sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
-sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -c 'bin/qbt-start' 
+sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec 'bin/qbt-start([[:space:]")>;&|]|$)' 
 sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
 sec end
 `

@@ -208,8 +208,13 @@ function connectEvents() {
     const e = JSON.parse(ev.data);
     S.boxes = S.boxes.filter((b) => b.id !== e.box_id);
     if (S.detail && S.detail.id === e.box_id) S.detail = null;
+    if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
     recomputeTotals();
-    if (S.view === 'box' && S.selId === e.box_id) go('/fleet'); else render();
+    if (S.view === 'box' && S.selId === e.box_id) go('/fleet'); else if (S.view === 'alerts') loadAlerts(); else render();
+  });
+  es.addEventListener('settings', () => {
+    // Saved from another tab: refresh our copy (the settings form's draft is left alone).
+    loadState().then(() => { if (S.view !== 'settings') render(); else renderSide(); });
   });
   es.addEventListener('services', async (ev) => {
     const e = JSON.parse(ev.data);
@@ -940,7 +945,9 @@ document.addEventListener('click', async (e) => {
   if (cs) {
     S.settings.card_min_px = Number(cs.dataset.cardsize);
     render();
-    api('PUT', '/api/settings', S.settings).then((d) => { S.settings = d; }).catch((err) => toast(err.message, 'bad'));
+    // Send only this field: the server merges it onto its current settings,
+    // so a stale copy in this tab cannot revert changes made elsewhere.
+    api('PUT', '/api/settings', { card_min_px: S.settings.card_min_px }).then((d) => { S.settings = d; }).catch((err) => toast(err.message, 'bad'));
     return;
   }
   const fv = e.target.closest('[data-fleetview]');

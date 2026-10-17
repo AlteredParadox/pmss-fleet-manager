@@ -876,5 +876,6 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.m.SetSettings(in)
+	s.m.Publish(collect.Event{Type: "settings"}) // other tabs refresh their copy
 	writeJSON(w, 200, in.Public())
 }

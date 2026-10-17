@@ -50,7 +50,8 @@ type want struct {
 // alert key. A source that was unavailable on an otherwise good poll (quota
 // command hung, dockerd blip, no traffic file yet) must not resolve an alert
 // it could not check, or an acknowledged alert comes back unacknowledged on
-// the next good poll.
+// the next good poll. A source the user switched off is different: nothing
+// will ever re-check it, so its alerts resolve.
 func recheckable(s *collect.BoxState, k string) bool {
 	switch {
 	case k == "disk":
@@ -59,8 +60,12 @@ func recheckable(s *collect.BoxState, k string) bool {
 		return s.Traffic.OK
 	case k == "ram":
 		return s.RAM.OK
+	case k == "suspended":
+		return s.Account.OK
 	case strings.HasPrefix(k, "container:"):
-		return s.Docker.Reachable
+		// Monitoring switched off for the box is a deliberate "nothing to
+		// check", like a disabled box: the alert must not be stranded.
+		return s.Docker.Reachable || !s.Docker.Enabled
 	}
 	return true
 }
