@@ -187,7 +187,7 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 			if conn, err := net.Dial("unix", sock); err == nil {
 				ag := agent.NewClient(conn)
 				methods = append(methods, ssh.PublicKeysCallback(ag.Signers))
-				cleanup = func() { conn.Close() } // was leaked once per dial before
+				cleanup = func() { conn.Close() } // only needed during the handshake
 			} else if cfg.AuthMethod == "agent" {
 				return nil, cleanup, fmt.Errorf("ssh agent: %w", err)
 			}

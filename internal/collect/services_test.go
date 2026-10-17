@@ -17,6 +17,8 @@
 package collect
 
 import (
+	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
@@ -97,5 +99,28 @@ func TestMibToBytesClamps(t *testing.T) {
 	nan = nan / nan
 	if mibToBytes(nan) != 0 {
 		t.Fatal("NaN must clamp to 0")
+	}
+}
+
+func TestSanitizeFloats(t *testing.T) {
+	nan := math.NaN()
+	st := BoxState{}
+	st.CPU.Pct = nan
+	st.CPU.QuotaCPUs = math.Inf(1)
+	st.Traffic.Daily = []DayPoint{{Date: "2026-10-16", OutMiB: math.Inf(-1), InMiB: 1}}
+	st.Qbt.GlobalRatio = nan
+	st.HostSys.Load1 = 0.5
+	st.Sanitize()
+	if st.CPU.Pct != 0 || st.CPU.QuotaCPUs != 0 || st.Traffic.Daily[0].OutMiB != 0 || st.Qbt.GlobalRatio != 0 {
+		t.Fatalf("non-finite survived: %+v", st)
+	}
+	if st.HostSys.Load1 != 0.5 || st.Traffic.Daily[0].InMiB != 1 {
+		t.Fatal("finite values must be untouched")
+	}
+	if _, err := json.Marshal(st); err != nil {
+		t.Fatal(err)
+	}
+	if gibToBytes(1) != 1<<30 || gibToBytes(1e12) != 1<<62 || gibToBytes(-3) != 0 {
+		t.Fatalf("gib: %d %d %d", gibToBytes(1), gibToBytes(1e12), gibToBytes(-3))
 	}
 }

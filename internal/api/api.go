@@ -366,6 +366,8 @@ type boxInput struct {
 	// ForgetHostKey drops the pinned SSH host key so the next connect
 	// re-pins (trust on first use); needed after a box is reinstalled.
 	ForgetHostKey bool `json:"forget_host_key"`
+	// ClearQbtPass removes the saved WebUI password (a blank field keeps it).
+	ClearQbtPass bool `json:"clear_qbt_pass"`
 }
 
 func (in boxInput) validate() error {
@@ -510,6 +512,22 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 	}
 	prevHost, prevPort := b.Host, b.Port
 	in.apply(b)
+	// Secrets: a blank field keeps the saved one, so clearing is explicit.
+	// The SSH password is dropped when the box no longer authenticates with
+	// one; the WebUI password on request.
+	clearSSH := in.AuthMethod == "key" || in.AuthMethod == "agent"
+	if clearSSH || in.ClearQbtPass {
+		if err := s.st.ClearSecrets(r.Context(), id, clearSSH, in.ClearQbtPass); err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		if clearSSH {
+			b.Password = ""
+		}
+		if in.ClearQbtPass {
+			b.QbtPass = ""
+		}
+	}
 	if b.Host != prevHost || b.Port != prevPort || in.ForgetHostKey {
 		// A different endpoint has a different key; re-pin on next connect
 		// unless the wizard supplied the one it just saw. (The edit form
@@ -641,15 +659,26 @@ func (s *Server) handleDetect(w http.ResponseWriter, r *http.Request) {
 	b := store.Box{Enabled: true, DuEnabled: true}
 	in.apply(&b)
 	if in.ID > 0 {
-		// Edit mode: blank password fields mean "keep the saved one". Use
-		// them, or detect would try a WebUI login with an empty password
-		// (one strike toward qBittorrent's ban) and fail SSH password auth.
+		// Edit mode: blank password fields mean "keep the saved one". The
+		// stored secrets are reused ONLY for the endpoint they were saved
+		// for, and under the pinned host key: a different host, or a key
+		// mismatch, must never see them (the poller enforces the pin; the
+		// wizard must not be a way around it).
 		if stored, err := s.st.GetBox(r.Context(), in.ID); err == nil {
-			if b.Password == "" {
-				b.Password = stored.Password
+			same := strings.EqualFold(b.Host, stored.Host) && b.Port == stored.Port && b.User == stored.User
+			if same && !in.ForgetHostKey && b.HostKey == "" {
+				b.HostKey = stored.HostKey
 			}
-			if b.QbtPass == "" {
-				b.QbtPass = stored.QbtPass
+			if same {
+				if b.Password == "" {
+					b.Password = stored.Password
+				}
+				if b.QbtPass == "" {
+					b.QbtPass = stored.QbtPass
+				}
+			} else if b.Password == "" && (b.AuthMethod == "password" || b.AuthMethod == "") && stored.Password != "" {
+				writeErr(w, 400, errors.New("re-enter the SSH password to test a different host, port or user; the saved one is only used for the saved endpoint"))
+				return
 			}
 		}
 	}

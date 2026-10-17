@@ -106,7 +106,7 @@ elif [ -f "/sys/fs/cgroup/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/cgro
 sec qbt_conf; grep -E '^WebUI\\(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=' "$home/.config/qBittorrent/qBittorrent.conf" 2>/dev/null
 sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
 sec listen
-# Listening sockets only, as "h <hexport> <uid>", filtered on the box so the
+# Listening sockets only, as "h <hexport> <uid> <hexaddr>", filtered on the box so the
 # output stays small (the whole table is every tenant's torrent connection).
 # Deliberately NOT ss -e: it appends the socket's cgroup path verbatim, a
 # directory name the socket's owner chooses, which can contain "uid:<ours>"

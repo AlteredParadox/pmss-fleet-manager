@@ -17,6 +17,8 @@
 package collect
 
 import (
+	"math"
+	"reflect"
 	"time"
 
 	"pmss-fleet-manager/internal/store"
@@ -171,7 +173,7 @@ type AccountState struct {
 
 // TorrentView is one torrent for the UI.
 type TorrentView struct {
-	Hash     string  `json:"hash"`
+	Hash     string  `json:"-"` // identity for sorting/dedup only; the UI never shows it
 	Name     string  `json:"name"`
 	Size     int64   `json:"size"`
 	Progress float64 `json:"progress"`
@@ -290,6 +292,52 @@ func (s *BoxState) resetVolatile() {
 	s.Dirs.Running = false
 	s.Unpolled = true
 }
+
+// sanitizeFloats walks a value and replaces every NaN or infinite float64
+// with 0. It is the last line of defence before a state is stored or
+// serialised: encoding/json refuses those values and one bad number on one
+// box would otherwise take the whole fleet response down. Field-level
+// sanitising upstream remains, but a missed path is no longer fatal.
+func sanitizeFloats(v reflect.Value) {
+	switch v.Kind() {
+	case reflect.Float64, reflect.Float32:
+		if v.CanSet() {
+			f := v.Float()
+			if math.IsNaN(f) || math.IsInf(f, 0) {
+				v.SetFloat(0)
+			}
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			sanitizeFloats(v.Field(i))
+		}
+	case reflect.Ptr:
+		if !v.IsNil() {
+			sanitizeFloats(v.Elem())
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			sanitizeFloats(v.Index(i))
+		}
+	case reflect.Map:
+		for _, k := range v.MapKeys() {
+			e := v.MapIndex(k)
+			if e.Kind() == reflect.Float64 {
+				if f := e.Float(); math.IsNaN(f) || math.IsInf(f, 0) {
+					v.SetMapIndex(k, reflect.ValueOf(0.0))
+				}
+			} else if e.Kind() == reflect.Struct || e.Kind() == reflect.Ptr {
+				cp := reflect.New(e.Type()).Elem()
+				cp.Set(e)
+				sanitizeFloats(cp)
+				v.SetMapIndex(k, cp)
+			}
+		}
+	}
+}
+
+// Sanitize makes the state safe to serialise (see sanitizeFloats).
+func (s *BoxState) Sanitize() { sanitizeFloats(reflect.ValueOf(s).Elem()) }
 
 // Summary strips the large lists for the fleet view and SSE events.
 func (s BoxState) Summary() BoxState {

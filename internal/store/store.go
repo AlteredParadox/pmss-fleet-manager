@@ -279,6 +279,23 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box) error {
 	return err
 }
 
+// ClearSecrets blanks the stored SSH password and/or WebUI password. The
+// normal update keeps a secret when the field is blank, so this is the only
+// way to remove one.
+func (s *Store) ClearSecrets(ctx context.Context, id int64, ssh, qbt bool) error {
+	if ssh {
+		if _, err := s.db.ExecContext(ctx, `UPDATE boxes SET password='' WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	if qbt {
+		if _, err := s.db.ExecContext(ctx, `UPDATE boxes SET qbt_pass='' WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SetHostKey pins the host key after a trust-on-first-use connect.
 func (s *Store) SetHostKey(ctx context.Context, id int64, key string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE boxes SET host_key=? WHERE id=?`, key, id)

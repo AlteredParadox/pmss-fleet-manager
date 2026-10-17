@@ -63,24 +63,21 @@ type Facts struct {
 	HostKeyFP     string  `json:"host_key_fp"`
 }
 
-// Detect connects once with the given box settings and reports what it finds.
-// The returned Box has detection-derived fields filled in (host key, qbt port,
-// docker flag, name).
-// detectGuards remembers rejected WebUI logins seen by the add wizard, per
-// host/port/credentials, so clicking "detect" again never retries one (five
-// rejections ban the box's loopback IP). AddBox seeds the box's poller
-// guard from it.
+// detectGuards remembers rejected WebUI logins seen by the add/edit wizard,
+// per host and credentials, so clicking "detect" again never retries one
+// (five rejections ban the box's loopback IP). startPoller seeds the box's
+// poller guard from it; a dashboard-driven client restart clears it.
 var (
 	detectMu     sync.Mutex
 	detectGuards = map[string]*qbt.AuthGuard{}
 )
 
-func detectKey(host string, port int, user, pass string) string {
-	return fmt.Sprintf("%s:%d:%s", strings.ToLower(host), port, qbt.CredsKey(user, pass))
+func detectKey(host, user, pass string) string {
+	return strings.ToLower(host) + ":" + qbt.CredsKey(user, pass)
 }
 
-func detectGuard(host string, port int, user, pass string) *qbt.AuthGuard {
-	k := detectKey(host, port, user, pass)
+func detectGuard(host, user, pass string) *qbt.AuthGuard {
+	k := detectKey(host, user, pass)
 	detectMu.Lock()
 	defer detectMu.Unlock()
 	if len(detectGuards) > 256 {
@@ -94,11 +91,11 @@ func detectGuard(host string, port int, user, pass string) *qbt.AuthGuard {
 	return g
 }
 
-// detectGuardState returns the remembered hold for a box's host/port/
+// detectGuardState returns the remembered hold for a box's host and
 // credentials without creating an entry.
-func detectGuardState(host string, port int, user, pass string) (qbt.AuthState, bool) {
+func detectGuardState(host, user, pass string) (qbt.AuthState, bool) {
 	detectMu.Lock()
-	g, ok := detectGuards[detectKey(host, port, user, pass)]
+	g, ok := detectGuards[detectKey(host, user, pass)]
 	detectMu.Unlock()
 	if !ok {
 		return qbt.AuthState{}, false
@@ -106,6 +103,9 @@ func detectGuardState(host string, port int, user, pass string) (qbt.AuthState, 
 	return g.State(), true
 }
 
+// Detect connects once with the given box settings and reports what it finds.
+// The returned Box has detection-derived fields filled in (host key, qbt port,
+// docker flag, name).
 func Detect(ctx context.Context, b store.Box) *DetectResult {
 	res := &DetectResult{}
 	add := func(status, format string, args ...any) {
@@ -160,13 +160,13 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 		res.Facts.QuotaBytes, res.Facts.DiskUsedBytes = snap.Quota.SoftBytes, snap.Quota.UsedBytes
 		add("ok", "disk quota %s · %s used (%s)", HumanBytes(snap.Quota.SoftBytes), HumanBytes(snap.Quota.UsedBytes), snap.Quota.Source)
 	} else if snap.Account.QuotaGiB > 0 {
-		res.Facts.QuotaBytes = int64(snap.Account.QuotaGiB * (1 << 30))
+		res.Facts.QuotaBytes = gibToBytes(snap.Account.QuotaGiB)
 		add("warn", "quota command unavailable; plan quota %s from account config", HumanBytes(res.Facts.QuotaBytes))
 	} else {
 		add("warn", "no quota information readable")
 	}
 	if snap.Traffic.Out.OK {
-		res.Facts.TrafficLimit = int64(snap.Traffic.EffectiveLimitGiB * (1 << 30))
+		res.Facts.TrafficLimit = gibToBytes(snap.Traffic.EffectiveLimitGiB)
 		lim := "unlimited"
 		if res.Facts.TrafficLimit > 0 {
 			lim = HumanBytes(res.Facts.TrafficLimit) + " / 30 days"
@@ -207,7 +207,7 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 				b.QbtPort = port
 				break
 			}
-			g := detectGuard(b.Host, port, b.QbtUser, b.QbtPass)
+			g := detectGuard(b.Host, b.QbtUser, b.QbtPass)
 			if err, held := g.Blocked(qbt.CredsKey(b.QbtUser, b.QbtPass)); held {
 				add("warn", "not retrying the WebUI login: %v", err)
 				b.QbtEnabled = true

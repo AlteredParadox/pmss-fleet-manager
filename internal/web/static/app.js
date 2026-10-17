@@ -640,7 +640,7 @@ async function startEdit(id) {
   try {
     const d = await api('GET', `/api/boxes/${id}`);
     const b = d.box;
-    S.add.form = { ...blankForm(), ...b, password: '', qbt_pass: '', port: b.port || 22, host_key: '', forget_host_key: false };
+    S.add.form = { ...blankForm(), ...b, password: '', qbt_pass: '', port: b.port || 22, host_key: '', forget_host_key: false, clear_qbt_pass: false };
     S.add.pinned = !!b.host_key; // the key itself never round-trips: changing host/port must clear it
     render();
   } catch (e) { toast(e.message, 'bad'); go('/fleet'); }
@@ -692,6 +692,7 @@ function viewAdd() {
         <label class="check"><input type="checkbox" data-f="du_enabled" ${f.du_enabled ? 'checked' : ''}> measure directory usage periodically (du at lowest I/O priority)</label>
         ${edit ? `<label class="check"><input type="checkbox" data-f="enabled" ${f.enabled ? 'checked' : ''}> polling enabled</label>` : ''}
         ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins the new key)</span></label>` : ''}
+        ${edit ? `<label class="check"><input type="checkbox" data-f="clear_qbt_pass" ${f.clear_qbt_pass ? 'checked' : ''}> remove the saved WebUI password <span class="hint">(the SSH password is removed automatically when auth is switched to key or agent)</span></label>` : ''}
       </div></details>
       <div class="form-foot">
         <button data-go="${back}">cancel</button>

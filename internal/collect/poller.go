@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +70,22 @@ type poller struct {
 	// aborts promptly instead of blocking a box edit/removal for minutes.
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	actionMu sync.Mutex
+	actionAt time.Time // last stop/restart, see QbtAction
+}
+
+func (p *poller) noteAction() {
+	p.actionMu.Lock()
+	p.actionAt = time.Now()
+	p.actionMu.Unlock()
+}
+
+// actionSince reports whether a stop/restart happened after t.
+func (p *poller) actionSince(t time.Time) bool {
+	p.actionMu.Lock()
+	defer p.actionMu.Unlock()
+	return p.actionAt.After(t)
 }
 
 func newPoller(m *Manager, b *store.Box) *poller {
@@ -258,7 +276,7 @@ func (p *poller) sshDialUnix(path string) dockerx.Dialer {
 func explainSessionError(err error) error {
 	msg := err.Error()
 	if strings.Contains(msg, "unexpected packet in response to channel open") || strings.Contains(msg, "connection reset by peer") {
-		return fmt.Errorf("SSH login succeeded but the box dropped the session immediately (%v); the account's slice may be out of memory or sessions may be blocked for this user, check it from the Pulsed Media web interface", err)
+		return fmt.Errorf("SSH login succeeded but the box dropped the session (%w); the account's slice may be out of memory or sessions may be blocked for this user, check it from the Pulsed Media web interface", err)
 	}
 	return err
 }
@@ -333,6 +351,11 @@ func (p *poller) poll(ctx context.Context) {
 		return
 	}
 	p.maybeDu(ctx, &st)
+	if p.actionSince(start) {
+		// stop/restart ran while this poll was in flight: the ownership it
+		// verified is from before the port was freed.
+		st.Qbt.PortOK, st.Qbt.Reachable = false, false
+	}
 	st.Unpolled = false
 	st.Failures = 0
 	st.LastError = ""
@@ -349,6 +372,7 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 		return // aborted by stop/edit, not a failure of the box
 	}
 	st.Failures++
+	st.Unpolled = false // a failed poll is still a verified observation
 	st.LastError = describeErr(err)
 	st.PollMs = time.Since(start).Milliseconds()
 	if st.Failures >= 2 || st.LastOK.IsZero() {
@@ -396,7 +420,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	st.Disk = DiskState{OK: q.OK, UsedBytes: q.UsedBytes, QuotaBytes: q.SoftBytes, HardBytes: q.HardBytes,
 		FilesUsed: q.FilesUsed, FilesSoft: q.FilesSoft, Source: q.Source, AgeSec: int64(q.Age.Seconds())}
 	if st.Disk.QuotaBytes == 0 && snap.Account.QuotaGiB > 0 {
-		st.Disk.QuotaBytes = int64(snap.Account.QuotaGiB * (1 << 30))
+		st.Disk.QuotaBytes = gibToBytes(snap.Account.QuotaGiB)
 	}
 	st.Disk.Pct = pct(st.Disk.UsedBytes, st.Disk.QuotaBytes)
 
@@ -408,9 +432,9 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 		InMonthBytes:   mibToBytes(t.In.MonthMiB),
 		OutDayBytes:    mibToBytes(t.Out.DayMiB),
 		InDayBytes:     mibToBytes(t.In.DayMiB),
-		LimitBytes:     int64(t.EffectiveLimitGiB * (1 << 30)),
-		BaseLimitBytes: int64(t.LimitGiB * (1 << 30)),
-		BonusBytes:     int64(t.BonusGiB * (1 << 30)),
+		LimitBytes:     gibToBytes(t.EffectiveLimitGiB),
+		BaseLimitBytes: gibToBytes(t.LimitGiB),
+		BonusBytes:     gibToBytes(t.BonusGiB),
 		Throttled:      t.Throttled,
 		CapMbit:        snap.Account.TrafficCapMbit,
 		Daily:          dailySeries(t.Out.Daily, t.In.Daily, snap.At.In(snap.Location)),
@@ -456,7 +480,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 				denom = float64(max(snap.Host.NCPU, 1))
 			}
 			st.CPU.OK = true
-			st.CPU.Pct = cpus / denom * 100
+			st.CPU.Pct = math.Min(cpus/denom*100, 100000) // a corrupt quota must not produce Inf
 		}
 		p.prevCPU, p.prevCPUAt = c.CPUUsageNS, snap.At
 	}
@@ -591,7 +615,9 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	}
 	qs.Reachable = true
 	ss := md.ServerState
-	fmt.Sscanf(ss.GlobalRatio, "%f", &qs.GlobalRatio)
+	if f, err := strconv.ParseFloat(strings.TrimSpace(ss.GlobalRatio), 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) && f >= 0 && f < 1e9 {
+		qs.GlobalRatio = f // qBittorrent sends "∞" for undefined, which parses as 0 here
+	}
 	st.Rates = RateState{UpBps: float64(ss.UPInfoSpeed), DownBps: float64(ss.DLInfoSpeed), Source: "qbt"}
 
 	qs.Torrents = make([]TorrentView, 0, len(md.Torrents))
