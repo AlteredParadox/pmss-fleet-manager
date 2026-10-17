@@ -48,11 +48,29 @@ type want struct {
 
 // Evaluate is a collect.Hook.
 func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
-	if s.Status == "disabled" || s.Status == "pending" {
+	if s.Status == "pending" {
 		return
 	}
 	set := e.settings()
 	var active []want
+	if s.Status == "disabled" {
+		// Nothing is being checked any more: resolve whatever was open so
+		// a disabled box does not keep an "unreachable" alert forever.
+		keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
+		if err != nil {
+			return
+		}
+		changed := false
+		for _, k := range keys {
+			if err := e.st.ResolveAlert(ctx, s.ID, k); err == nil {
+				changed = true
+			}
+		}
+		if changed && e.notify != nil {
+			e.notify()
+		}
+		return
+	}
 	name := s.Name
 
 	if s.Status == "offline" {

@@ -155,7 +155,12 @@ func (m *Manager) housekeeping() {
 	}
 }
 
-func (m *Manager) startPoller(b *store.Box) {
+func (m *Manager) startPoller(bp *store.Box) {
+	if m.ctx.Err() != nil {
+		return // shutting down: never add a poller after Stop began waiting
+	}
+	b := new(store.Box)
+	*b = *bp // the poller owns its own copy (conn() writes HostKey into it)
 	st := fromBox(b)
 	// Resume from the last persisted state so a restart does not blank the UI.
 	var cached BoxState
@@ -164,6 +169,12 @@ func (m *Manager) startPoller(b *store.Box) {
 		st = cached
 		st.adoptIdentity(keep)
 		st.Qbt.Torrents, st.Docker.Containers = nil, nil
+		st.resetVolatile()
+	}
+	var auth qbt.AuthState
+	authKnown := false
+	if _, err := m.st.GetCache(m.ctx, b.ID, authCacheKind, &auth); err == nil {
+		authKnown = true
 	}
 	if !b.Enabled {
 		st.Status = "disabled"
@@ -173,8 +184,7 @@ func (m *Manager) startPoller(b *store.Box) {
 	m.states[b.ID] = &st
 	p := newPoller(m, b)
 	p.ctx, p.cancel = context.WithCancel(m.ctx)
-	var auth qbt.AuthState
-	if _, err := m.st.GetCache(m.ctx, b.ID, authCacheKind, &auth); err == nil {
+	if authKnown {
 		p.guard.Restore(auth)
 	}
 	m.pollers[b.ID] = p
@@ -188,7 +198,7 @@ func (m *Manager) startPoller(b *store.Box) {
 	}
 }
 
-// States returns summaries of every box sorted by name.
+// States returns a full copy of every box state sorted by name.
 func (m *Manager) States() []BoxState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -245,6 +255,10 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 		return err
 	}
 	m.startPoller(b)
+	if p := m.poller(b.ID); p != nil {
+		// A login the add wizard already saw rejected must not be retried.
+		p.guard.Restore(detectGuard(b.Host, b.QbtPort, b.QbtUser, b.QbtPass).State())
+	}
 	if s, ok := m.State(b.ID); ok {
 		sum := s.Summary()
 		m.Publish(Event{Type: "state", BoxID: b.ID, State: &sum})
@@ -257,11 +271,6 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 	if err := m.st.UpdateBox(ctx, b); err != nil {
 		return err
 	}
-	if b.QbtPass != "" {
-		// A password was typed in: treat it as an explicit request to try
-		// again, even if it is the same one the hold was recorded for.
-		_ = m.st.SetCache(ctx, b.ID, authCacheKind, qbt.AuthState{})
-	}
 	fresh, err := m.st.GetBox(ctx, b.ID)
 	if err != nil {
 		return err
@@ -273,6 +282,13 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 	if p != nil {
 		p.stopAndWait()
 	}
+	if b.QbtPass != "" {
+		// A password was typed in: treat it as an explicit request to try
+		// again, even if it is the same one the hold was recorded for.
+		// After stopAndWait, so the old poller's last record() cannot
+		// write the hold back.
+		_ = m.st.SetCache(ctx, b.ID, authCacheKind, qbt.AuthState{})
+	}
 	m.startPoller(fresh)
 	// Keep the last measured data so the UI does not blank out on edit.
 	if prev != nil {
@@ -281,6 +297,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 		keep := *prev
 		keep.adoptIdentity(*cur)
 		keep.Service = cur.Service
+		keep.resetVolatile() // port/creds may have changed: re-verify before any action
 		if !fresh.Enabled {
 			keep.Status = "disabled"
 		}
@@ -294,7 +311,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 	return nil
 }
 
-// RemoveBox stops polling and deletes the box and its history.
+// RemoveBox stops polling and deletes the box, its alerts and its cache.
 func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 	m.mu.Lock()
 	p := m.pollers[id]
@@ -337,6 +354,9 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 	if p == nil {
 		return "", store.ErrNotFound
 	}
+	if !p.box.Enabled {
+		return "", errors.New("polling is disabled for this box; enable it before running actions")
+	}
 	var out string
 	var err error
 	switch action {
@@ -350,10 +370,9 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 	case "autostart":
 		out, err = p.qbtAutostart(ctx)
 	default:
+		// "start" is not cleared: qbt-start exits 0 when the client is
+		// already running, so it does not prove a fresh process.
 		err = p.qbtAction(ctx, action)
-		if err == nil && action == "start" {
-			p.guard.Clear()
-		}
 	}
 	p.wake()
 	return out, err
@@ -391,11 +410,7 @@ func describeErr(err error) string {
 	if err == nil {
 		return ""
 	}
-	s := err.Error()
-	if len(s) > 200 {
-		s = s[:200] + "…"
-	}
-	return s
+	return clip(err.Error(), 200)
 }
 
 func pct(used, total int64) float64 {

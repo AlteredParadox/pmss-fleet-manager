@@ -55,7 +55,7 @@ function fmtBps(bps) {
 }
 function fmtPct(p) { return `${Math.round(Number(p) || 0)}%`; }
 const CUR = { EUR: '€', USD: '$', GBP: '£' };
-function fmtMoney(v, cur) { const n = Number(v) || 0; return `${CUR[cur] || (cur ? cur + ' ' : '')}${n.toFixed(2)}`; }
+function fmtMoney(v, cur) { const n = Number(v) || 0; return `${CUR[cur] || (cur ? esc(cur) + ' ' : '')}${n.toFixed(2)}`; }
 function cycleShort(c) { return ({ monthly: 'mo', quarterly: 'qtr', 'semi-annually': '6 mo', annually: 'yr', biennially: '2 yr', triennially: '3 yr' })[String(c || '').toLowerCase()] || (c || ''); }
 function safeHref(u) { return /^https?:\/\//i.test(String(u || '')) ? u : '#'; } // never render javascript: or data: links from API data
 function planOf(b) { return b.plan || (b.service && b.service.product) || ''; }
@@ -264,7 +264,7 @@ function renderMain() {
 /* ----- fleet ----- */
 function viewFleet() {
   const t = S.totals || {};
-  const renew = t.next_renewal ? `${t.next_renewal.slice(5)} <small>· ${daysUntil(t.next_renewal)}d</small>` : '—';
+  const renew = t.next_renewal ? `${esc(t.next_renewal.slice(5))} <small>· ${daysUntil(t.next_renewal)}d</small>` : '—';
   const body = S.boxes.length === 0
     ? `<div class="empty">no boxes yet — <a href="#/add">add your first box</a></div>`
     : (S.fleetView === 'table' ? fleetTable() : fleetCards());
@@ -386,7 +386,7 @@ function viewBox() {
         ${installBtn}
         ${powerBtn}
         <button data-go="/edit/${b.id}">edit</button>
-        <button class="danger" data-act="remove" data-confirm="Remove ${esc(b.name)} from the fleet? History and alerts for it are deleted. Nothing on the box is touched.">remove</button>
+        <button class="danger" data-act="remove" data-confirm="Remove ${esc(b.name)} from the fleet? Its alerts are deleted. Nothing on the box is touched.">remove</button>
       </div>
     </div>
     <div class="tabs">${tabs.map(([k, l]) => `<button class="${S.tab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>

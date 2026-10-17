@@ -27,8 +27,6 @@ const sample = `@@uid
 1001
 @@user
 ragnar
-@@home
-/home/ragnar
 @@hostname
 odin.pulsedmedia.com
 @@now
@@ -65,7 +63,6 @@ a:2:{s:3:"raw";a:5:{s:5:"month";d:6963.25;s:4:"week";i:1200;s:3:"day";d:0;s:4:"h
 20000
 @@throttle
 0
-@@resource
 @@pmss_user
 {"quota": 2000, "quotaBurst": 2500, "ramMiB": 8192, "dockerEnabled": true, "trafficCapMbit": 1000}
 @@cgroup
@@ -266,5 +263,30 @@ func TestParseTZ(t *testing.T) {
 		if _, got := time.Now().In(parseTZ(in)).Zone(); got != want {
 			t.Errorf("%q: got %d want %d", in, got, want)
 		}
+	}
+}
+
+func TestListenersContestedAndUnknownUID(t *testing.T) {
+	snap, _ := Parse([]byte("@@uid\n1001\n@@listen\nh 1F90 1001\nh 1F90 1002\nh 0016 0\n@@end\n"), time.Now())
+	if ok, reason := snap.PortOwner(8080); ok || !strings.Contains(reason, "more than one account") {
+		t.Fatalf("contested port must be refused: %v %q", ok, reason)
+	}
+	snap2, _ := Parse([]byte("@@listen\nh 1F90 0\n@@end\n"), time.Now())
+	if ok, _ := snap2.PortOwner(8080); ok {
+		t.Fatal("unknown own uid must refuse")
+	}
+	if _, err := Parse([]byte("@@uid\n1\n@@traffic\na:1:{s:3:\"raw\";a:1:{s:5:\"15min\";d:1.0E+308;}}\n@@end\n"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFiniteTraffic(t *testing.T) {
+	snap, err := Parse([]byte("@@uid\n1\n@@traffic\na:2:{s:3:\"raw\";a:2:{s:5:\"15min\";d:1.0E+308;s:5:\"month\";d:NAN;}s:5:\"daily\";a:1:{s:10:\"2026/10/16\";d:INF;}}\n@@end\n"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := snap.Traffic.Out
+	if ts.Min15MiB != 0 || ts.MonthMiB != 0 || ts.Daily["2026/10/16"] != 0 {
+		t.Fatalf("non-finite values must become 0: %+v", ts)
 	}
 }

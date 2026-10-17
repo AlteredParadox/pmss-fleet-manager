@@ -69,7 +69,7 @@ make build                                 # or: go build -o pmss-fleet-manager 
 ```
 
 Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
-`PMSS_AUTH`, `PMSS_LOG`:
+`PMSS_AUTH`, `PMSS_LOG`, `PMSS_ALLOWED_HOSTS`:
 
 | flag | default | meaning |
 |---|---|---|
@@ -95,10 +95,14 @@ they arrive from the box's own loopback address. On a shared host other tenants
 can reach that same loopback port, so keep WebUI authentication on and give the
 dashboard the username and password rather than enabling the localhost bypass.
 
-The poller never retries a failed login on every poll: qBittorrent bans an IP
-after five failures, and on PMSS that loopback address is shared with the
-`/user-<name>/` web path, so a ban would lock you out of both. After an auth
-failure it waits 20 minutes before trying again, and after a ban 65 minutes.
+The poller never retries a rejected login: qBittorrent bans an IP after five
+failures, its counter never decays, and on PMSS that loopback address is
+shared with the `/user-<name>/` web path, so a ban would lock you out of
+both. A rejected username/password is held until you change it, re-enter it
+under edit, or restart the client from the dashboard (a fresh process has a
+fresh counter). A detected ban is held for 65 minutes. Before any login the
+probe also checks that the WebUI port is bound by your own uid, since on a
+shared host another tenant could bind it while your client is down.
 
 "Start client" runs the per-box start command; when none is set it uses
 `~/bin/qbt-start` if present, else `"$HOME/bin/qbittorrent-nox" -d`.

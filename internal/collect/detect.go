@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"pmss-fleet-manager/internal/dockerx"
@@ -65,6 +66,30 @@ type Facts struct {
 // Detect connects once with the given box settings and reports what it finds.
 // The returned Box has detection-derived fields filled in (host key, qbt port,
 // docker flag, name).
+// detectGuards remembers rejected WebUI logins seen by the add wizard, per
+// host/port/credentials, so clicking "detect" again never retries one (five
+// rejections ban the box's loopback IP). AddBox seeds the box's poller
+// guard from it.
+var (
+	detectMu     sync.Mutex
+	detectGuards = map[string]*qbt.AuthGuard{}
+)
+
+func detectGuard(host string, port int, user, pass string) *qbt.AuthGuard {
+	k := fmt.Sprintf("%s:%d:%s", strings.ToLower(host), port, qbt.CredsKey(user, pass))
+	detectMu.Lock()
+	defer detectMu.Unlock()
+	if len(detectGuards) > 256 {
+		detectGuards = map[string]*qbt.AuthGuard{}
+	}
+	g, ok := detectGuards[k]
+	if !ok {
+		g = &qbt.AuthGuard{}
+		detectGuards[k] = g
+	}
+	return g
+}
+
 func Detect(ctx context.Context, b store.Box) *DetectResult {
 	res := &DetectResult{}
 	add := func(status, format string, args ...any) {
@@ -166,9 +191,16 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 				b.QbtPort = port
 				break
 			}
+			g := detectGuard(b.Host, port, b.QbtUser, b.QbtPass)
+			if err, held := g.Blocked(qbt.CredsKey(b.QbtUser, b.QbtPass)); held {
+				add("warn", "not retrying the WebUI login: %v", err)
+				b.QbtEnabled = true
+				b.QbtPort = port
+				break
+			}
 			qctx, qcancel := context.WithTimeout(ctx, 15*time.Second)
 			hp := fmt.Sprintf("127.0.0.1:%d", port)
-			qc := qbt.New(func(ctx context.Context) (netConn, error) { return cli.DialTCP(ctx, hp) }, hp, b.QbtUser, b.QbtPass)
+			qc := qbt.NewWithGuard(func(ctx context.Context) (netConn, error) { return cli.DialTCP(ctx, hp) }, hp, b.QbtUser, b.QbtPass, g)
 			v, err := qc.Version(qctx)
 			qcancel()
 			qc.Close()

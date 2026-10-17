@@ -94,14 +94,16 @@ func parseAmount(s string) float64 {
 		}
 		return -1
 	}, s)
-	if strings.Contains(s, ",") {
-		if strings.Contains(s, ".") {
-			s = strings.ReplaceAll(s, ",", "") // thousands separator
-		} else if i := strings.LastIndex(s, ","); len(s)-i-1 <= 2 {
-			s = s[:i] + "." + s[i+1:] // European decimal comma
-		} else {
-			s = strings.ReplaceAll(s, ",", "")
-		}
+	// Whichever separator comes last with at most two digits after it is the
+	// decimal point: "1,234.56", "1.234,56", "11,94", "1,234".
+	lc, ld := strings.LastIndex(s, ","), strings.LastIndex(s, ".")
+	switch {
+	case lc > ld && len(s)-lc-1 <= 2 && strings.Count(s, ",") == 1:
+		s = strings.ReplaceAll(s[:lc], ".", "") + "." + s[lc+1:]
+	case lc > ld:
+		s = strings.ReplaceAll(s, ",", "")
+	default:
+		s = strings.ReplaceAll(s, ",", "")
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {

@@ -168,7 +168,15 @@ func (p *poller) run(ctx context.Context) {
 // conn returns a live SSH client, connecting if needed.
 func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
 	if p.stopped() {
-		return nil, errors.New("this box was just edited or removed; retry the action")
+		return nil, errStopped
+	}
+	// An action runs on its HTTP request ctx; tie the dial/ping to the
+	// poller's ctx as well so stopAndWait aborts it instead of waiting.
+	if p.ctx != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		defer context.AfterFunc(p.ctx, cancel)()
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -195,6 +203,12 @@ func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
 	cli, err := sshx.Dial(cctx, sshConfig(p.box))
 	if err != nil {
 		return nil, err
+	}
+	if p.stopped() {
+		// Retired while dialling (box edited/removed): never keep this
+		// connection or pin its key onto the edited record.
+		cli.Close()
+		return nil, errStopped
 	}
 	if p.box.HostKey == "" && cli.HostKey() != "" {
 		p.box.HostKey = cli.HostKey()
@@ -237,6 +251,8 @@ func (p *poller) sshDialUnix(path string) dockerx.Dialer {
 	}
 }
 
+var errStopped = errors.New("this box was just edited or removed; retry the action")
+
 // safePoll turns a panic in a poll (a parser bug on hostile box output) into
 // a failed poll for that one box instead of taking the whole dashboard down.
 func (p *poller) safePoll(ctx context.Context) {
@@ -244,7 +260,7 @@ func (p *poller) safePoll(ctx context.Context) {
 		if r := recover(); r != nil {
 			p.m.log.Error("poll panicked", "box", p.box.Name, "panic", fmt.Sprint(r))
 			st, _ := p.m.State(p.box.ID)
-			p.fail(&st, fmt.Errorf("internal error: %v", r), time.Now())
+			p.fail(ctx, &st, fmt.Errorf("internal error: %v", r), time.Now())
 		}
 	}()
 	p.poll(ctx)
@@ -258,7 +274,7 @@ func (p *poller) poll(ctx context.Context) {
 
 	cli, err := p.conn(ctx)
 	if err != nil {
-		p.fail(&st, err, start)
+		p.fail(ctx, &st, err, start)
 		return
 	}
 	tag := probe.NewTag()
@@ -272,12 +288,12 @@ func (p *poller) poll(ctx context.Context) {
 			p.ssh = nil
 		}
 		p.mu.Unlock()
-		p.fail(&st, fmt.Errorf("probe: %v %s", err, strings.TrimSpace(string(stderr))), start)
+		p.fail(ctx, &st, fmt.Errorf("probe: %v %s", err, strings.TrimSpace(string(stderr))), start)
 		return
 	}
 	snap, err := probe.ParseTagged(out, tag, time.Now())
 	if err != nil {
-		p.fail(&st, err, start)
+		p.fail(ctx, &st, err, start)
 		return
 	}
 	p.apply(&st, snap)
@@ -295,6 +311,12 @@ func (p *poller) poll(ctx context.Context) {
 	}
 	p.maybeDu(ctx, &st)
 
+	if ctx.Err() != nil {
+		// Cancelled by an edit/removal/shutdown part-way through: whatever
+		// the qbt/docker stages reported is an artefact of the cancel, not
+		// a real failure. Do not classify, record or alert on it.
+		return
+	}
 	st.Failures = 0
 	st.LastError = ""
 	st.LastOK = time.Now()
@@ -305,7 +327,10 @@ func (p *poller) poll(ctx context.Context) {
 	p.m.setState(&st)
 }
 
-func (p *poller) fail(st *BoxState, err error, start time.Time) {
+func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.Time) {
+	if ctx.Err() != nil {
+		return // aborted by stop/edit, not a failure of the box
+	}
 	st.Failures++
 	st.LastError = describeErr(err)
 	st.PollMs = time.Since(start).Milliseconds()
@@ -317,6 +342,7 @@ func (p *poller) fail(st *BoxState, err error, start time.Time) {
 	st.StatusReason = st.LastError
 	st.Rates = RateState{}
 	st.Qbt.Reachable = false
+	st.Qbt.PortOK = false // must be re-verified by the next successful probe
 	st.Docker.Reachable = false
 	p.m.log.Warn("poll failed", "box", p.box.Name, "failures", st.Failures, "err", err)
 	p.m.setState(st)
@@ -545,13 +571,8 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 			qs.Leeching++
 		case "paused":
 			qs.Paused++
-		case "checking":
-			qs.Checking++
 		case "error":
 			qs.Errored++
-		}
-		if t.UPSpeed > 0 || t.DLSpeed > 0 {
-			qs.Active++
 		}
 		qs.Torrents = append(qs.Torrents, TorrentView{
 			Hash: clip(t.Hash, 64), Name: clip(t.Name, 400), Size: t.Size, Progress: t.Progress, UpBps: t.UPSpeed, DownBps: t.DLSpeed,
@@ -673,16 +694,16 @@ func (p *poller) forceDu() {
 
 func (p *poller) maybeDu(ctx context.Context, st *BoxState) {
 	st.Dirs.Enabled = p.box.DuEnabled
-	// The persisted state keeps Dirs.At but drops the entries (Summary), so
-	// reload the full du result whenever the live state has none.
-	if len(st.Dirs.Entries) == 0 {
-		var cached DirsState
-		if at, err := p.m.st.GetCache(ctx, p.box.ID, "du", &cached); err == nil {
-			cached.At = at
-			cached.Enabled = p.box.DuEnabled
-			cached.Running = false
-			st.Dirs = cached
-		}
+	// The persisted state keeps Dirs.At but drops the entries (Summary), and
+	// a du finishing mid-poll is overwritten by that poll's stale copy, so
+	// reload the cached result whenever the live state has none or the
+	// cache is newer.
+	var cached DirsState
+	if at, err := p.m.st.GetCache(ctx, p.box.ID, "du", &cached); err == nil && (len(st.Dirs.Entries) == 0 || at.After(st.Dirs.At)) {
+		cached.At = at
+		cached.Enabled = p.box.DuEnabled
+		cached.Running = false
+		st.Dirs = cached
 	}
 	if !p.box.DuEnabled {
 		return
@@ -730,18 +751,20 @@ func (p *poller) runDu(ctx context.Context) {
 	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer scancel()
 	res := DirsState{Enabled: true, At: time.Now()}
-	if err != nil && len(out) == 0 {
-		// Interrupted (stop, SSH drop, timeout): keep the last good
-		// measurement and only attach the error, instead of replacing six
-		// hours of data with an empty list.
+	interrupted := err != nil && (len(out) == 0 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+	if interrupted {
+		// Interrupted (stop, SSH drop, timeout): du prints one line per
+		// directory as it goes, so partial output is NOT a measurement.
+		// Keep the last good one and only attach the error.
 		var prev DirsState
 		if at, gerr := p.m.st.GetCache(sctx, p.box.ID, "du", &prev); gerr == nil {
 			res.Entries, res.At = prev.Entries, at
 		}
 		res.Error = describeErr(err)
-	}
-	for _, d := range probe.ParseDu(out) {
-		res.Entries = append(res.Entries, DirEntry{Name: clip(d.Name, 255), Bytes: d.Bytes})
+	} else {
+		for _, d := range probe.ParseDu(out) {
+			res.Entries = append(res.Entries, DirEntry{Name: clip(d.Name, 255), Bytes: d.Bytes})
+		}
 	}
 	if err := p.m.st.SetCache(sctx, p.box.ID, "du", res); err != nil {
 		p.m.log.Warn("cache du", "box", p.box.Name, "err", err)
@@ -855,9 +878,7 @@ func (p *poller) rawProbe(ctx context.Context) (map[string]string, error) {
 		secs["pmss_user"] = probe.AccountSummary(raw)
 	}
 	for k, v := range secs {
-		if len(v) > 4096 {
-			secs[k] = v[:4096] + "…"
-		}
+		secs[k] = clip(v, 4096)
 	}
 	if len(stderr) > 0 {
 		secs["_stderr"] = strings.TrimSpace(string(stderr))

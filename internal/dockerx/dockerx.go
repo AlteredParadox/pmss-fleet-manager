@@ -151,13 +151,8 @@ type rawStats struct {
 	} `json:"precpu_stats"`
 	MemoryStats struct {
 		Usage int64            `json:"usage"`
-		Limit int64            `json:"limit"`
 		Stats map[string]int64 `json:"stats"`
 	} `json:"memory_stats"`
-	Networks map[string]struct {
-		RxBytes int64 `json:"rx_bytes"`
-		TxBytes int64 `json:"tx_bytes"`
-	} `json:"networks"`
 }
 
 // Stats takes one two-sample stats reading (about one second).
