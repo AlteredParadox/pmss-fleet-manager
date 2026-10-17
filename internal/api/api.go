@@ -41,6 +41,8 @@ import (
 
 // Server holds the dependencies for the handlers.
 const (
+	schemeHTTP      = "http://"
+	schemeHTTPS     = "https://"
 	hdrContentType  = "Content-Type"
 	hdrCacheControl = "Cache-Control"
 	noStore         = "no-store"
@@ -205,7 +207,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func sameOrigin(origin, host string) bool {
-	origin = strings.TrimPrefix(strings.TrimPrefix(origin, "http://"), "https://")
+	origin = strings.TrimPrefix(strings.TrimPrefix(origin, schemeHTTP), schemeHTTPS)
 	return strings.EqualFold(origin, host)
 }
 
@@ -710,7 +712,7 @@ func validTorrentURL(u string) bool {
 		return false
 	}
 	l := strings.ToLower(u)
-	return strings.HasPrefix(l, "magnet:?") || strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
+	return strings.HasPrefix(l, "magnet:?") || strings.HasPrefix(l, schemeHTTP) || strings.HasPrefix(l, schemeHTTPS)
 }
 
 // looksLikeTorrent is a cheap shape check (a bencoded dictionary) so junk
@@ -1070,7 +1072,7 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	if in.QbtDownloadURL == "" {
 		in.QbtDownloadURL = store.DefaultQbtDownloadURL
 	}
-	if !strings.HasPrefix(in.QbtDownloadURL, "https://") || strings.ContainsAny(in.QbtDownloadURL, " '\"") {
+	if !strings.HasPrefix(in.QbtDownloadURL, schemeHTTPS) || strings.ContainsAny(in.QbtDownloadURL, " '\"") {
 		writeErr(w, 400, errors.New("qbt_download_url must be an https URL"))
 		return
 	}
