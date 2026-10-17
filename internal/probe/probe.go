@@ -55,6 +55,11 @@ type Snapshot struct {
 	// be read, in which case nothing can be verified.
 	Listeners      map[int]int
 	ListenersKnown bool
+
+	// Location is the box's local time zone (a fixed offset from `date +%z`).
+	// PMSS keys the daily traffic series by the box's local date, so the
+	// 30-day window must be built in that zone, not the dashboard's.
+	Location *time.Location
 }
 
 // PortOwner reports who listens on port: our uid, another uid, or nobody.
@@ -72,6 +77,35 @@ func (s *Snapshot) PortOwner(port int) (ok bool, reason string) {
 		return false, fmt.Sprintf("port %d is owned by uid %d, not by this account; refusing to connect or send credentials to it", port, uid)
 	}
 	return true, ""
+}
+
+// AccountSummary renders the parsed fields of ~/.config/pmss-user.json for
+// diagnostics, so the raw file (which may grow fields we do not use) is
+// never shown verbatim.
+func AccountSummary(raw string) string {
+	a := parseAccount(raw)
+	if !a.OK {
+		return "(not present or not parsable)"
+	}
+	return fmt.Sprintf("quota=%g GiB ram=%g MiB docker=%v trafficCap=%g Mbit suspended=%v", a.QuotaGiB, a.RAMMiB, a.DockerEnabled, a.TrafficCapMbit, a.Suspended)
+}
+
+// parseTZ turns a `date +%z` offset ("+0300", "-0500") into a fixed zone;
+// unparsable input yields UTC.
+func parseTZ(z string) *time.Location {
+	if len(z) != 5 || (z[0] != '+' && z[0] != '-') {
+		return time.UTC
+	}
+	hh, err1 := strconv.Atoi(z[1:3])
+	mm, err2 := strconv.Atoi(z[3:5])
+	if err1 != nil || err2 != nil || hh > 14 || mm > 59 {
+		return time.UTC
+	}
+	off := hh*3600 + mm*60
+	if z[0] == '-' {
+		off = -off
+	}
+	return time.FixedZone("box"+z, off)
 }
 
 // lastSection returns the name of the last section header in raw.
@@ -281,6 +315,7 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	if ts, err := strconv.ParseInt(strings.TrimSpace(s["now"]), 10, 64); err == nil && ts > 0 {
 		snap.At = time.Unix(ts, 0)
 	}
+	snap.Location = parseTZ(strings.TrimSpace(s["tz"]))
 	snap.Host = parseHost(s)
 	snap.HomeFS = parseDF(s["df_home"])
 	snap.Quota = parseQuota(s, snap.At)

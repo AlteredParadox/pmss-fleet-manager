@@ -44,6 +44,7 @@ sec uid; echo "$uid"
 sec user; echo "$user"
 sec hostname; timeout 5 hostname -f 2>/dev/null || hostname
 sec now; date +%s
+sec tz; date +%z
 sec uptime; cat /proc/uptime 2>/dev/null
 sec loadavg; cat /proc/loadavg 2>/dev/null
 sec meminfo; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo 2>/dev/null

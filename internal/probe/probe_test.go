@@ -260,3 +260,11 @@ func TestTruncatedNamesLastSection(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestParseTZ(t *testing.T) {
+	for in, want := range map[string]int{"+0300": 3 * 3600, "-0500": -5 * 3600, "+0530": 5*3600 + 1800, "Z": 0, "": 0, "+9900": 0} {
+		if _, got := time.Now().In(parseTZ(in)).Zone(); got != want {
+			t.Errorf("%q: got %d want %d", in, got, want)
+		}
+	}
+}

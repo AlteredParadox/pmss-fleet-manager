@@ -310,7 +310,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			fl.Flush()
 		case ev, ok := <-ch:
 			if !ok {
-				return
+				return // dropped as a slow subscriber: the client reconnects and resyncs
 			}
 			b, _ := json.Marshal(ev)
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, b)

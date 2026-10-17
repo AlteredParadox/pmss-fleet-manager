@@ -18,6 +18,7 @@ package collect
 
 import (
 	"testing"
+	"time"
 
 	"pmss-fleet-manager/internal/pmapi"
 )
@@ -54,4 +55,36 @@ func TestMatchService(t *testing.T) {
 			t.Errorf("%s/%s: got %d %q, want %d %q", c.host, c.user, id, how, c.want, c.how)
 		}
 	}
+}
+
+func TestDailySeriesUsesBoxZone(t *testing.T) {
+	// 01:00 on the 10th in Helsinki is still the 9th in UTC; the box keys by
+	// its own date, so the "today" bar must be the 10th.
+	hel := time.FixedZone("hel", 3*3600)
+	now := time.Date(2026, 10, 10, 1, 0, 0, 0, hel)
+	out := map[string]float64{"2026/10/10": 5, "2026/10/09": 3}
+	pts := dailySeries(out, nil, now)
+	if last := pts[len(pts)-1]; last.Date != "2026-10-10" || last.OutMiB != 5 {
+		t.Fatalf("last point = %+v", last)
+	}
+	if pts[len(pts)-2].OutMiB != 3 {
+		t.Fatalf("yesterday = %+v", pts[len(pts)-2])
+	}
+}
+
+func TestBusDropsSlowSubscriber(t *testing.T) {
+	b := NewBus()
+	ch, cancel := b.Subscribe()
+	defer cancel()
+	for i := 0; i < 70; i++ { // buffer is 64
+		b.Publish(Event{Type: "state"})
+	}
+	n := 0
+	for range ch {
+		n++
+	}
+	if n != 64 {
+		t.Fatalf("delivered %d, want the 64 buffered then a closed channel", n)
+	}
+	cancel() // must be safe after the bus already dropped the subscriber
 }
