@@ -125,7 +125,7 @@ shared host another tenant could bind it while your client is down.
 
 - Box credentials (SSH password, qBittorrent password) and the Pulsed Media
   API key are stored in plain text in the SQLite file, which is created mode
-  0600. Prefer SSH keys or the agent. The API key is never sent to the browser.
+  0600 (its -wal and -shm side files too). Prefer SSH keys or the agent. The API key is never sent to the browser.
 - The server has no authentication by default and binds to loopback. Use
   `-auth`, and put it behind a reverse proxy with TLS before exposing it
   further.

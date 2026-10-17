@@ -59,8 +59,10 @@ function fmtMoney(v, cur) { const n = Number(v) || 0; return `${CUR[cur] || (cur
 function cycleShort(c) { return ({ monthly: 'mo', quarterly: 'qtr', 'semi-annually': '6 mo', annually: 'yr', biennially: '2 yr', triennially: '3 yr' })[String(c || '').toLowerCase()] || (c || ''); }
 function safeHref(u) { return /^https?:\/\//i.test(String(u || '')) ? u : '#'; } // never render javascript: or data: links from API data
 function retryNote(b) {
-  if (b.status === 'disabled' || !b.failures || !b.next_poll) return '';
-  const s = Math.max(0, Math.round((Date.parse(b.next_poll) - Date.now()) / 1000));
+  // next_poll is the zero time ("0001-01-01…", a truthy string) when no retry is scheduled.
+  const due = Date.parse(b.next_poll);
+  if (b.status === 'disabled' || !b.failures || !(due > 0)) return '';
+  const s = Math.max(0, Math.round((due - Date.now()) / 1000));
   return `retry ${s < 5 ? 'now' : s < 90 ? `in ${s}s` : `in ${Math.round(s / 60)} min`}${b.backoff ? ', backed off' : ''}`;
 }
 function planOf(b) { return b.plan || (b.service && b.service.product) || ''; }
@@ -317,7 +319,7 @@ function fleetCards() {
     <div class="card click" data-go="/box/${b.id}">
       <div class="card-head">
         <div class="card-title"><span class="led ${b.status}" title="${esc(statusLabel(b.status))}${b.status_reason ? ' — ' + esc(b.status_reason) : ''}"></span><span class="n">${esc(b.name)}</span></div>
-        <div class="sub">${esc(b.hostname || b.host)}${b.status_reason ? ` · <span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(b.status_reason)}</span>` : ''}${b.failures && b.next_poll ? ` · <span class="muted">${esc(retryNote(b))}</span>` : ''}</div>
+        <div class="sub">${esc(b.hostname || b.host)}${b.status_reason ? ` · <span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(b.status_reason)}</span>` : ''}${retryNote(b) ? ` · <span class="muted">${esc(retryNote(b))}</span>` : ''}</div>
         <div class="tags"><span class="tag">${esc(b.type)}</span>${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}</div>
       </div>
       <div style="display:grid;gap:8px">
@@ -387,7 +389,7 @@ function viewBox() {
         ${b.status_reason ? `<div class="meta"><span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(statusLabel(b.status))} — ${esc(b.status_reason)}</span>${b.failures ? `<span class="muted" title="${b.backoff ? 'after repeated failures the dashboard retries less often, up to every 10 minutes; use retry now to reconnect immediately' : 'retrying at the normal interval'}">${retryNote(b) ? esc(retryNote(b)) + ' · ' : ''}${b.failures} failed</span>` : ''}</div>` : ''}
       </div>
       <div class="actions">
-        <button data-act="refresh" title="${b.failures ? 'reconnect and poll now, ignoring the backoff' : 'poll now'}">${b.failures ? 'retry now' : 'refresh'}</button>
+        ${b.status === 'disabled' ? '' : `<button data-act="refresh" title="${b.failures ? 'reconnect and poll now, ignoring the backoff' : 'poll now'}">${b.failures ? 'retry now' : 'refresh'}</button>`}
         ${installBtn}
         ${powerBtn}
         <button data-go="/edit/${b.id}">edit</button>

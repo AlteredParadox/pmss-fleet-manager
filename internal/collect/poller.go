@@ -395,9 +395,10 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 	st.Unpolled = false // a failed poll is still a verified observation
 	st.LastError = describeErr(err)
 	st.PollMs = time.Since(start).Milliseconds()
-	// A box already offline stays offline: after a restart or an edit the
-	// failure count starts over, and one "degraded" poll in between would
-	// resolve the unreachable alert only to raise it again.
+	// A box already offline stays offline. The state survives an edit in
+	// memory and a restart through the cache (failed polls are recorded
+	// too); one "degraded" poll in between would resolve the unreachable
+	// alert only to raise it again, unacknowledged.
 	if st.Failures >= 2 || st.LastOK.IsZero() || st.Status == "offline" {
 		st.Status = "offline"
 	} else {
@@ -409,6 +410,10 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 	st.Qbt.PortOK = false // must be re-verified by the next successful probe
 	st.Docker.Reachable = false
 	p.m.log.Warn("poll failed", "box", p.box.Name, "failures", st.Failures, "err", err)
+	// Persist the failure as well: a restart must not restore a down box as
+	// online (the last successful poll) and walk it through "degraded".
+	st.Sanitize()
+	p.record(ctx, st)
 	p.m.setState(st)
 }
 
@@ -590,12 +595,12 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: snap.Qbt.SubnetList, ConfUser: snap.Qbt.Username,
 		HasCreds:      p.box.QbtUser != "" || p.box.QbtPass != "",
 		BinaryVersion: snap.Qbt.BinaryVersion, StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0}
-	defer func() { // runs after st.Qbt is set below
+	versionOK := false // this poll read the running version (it is otherwise carried over for display)
+	defer func() {     // runs after st.Qbt is set below
 		q := &st.Qbt
-		// Version is carried over from the last reachable poll; only compare
-		// it when this poll confirmed it, or a restarted-but-unreachable
-		// client would keep "restart to apply" lit.
-		q.RestartNeeded = q.Reachable && q.ProcessUp && q.Version != "" && q.BinaryVersion != "" && q.Version != q.BinaryVersion
+		// Compare only a version this poll confirmed, or a restarted client
+		// whose version call failed would keep "restart to apply" lit.
+		q.RestartNeeded = versionOK && q.ProcessUp && q.Version != "" && q.BinaryVersion != "" && q.Version != q.BinaryVersion
 		// Last, so a slow GitHub lookup (cached six hours) cannot eat into
 		// the time budget of the WebUI calls above.
 		q.LatestVersion = p.m.latest.get(ctx)
@@ -640,6 +645,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	// after an update, and the call is one tiny request.
 	if v, err := cli.Version(actx); err == nil {
 		qs.Version = clip(v, 64)
+		versionOK = true
 	}
 	qs.Reachable = true
 	ss := md.ServerState
