@@ -19,3 +19,16 @@ package collect
 import "net"
 
 type netConn = net.Conn
+
+// clip bounds a remote-supplied string so a hostile box cannot bloat state,
+// the database or every SSE event. Cuts on a rune boundary.
+func clip(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}

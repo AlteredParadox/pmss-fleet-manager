@@ -16,16 +16,30 @@
 
 package probe
 
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"strconv"
+	"strings"
+	"time"
+)
+
 // Script is the POSIX sh probe executed on the box as the tenant user. It
-// prints "@@name" section headers followed by raw content. Every command is
-// allowed to fail so one missing file never hides the rest.
+// prints "@@<tag>name" section headers followed by raw content. Every command
+// is allowed to fail so one missing file never hides the rest.
+//
+// The tag is a per-run secret (see ScriptWithTag): sections quote content a
+// co-tenant can influence, and without the tag anyone on the shared host
+// could inject a header line and overwrite an earlier section. The tag is
+// delivered on stdin with the script, never on the command line, because
+// /proc/<pid>/cmdline is world-readable.
 const Script = `#!/bin/sh
 LC_ALL=C; export LC_ALL
 uid=$(id -u); user=$(id -un); home=${HOME:-$(eval echo ~$user)}
 S="user.slice/user-$uid.slice"
 # Each header starts with a newline: files like ~/.trafficLimit have no trailing newline,
 # which would otherwise glue the next header onto the value.
-sec(){ printf '\n@@%s\n' "$1"; }
+sec(){ printf '\n@@%s%s\n' "${PMSS_TAG:-}" "$1"; }
 sec uid; echo "$uid"
 sec user; echo "$user"
 sec home; echo "$home"
@@ -56,7 +70,6 @@ sec traffic_in; cat "$home/.trafficDataIngress" 2>/dev/null
 sec traffic_limit; cat "$home/.trafficLimit" 2>/dev/null
 sec bonus_traffic; cat "$home/.bonusTraffic" 2>/dev/null
 sec throttle; [ -e "$home/.throttle" ] && echo 1 || echo 0
-sec resource; cat "$home/.resourceData" 2>/dev/null
 sec pmss_user; cat "$home/.config/pmss-user.json" 2>/dev/null
 sec cgroup
 if [ -f "/sys/fs/cgroup/memory/$S/memory.usage_in_bytes" ]; then
@@ -81,17 +94,30 @@ fi
 if [ -f "/sys/fs/cgroup/pids/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/cgroup/pids/$S/pids.current)"
 elif [ -f "/sys/fs/cgroup/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/cgroup/$S/pids.current)"; fi
 sec qbt_conf; grep -E '^WebUI\\(Port|Address|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|HostHeaderValidation|ReverseProxySupportEnabled|TrustedReverseProxiesList|Username|MaxAuthenticationFailCount|BanDuration)=' "$home/.config/qBittorrent/qBittorrent.conf" 2>/dev/null
-sec qbt_pid; pgrep -x qbittorrent-nox 2>/dev/null
-sec qbt_exe; for pid in $(pgrep -x qbittorrent-nox 2>/dev/null); do printf '%s %s %s\n' "$pid" "$(readlink -f /proc/$pid/exe 2>/dev/null)" "$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null)"; done
-sec qbt_bin_ls; ls -la --time-style=long-iso "$home/bin/qbittorrent-nox" 2>/dev/null; md5sum "$home/bin/qbittorrent-nox" 2>/dev/null
+sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
 sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version; [ -x "$home/bin/qbittorrent-nox" ] && timeout 10 "$home/bin/qbittorrent-nox" --version 2>/dev/null | head -n 1
 sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; crontab -l 2>/dev/null | grep -c 'bin/qbt-start' 
 sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
-sec docker_pid; pgrep -x dockerd 2>/dev/null
+sec docker_pid; pgrep -u "$uid" -x dockerd 2>/dev/null
 sec end
 `
+
+// ScriptWithTag returns Script with the section tag set on its first line.
+// The tag must be [A-Za-z0-9]+ (NewTag guarantees that); it is quoted anyway.
+func ScriptWithTag(tag string) string {
+	return "PMSS_TAG='" + strings.ReplaceAll(tag, "'", "") + "'\n" + Script
+}
+
+// NewTag returns a random hex section tag for one probe run.
+func NewTag() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b[:])
+}
 
 // DuScript measures top-level directories in the home. It is heavy on big
 // trees, so it runs rarely and at the lowest I/O priority.

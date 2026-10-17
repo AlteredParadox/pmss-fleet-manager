@@ -16,7 +16,10 @@
 
 package phpserial
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestUnserializeTrafficData(t *testing.T) {
 	in := `a:2:{s:3:"raw";a:5:{s:5:"month";d:6963.25;s:4:"week";i:1200;s:3:"day";d:0;s:4:"hour";d:12.5;s:5:"15min";d:3;}s:5:"daily";a:2:{s:10:"2026/10/15";d:220.5;s:10:"2026/10/16";i:40;}}`
@@ -63,5 +66,27 @@ func TestUnserializeScalars(t *testing.T) {
 	}
 	if _, err := Unserialize([]byte(`a:1:{s:1:"x";`)); err == nil {
 		t.Fatal("want error on truncated input")
+	}
+}
+
+func TestHostileInputs(t *testing.T) {
+	cases := map[string]string{
+		"length overflow":  `s:9223372036854775807:"abc";`,
+		"huge array count": `a:10000000:{}`,
+		"negative length":  `s:-1:"";`,
+		"count overflow":   `a:9223372036854775807:{}`,
+	}
+	for name, in := range cases {
+		if _, err := Unserialize([]byte(in)); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+	deep := strings.Repeat("a:1:{i:0;", 40) + "i:1;" + strings.Repeat("}", 40)
+	if _, err := Unserialize([]byte(deep)); err == nil {
+		t.Error("deep nesting: expected error")
+	}
+	ok := strings.Repeat("a:1:{i:0;", 8) + "i:1;" + strings.Repeat("}", 8)
+	if _, err := Unserialize([]byte(ok)); err != nil {
+		t.Errorf("moderate nesting should parse: %v", err)
 	}
 }

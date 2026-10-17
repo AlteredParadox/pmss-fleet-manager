@@ -88,13 +88,14 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 
 	pctx, cancel2 := context.WithTimeout(ctx, probeTimeout)
 	defer cancel2()
-	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.Script))
+	tag := probe.NewTag()
+	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)))
 	if err != nil && len(out) == 0 {
 		add("fail", "probe failed: %v %s", err, strings.TrimSpace(string(stderr)))
 		res.Box = &b
 		return res
 	}
-	snap, err := probe.Parse(out, time.Now())
+	snap, err := probe.ParseTagged(out, tag, time.Now())
 	if err != nil {
 		add("fail", "probe output unreadable: %v", err)
 		res.Box = &b

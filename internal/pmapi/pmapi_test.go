@@ -69,3 +69,15 @@ func TestFetch(t *testing.T) {
 		t.Fatalf("fetch: %v %+v", err, f)
 	}
 }
+
+func TestParseAmount(t *testing.T) {
+	cases := map[string]float64{"11.94": 11.94, "€11.94": 11.94, "1,234.56": 1234.56, "11,94": 11.94, "1,234": 1234, "": 0, "abc": 0, "-5.5": -5.5}
+	for in, want := range cases {
+		if got := parseAmount(in); math.Abs(got-want) > 1e-9 {
+			t.Errorf("%q: got %v want %v", in, got, want)
+		}
+	}
+	if _, err := Parse([]byte(`{"services":[{"id":1,"recurring_amount":true}]}`)); err != nil {
+		t.Fatalf("odd amount must not reject the feed: %v", err)
+	}
+}

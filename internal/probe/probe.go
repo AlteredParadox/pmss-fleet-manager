@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -164,24 +165,34 @@ type DockerInfo struct {
 	Running       bool
 }
 
-// Sections splits raw probe output into named sections.
-func Sections(raw []byte) map[string]string {
+// Sections splits untagged probe output into named sections (tests and
+// diagnostics). Production runs use SectionsTagged.
+func Sections(raw []byte) map[string]string { return SectionsTagged(raw, "") }
+
+// SectionsTagged splits raw probe output into named sections. A header is a
+// line "@@<tag><name>"; with the per-run tag, content a co-tenant can
+// influence cannot forge one. The first occurrence of a section wins, so a
+// forged duplicate can never overwrite a real section either.
+func SectionsTagged(raw []byte, tag string) map[string]string {
 	out := map[string]string{}
+	prefix := "@@" + tag
 	var cur string
 	var buf strings.Builder
 	sc := bufio.NewScanner(strings.NewReader(string(raw)))
 	sc.Buffer(make([]byte, 1024*1024), 8*1024*1024)
 	flush := func() {
 		if cur != "" {
-			out[cur] = strings.TrimRight(buf.String(), "\n")
+			if _, dup := out[cur]; !dup {
+				out[cur] = strings.TrimRight(buf.String(), "\n")
+			}
 		}
 		buf.Reset()
 	}
 	for sc.Scan() {
 		line := sc.Text()
-		if strings.HasPrefix(line, "@@") && !strings.ContainsAny(line, " \t") {
+		if strings.HasPrefix(line, prefix) && len(line) > len(prefix) && !strings.ContainsAny(line, " \t") {
 			flush()
-			cur = line[2:]
+			cur = line[len(prefix):]
 			continue
 		}
 		buf.WriteString(line)
@@ -191,9 +202,13 @@ func Sections(raw []byte) map[string]string {
 	return out
 }
 
-// Parse turns raw probe output into a Snapshot.
-func Parse(raw []byte, now time.Time) (*Snapshot, error) {
-	s := Sections(raw)
+// Parse turns untagged probe output into a Snapshot (tests and diagnostics).
+func Parse(raw []byte, now time.Time) (*Snapshot, error) { return ParseTagged(raw, "", now) }
+
+// ParseTagged turns raw probe output produced by ScriptWithTag(tag) into a
+// Snapshot.
+func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
+	s := SectionsTagged(raw, tag)
 	if _, ok := s["end"]; !ok {
 		return nil, fmt.Errorf("probe: output truncated (%d bytes)", len(raw))
 	}
@@ -336,12 +351,15 @@ func parseQuotaLine(text string) (vals [6]int64, ok bool) {
 				}
 				n, _ := strconv.ParseFloat(m[1], 64)
 				mult := 1.0
-				if m[2] == "" {
+				switch {
+				case m[2] == "":
 					if len(got) < 3 {
 						mult = 1024 // blocks are KiB
 					}
-				} else {
-					mult = float64(int64(1) << (10 * uint(strings.Index(" KMGTP", strings.ToUpper(m[2])))))
+				case m[2] >= "a": // quota-tools: inode counts use lowercase suffixes on a 1000 base
+					mult = math.Pow(1000, float64(strings.Index(" kmgtp", m[2])))
+				default: // space uses uppercase suffixes on a 1024 base
+					mult = float64(int64(1) << (10 * uint(strings.Index(" KMGTP", m[2]))))
 				}
 				got = append(got, int64(n*mult))
 				j++
