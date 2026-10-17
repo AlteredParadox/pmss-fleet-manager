@@ -256,3 +256,10 @@ func TestPortOwner(t *testing.T) {
 		t.Fatal("unknown listeners must not refuse")
 	}
 }
+
+func TestTruncatedNamesLastSection(t *testing.T) {
+	_, err := Parse([]byte("@@uid\n1\n@@quota\n"), time.Now())
+	if err == nil || !strings.Contains(err.Error(), `after section "quota"`) {
+		t.Fatalf("err = %v", err)
+	}
+}
