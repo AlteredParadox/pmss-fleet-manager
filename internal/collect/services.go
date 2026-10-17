@@ -165,6 +165,11 @@ func (m *Manager) SyncServices(ctx context.Context) error {
 	fctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	feed, raw, err := m.pmapi.Fetch(fctx, key)
+	if m.Settings().PMAPIKey != key {
+		// The key was changed or cleared while this fetch was in flight: the
+		// sync for the new key (or the clear) owns the cache now.
+		return errors.New("api key changed during sync; superseded")
+	}
 	m.svcMu.Lock()
 	if err != nil {
 		m.svc.err = err.Error()

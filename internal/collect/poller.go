@@ -671,7 +671,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		}
 		qs.Torrents = append(qs.Torrents, TorrentView{
 			Hash: clip(t.Hash, 64), Name: clip(t.Name, 400), Size: t.Size, Progress: t.Progress, UpBps: t.UPSpeed, DownBps: t.DLSpeed,
-			Ratio: t.Ratio, State: t.State, Kind: kind, AddedOn: t.AddedOn, Category: clip(t.Category, 100),
+			Ratio: t.Ratio, State: clip(t.State, 32), Kind: kind, AddedOn: t.AddedOn, Category: clip(t.Category, 100),
 		})
 	}
 	qs.Total = len(qs.Torrents)
@@ -746,9 +746,9 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 				if ip != "" {
 					ip += ":"
 				}
-				cv.Ports = append(cv.Ports, fmt.Sprintf("%s%d->%d/%s", ip, pt.PublicPort, pt.PrivatePort, pt.Type))
+				cv.Ports = append(cv.Ports, fmt.Sprintf("%s%d->%d/%s", clip(ip, 64), pt.PublicPort, pt.PrivatePort, clip(pt.Type, 16)))
 			} else {
-				cv.Ports = append(cv.Ports, fmt.Sprintf("%d/%s", pt.PrivatePort, pt.Type))
+				cv.Ports = append(cv.Ports, fmt.Sprintf("%d/%s", pt.PrivatePort, clip(pt.Type, 16)))
 			}
 		}
 		sort.Strings(cv.Ports)
@@ -853,6 +853,14 @@ func foldDu(ds []probe.DirUsage) []DirEntry {
 // first) and sums the rest into one; also applied to rows restored from the
 // cache, which an older build may have written unbounded.
 func capEntries(es []DirEntry) []DirEntry {
+	// A row an older build cached may carry sizes ParseDu now rejects.
+	kept := es[:0:0]
+	for _, e := range es {
+		if e.Bytes >= 0 && e.Bytes <= 1<<60 {
+			kept = append(kept, e)
+		}
+	}
+	es = kept
 	if len(es) <= maxDuEntries {
 		return es
 	}
@@ -904,7 +912,7 @@ func (p *poller) runDu(ctx context.Context) {
 		// Keep the last good one and only attach the error.
 		var prev DirsState
 		if at, gerr := p.m.st.GetCache(sctx, p.box.ID, "du", &prev); gerr == nil {
-			res.Entries, res.At = prev.Entries, at
+			res.Entries, res.At = capEntries(prev.Entries), at
 		}
 		res.Error = describeErr(err)
 	} else {
