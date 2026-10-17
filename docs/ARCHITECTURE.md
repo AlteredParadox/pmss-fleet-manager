@@ -18,7 +18,7 @@ browser  <-- HTTP/JSON + SSE -->  pmss-fleet-manager  <-- SSH -->  box (tenant s
 | traffic, rolling 30 days | `~/.trafficData` (egress), `~/.trafficDataIngress` (ingress) | PHP `serialize()`: `{raw:{month,week,day,hour,15min} MiB, daily:{Y/m/d: MiB}}`, refreshed :25/:55 |
 | traffic limit | `~/.trafficLimit` + `~/.bonusTraffic` (GiB) | effective = limit + min(bonus, limit); 0 = unlimited |
 | throttled | `~/.throttle` exists | set hourly by PMSS when over limit |
-| ram / cpu / pids | cgroup slice `user-<uid>.slice` (v1 controllers, v2 fallback) | CPU% from usage delta between polls |
+| ram / cpu / pids | cgroup slice `user-<uid>.slice` (v1 controllers, v2 fallback): usage, `memory.stat` rss/cache split, OOM-kill counter | pressure is process memory, not the charged figure (page cache); CPU% from usage delta between polls |
 | account config | `~/.config/pmss-user.json` | quota GiB, ramMiB, dockerEnabled, trafficCapMbit |
 | host | `/proc/uptime`, `/proc/loadavg`, `/proc/meminfo`, `df /home` | shared host, informational |
 | torrents | qBittorrent Web API over SSH tunnel | user-installed `~/bin/qbittorrent-nox`; port from `~/.config/qBittorrent/qBittorrent.conf` or box setting |

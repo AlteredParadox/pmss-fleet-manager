@@ -75,8 +75,12 @@ var (
 	detectGuards = map[string]*qbt.AuthGuard{}
 )
 
+func detectKey(host string, port int, user, pass string) string {
+	return fmt.Sprintf("%s:%d:%s", strings.ToLower(host), port, qbt.CredsKey(user, pass))
+}
+
 func detectGuard(host string, port int, user, pass string) *qbt.AuthGuard {
-	k := fmt.Sprintf("%s:%d:%s", strings.ToLower(host), port, qbt.CredsKey(user, pass))
+	k := detectKey(host, port, user, pass)
 	detectMu.Lock()
 	defer detectMu.Unlock()
 	if len(detectGuards) > 256 {
@@ -88,6 +92,18 @@ func detectGuard(host string, port int, user, pass string) *qbt.AuthGuard {
 		detectGuards[k] = g
 	}
 	return g
+}
+
+// detectGuardState returns the remembered hold for a box's host/port/
+// credentials without creating an entry.
+func detectGuardState(host string, port int, user, pass string) (qbt.AuthState, bool) {
+	detectMu.Lock()
+	g, ok := detectGuards[detectKey(host, port, user, pass)]
+	detectMu.Unlock()
+	if !ok {
+		return qbt.AuthState{}, false
+	}
+	return g.State(), true
 }
 
 func Detect(ctx context.Context, b store.Box) *DetectResult {

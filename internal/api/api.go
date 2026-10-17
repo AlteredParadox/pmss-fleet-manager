@@ -132,7 +132,7 @@ func (s *Server) routes() {
 	static, _ := fs.Sub(web.FS, "static")
 	fileServer := http.FileServer(http.FS(static))
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/") { // no directory listings
+		if r.URL.Path == "" || strings.HasSuffix(r.URL.Path, "/") { // no directory listings, no second copy of the page
 			http.NotFound(w, r)
 			return
 		}
@@ -324,7 +324,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return // dropped as a slow subscriber: the client reconnects and resyncs
 			}
-			b, _ := json.Marshal(ev)
+			b, err := json.Marshal(ev)
+			if err != nil {
+				// An unencodable state (should be impossible after sanitising)
+				// must not become an empty frame the client cannot parse.
+				fmt.Fprint(w, ": skipped unencodable event\n\n")
+				fl.Flush()
+				continue
+			}
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, b)
 			fl.Flush()
 		}
@@ -353,6 +360,9 @@ type boxInput struct {
 	DuEnabled     *bool  `json:"du_enabled"`
 	Enabled       *bool  `json:"enabled"`
 	HostKey       string `json:"host_key"`
+	// ID is set by the edit wizard so detect can use the stored secrets
+	// when the password fields were left blank ("blank keeps saved").
+	ID int64 `json:"id"`
 	// ForgetHostKey drops the pinned SSH host key so the next connect
 	// re-pins (trust on first use); needed after a box is reinstalled.
 	ForgetHostKey bool `json:"forget_host_key"`
@@ -630,6 +640,19 @@ func (s *Server) handleDetect(w http.ResponseWriter, r *http.Request) {
 	}
 	b := store.Box{Enabled: true, DuEnabled: true}
 	in.apply(&b)
+	if in.ID > 0 {
+		// Edit mode: blank password fields mean "keep the saved one". Use
+		// them, or detect would try a WebUI login with an empty password
+		// (one strike toward qBittorrent's ban) and fail SSH password auth.
+		if stored, err := s.st.GetBox(r.Context(), in.ID); err == nil {
+			if b.Password == "" {
+				b.Password = stored.Password
+			}
+			if b.QbtPass == "" {
+				b.QbtPass = stored.QbtPass
+			}
+		}
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 	res := collect.Detect(ctx, b)

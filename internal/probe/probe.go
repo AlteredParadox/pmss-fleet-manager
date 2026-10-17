@@ -67,7 +67,9 @@ type Snapshot struct {
 // determined at all; reason explains a refusal.
 func (s *Snapshot) PortOwner(port int) (ok bool, reason string) {
 	if !s.ListenersKnown {
-		return true, ""
+		// sshd's own listener is always in the table, so an empty section
+		// means the probe could not read it; do not send credentials blind.
+		return false, "could not read the listening sockets on the box; not sending credentials unverified"
 	}
 	if s.UID <= 0 {
 		return false, "own uid unknown; cannot verify who owns the port"
@@ -82,6 +84,20 @@ func (s *Snapshot) PortOwner(port int) (ok bool, reason string) {
 		return false, fmt.Sprintf("port %d is owned by uid %d, not by this account; refusing to connect or send credentials to it", port, uid)
 	}
 	return true, ""
+}
+
+// loopbackReachable reports whether a /proc/net/tcp{,6} local address (hex,
+// little-endian words) is one that a connection to 127.0.0.1 reaches.
+func loopbackReachable(hexaddr string) bool {
+	switch strings.ToUpper(hexaddr) {
+	case "00000000", "0100007F", // v4 any, v4 loopback
+		"00000000000000000000000000000000", // v6 any (dual-stack reaches 127.0.0.1 too)
+		"0000000000000000FFFF00000100007F": // ::ffff:127.0.0.1
+		return true
+	}
+	// ::1 is deliberately absent: a 127.0.0.1 dial never reaches it, so a
+	// co-tenant on [::1]:port is neither a threat nor a reason to refuse.
+	return false
 }
 
 // contestedPort marks a port with listeners (v4 and v6, or several
@@ -118,13 +134,24 @@ func parseTZ(z string) *time.Location {
 	return time.FixedZone("box"+z, off)
 }
 
-// finite drops NaN/Inf (which encoding/json refuses, blanking the whole
-// fleet response) and absurd magnitudes; PMSS never writes either.
+// finite drops NaN/Inf (which encoding/json refuses, turning the whole fleet
+// response into a 500) and magnitudes no real PMSS value approaches (1e12
+// MiB is ~1 EiB, and still converts to int64 bytes without overflow).
 func finite(f float64, _ bool) float64 {
-	if math.IsNaN(f) || math.IsInf(f, 0) || math.Abs(f) > 1e15 {
+	if math.IsNaN(f) || math.IsInf(f, 0) || math.Abs(f) > 1e12 {
 		return 0
 	}
 	return f
+}
+
+// parseFinite is strconv.ParseFloat for box-supplied text: "nan"/"inf"
+// parse successfully there and must not reach the state.
+func parseFinite(s string) float64 {
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return 0
+	}
+	return finite(f, true)
 }
 
 // lastSection returns the name of the last section header in raw.
@@ -140,14 +167,22 @@ func lastSection(raw []byte, tag string) string {
 }
 
 // parseListeners reads the probe's listen section: one listening socket per
-// line as "h <hexport> <uid>" from /proc/net/tcp (or "d <port> <uid>"
-// decimal). A port listed with different owners becomes contestedPort.
+// line as "h <hexport> <uid> [<hexaddr>]" from /proc/net/tcp{,6}. Only
+// sockets a 127.0.0.1 dial can reach count (v4 any/loopback, v6 any/
+// loopback/v4-mapped loopback): a socket bound to a LAN address is neither
+// ours to use nor a threat, and a co-tenant on 127.0.0.2 or ::1 must not
+// turn our port "contested". A port listed with different reachable owners
+// becomes contestedPort.
 func parseListeners(text string) (map[int]int, bool) {
 	out := map[int]int{}
 	known := false
 	for _, line := range strings.Split(text, "\n") {
 		f := strings.Fields(line)
-		if len(f) != 3 {
+		if len(f) != 3 && len(f) != 4 {
+			continue
+		}
+		if len(f) == 4 && !loopbackReachable(f[3]) {
+			known = true
 			continue
 		}
 		base := 10
@@ -245,15 +280,15 @@ type TrafficInfo struct {
 
 // CgroupInfo is the user's systemd slice accounting. Zero means unknown.
 type CgroupInfo struct {
-	MemUsage        int64 // charged to the slice, cache included
-	MemRSS          int64 // process memory (v1 total_rss / v2 anon); 0 = unknown
-	MemCache        int64 // page cache charged to the slice
-	MemInactiveFile int64 // the part of the cache the kernel reclaims first
-	OOMKills        int64 // cumulative kernel OOM kills in the slice
-	MemLimit        int64 // 0 = unlimited/unknown
-	CPUUsageNS      int64
-	CPUQuota        float64 // fraction of CPUs allowed, 0 = unlimited/unknown
-	Pids            int64
+	MemUsage   int64 // charged to the slice, cache included
+	MemRSS     int64 // process memory (v1 total_rss / v2 anon); 0 = unknown
+	MemCache   int64 // page cache charged to the slice
+	OOMKills   int64 // cumulative kernel OOM kills in the slice
+	OOMKnown   bool  // the counter was reported (needed as a baseline before comparing)
+	MemLimit   int64 // 0 = unlimited/unknown
+	CPUUsageNS int64
+	CPUQuota   float64 // fraction of CPUs allowed, 0 = unlimited/unknown
+	Pids       int64
 }
 
 // AccountInfo mirrors ~/.config/pmss-user.json.
@@ -295,7 +330,10 @@ func Sections(raw []byte) map[string]string { return SectionsTagged(raw, "") }
 // influence cannot forge one. The first occurrence of a section wins, so a
 // forged duplicate can never overwrite a real section either.
 func SectionsTagged(raw []byte, tag string) map[string]string {
-	out, _ := sectionsTagged(raw, tag)
+	out, complete := sectionsTagged(raw, tag)
+	if !complete {
+		out["_truncated"] = "a section line exceeded the 8 MiB limit; output after it is missing"
+	}
 	return out
 }
 
@@ -374,12 +412,12 @@ func parseHost(s map[string]string) HostInfo {
 		PMSSVersion: strings.TrimSpace(s["pmss_version"]),
 	}
 	if f := strings.Fields(s["uptime"]); len(f) > 0 {
-		h.UptimeSec, _ = strconv.ParseFloat(f[0], 64)
+		h.UptimeSec = parseFinite(f[0])
 	}
 	if f := strings.Fields(s["loadavg"]); len(f) >= 3 {
-		h.Load1, _ = strconv.ParseFloat(f[0], 64)
-		h.Load5, _ = strconv.ParseFloat(f[1], 64)
-		h.Load15, _ = strconv.ParseFloat(f[2], 64)
+		h.Load1 = parseFinite(f[0])
+		h.Load5 = parseFinite(f[1])
+		h.Load15 = parseFinite(f[2])
 	}
 	for _, line := range strings.Split(s["meminfo"], "\n") {
 		f := strings.Fields(line)
@@ -554,7 +592,7 @@ func parseSeries(raw string) TrafficSeries {
 				continue
 			}
 			if f, ok := d.Float(ks); ok {
-				ts.Daily[ks] = f
+				ts.Daily[ks] = finite(f, true)
 			}
 		}
 	}
@@ -562,8 +600,8 @@ func parseSeries(raw string) TrafficSeries {
 }
 
 func parseGiB(raw string) float64 {
-	f, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-	if err != nil || f < 0 {
+	f := parseFinite(raw)
+	if f < 0 {
 		return 0
 	}
 	return f
@@ -598,8 +636,8 @@ func parseCgroup(raw string) CgroupInfo {
 	c.MemUsage, _ = strconv.ParseInt(kv["mem_usage"], 10, 64)
 	c.MemRSS, _ = strconv.ParseInt(kv["mem_rss"], 10, 64)
 	c.MemCache, _ = strconv.ParseInt(kv["mem_cache"], 10, 64)
-	c.MemInactiveFile, _ = strconv.ParseInt(kv["mem_inactive_file"], 10, 64)
 	c.OOMKills, _ = strconv.ParseInt(kv["oom_kill"], 10, 64)
+	_, c.OOMKnown = kv["oom_kill"]
 	if lim, err := strconv.ParseInt(kv["mem_limit"], 10, 64); err == nil && lim > 0 && lim < 1<<60 {
 		c.MemLimit = lim
 	}
@@ -633,10 +671,9 @@ func parseAccount(raw string) AccountInfo {
 	num := func(k string) float64 {
 		switch v := m[k].(type) {
 		case float64:
-			return v
+			return finite(v, true)
 		case string:
-			f, _ := strconv.ParseFloat(v, 64)
-			return f
+			return parseFinite(v)
 		}
 		return 0
 	}

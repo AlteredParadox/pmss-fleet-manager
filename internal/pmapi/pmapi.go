@@ -97,6 +97,9 @@ func parseAmount(s string) float64 {
 	// Whichever separator comes last with at most two digits after it is the
 	// decimal point: "1,234.56", "1.234,56", "11,94", "1,234".
 	lc, ld := strings.LastIndex(s, ","), strings.LastIndex(s, ".")
+	if lc < 0 && strings.Count(s, ".") > 1 {
+		s = strings.ReplaceAll(s, ".", "") // "1.234.567": dots are thousands separators
+	}
 	switch {
 	case lc > ld && len(s)-lc-1 <= 2 && strings.Count(s, ",") == 1:
 		s = strings.ReplaceAll(s[:lc], ".", "") + "." + s[lc+1:]

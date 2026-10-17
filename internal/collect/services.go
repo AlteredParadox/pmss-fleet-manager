@@ -212,6 +212,12 @@ func (m *Manager) reattachServices() {
 			cp = ncp
 		}
 		m.mu.Unlock()
+		if cp.Unpolled && cp.Status != "disabled" {
+			// Restored or just-edited: its reachability fields were reset and
+			// no poll has verified them; evaluating now would raise false
+			// "not responding" alerts. The next poll runs the hooks.
+			continue
+		}
 		for _, h := range m.hooks {
 			h(m.ctx, &cp)
 		}

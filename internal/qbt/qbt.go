@@ -360,7 +360,7 @@ func (c *Client) Shutdown(ctx context.Context) error {
 	return c.call(ctx, http.MethodPost, "/api/v2/app/shutdown", url.Values{}, nil)
 }
 
-// StateKind classifies a qBittorrent state string into seeding, leeching, paused, checking, error or stalled.
+// StateKind classifies a qBittorrent state string into seeding, leeching, paused, checking, error.
 func StateKind(state string) string {
 	switch state {
 	case "uploading", "forcedUP", "stalledUP", "queuedUP":

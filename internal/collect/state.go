@@ -40,6 +40,11 @@ type BoxState struct {
 	// API, when an API key is configured and a service matches this box.
 	Service *ServiceInfo `json:"service,omitempty"`
 
+	// Unpolled marks a state restored from cache or carried across an
+	// edit: its reachability fields were reset and nothing has verified
+	// them yet, so alert rules must not run on it until a poll lands.
+	Unpolled bool `json:"-"`
+
 	Status       string    `json:"status"` // online | degraded | offline | disabled | pending
 	StatusReason string    `json:"status_reason,omitempty"`
 	LastPoll     time.Time `json:"last_poll"`
@@ -125,7 +130,8 @@ type RAMState struct {
 	Pct        float64 `json:"pct"` // process memory vs limit (charged usage when the split is unknown)
 	Pids       int64   `json:"pids"`
 	OOMKills   int64   `json:"oom_kills"`          // cumulative kernel OOM kills in the slice
-	LastOOM    string  `json:"last_oom,omitempty"` // RFC3339, when the counter was last seen rising
+	OOMKnown   bool    `json:"oom_known"`          // the counter was reported, so a rise is meaningful
+	LastOOM    string  `json:"last_oom,omitempty"` // RFC3339, when a rise of the counter was first seen
 }
 
 // HostState is shared-host information.
@@ -275,13 +281,14 @@ func (s *BoxState) adoptIdentity(from BoxState) {
 }
 
 // resetVolatile clears what only a fresh poll by the current poller may
-// assert: port ownership (a credential-send gate), reachability, and the
-// du-running flag. Called when a state is restored from cache or carried
-// across an edit.
+// assert: port ownership (a credential-send gate), reachability, the auth
+// hold flag and the du-running flag, and marks the state Unpolled. Called
+// when a state is restored from cache or carried across an edit.
 func (s *BoxState) resetVolatile() {
 	s.Qbt.PortOK, s.Qbt.Reachable, s.Qbt.AuthHold = false, false, false
 	s.Docker.Reachable = false
 	s.Dirs.Running = false
+	s.Unpolled = true
 }
 
 // Summary strips the large lists for the fleet view and SSE events.

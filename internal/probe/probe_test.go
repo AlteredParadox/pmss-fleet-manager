@@ -244,10 +244,11 @@ d 80 0`
 	if ok, reason := snap.PortOwner(9999); ok || !strings.Contains(reason, "nothing is listening") {
 		t.Fatalf("unbound port must be refused: %v %q", ok, reason)
 	}
-	// Unreadable /proc/net/tcp: nothing can be verified, do not block.
+	// Unreadable /proc/net/tcp: sshd's listener is always there, so an empty
+	// section means the probe could not read it; fail closed.
 	snap2, _ := Parse([]byte("@@uid\n1001\n@@listen\n@@end\n"), time.Now())
-	if ok, _ := snap2.PortOwner(8080); !ok || snap2.ListenersKnown {
-		t.Fatal("unknown listeners must not refuse")
+	if ok, reason := snap2.PortOwner(8080); ok || snap2.ListenersKnown || !strings.Contains(reason, "could not read") {
+		t.Fatalf("unknown listeners must refuse: %v %q", ok, reason)
 	}
 }
 
@@ -292,8 +293,40 @@ func TestFiniteTraffic(t *testing.T) {
 }
 
 func TestCgroupMemorySplit(t *testing.T) {
-	c := parseCgroup("mem_usage=15000000000\nmem_limit=15700000000\nmem_rss=165000000\nmem_cache=13900000000\nmem_inactive_file=13800000000\noom_kill=2\n")
-	if c.MemRSS != 165000000 || c.MemCache != 13900000000 || c.MemInactiveFile != 13800000000 || c.OOMKills != 2 || c.MemUsage != 15000000000 {
+	c := parseCgroup("mem_usage=15000000000\nmem_limit=15700000000\nmem_rss=165000000\nmem_cache=13900000000\noom_kill=2\n")
+	if c.MemRSS != 165000000 || c.MemCache != 13900000000 || c.OOMKills != 2 || !c.OOMKnown || c.MemUsage != 15000000000 {
 		t.Fatalf("%+v", c)
+	}
+	if c2 := parseCgroup("mem_usage=1\n"); c2.OOMKnown {
+		t.Fatal("oom counter absent must not count as known")
+	}
+}
+
+func TestListenersAddressAware(t *testing.T) {
+	// Ours on v4-any; a co-tenant on 127.0.0.2 and ::1 with the same port
+	// must not make it contested; a co-tenant on 0.0.0.0 must.
+	raw := "@@uid\n1001\n@@listen\nh 1F90 1001 00000000\nh 1F90 1002 0200007F\nh 1F90 1002 00000000000000000000000001000000\nh 0016 0 00000000\nh 1F91 1001 0A00000A\n@@end\n"
+	snap, _ := Parse([]byte(raw), time.Now())
+	if ok, reason := snap.PortOwner(8080); !ok {
+		t.Fatalf("non-reachable co-tenant sockets must not contest: %q", reason)
+	}
+	if ok, reason := snap.PortOwner(8081); ok || !strings.Contains(reason, "nothing is listening") {
+		t.Fatalf("our LAN-only socket is not reachable from 127.0.0.1: %v %q", ok, reason)
+	}
+	raw2 := "@@uid\n1001\n@@listen\nh 1F90 1001 0100007F\nh 1F90 1002 00000000000000000000000000000000\n@@end\n"
+	snap2, _ := Parse([]byte(raw2), time.Now())
+	if ok, reason := snap2.PortOwner(8080); ok || !strings.Contains(reason, "more than one") {
+		t.Fatalf("v6-any co-tenant socket is reachable and must contest: %v %q", ok, reason)
+	}
+}
+
+func TestNonFiniteEverywhere(t *testing.T) {
+	raw := "@@uid\n1\n@@uptime\nnan 1\n@@loadavg\ninf 0.1 0.2 1/2 3\n@@traffic_limit\nNaN\n@@pmss_user\n{\"quota\":\"NaN\",\"ramMiB\":\"Inf\",\"trafficCapMbit\":1e308}\n@@traffic\na:2:{s:3:\"raw\";a:1:{s:5:\"month\";d:1.0E+14;}s:5:\"daily\";a:1:{s:10:\"2026/10/16\";s:3:\"NaN\";}}\n@@end\n"
+	snap, err := Parse([]byte(raw), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Host.UptimeSec != 0 || snap.Host.Load1 != 0 || snap.Traffic.LimitGiB != 0 || snap.Account.QuotaGiB != 0 || snap.Account.RAMMiB != 0 || snap.Account.TrafficCapMbit != 0 || snap.Traffic.Out.MonthMiB != 0 || snap.Traffic.Out.Daily["2026/10/16"] != 0 {
+		t.Fatalf("non-finite or absurd values survived: host=%+v acct=%+v traffic=%+v", snap.Host, snap.Account, snap.Traffic.Out)
 	}
 }
