@@ -132,9 +132,6 @@ func main() {
 	}
 
 	<-ctx.Done()
-	if listenFailed.Load() {
-		defer os.Exit(1) // after the deferred store close: a supervisor must see the failure
-	}
 	log.Info("shutting down")
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -142,6 +139,12 @@ func main() {
 		_ = srv.Shutdown(sctx)
 	}
 	mgr.Stop()
+	if listenFailed.Load() {
+		// A bind failure is a failed start: close the store ourselves (a
+		// deferred close would not run past os.Exit) and tell the supervisor.
+		st.Close()
+		os.Exit(1)
+	}
 }
 
 // allowedHostList derives the Host header allow-list: every listen address's
