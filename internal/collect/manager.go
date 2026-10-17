@@ -117,7 +117,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return err
 	}
 	for _, b := range boxes {
-		m.startPoller(b)
+		m.startPoller(b, nil)
 	}
 	m.wg.Add(2)
 	go m.housekeeping()
@@ -160,7 +160,11 @@ func (m *Manager) housekeeping() {
 	}
 }
 
-func (m *Manager) startPoller(bp *store.Box) {
+// startPoller builds the box's state (restored from the cache, or carried
+// over from prev when an edit replaces a running poller), stores it and
+// starts the run loop. prev is merged here, before the poller exists, so
+// its first poll cannot start from a state that is about to be replaced.
+func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	if m.ctx.Err() != nil {
 		return // shutting down: never add a poller after Stop began waiting
 	}
@@ -175,13 +179,27 @@ func (m *Manager) startPoller(bp *store.Box) {
 		st.adoptIdentity(keep)
 		st.resetVolatile()
 	}
+	if prev != nil {
+		// Keep the last measured data so the UI does not blank out on edit.
+		keep := *prev
+		keep.adoptIdentity(st)
+		keep.resetVolatile() // port/creds may have changed: re-verify before any action
+		if keep.Status == "disabled" && b.Enabled {
+			keep.Status, keep.StatusReason, keep.LastError, keep.Failures = "pending", "", "", 0 // re-enabled: the first poll decides
+		}
+		st = keep
+	}
+	// The retry schedule belongs to the poller that set it; this one polls
+	// at once. The failure count stays: it feeds the offline/degraded
+	// decision, and a box down for hours must not dip to "degraded".
+	st.NextPoll, st.Backoff = time.Time{}, false
 	var auth qbt.AuthState
 	authKnown := false
 	if _, err := m.st.GetCache(m.ctx, b.ID, authCacheKind, &auth); err == nil {
 		authKnown = true
 	}
 	if !b.Enabled {
-		st.Status, st.StatusReason = "disabled", "" // the cached reason belongs to the last poll
+		st.Status, st.StatusReason, st.Failures = "disabled", "", 0 // nothing to retry; the reason belonged to the last poll
 	}
 	m.decorate(&st)
 	m.mu.Lock()
@@ -275,7 +293,7 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 	if err := m.st.CreateBox(ctx, b); err != nil {
 		return err
 	}
-	m.startPoller(b)
+	m.startPoller(b, nil)
 	if s, ok := m.State(b.ID); ok {
 		sum := s.Summary()
 		m.Publish(Event{Type: "state", BoxID: b.ID, State: &sum})
@@ -325,35 +343,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 	if !stillHere {
 		return store.ErrNotFound
 	}
-	m.startPoller(fresh)
-	// Keep the last measured data so the UI does not blank out on edit.
-	if prev != nil {
-		var keep BoxState
-		m.mu.Lock()
-		cur, ok := m.states[fresh.ID]
-		if ok {
-			keep = *prev
-			keep.adoptIdentity(*cur)
-			keep.Service = cur.Service
-			keep.resetVolatile() // port/creds may have changed: re-verify before any action
-			// The old poller's retry schedule died with it (the new one polls
-			// at once), but the failure count did not: it feeds the
-			// offline/degraded decision, and a box that has been down for
-			// hours must not dip to "degraded" on its first post-edit poll.
-			keep.NextPoll, keep.Backoff = time.Time{}, false
-			switch {
-			case !fresh.Enabled:
-				keep.Status, keep.StatusReason, keep.Failures = "disabled", "", 0 // nothing to retry
-			case keep.Status == "disabled":
-				keep.Status, keep.StatusReason, keep.LastError, keep.Failures = "pending", "", "", 0 // re-enabled: the first poll decides
-			}
-			m.states[fresh.ID] = &keep
-		}
-		m.mu.Unlock()
-		if ok && !fresh.Enabled {
-			m.runHooks(keep) // resolve open alerts: nothing will poll this box now
-		}
-	}
+	m.startPoller(fresh, prev) // carries the last measured data over; runs the hooks if disabled
 	if s, ok := m.State(fresh.ID); ok {
 		sum := s.Summary()
 		m.Publish(Event{Type: "state", BoxID: fresh.ID, State: &sum})

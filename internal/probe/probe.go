@@ -475,8 +475,6 @@ func parseHost(s map[string]string) HostInfo {
 		if len(f) > 2 {
 			g.VendorID = f[2]
 		}
-		if len(f) > 3 {
-		}
 		switch strings.ToLower(g.VendorID) {
 		case "0x8086":
 			g.Vendor = "intel"

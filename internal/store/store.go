@@ -148,7 +148,11 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	f.Close()
-	_ = os.Chmod(path, 0o600) // an existing file from an older build
+	// Existing files from an older build or an unclean stop: fix their modes
+	// before SQLite reuses them (and again after, for ones created now).
+	for _, side := range []string{"", "-wal", "-shm"} {
+		_ = os.Chmod(path+side, 0o600)
+	}
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -161,7 +165,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	for _, side := range []string{"-wal", "-shm"} {
-		_ = os.Chmod(path+side, 0o600) // left over from an older build or an unclean stop
+		_ = os.Chmod(path+side, 0o600)
 	}
 	return s, nil
 }

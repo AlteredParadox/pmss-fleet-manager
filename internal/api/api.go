@@ -557,8 +557,11 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 	// one; the WebUI password on request, unless a new one was typed.
 	clearSSH := in.AuthMethod == "key" || in.AuthMethod == "agent"
 	clearQbt := in.ClearQbtPass && in.QbtPass == ""
+	// Two writes: a client that drops (or a shutdown) between them must not
+	// leave the secret cleared and the rest of the edit unsaved.
+	ctx := context.WithoutCancel(r.Context())
 	if clearSSH || clearQbt {
-		if err := s.st.ClearSecrets(r.Context(), id, clearSSH, clearQbt); err != nil {
+		if err := s.st.ClearSecrets(ctx, id, clearSSH, clearQbt); err != nil {
 			writeErr(w, 500, err)
 			return
 		}
@@ -569,7 +572,7 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 			b.QbtPass = ""
 		}
 	}
-	if err := s.m.UpdateBox(r.Context(), b); err != nil {
+	if err := s.m.UpdateBox(ctx, b); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeErr(w, 404, err)
 			return
@@ -634,7 +637,11 @@ func (s *Server) handleDu(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.m.RunDu(id); err != nil {
-		writeErr(w, 404, err)
+		code := 409 // disabled, busy or unreachable
+		if errors.Is(err, store.ErrNotFound) {
+			code = 404
+		}
+		writeErr(w, code, err)
 		return
 	}
 	writeJSON(w, 202, map[string]bool{"ok": true})
