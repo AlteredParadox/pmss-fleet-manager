@@ -137,3 +137,43 @@ func TestAuthBackoffAndBan(t *testing.T) {
 		t.Fatalf("want ErrBanned, got %v", err)
 	}
 }
+
+func TestAuthGuardSurvivesClientRebuild(t *testing.T) {
+	logins := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) { logins++; w.WriteHeader(401) })
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	dial := func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }
+	ctx := context.Background()
+	g := &AuthGuard{}
+	// A rebuilt client (SSH reconnect, restart) must not get a fresh attempt.
+	for i := 0; i < 3; i++ {
+		c := NewWithGuard(dial, "127.0.0.1:1", "u", "p", g)
+		if _, err := c.Version(ctx); err == nil {
+			t.Fatal("want error")
+		}
+	}
+	if logins != 1 {
+		t.Fatalf("login attempted %d times across rebuilds; want 1", logins)
+	}
+	// Persist and restore: still held.
+	g2 := &AuthGuard{}
+	g2.Restore(g.State())
+	if err, held := g2.Blocked(CredsKey("u", "p")); !held || err != ErrAuth {
+		t.Fatalf("restored guard not held: %v %v", err, held)
+	}
+	// Different credentials are a new attempt.
+	if _, held := g2.Blocked(CredsKey("u", "other")); held {
+		t.Fatal("changed credentials must clear the hold")
+	}
+	// Explicit clear (after a client restart) allows one more attempt.
+	g.Clear()
+	c := NewWithGuard(dial, "127.0.0.1:1", "u", "p", g)
+	c.Version(ctx)
+	if logins != 2 {
+		t.Fatalf("after Clear, login attempts = %d, want 2", logins)
+	}
+}

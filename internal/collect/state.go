@@ -194,6 +194,7 @@ type QbtState struct {
 	ConfUser      string        `json:"conf_user,omitempty"`
 	HasCreds      bool          `json:"has_creds"`
 	AuthHold      bool          `json:"auth_hold"`                // login attempts suspended after a failure
+	PortOK        bool          `json:"port_ok"`                  // WebUI port verified as owned by this account
 	BinaryVersion string        `json:"binary_version,omitempty"` // ~/bin/qbittorrent-nox --version
 	LatestVersion string        `json:"latest_version,omitempty"` // newest userdocs release
 	UpdateAvail   bool          `json:"update_available"`         // binary on disk is older than latest

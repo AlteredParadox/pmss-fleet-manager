@@ -226,3 +226,35 @@ func TestScriptWithTag(t *testing.T) {
 		t.Fatal("wrong tag must not parse")
 	}
 }
+
+func TestPortOwner(t *testing.T) {
+	listen := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:93D9 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 12345 1 0000000000000000 100 0 0 10 0
+   1: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1002        0 12346 1 0000000000000000 100 0 0 10 0
+   2: 0100007F:0016 00000000:0000 01 00000000:00000000 00:00000000 00000000     0        0 12347 1 0000000000000000 100 0 0 10 0
+   0: 00000000000000000000000000000000:0050 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1 0000000000000000 100 0 0 10 0`
+	snap, err := Parse([]byte("@@uid\n1001\n@@listen\n"+listen+"\n@@end\n"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.ListenersKnown || snap.Listeners[0x93D9] != 1001 || snap.Listeners[8080] != 1002 || snap.Listeners[80] != 0 {
+		t.Fatalf("listeners = %+v", snap.Listeners)
+	}
+	if _, ok := snap.Listeners[22]; ok {
+		t.Fatal("established socket must not count as a listener")
+	}
+	if ok, _ := snap.PortOwner(0x93D9); !ok {
+		t.Fatal("own port should be ok")
+	}
+	if ok, reason := snap.PortOwner(8080); ok || !strings.Contains(reason, "uid 1002") {
+		t.Fatalf("foreign port must be refused: %v %q", ok, reason)
+	}
+	if ok, reason := snap.PortOwner(9999); ok || !strings.Contains(reason, "nothing is listening") {
+		t.Fatalf("unbound port must be refused: %v %q", ok, reason)
+	}
+	// Unreadable /proc/net/tcp: nothing can be verified, do not block.
+	snap2, _ := Parse([]byte("@@uid\n1001\n@@listen\n@@end\n"), time.Now())
+	if ok, _ := snap2.PortOwner(8080); !ok || snap2.ListenersKnown {
+		t.Fatal("unknown listeners must not refuse")
+	}
+}

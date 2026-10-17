@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"pmss-fleet-manager/internal/pmapi"
+	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 )
@@ -176,6 +177,10 @@ func (m *Manager) startPoller(b *store.Box) {
 	m.mu.Lock()
 	m.states[b.ID] = &st
 	p := newPoller(m, b)
+	var auth qbt.AuthState
+	if _, err := m.st.GetCache(m.ctx, b.ID, authCacheKind, &auth); err == nil {
+		p.guard.Restore(auth)
+	}
 	m.pollers[b.ID] = p
 	m.mu.Unlock()
 	if b.Enabled {
@@ -255,6 +260,11 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 	if err := m.st.UpdateBox(ctx, b); err != nil {
 		return err
+	}
+	if b.QbtPass != "" {
+		// A password was typed in: treat it as an explicit request to try
+		// again, even if it is the same one the hold was recorded for.
+		_ = m.st.SetCache(ctx, b.ID, authCacheKind, qbt.AuthState{})
 	}
 	fresh, err := m.st.GetBox(ctx, b.ID)
 	if err != nil {
@@ -349,10 +359,16 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		out, err = p.qbtInstall(ctx, m.Settings().QbtDownloadURL)
 	case "restart":
 		out, err = p.qbtRestart(ctx)
+		if err == nil {
+			p.guard.Clear() // a fresh qbittorrent-nox has a fresh failed-login counter
+		}
 	case "autostart":
 		out, err = p.qbtAutostart(ctx)
 	default:
 		err = p.qbtAction(ctx, action)
+		if err == nil && action == "start" {
+			p.guard.Clear()
+		}
 	}
 	p.wake()
 	return out, err

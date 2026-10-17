@@ -44,11 +44,12 @@ type poller struct {
 	m   *Manager
 	box *store.Box
 
-	mu   sync.Mutex
-	ssh  *sshx.Client
-	qbt  *qbt.Client
-	qbtP int
-	dk   *dockerx.Client
+	mu    sync.Mutex
+	ssh   *sshx.Client
+	qbt   *qbt.Client
+	qbtP  int
+	dk    *dockerx.Client
+	guard *qbt.AuthGuard // outlives p.qbt; see qbt.AuthGuard
 
 	prevCPU   int64
 	prevCPUAt time.Time
@@ -65,7 +66,7 @@ type poller struct {
 }
 
 func newPoller(m *Manager, b *store.Box) *poller {
-	return &poller{m: m, box: b, wakeCh: make(chan struct{}, 1), stopCh: make(chan struct{}), doneCh: make(chan struct{})}
+	return &poller{m: m, box: b, guard: &qbt.AuthGuard{}, wakeCh: make(chan struct{}, 1), stopCh: make(chan struct{}), doneCh: make(chan struct{})}
 }
 
 func (p *poller) wake() {
@@ -415,7 +416,7 @@ func (p *poller) qbtClient(port int) *qbt.Client {
 		p.qbt.Close()
 	}
 	hp := fmt.Sprintf("127.0.0.1:%d", port)
-	p.qbt = qbt.New(p.sshDialTCP(hp), hp, p.box.QbtUser, p.box.QbtPass)
+	p.qbt = qbt.NewWithGuard(p.sshDialTCP(hp), hp, p.box.QbtUser, p.box.QbtPass, p.guard)
 	p.qbtP = port
 	return p.qbt
 }
@@ -454,6 +455,14 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		st.Qbt = qs
 		return
 	}
+	if ok, reason := snap.PortOwner(port); !ok {
+		// Shared host: a co-tenant can bind our WebUI port while our client
+		// is down and harvest the credentials the login would send.
+		qs.Error = reason
+		st.Qbt = qs
+		return
+	}
+	qs.PortOK = true
 	cli := p.qbtClient(port)
 	if err, held := cli.AuthBlocked(); held {
 		qs.Error, qs.AuthHold = describeErr(err), true
@@ -710,7 +719,15 @@ func (p *poller) record(ctx context.Context, st *BoxState) {
 	if err := p.m.st.SetCache(sctx, p.box.ID, "state", st.Summary()); err != nil {
 		p.m.log.Warn("cache state", "box", p.box.Name, "err", err)
 	}
+	// The auth hold must survive restarts, or every restart would retry a
+	// rejected login and walk the box toward qBittorrent's IP ban.
+	if err := p.m.st.SetCache(sctx, p.box.ID, authCacheKind, p.guard.State()); err != nil {
+		p.m.log.Warn("cache auth hold", "box", p.box.Name, "err", err)
+	}
 }
+
+// authCacheKind is the box_cache kind holding the persisted qbt.AuthState.
+const authCacheKind = "qbt_auth"
 
 func (p *poller) qbtAction(ctx context.Context, action string) error {
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
@@ -735,6 +752,9 @@ func (p *poller) qbtAction(ctx context.Context, action string) error {
 			return err
 		}
 		st, _ := p.m.State(p.box.ID)
+		if !st.Qbt.PortOK {
+			return errors.New("the WebUI port has not been verified as owned by this account yet (see the client error on the overview); not sending credentials")
+		}
 		port := p.box.QbtPort
 		if port == 0 {
 			port = st.Qbt.Port

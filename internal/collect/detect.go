@@ -167,6 +167,12 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 			b.QbtEnabled = true
 			b.QbtPort = port
 		default:
+			if ok, reason := snap.PortOwner(port); !ok {
+				add("warn", "not connecting to the WebUI: %s", reason)
+				b.QbtEnabled = true
+				b.QbtPort = port
+				break
+			}
 			qctx, qcancel := context.WithTimeout(ctx, 15*time.Second)
 			hp := fmt.Sprintf("127.0.0.1:%d", port)
 			qc := qbt.New(func(ctx context.Context) (netConn, error) { return cli.DialTCP(ctx, hp) }, hp, b.QbtUser, b.QbtPass)
