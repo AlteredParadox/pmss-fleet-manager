@@ -65,8 +65,8 @@ function retryNote(b) {
   const s = Math.max(0, Math.round((due - Date.now()) / 1000));
   return `retry ${s < 5 ? 'now' : s < 90 ? `in ${s}s` : `in ${Math.round(s / 60)} min`}${b.backoff ? ', backed off' : ''}`;
 }
-function planOf(b) { return b.plan || (b.service && b.service.product) || ''; }
-function renewalOf(b) { return b.renewal || (b.service && b.service.next_due) || ''; }
+function planOf(b) { return b.plan || b.service?.product || ''; }
+function renewalOf(b) { return b.renewal || b.service?.next_due || ''; }
 function fmtDur(sec) {
   sec = Math.max(0, Math.floor(Number(sec) || 0));
   const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
@@ -112,7 +112,7 @@ async function api(method, path, body) {
   const r = await fetch(path, opts);
   let data = null;
   try { data = await r.json(); } catch (e) { /* no body */ }
-  if (!r.ok) throw Object.assign(new Error((data && data.error ? data.error + (data.output ? ' — ' + data.output.split('\n').slice(-2).join(' · ') : '') : null) || `${r.status} ${r.statusText}`), { status: r.status });
+  if (!r.ok) throw Object.assign(new Error((data?.error ? data.error + (data.output ? ' — ' + data.output.split('\n').slice(-2).join(' · ') : '') : null) || `${r.status} ${r.statusText}`), { status: r.status });
   return data;
 }
 
@@ -242,7 +242,7 @@ function connectEvents() {
 }
 function recomputeTotals() {
   const t = { count: 0, online: 0, disk_used: 0, disk_quota: 0, traffic_out: 0, traffic_in: 0, up_bps: 0, down_bps: 0, torrents: 0, seeding: 0, containers: 0, next_renewal: '', last_poll: '',
-    monthly_cost: 0, monthly_cost_fleet: (S.totals || {}).monthly_cost_fleet || 0, currency: (S.totals || {}).currency || '' };
+    monthly_cost: 0, monthly_cost_fleet: S.totals?.monthly_cost_fleet || 0, currency: S.totals?.currency || '' };
   let last = 0;
   for (const b of S.boxes) {
     t.count++;
@@ -294,7 +294,7 @@ function renderMain() {
   }
   if (S.view === 'box') {
     const b = curBox();
-    if (b && b.status === 'disabled') {
+    if (b?.status === 'disabled') {
       // Polling is off: the server refuses every action, so say so up front.
       m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
         el.disabled = true;
@@ -406,12 +406,6 @@ function viewBox() {
   if (b.docker.enabled || b.docker.socket_up) tabs.push(['containers', 'containers']);
   tabs.push(['storage', 'storage'], ['host', 'host']);
   if (!tabs.some(([k]) => k === S.tab)) S.tab = 'overview';
-  const q = b.qbt;
-  const powerBtn = q.enabled ? (q.process_up
-    ? `<button data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(b.name)}? It is asked to exit cleanly, then started again with the box's start command (default: ~/bin/qbt-start when present)">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(b.name)}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
-    : `<button data-act="qbt:start">start client</button>`) : '';
-  const installBtn = (q.enabled || q.installed || b.type === 'seedbox')
-    ? `<button data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(b.name) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(b.name) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
   const renewDays = daysUntil(renewalOf(b));
   let body = '';
   switch (S.tab) {
@@ -424,70 +418,142 @@ function viewBox() {
   }
   return `
     <button class="crumb" data-go="/fleet">← fleet</button>
-    <div class="head" style="align-items:flex-start;margin-bottom:20px">
+    ${boxHeader(b)}
+    ${boxTabStrip(tabs)}
+    ${body}`;
+}
+// restart/stop (client running) or start (client down) buttons; nothing when monitoring is off.
+function boxPowerBtn(b, q) {
+  return q.enabled ? (q.process_up
+    ? `<button data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(b.name)}? It is asked to exit cleanly, then started again with the box's start command (default: ~/bin/qbt-start when present)">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(b.name)}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
+    : `<button data-act="qbt:start">start client</button>`) : '';
+}
+function boxInstallBtn(b, q) {
+  return (q.enabled || q.installed || b.type === 'seedbox')
+    ? `<button data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(b.name) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(b.name) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
+}
+function boxActions(b) {
+  return `<div class="actions">
+        ${b.status === 'disabled' ? '' : `<button data-act="refresh" title="${b.failures ? 'reconnect and poll now, ignoring the backoff' : 'poll now'}">${b.failures ? 'retry now' : 'refresh'}</button>`}
+        ${boxInstallBtn(b, b.qbt)}
+        ${boxPowerBtn(b, b.qbt)}
+        <button data-go="/edit/${b.id}">edit</button>
+        <button class="danger" data-act="remove" data-confirm="Remove ${esc(b.name)} from the fleet? Its alerts are deleted. Nothing on the box is touched.">remove</button>
+      </div>`;
+}
+function boxStatusLine(b) {
+  return b.status_reason ? `<div class="meta"><span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(statusLabel(b.status))} — ${esc(b.status_reason)}</span>${b.failures ? `<span class="muted" title="${b.backoff ? 'after repeated failures the dashboard retries less often, up to every 10 minutes; use retry now to reconnect immediately' : 'retrying at the normal interval'}">${retryNote(b) ? esc(retryNote(b)) + ' · ' : ''}${b.failures} failed</span>` : ''}</div>` : '';
+}
+// Title, meta line, status line and the action buttons of the box detail page.
+function boxHeader(b) {
+  return `<div class="head" style="align-items:flex-start;margin-bottom:20px">
       <div>
         <div style="display:flex;align-items:center;gap:10px"><span class="led ${b.status}" style="width:10px;height:10px"></span><h1 style="margin:0">${esc(b.name)}</h1><span class="tag">${esc(b.type)}</span></div>
         <div class="meta"><span>${esc(b.hostname || b.host)}</span><span>${esc(b.user)}@${esc(b.host)}:${b.port}</span>${b.datacenter ? `<span>${esc(b.datacenter)}</span>` : ''}${planOf(b) ? `<span>${esc(planOf(b))}</span>` : ''}</div>
-        ${b.status_reason ? `<div class="meta"><span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(statusLabel(b.status))} — ${esc(b.status_reason)}</span>${b.failures ? `<span class="muted" title="${b.backoff ? 'after repeated failures the dashboard retries less often, up to every 10 minutes; use retry now to reconnect immediately' : 'retrying at the normal interval'}">${retryNote(b) ? esc(retryNote(b)) + ' · ' : ''}${b.failures} failed</span>` : ''}</div>` : ''}
+        ${boxStatusLine(b)}
       </div>
-      <div class="actions">
-        ${b.status === 'disabled' ? '' : `<button data-act="refresh" title="${b.failures ? 'reconnect and poll now, ignoring the backoff' : 'poll now'}">${b.failures ? 'retry now' : 'refresh'}</button>`}
-        ${installBtn}
-        ${powerBtn}
-        <button data-go="/edit/${b.id}">edit</button>
-        <button class="danger" data-act="remove" data-confirm="Remove ${esc(b.name)} from the fleet? Its alerts are deleted. Nothing on the box is touched.">remove</button>
-      </div>
-    </div>
-    <div class="tabs">${tabs.map(([k, l]) => `<button class="${S.tab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>
-    ${body}`;
+      ${boxActions(b)}
+    </div>`;
+}
+function boxTabStrip(tabs) {
+  return `<div class="tabs">${tabs.map(([k, l]) => `<button class="${S.tab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>`;
 }
 function tabOverview(b, renewDays) {
   const dt = S.settings.disk_threshold_pct || 90, tt = S.settings.traffic_threshold_pct || 90;
-  const tr = b.traffic, q = b.qbt;
+  return `<div class="grid stats">
+    ${ovDiskPanel(b, dt)}
+    ${ovUploadPanel(b, tt)}
+    ${ovBandwidthPanel(b)}
+    ${ovCpuRamPanel(b)}
+  </div>
+  <div class="grid wide">
+    ${ovBoxPanel(b, b.qbt)}
+    ${ovPlanBillingPanel(b, renewDays)}
+  </div>`;
+}
+/* overview tiles */
+function ovDiskPanel(b, dt) {
+  return `<div class="panel"><div class="tile-label">disk</div>
+      <div class="tile-value">${fmtBytes(b.disk.used_bytes, 2)} <small>/ ${b.disk.quota_bytes ? fmtBytes(b.disk.quota_bytes, 1) : 'n/a'}</small></div>
+      <div class="meter thick"><i class="${levelClass(b.disk.pct, dt)}" style="width:${Math.min(100, b.disk.pct)}%"></i></div>
+      <div class="note">${b.disk.quota_bytes ? `${fmtPct(b.disk.pct)} used · ${fmtBytes(Math.max(0, b.disk.quota_bytes - b.disk.used_bytes), 1)} free` : 'quota unknown'}${b.disk.source === 'file' ? ` · snapshot ${fmtDur(b.disk.age_sec)} old` : ''}</div></div>`;
+}
+function ovUploadPanel(b, tt) {
+  const tr = b.traffic;
   const trNote = !tr.ok ? 'no traffic data yet' : tr.limit_bytes > 0
     ? `${fmtPct(tr.pct)} of limit · rolling 30 days${tr.bonus_bytes ? ` · incl. ${fmtBytes(tr.bonus_bytes, 0)} bonus` : ''}${tr.throttled ? ' · <span class="bad">throttled</span>' : ''}`
     : 'no monthly cap on this account · rolling 30 days';
-  const rateNote = b.rates.source === 'qbt' ? 'live from qBittorrent' : b.rates.source === 'pmss-15min' ? 'PMSS 15-min average (refreshed twice an hour)' : 'no rate source';
-  return `<div class="grid stats">
-    <div class="panel"><div class="tile-label">disk</div>
-      <div class="tile-value">${fmtBytes(b.disk.used_bytes, 2)} <small>/ ${b.disk.quota_bytes ? fmtBytes(b.disk.quota_bytes, 1) : 'n/a'}</small></div>
-      <div class="meter thick"><i class="${levelClass(b.disk.pct, dt)}" style="width:${Math.min(100, b.disk.pct)}%"></i></div>
-      <div class="note">${b.disk.quota_bytes ? `${fmtPct(b.disk.pct)} used · ${fmtBytes(Math.max(0, b.disk.quota_bytes - b.disk.used_bytes), 1)} free` : 'quota unknown'}${b.disk.source === 'file' ? ` · snapshot ${fmtDur(b.disk.age_sec)} old` : ''}</div></div>
-    <div class="panel"><div class="tile-label">upload, last 30 days</div>
+  return `<div class="panel"><div class="tile-label">upload, last 30 days</div>
       <div class="tile-value">${fmtBytes(tr.out_month_bytes, 2)} <small>/ ${tr.limit_bytes > 0 ? fmtBytes(tr.limit_bytes, 1) : 'unlimited'}</small></div>
       <div class="meter thick"><i class="${tr.limit_bytes > 0 ? levelClass(tr.pct, tt) : 'dim'}" style="width:${trafficPct(b)}%"></i></div>
-      <div class="note">${trNote}</div></div>
-    <div class="panel"><div class="tile-label">bandwidth now</div>
+      <div class="note">${trNote}</div></div>`;
+}
+function ovBandwidthPanel(b) {
+  const tr = b.traffic;
+  const rateNote = b.rates.source === 'qbt' ? 'live from qBittorrent' : b.rates.source === 'pmss-15min' ? 'PMSS 15-min average (refreshed twice an hour)' : 'no rate source';
+  return `<div class="panel"><div class="tile-label">bandwidth now</div>
       <div class="tile-value"><span class="nw"><span class="up">↑</span> ${fmtBits(b.rates.up_bps)}</span> <small class="nw"><span class="down">↓</span> ${fmtBits(b.rates.down_bps)}</small></div>
       ${tr.cap_mbit ? `<div class="meter thick" title="upload vs. the account's ${tr.cap_mbit} Mbit/s cap"><i style="width:${Math.min(100, (b.rates.up_bps / (tr.cap_mbit * 1e6)) * 100)}%"></i></div>` : ''}
-      <div class="note">${rateNote}${tr.cap_mbit ? ` · cap ${tr.cap_mbit} Mbit/s` : ''}</div></div>
-    <div class="panel"><div class="tile-label">cpu / ram</div>
+      <div class="note">${rateNote}${tr.cap_mbit ? ` · cap ${tr.cap_mbit} Mbit/s` : ''}</div></div>`;
+}
+function ovCpuRamPanel(b) {
+  return `<div class="panel"><div class="tile-label">cpu / ram</div>
       <div class="tile-value">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} <small>cpu${b.cpu.quota_cpus ? ` · of ${b.cpu.quota_cpus.toFixed(1)} cores` : b.cpu.host_cpus ? ` · of ${b.cpu.host_cpus} host cores` : ''}</small></div>
       <div class="meter thick"><i style="width:${Math.min(100, b.cpu.pct || 0)}%"></i></div>
       <div class="note" style="display:flex;justify-content:space-between;gap:8px"><span title="process memory (rss) against the slice limit; page cache is charged to the slice too but is reclaimed, not OOM-killed">ram ${b.ram.ok ? fmtPct(b.ram.pct) : '—'} · ${b.ram.rss_bytes ? `${fmtBytes(b.ram.rss_bytes, 1)} proc + ${fmtBytes(b.ram.cache_bytes, 1)} cache` : fmtBytes(b.ram.used_bytes, 1)} / ${b.ram.limit_bytes ? fmtBytes(b.ram.limit_bytes, 1) : '?'}${b.ram.last_oom && Date.now() - Date.parse(b.ram.last_oom) < 864e5 ? ` · <span class="bad" title="kernel OOM kill noticed ${esc(b.ram.last_oom)}">OOM kill</span>` : ''}</span><span>${b.ram.pids ? `${b.ram.pids} proc` : ''}</span></div>
-      <div class="meter" style="margin-top:4px"><i class="${levelClass(b.ram.pct, 95)}" style="width:${Math.min(100, b.ram.pct || 0)}%"></i></div></div>
-  </div>
-  <div class="grid wide">
-    <div class="panel rows"><div class="tile-label">box</div>
-      <div><span>status</span><span class="${b.status === 'online' ? 'ok' : b.status === 'offline' ? 'bad' : 'warn'}">${esc(statusLabel(b.status))}</span></div>
-      <div><span>last poll</span><span>${fmtAgo(b.last_poll)}${b.poll_ms ? ` <span class="muted">· ${b.poll_ms} ms</span>` : ''}</span></div>
-      <div><span>client</span><span>${q.enabled ? `qBittorrent ${esc(q.version || '')}${q.reachable ? '' : ' <span class="warn">(not responding)</span>'}` : (q.installed ? 'qbittorrent-nox present, monitoring off' : '—')}</span></div>
-      ${q.enabled && !q.reachable && q.error ? `<div><span>client error</span><span class="warn" style="text-align:right">${esc(q.error)}</span></div>` : ''}
-      ${(q.enabled || q.installed) ? `<div><span>binary</span><span>${q.binary_version ? esc(q.binary_version) : (q.installed ? 'present' : 'not installed')}${q.latest_version ? ` <span class="muted">· latest ${esc(q.latest_version)}</span>` : ''}${q.update_available ? ' · <span class="warn">update available</span>' : ''}${q.restart_needed ? ' · <span class="warn">restart to apply</span>' : ''}</span></div>
-      <div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'} <button class="small ghost" data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button></span></div>` : ''}
-      ${q.enabled ? `<div><span>webui auth</span><span class="muted">${q.local_bypass ? 'localhost bypass on' : q.subnet_bypass ? `subnet bypass (${esc(q.subnet_list || '')})` : 'login required'}${q.has_creds ? ' · credentials set' : ''}${q.conf_user ? ` · user ${esc(q.conf_user)}` : ''}${q.auth_hold ? ' · <span class="warn" title="A login was rejected. To avoid qBittorrent banning the box\'s loopback IP, no further attempts are made until you re-enter the password under edit or restart the client.">login suspended</span>' : ''}</span></div>` : ''}
-      ${q.enabled ? `<div><span>torrents</span><span>${q.total} total · ${q.seeding} seeding · ratio ${q.global_ratio ? q.global_ratio.toFixed(2) : '—'}</span></div>` : ''}
-      ${b.docker.enabled ? `<div><span>containers</span><span>${b.docker.running} running${b.docker.stopped ? ` · ${b.docker.stopped} stopped` : ''}</span></div>` : ''}
-      <div><span>account</span><span>${b.account.ok ? `${b.account.quota_gib} GiB · ${b.account.ram_mib} MiB RAM${b.account.docker_enabled ? ' · docker' : ''}${b.account.suspended ? ' · <span class="bad">suspended</span>' : ''}` : '—'}</span></div>
-      ${b.host_key_fp ? `<div><span>host key</span><span class="muted" title="${esc(b.host_key_fp)}">${esc(b.host_key_fp.slice(0, 22))}…</span></div>` : ''}
-    </div>
-    <div class="panel rows"><div class="tile-label">plan &amp; billing</div>
+      <div class="meter" style="margin-top:4px"><i class="${levelClass(b.ram.pct, 95)}" style="width:${Math.min(100, b.ram.pct || 0)}%"></i></div></div>`;
+}
+/* overview "box" panel rows */
+function ovHostStatusRows(b) {
+  return `<div><span>status</span><span class="${b.status === 'online' ? 'ok' : b.status === 'offline' ? 'bad' : 'warn'}">${esc(statusLabel(b.status))}</span></div>
+      <div><span>last poll</span><span>${fmtAgo(b.last_poll)}${b.poll_ms ? ` <span class="muted">· ${b.poll_ms} ms</span>` : ''}</span></div>`;
+}
+function ovClientRows(q) {
+  return `<div><span>client</span><span>${q.enabled ? `qBittorrent ${esc(q.version || '')}${q.reachable ? '' : ' <span class="warn">(not responding)</span>'}` : (q.installed ? 'qbittorrent-nox present, monitoring off' : '—')}</span></div>
+      ${q.enabled && !q.reachable && q.error ? `<div><span>client error</span><span class="warn" style="text-align:right">${esc(q.error)}</span></div>` : ''}`;
+}
+function ovBinaryRow(q) {
+  return `<div><span>binary</span><span>${q.binary_version ? esc(q.binary_version) : (q.installed ? 'present' : 'not installed')}${q.latest_version ? ` <span class="muted">· latest ${esc(q.latest_version)}</span>` : ''}${q.update_available ? ' · <span class="warn">update available</span>' : ''}${q.restart_needed ? ' · <span class="warn">restart to apply</span>' : ''}</span></div>`;
+}
+function ovAutostartRow(b, q) {
+  return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'} <button class="small ghost" data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button></span></div>`;
+}
+// binary + autostart rows: shown whenever the client is monitored or at least present on the box.
+function ovAutostartRows(b, q) {
+  return (q.enabled || q.installed) ? `${ovBinaryRow(q)}
+      ${ovAutostartRow(b, q)}` : '';
+}
+function ovWebuiAuthRow(q) {
+  return q.enabled ? `<div><span>webui auth</span><span class="muted">${q.local_bypass ? 'localhost bypass on' : q.subnet_bypass ? `subnet bypass (${esc(q.subnet_list || '')})` : 'login required'}${q.has_creds ? ' · credentials set' : ''}${q.conf_user ? ` · user ${esc(q.conf_user)}` : ''}${q.auth_hold ? ' · <span class="warn" title="A login was rejected. To avoid qBittorrent banning the box\'s loopback IP, no further attempts are made until you re-enter the password under edit or restart the client.">login suspended</span>' : ''}</span></div>` : '';
+}
+function ovTorrentsRow(q) {
+  return q.enabled ? `<div><span>torrents</span><span>${q.total} total · ${q.seeding} seeding · ratio ${q.global_ratio ? q.global_ratio.toFixed(2) : '—'}</span></div>` : '';
+}
+function ovDockerRow(b) {
+  return b.docker.enabled ? `<div><span>containers</span><span>${b.docker.running} running${b.docker.stopped ? ` · ${b.docker.stopped} stopped` : ''}</span></div>` : '';
+}
+function ovHostAccountRows(b) {
+  return `<div><span>account</span><span>${b.account.ok ? `${b.account.quota_gib} GiB · ${b.account.ram_mib} MiB RAM${b.account.docker_enabled ? ' · docker' : ''}${b.account.suspended ? ' · <span class="bad">suspended</span>' : ''}` : '—'}</span></div>
+      ${b.host_key_fp ? `<div><span>host key</span><span class="muted" title="${esc(b.host_key_fp)}">${esc(b.host_key_fp.slice(0, 22))}…</span></div>` : ''}`;
+}
+function ovBoxPanel(b, q) {
+  return `<div class="panel rows"><div class="tile-label">box</div>
+      ${ovHostStatusRows(b)}
+      ${ovClientRows(q)}
+      ${ovAutostartRows(b, q)}
+      ${ovWebuiAuthRow(q)}
+      ${ovTorrentsRow(q)}
+      ${ovDockerRow(b)}
+      ${ovHostAccountRows(b)}
+    </div>`;
+}
+function ovPlanBillingPanel(b, renewDays) {
+  return `<div class="panel rows"><div class="tile-label">plan &amp; billing</div>
       <div><span>plan</span><span>${esc(planOf(b) || '—')}${b.service && !b.plan ? ' <span class="muted" title="from the Pulsed Media API">·api</span>' : ''}</span></div>
       <div><span>renews</span><span class="${renewDays !== null && renewDays <= (S.settings.renewal_warn_days || 7) ? 'warn' : ''}">${renewalOf(b) ? `${esc(renewalOf(b))} (${renewDays < 0 ? 'overdue' : renewDays + 'd'})` : '—'}</span></div>
       ${b.service ? billingRows(b.service) : `<div><span>billing</span><span class="muted">${S.settings.has_pm_api_key ? 'no matching service in the API feed' : 'set a Pulsed Media API key in settings'}</span></div>`}
       <div><span>datacenter</span><span>${esc(b.datacenter || '—')}</span></div>
-    </div>
-  </div>`;
+    </div>`;
 }
 function billingRows(sv) {
   const u = sv.usage;
@@ -704,85 +770,11 @@ function viewAdd() {
   const back = edit ? `/box/${A.editId}` : '/fleet';
   let body = '';
   if (A.step === 1) {
-    body = `<div class="form">
-      <div class="f2">
-        <label class="f">display name<input data-f="name" value="${esc(f.name)}" placeholder="e.g. seed-02"></label>
-        <label class="f">box type<select data-f="type"><option value="seedbox" ${f.type === 'seedbox' ? 'selected' : ''}>seedbox</option><option value="storage" ${f.type === 'storage' ? 'selected' : ''}>storage box</option></select></label>
-      </div>
-      <div class="f2" style="grid-template-columns:1fr 110px">
-        <label class="f">hostname *<input data-f="host" class="${E.host ? 'err' : ''}" value="${esc(f.host)}" placeholder="server.pulsedmedia.com">${E.host ? `<span class="err-box">${esc(E.host)}</span>` : ''}</label>
-        <label class="f">ssh port<input data-f="port" type="number" min="1" max="65535" value="${f.port || 22}"></label>
-      </div>
-      <div class="f2">
-        <label class="f">username *<input data-f="user" class="${E.user ? 'err' : ''}" value="${esc(f.user)}" autocomplete="off">${E.user ? `<span class="err-box">${esc(E.user)}</span>` : ''}</label>
-        <label class="f">ssh auth<select data-f="auth_method">
-          <option value="" ${f.auth_method === '' ? 'selected' : ''}>auto (keys, agent, password)</option>
-          <option value="key" ${f.auth_method === 'key' ? 'selected' : ''}>private key file</option>
-          <option value="agent" ${f.auth_method === 'agent' ? 'selected' : ''}>ssh agent</option>
-          <option value="password" ${f.auth_method === 'password' ? 'selected' : ''}>password</option></select></label>
-      </div>
-      <div class="f2">
-        <label class="f">key path <span class="hint">(empty = ~/.ssh/id_*)</span><input data-f="key_path" value="${esc(f.key_path)}" placeholder="~/.ssh/id_ed25519" ${f.auth_method === 'password' || f.auth_method === 'agent' ? 'disabled' : ''}></label>
-        <label class="f">ssh password${edit ? ` <span class="hint">${f.has_password ? '(blank keeps saved)' : '(none saved)'}</span>` : ''}<input data-f="password" type="password" class="${E.password ? 'err' : ''}" value="${esc(f.password)}" autocomplete="new-password" ${f.auth_method === 'key' || f.auth_method === 'agent' ? 'disabled' : ''}>${E.password ? `<span class="err-box">${esc(E.password)}</span>` : ''}</label>
-      </div>
-      <div class="f3">
-        <label class="f">plan <span class="hint">(optional)</span><input data-f="plan" value="${esc(f.plan)}" placeholder="Dragon-R 2TB"></label>
-        <label class="f">datacenter<input data-f="datacenter" value="${esc(f.datacenter)}" placeholder="Helsinki, FI"></label>
-        <label class="f">renewal date<input data-f="renewal" type="date" value="${esc(f.renewal)}"></label>
-      </div>
-      <details class="adv" ${edit ? 'open' : ''}><summary>qBittorrent, docker and measurement options</summary><div>
-        <label class="check"><input type="checkbox" data-f="qbt_enabled" ${f.qbt_enabled ? 'checked' : ''}> monitor qbittorrent-nox via its Web API (tunnelled over SSH)</label>
-        <div class="f3">
-          <label class="f">WebUI port <span class="hint">(0 = detect from config)</span><input data-f="qbt_port" type="number" min="0" max="65535" value="${f.qbt_port || 0}"></label>
-          <label class="f">WebUI user<input data-f="qbt_user" value="${esc(f.qbt_user)}" autocomplete="off"></label>
-          <label class="f">WebUI password${edit ? ` <span class="hint">${f.has_qbt_pass ? '(blank keeps saved)' : '(none saved)'}</span>` : ''}<input data-f="qbt_pass" type="password" value="${esc(f.qbt_pass)}" autocomplete="new-password"></label>
-        </div>
-        <label class="f">start command <span class="hint">(used by “start client”; it must detach, e.g. -d or the qbt-start helper: a command left in the foreground is killed after 30 s)</span><input data-f="qbt_start_cmd" value="${esc(f.qbt_start_cmd)}" placeholder='cd "$HOME" && ( "$HOME/bin/qbittorrent-nox" -d </dev/null >/dev/null 2>&1 )'></label>
-        <label class="check"><input type="checkbox" data-f="docker_enabled" ${f.docker_enabled ? 'checked' : ''}> monitor rootless docker containers</label>
-        <label class="check"><input type="checkbox" data-f="du_enabled" ${f.du_enabled ? 'checked' : ''}> measure directory usage periodically (du at lowest I/O priority)</label>
-        ${edit ? `<label class="check"><input type="checkbox" data-f="enabled" ${f.enabled ? 'checked' : ''}> polling enabled</label>` : ''}
-        ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins the new key)</span></label>` : ''}
-        ${edit && f.has_qbt_pass ? `<label class="check"><input type="checkbox" data-f="clear_qbt_pass" ${f.clear_qbt_pass ? 'checked' : ''}> remove the saved WebUI password <span class="hint">(the SSH password is removed automatically when auth is switched to key or agent)</span></label>` : ''}
-      </div></details>
-      <div class="form-foot">
-        <button data-go="${back}">cancel</button>
-        ${edit ? `<button data-act="add:next" ${A.busy ? 'disabled' : ''}>test connection →</button><button class="primary" data-act="edit:save" ${A.busy ? 'disabled' : ''}>save</button>`
-               : `<button class="primary" data-act="add:next" ${A.busy ? 'disabled' : ''}>test connection →</button>`}
-      </div>
-    </div>`;
+    body = addStep1(A, f, E, edit, back);
   } else if (A.step === 2) {
-    const D = A.detect;
-    const mark = { ok: ['✓', 'var(--ok)'], warn: ['!', 'var(--warn)'], fail: ['✗', 'var(--bad)'], info: ['·', 'var(--muted)'], run: ['…', 'var(--accent)'] };
-    const steps = D ? D.steps : [{ status: 'run', text: `connecting to ${f.host}:${f.port || 22}…` }];
-    body = `<div class="form" style="gap:10px">
-      <div class="log">${steps.map((s) => `<div><span class="mk ${s.status === 'run' ? 'pulse' : ''}" style="color:${mark[s.status]?.[1]}">${mark[s.status]?.[0] || '·'}</span><span style="color:${s.status === 'fail' ? 'var(--bad)' : s.status === 'info' ? 'var(--muted)' : 'var(--text)'}">${esc(s.text)}</span></div>`).join('')}</div>
-      ${D ? `<div class="form-foot">
-        <button data-act="add:back">← back</button>
-        ${D.ok ? `<button class="primary" data-act="add:next">${edit ? 'apply detected →' : 'continue →'}</button>` : `<button data-act="add:retry">retry</button>`}
-      </div>` : ''}
-    </div>`;
+    body = addStep2(A, f, edit);
   } else {
-    const D = A.detect, F = D.facts || {}, pb = D.box || {};
-    body = `<div class="form" style="gap:10px">
-      <div class="tile-label">detected</div>
-      <div class="rows">
-        <div><span>name</span><span>${esc(f.name || pb.name)}</span></div>
-        <div><span>hostname</span><span>${esc(F.hostname || f.host)}</span></div>
-        <div><span>account</span><span>${esc(F.user)} (uid ${F.uid})</span></div>
-        <div><span>PMSS</span><span>${esc(F.pmss_version || '—')} · Debian ${esc(F.debian || '—')}</span></div>
-        <div><span>disk quota</span><span>${F.quota_bytes ? `${fmtBytes(F.quota_bytes, 1)} · ${fmtBytes(F.disk_used_bytes, 1)} used` : '—'}</span></div>
-        <div><span>traffic limit</span><span>${F.traffic_limit_bytes ? fmtBytes(F.traffic_limit_bytes, 1) + ' / 30 days' : 'unlimited or unknown'}</span></div>
-        <div><span>resources</span><span>${F.ram_limit_bytes ? fmtBytes(F.ram_limit_bytes, 0) + ' RAM' : '—'}${F.cpu_quota_cpus ? ` · ${F.cpu_quota_cpus.toFixed(1)} CPUs` : ''}</span></div>
-        <div><span>client</span><span>${pb.qbt_enabled ? `qBittorrent ${esc(F.qbt_version || '(not responding)')} on port ${F.qbt_port}` : 'none'}</span></div>
-        <div><span>docker</span><span>${pb.docker_enabled ? `${esc(F.docker_version || 'enabled, daemon down')}${F.containers ? ` · ${F.containers} containers` : ''}` : 'no'}</span></div>
-        <div><span>host key</span><span class="muted">${esc(F.host_key_fp || '')}</span></div>
-        <div><span>plan / renewal</span><span>${esc(f.plan || '—')} · ${esc(f.renewal || '—')}</span></div>
-      </div>
-      <div class="form-foot">
-        <button data-act="add:back">← back</button>
-        <button class="good" data-act="add:confirm" ${A.busy ? 'disabled' : ''}>${edit ? 'save box' : 'add to fleet'}</button>
-      </div>
-    </div>`;
+    body = addStep3(A, f, edit);
   }
   return `<div style="max-width:620px">
     <button class="crumb" data-go="${back}">← ${edit ? 'box' : 'fleet'}</button>
@@ -790,6 +782,120 @@ function viewAdd() {
     <div class="steps"><span class="${stepCls(1)}">1 connect</span><span>—</span><span class="${stepCls(2)}">2 detect</span><span>—</span><span class="${stepCls(3)}">3 confirm</span></div>
     ${body}
   </div>`;
+}
+/* add/edit wizard, step 1: the connection form */
+function addIdentityFields(f, E) {
+  return `<div class="f2">
+        <label class="f">display name<input data-f="name" value="${esc(f.name)}" placeholder="e.g. seed-02"></label>
+        <label class="f">box type<select data-f="type"><option value="seedbox" ${f.type === 'seedbox' ? 'selected' : ''}>seedbox</option><option value="storage" ${f.type === 'storage' ? 'selected' : ''}>storage box</option></select></label>
+      </div>
+      <div class="f2" style="grid-template-columns:1fr 110px">
+        <label class="f">hostname *<input data-f="host" class="${E.host ? 'err' : ''}" value="${esc(f.host)}" placeholder="server.pulsedmedia.com">${E.host ? `<span class="err-box">${esc(E.host)}</span>` : ''}</label>
+        <label class="f">ssh port<input data-f="port" type="number" min="1" max="65535" value="${f.port || 22}"></label>
+      </div>`;
+}
+function addUserAuthFields(f, E) {
+  return `<div class="f2">
+        <label class="f">username *<input data-f="user" class="${E.user ? 'err' : ''}" value="${esc(f.user)}" autocomplete="off">${E.user ? `<span class="err-box">${esc(E.user)}</span>` : ''}</label>
+        <label class="f">ssh auth<select data-f="auth_method">
+          <option value="" ${f.auth_method === '' ? 'selected' : ''}>auto (keys, agent, password)</option>
+          <option value="key" ${f.auth_method === 'key' ? 'selected' : ''}>private key file</option>
+          <option value="agent" ${f.auth_method === 'agent' ? 'selected' : ''}>ssh agent</option>
+          <option value="password" ${f.auth_method === 'password' ? 'selected' : ''}>password</option></select></label>
+      </div>`;
+}
+function addKeyPasswordFields(f, E, edit) {
+  return `<div class="f2">
+        <label class="f">key path <span class="hint">(empty = ~/.ssh/id_*)</span><input data-f="key_path" value="${esc(f.key_path)}" placeholder="~/.ssh/id_ed25519" ${f.auth_method === 'password' || f.auth_method === 'agent' ? 'disabled' : ''}></label>
+        <label class="f">ssh password${edit ? ` <span class="hint">${f.has_password ? '(blank keeps saved)' : '(none saved)'}</span>` : ''}<input data-f="password" type="password" class="${E.password ? 'err' : ''}" value="${esc(f.password)}" autocomplete="new-password" ${f.auth_method === 'key' || f.auth_method === 'agent' ? 'disabled' : ''}>${E.password ? `<span class="err-box">${esc(E.password)}</span>` : ''}</label>
+      </div>`;
+}
+function addQbtFields(f, edit) {
+  return `<label class="check"><input type="checkbox" data-f="qbt_enabled" ${f.qbt_enabled ? 'checked' : ''}> monitor qbittorrent-nox via its Web API (tunnelled over SSH)</label>
+        <div class="f3">
+          <label class="f">WebUI port <span class="hint">(0 = detect from config)</span><input data-f="qbt_port" type="number" min="0" max="65535" value="${f.qbt_port || 0}"></label>
+          <label class="f">WebUI user<input data-f="qbt_user" value="${esc(f.qbt_user)}" autocomplete="off"></label>
+          <label class="f">WebUI password${edit ? ` <span class="hint">${f.has_qbt_pass ? '(blank keeps saved)' : '(none saved)'}</span>` : ''}<input data-f="qbt_pass" type="password" value="${esc(f.qbt_pass)}" autocomplete="new-password"></label>
+        </div>
+        <label class="f">start command <span class="hint">(used by “start client”; it must detach, e.g. -d or the qbt-start helper: a command left in the foreground is killed after 30 s)</span><input data-f="qbt_start_cmd" value="${esc(f.qbt_start_cmd)}" placeholder='cd "$HOME" && ( "$HOME/bin/qbittorrent-nox" -d </dev/null >/dev/null 2>&1 )'></label>`;
+}
+function addDockerDuFields(f) {
+  return `<label class="check"><input type="checkbox" data-f="docker_enabled" ${f.docker_enabled ? 'checked' : ''}> monitor rootless docker containers</label>
+        <label class="check"><input type="checkbox" data-f="du_enabled" ${f.du_enabled ? 'checked' : ''}> measure directory usage periodically (du at lowest I/O priority)</label>`;
+}
+// Checkboxes that only make sense for an existing box (each renders empty in add mode).
+function addEditExtras(A, f, edit) {
+  return `${edit ? `<label class="check"><input type="checkbox" data-f="enabled" ${f.enabled ? 'checked' : ''}> polling enabled</label>` : ''}
+        ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins the new key)</span></label>` : ''}
+        ${edit && f.has_qbt_pass ? `<label class="check"><input type="checkbox" data-f="clear_qbt_pass" ${f.clear_qbt_pass ? 'checked' : ''}> remove the saved WebUI password <span class="hint">(the SSH password is removed automatically when auth is switched to key or agent)</span></label>` : ''}`;
+}
+function addStep1(A, f, E, edit, back) {
+  return `<div class="form">
+      ${addIdentityFields(f, E)}
+      ${addUserAuthFields(f, E)}
+      ${addKeyPasswordFields(f, E, edit)}
+      <div class="f3">
+        <label class="f">plan <span class="hint">(optional)</span><input data-f="plan" value="${esc(f.plan)}" placeholder="Dragon-R 2TB"></label>
+        <label class="f">datacenter<input data-f="datacenter" value="${esc(f.datacenter)}" placeholder="Helsinki, FI"></label>
+        <label class="f">renewal date<input data-f="renewal" type="date" value="${esc(f.renewal)}"></label>
+      </div>
+      <details class="adv" ${edit ? 'open' : ''}><summary>qBittorrent, docker and measurement options</summary><div>
+        ${addQbtFields(f, edit)}
+        ${addDockerDuFields(f)}
+        ${addEditExtras(A, f, edit)}
+      </div></details>
+      <div class="form-foot">
+        <button data-go="${back}">cancel</button>
+        ${edit ? `<button data-act="add:next" ${A.busy ? 'disabled' : ''}>test connection →</button><button class="primary" data-act="edit:save" ${A.busy ? 'disabled' : ''}>save</button>`
+               : `<button class="primary" data-act="add:next" ${A.busy ? 'disabled' : ''}>test connection →</button>`}
+      </div>
+    </div>`;
+}
+/* step 2: the detect log */
+function addDetectLog(steps, mark) {
+  return steps.map((s) => `<div><span class="mk ${s.status === 'run' ? 'pulse' : ''}" style="color:${mark[s.status]?.[1]}">${mark[s.status]?.[0] || '·'}</span><span style="color:${s.status === 'fail' ? 'var(--bad)' : s.status === 'info' ? 'var(--muted)' : 'var(--text)'}">${esc(s.text)}</span></div>`).join('');
+}
+function addStep2(A, f, edit) {
+  const D = A.detect;
+  const mark = { ok: ['✓', 'var(--ok)'], warn: ['!', 'var(--warn)'], fail: ['✗', 'var(--bad)'], info: ['·', 'var(--muted)'], run: ['…', 'var(--accent)'] };
+  const steps = D ? D.steps : [{ status: 'run', text: `connecting to ${f.host}:${f.port || 22}…` }];
+  return `<div class="form" style="gap:10px">
+      <div class="log">${addDetectLog(steps, mark)}</div>
+      ${D ? `<div class="form-foot">
+        <button data-act="add:back">← back</button>
+        ${D.ok ? `<button class="primary" data-act="add:next">${edit ? 'apply detected →' : 'continue →'}</button>` : `<button data-act="add:retry">retry</button>`}
+      </div>` : ''}
+    </div>`;
+}
+/* step 3: the detected facts and the confirm button */
+function addDetectedFacts(f, F, pb) {
+  return `<div><span>name</span><span>${esc(f.name || pb.name)}</span></div>
+        <div><span>hostname</span><span>${esc(F.hostname || f.host)}</span></div>
+        <div><span>account</span><span>${esc(F.user)} (uid ${F.uid})</span></div>
+        <div><span>PMSS</span><span>${esc(F.pmss_version || '—')} · Debian ${esc(F.debian || '—')}</span></div>
+        <div><span>disk quota</span><span>${F.quota_bytes ? `${fmtBytes(F.quota_bytes, 1)} · ${fmtBytes(F.disk_used_bytes, 1)} used` : '—'}</span></div>
+        <div><span>traffic limit</span><span>${F.traffic_limit_bytes ? fmtBytes(F.traffic_limit_bytes, 1) + ' / 30 days' : 'unlimited or unknown'}</span></div>
+        <div><span>resources</span><span>${F.ram_limit_bytes ? fmtBytes(F.ram_limit_bytes, 0) + ' RAM' : '—'}${F.cpu_quota_cpus ? ` · ${F.cpu_quota_cpus.toFixed(1)} CPUs` : ''}</span></div>`;
+}
+function addDetectedServiceFacts(f, F, pb) {
+  return `<div><span>client</span><span>${pb.qbt_enabled ? `qBittorrent ${esc(F.qbt_version || '(not responding)')} on port ${F.qbt_port}` : 'none'}</span></div>
+        <div><span>docker</span><span>${pb.docker_enabled ? `${esc(F.docker_version || 'enabled, daemon down')}${F.containers ? ` · ${F.containers} containers` : ''}` : 'no'}</span></div>
+        <div><span>host key</span><span class="muted">${esc(F.host_key_fp || '')}</span></div>
+        <div><span>plan / renewal</span><span>${esc(f.plan || '—')} · ${esc(f.renewal || '—')}</span></div>`;
+}
+function addStep3(A, f, edit) {
+  const D = A.detect, F = D.facts || {}, pb = D.box || {};
+  return `<div class="form" style="gap:10px">
+      <div class="tile-label">detected</div>
+      <div class="rows">
+        ${addDetectedFacts(f, F, pb)}
+        ${addDetectedServiceFacts(f, F, pb)}
+      </div>
+      <div class="form-foot">
+        <button data-act="add:back">← back</button>
+        <button class="good" data-act="add:confirm" ${A.busy ? 'disabled' : ''}>${edit ? 'save box' : 'add to fleet'}</button>
+      </div>
+    </div>`;
 }
 function validateForm(f) {
   const E = {};
@@ -908,7 +1014,7 @@ function viewSettings() {
 }
 function viewServices() {
   const v = S.services;
-  if (!v || !v.configured) return '';
+  if (!v?.configured) return '';
   const boxById = (id) => S.boxes.find((b) => b.id === id);
   const status = v.error ? `<span class="bad">${esc(v.error)}</span>` : v.synced_at ? `synced ${fmtAgo(v.synced_at)}${v.generated_at ? ` · feed generated ${fmtAgo(v.generated_at)}` : ''}` : 'not synced yet';
   return `<div class="svc">
@@ -976,52 +1082,76 @@ document.addEventListener('click', async (e) => {
   if (act.dataset.confirm && !confirm(act.dataset.confirm)) return;
   const a = act.dataset.act;
   try {
-    if (a === 'refresh-all') { for (const b of S.boxes) { api('POST', `/api/boxes/${b.id}/refresh`).catch(() => {}); } toast('refreshing all boxes'); }
-    else if (a === 'refresh') { await api('POST', `/api/boxes/${S.selId}/refresh`); toast('refresh requested'); }
-    else if (a === 'du') { const id = S.selId; await api('POST', `/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
-    else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
-    else if (a.startsWith('qbt:')) {
-      const what = a.slice(4);
-      act.disabled = true;
-      if (what === 'install') toast('downloading qbittorrent-nox on the box…');
-      const r = await api('POST', `/api/boxes/${S.selId}/qbt/${what}`);
-      toast(`qBittorrent ${what}: ok${r && r.output ? ' — ' + r.output.split('\n').slice(0, 2).join(' · ') : ''}`, 'ok');
-    }
-    else if (a.startsWith('ctr:')) { act.disabled = true; await api('POST', `/api/boxes/${S.selId}/containers/${act.dataset.cid}/${a.slice(4)}`); toast(`container ${a.slice(4)} ok`, 'ok'); }
-    else if (a === 'ack') { act.disabled = true; await api('POST', `/api/alerts/${act.dataset.id}/ack`); toast('acknowledged', 'ok'); await loadAlerts(); }
-    else if (a === 'ack-all') { await api('POST', '/api/alerts/ack-all'); toast('all alerts acknowledged', 'ok'); await loadAlerts(); }
-    else if (a === 'alert:dismiss') { act.disabled = true; await api('DELETE', `/api/alerts/${act.dataset.id}`); await loadAlerts(); }
-    else if (a === 'alerts:clear-resolved') { await api('POST', '/api/alerts/clear-resolved'); toast('resolved alerts cleared', 'ok'); await loadAlerts(); }
-    else if (a === 'settings:save') {
-      const d = { ...S.settingsDraft };
-      for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px']) d[k] = Number(d[k]);
-      const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
-      S.settings = await api('PUT', '/api/settings', d); S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
-      if (keyChanged) { S.services = null; setTimeout(loadServices, 1500); }
-    }
-    else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; render(); }
-    else if (a === 'svc:sync') { act.disabled = true; toast('syncing services from pulsedmedia.com…'); S.services = await api('POST', '/api/services/sync'); await loadState(); toast(`synced ${S.services.services.length} services`, 'ok'); render(); }
-    else if (a === 'svc:add') {
-      const sv = (S.services && S.services.services || []).find((x) => String(x.id) === act.dataset.id);
-      if (!sv) return;
-      resetAdd();
-      Object.assign(S.add.form, { name: sv.username, host: sv.domain, user: sv.username, type: /storage/i.test(sv.product) ? 'storage' : 'seedbox' });
-      go('/add');
-    }
-    else if (a === 'add:next') {
-      const A = S.add;
-      if (A.step === 1) { A.errors = validateForm(A.form); if (Object.keys(A.errors).length) { render(); return; } A.step = 2; void runDetect(); }
-      else if (A.step === 2) { A.step = 3; render(); }
-    }
-    else if (a === 'add:retry') { void runDetect(); }
-    else if (a === 'add:back') { S.add.step = Math.max(1, S.add.step - 1); render(); }
-    else if (a === 'add:confirm') { void confirmAdd(); }
-    else if (a === 'edit:save') { const A = S.add; A.errors = validateForm(A.form); if (Object.keys(A.errors).length) { render(); return; } void confirmAdd(); }
+    await runAction(a, act);
   } catch (err) {
     toast(err.message, 'bad');
     act.disabled = false;
   }
 });
+/* data-act handlers, one per action group. API errors propagate to the click
+   handler, which shows the toast and re-enables the button. */
+async function boxAction(a) {
+  if (a === 'refresh-all') { for (const b of S.boxes) { api('POST', `/api/boxes/${b.id}/refresh`).catch(() => {}); } toast('refreshing all boxes'); }
+  else if (a === 'refresh') { await api('POST', `/api/boxes/${S.selId}/refresh`); toast('refresh requested'); }
+  else if (a === 'du') { const id = S.selId; await api('POST', `/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
+  else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
+}
+async function qbtAction(a, act) {
+  const what = a.slice(4);
+  act.disabled = true;
+  if (what === 'install') toast('downloading qbittorrent-nox on the box…');
+  const r = await api('POST', `/api/boxes/${S.selId}/qbt/${what}`);
+  toast(`qBittorrent ${what}: ok${r?.output ? ' — ' + r.output.split('\n').slice(0, 2).join(' · ') : ''}`, 'ok');
+}
+async function containerAction(a, act) {
+  act.disabled = true; await api('POST', `/api/boxes/${S.selId}/containers/${act.dataset.cid}/${a.slice(4)}`); toast(`container ${a.slice(4)} ok`, 'ok');
+}
+async function alertsAction(a, act) {
+  if (a === 'ack') { act.disabled = true; await api('POST', `/api/alerts/${act.dataset.id}/ack`); toast('acknowledged', 'ok'); await loadAlerts(); }
+  else if (a === 'ack-all') { await api('POST', '/api/alerts/ack-all'); toast('all alerts acknowledged', 'ok'); await loadAlerts(); }
+  else if (a === 'alert:dismiss') { act.disabled = true; await api('DELETE', `/api/alerts/${act.dataset.id}`); await loadAlerts(); }
+  else if (a === 'alerts:clear-resolved') { await api('POST', '/api/alerts/clear-resolved'); toast('resolved alerts cleared', 'ok'); await loadAlerts(); }
+}
+async function settingsAction(a) {
+  if (a === 'settings:save') {
+    const d = { ...S.settingsDraft };
+    for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px']) d[k] = Number(d[k]);
+    const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
+    S.settings = await api('PUT', '/api/settings', d); S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
+    if (keyChanged) { S.services = null; setTimeout(loadServices, 1500); }
+  }
+  else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; render(); }
+}
+async function servicesAction(a, act) {
+  if (a === 'svc:sync') { act.disabled = true; toast('syncing services from pulsedmedia.com…'); S.services = await api('POST', '/api/services/sync'); await loadState(); toast(`synced ${S.services.services.length} services`, 'ok'); render(); }
+  else if (a === 'svc:add') {
+    const sv = (S.services?.services || []).find((x) => String(x.id) === act.dataset.id);
+    if (!sv) return;
+    resetAdd();
+    Object.assign(S.add.form, { name: sv.username, host: sv.domain, user: sv.username, type: /storage/i.test(sv.product) ? 'storage' : 'seedbox' });
+    go('/add');
+  }
+}
+async function wizardAction(a) {
+  if (a === 'add:next') {
+    const A = S.add;
+    if (A.step === 1) { A.errors = validateForm(A.form); if (Object.keys(A.errors).length) { render(); return; } A.step = 2; void runDetect(); }
+    else if (A.step === 2) { A.step = 3; render(); }
+  }
+  else if (a === 'add:retry') { void runDetect(); }
+  else if (a === 'add:back') { S.add.step = Math.max(1, S.add.step - 1); render(); }
+  else if (a === 'add:confirm') { void confirmAdd(); }
+  else if (a === 'edit:save') { const A = S.add; A.errors = validateForm(A.form); if (Object.keys(A.errors).length) { render(); return; } void confirmAdd(); }
+}
+async function runAction(a, act) {
+  if (a === 'refresh-all' || a === 'refresh' || a === 'du' || a === 'remove') await boxAction(a);
+  else if (a.startsWith('qbt:')) await qbtAction(a, act);
+  else if (a.startsWith('ctr:')) await containerAction(a, act);
+  else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
+  else if (a.startsWith('settings:')) await settingsAction(a);
+  else if (a.startsWith('svc:')) await servicesAction(a, act);
+  else if (a.startsWith('add:') || a === 'edit:save') await wizardAction(a);
+}
 document.addEventListener('input', (e) => {
   const f = e.target.closest('[data-f]');
   if (f && S.add.form) {
