@@ -92,8 +92,10 @@ your ssh-agent, or a password; with "auto" it tries `~/.ssh/id_ed25519`,
 
 Blank password fields keep the saved passwords. They are only ever used for
 the host, port and user they were saved for: moving a box to a different
-endpoint with a blank SSH password is refused until you re-enter it, both
-on save and on "test connection". Switching SSH auth to a key or the agent
+endpoint with a blank SSH or WebUI password is refused until you re-enter
+it (or remove it), both on save and on "test connection". Before any action
+that logs in to the WebUI the dashboard re-reads the box's socket table to
+confirm the port is still bound by your account. Switching SSH auth to a key or the agent
 removes the saved SSH password; a checkbox removes the saved WebUI password.
 The pinned host key belongs to the host and port: it is kept while they are
 unchanged, cleared when they change or when you tick "forget the pinned SSH

@@ -18,6 +18,7 @@ package probe
 
 import (
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -328,5 +329,34 @@ func TestNonFiniteEverywhere(t *testing.T) {
 	}
 	if snap.Host.UptimeSec != 0 || snap.Host.Load1 != 0 || snap.Traffic.LimitGiB != 0 || snap.Account.QuotaGiB != 0 || snap.Account.RAMMiB != 0 || snap.Account.TrafficCapMbit != 0 || snap.Traffic.Out.MonthMiB != 0 || snap.Traffic.Out.Daily["2026/10/16"] != 0 {
 		t.Fatalf("non-finite or absurd values survived: host=%+v acct=%+v traffic=%+v", snap.Host, snap.Account, snap.Traffic.Out)
+	}
+}
+
+func TestPortOwnerNow(t *testing.T) {
+	out := []byte("1001\nh 1F90 1001 0100007F\nh 0016 0 00000000\n")
+	if ok, reason := PortOwnerNow(out, 8080); !ok {
+		t.Fatalf("own port: %q", reason)
+	}
+	if ok, _ := PortOwnerNow(out, 22); ok {
+		t.Fatal("root's port must be refused")
+	}
+	if ok, reason := PortOwnerNow([]byte("garbage\n"), 8080); ok || !strings.Contains(reason, "uid") {
+		t.Fatalf("bad uid line: %v %q", ok, reason)
+	}
+	if ok, _ := PortOwnerNow([]byte("1001\n"), 8080); ok {
+		t.Fatal("empty table must refuse")
+	}
+	// The live script must produce exactly this shape locally.
+	if _, err := exec.LookPath("sh"); err == nil {
+		cmd := exec.Command("sh")
+		cmd.Stdin = strings.NewReader(ListenScript)
+		raw, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, _, _ := strings.Cut(string(raw), "\n")
+		if _, err := strconv.Atoi(strings.TrimSpace(first)); err != nil {
+			t.Fatalf("first line should be the uid: %q", first)
+		}
 	}
 }

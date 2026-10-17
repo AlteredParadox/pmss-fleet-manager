@@ -46,11 +46,18 @@ sec(){ printf '\n@@%s%s\n' "${PMSS_TAG:-}" "$1"; }
 # then waits for it, which stalled whole probes on one box. Here nothing
 # waits on the child; it is abandoned after the deadline and the section is
 # simply empty (the parser falls back to ~/.quota for quota).
+scratch="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+[ -d "$scratch" ] && [ -w "$scratch" ] || scratch="$home"
+# A probe killed at its deadline mid-bounded leaves its scratch file; sweep
+# old ones (not a concurrent probe's) rather than letting them pile up.
+find "$scratch" -maxdepth 1 -name '.pmss-probe.*' -mmin +2 -delete 2>/dev/null
 bounded(){
   secs=$1; shift
-  # The scratch file lives in the tenant's own home, never in shared /tmp
-  # where a co-tenant could plant a file at a guessable name.
-  f=$(mktemp "$home/.pmss-probe.XXXXXX" 2>/dev/null) || return 0
+  # The scratch file lives in the tenant's own runtime dir or home, never
+  # in shared /tmp where a co-tenant could plant a guessable name. The
+  # runtime dir is tmpfs and outside the home quota, so the live quota
+  # reading survives the box being full.
+  f=$(mktemp "$scratch/.pmss-probe.XXXXXX" 2>/dev/null) || return 0
   ( "$@" >"$f" 2>/dev/null ) & bp=$!
   i=0; while [ $i -lt $((secs*5)) ] && kill -0 $bp 2>/dev/null; do sleep 0.2; i=$((i+1)); done
   kill -9 $bp 2>/dev/null
@@ -135,6 +142,15 @@ sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -c 'bin/qbt-start' 
 sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
 sec end
+`
+
+// ListenScript prints the account's uid and the listening sockets in the
+// same form as the probe's listen section, for a live ownership re-check
+// right before an action that sends credentials.
+const ListenScript = `#!/bin/sh
+LC_ALL=C; export LC_ALL
+id -u
+awk '$4=="0A"{x=$2; a=x; sub(/.*:/,"",x); sub(/:.*/,"",a); print "h", x, $8, a}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
 `
 
 // ScriptWithTag returns Script with the section tag set on its first line.

@@ -750,9 +750,8 @@ function validateForm(f) {
   const E = {};
   if (!/^[a-z0-9.-]+$/i.test(f.host.trim())) E.host = 'enter a valid hostname';
   if (!f.user.trim()) E.user = 'required';
-  const needsPw = f.auth_method === 'password' || f.auth_method === '';
   if (f.auth_method === 'password' && !f.password && S.add.mode === 'add') E.password = 'required for password auth';
-  if (S.add.mode === 'edit' && needsPw && !f.password && !f.has_password && f.auth_method === 'password') E.password = 'no password is saved for this box; enter one';
+  if (S.add.mode === 'edit' && f.auth_method === 'password' && !f.password && !f.has_password) E.password = 'no password is saved for this box; enter one';
   return E;
 }
 function payload(f) {
@@ -979,7 +978,7 @@ document.addEventListener('input', (e) => {
     S.add.form[k] = f.type === 'checkbox' ? f.checked : f.value;
     // A host key belongs to host:port; anything detect saw for a previous
     // endpoint must not be carried to a new one (or saved as its pin).
-    if (k === 'host' || k === 'port' || k === 'user') S.add.form.host_key = '';
+    if (k === 'host' || k === 'port' || k === 'user') { S.add.form.host_key = ''; if (k !== 'user') S.add.pinned = false; }
     if (S.add.errors[k]) { delete S.add.errors[k]; f.classList.remove('err'); }
     if (k === 'auth_method') render();
     return;
