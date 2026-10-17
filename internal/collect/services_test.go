@@ -19,8 +19,10 @@ package collect
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"pmss-fleet-manager/internal/pmapi"
 )
@@ -134,5 +136,29 @@ func TestRetryInterval(t *testing.T) {
 	}
 	if got := retryInterval(15*time.Minute, 9); got != 15*time.Minute {
 		t.Fatalf("a base above the cap must not be shortened: %s", got)
+	}
+}
+
+// clip bounds a remote string by runes, marks every truncation with an
+// ellipsis, and never leaves a split rune in the kept part.
+func TestClip(t *testing.T) {
+	if got := clip("abc", 3); got != "abc" {
+		t.Fatalf("no cut: %q", got)
+	}
+	if got := clip("abcd", 3); got != "abc…" {
+		t.Fatalf("ascii cut: %q", got)
+	}
+	emoji := strings.Repeat("😀", 129) // 4-byte runes: the byte pre-cut lands on exactly max runes
+	if got := clip(emoji, 128); got != strings.Repeat("😀", 128)+"…" {
+		t.Fatalf("4-byte boundary lost the marker or cut wrong: len=%d", len([]rune(got)))
+	}
+	mixed := strings.Repeat("é", 300) // 2-byte runes
+	got := clip(mixed, 100)
+	if r := []rune(got); len(r) != 101 || r[100] != '…' || !utf8.ValidString(got) {
+		t.Fatalf("2-byte cut: %d runes, valid=%v", len(r), utf8.ValidString(got))
+	}
+	exact := strings.Repeat("😀", 128)
+	if got := clip(exact, 128); got != exact {
+		t.Fatalf("exactly max runes must not be marked: %q", got[:8])
 	}
 }

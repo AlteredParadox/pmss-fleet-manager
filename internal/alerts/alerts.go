@@ -46,6 +46,25 @@ type want struct {
 	key, sev, title string
 }
 
+// recheckable reports whether this poll could re-evaluate the rule behind an
+// alert key. A source that was unavailable on an otherwise good poll (quota
+// command hung, dockerd blip, no traffic file yet) must not resolve an alert
+// it could not check, or an acknowledged alert comes back unacknowledged on
+// the next good poll.
+func recheckable(s *collect.BoxState, k string) bool {
+	switch {
+	case k == "disk":
+		return s.Disk.OK
+	case k == "traffic":
+		return s.Traffic.OK
+	case k == "ram":
+		return s.RAM.OK
+	case strings.HasPrefix(k, "container:"):
+		return s.Docker.Reachable
+	}
+	return true
+}
+
 // Evaluate is a collect.Hook.
 func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 	if s.Status == "pending" {
@@ -169,6 +188,9 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 		}
 		// Only auto-resolve conditions we could actually re-check this poll.
 		if !probeOK && k != "unreachable" && k != "renewal" {
+			continue
+		}
+		if !recheckable(s, k) {
 			continue
 		}
 		if err := e.st.ResolveAlert(ctx, s.ID, k); err == nil {

@@ -112,7 +112,7 @@ async function api(method, path, body) {
   const r = await fetch(path, opts);
   let data = null;
   try { data = await r.json(); } catch (e) { /* no body */ }
-  if (!r.ok) throw new Error((data && data.error ? data.error + (data.output ? ' — ' + data.output.split('\n').slice(-2).join(' · ') : '') : null) || `${r.status} ${r.statusText}`);
+  if (!r.ok) throw Object.assign(new Error((data && data.error ? data.error + (data.output ? ' — ' + data.output.split('\n').slice(-2).join(' · ') : '') : null) || `${r.status} ${r.statusText}`), { status: r.status });
   return data;
 }
 
@@ -162,7 +162,17 @@ async function loadDetail(id) {
     if (S.selId !== id) return;
     S.detail = d.state;
     render();
-  } catch (e) { toast(`box: ${e.message}`, 'bad'); }
+  } catch (e) {
+    toast(`box: ${e.message}`, 'bad');
+    if (e.status === 404 && S.selId === id) {
+      // The box is gone (removed, then Back): drop its last detail and
+      // summary so the page says so instead of showing a live-looking copy.
+      if (S.detail && S.detail.id === id) S.detail = null;
+      S.boxes = S.boxes.filter((b) => b.id !== id);
+      recomputeTotals();
+      render();
+    }
+  }
 }
 async function loadServices() { try { S.services = await api('GET', '/api/services'); } catch (e) { S.services = { configured: false, services: [], error: e.message }; } if (S.view === 'settings') render(); }
 async function loadAlerts() {
@@ -197,6 +207,7 @@ function connectEvents() {
   es.addEventListener('removed', (ev) => {
     const e = JSON.parse(ev.data);
     S.boxes = S.boxes.filter((b) => b.id !== e.box_id);
+    if (S.detail && S.detail.id === e.box_id) S.detail = null;
     recomputeTotals();
     if (S.view === 'box' && S.selId === e.box_id) go('/fleet'); else render();
   });
@@ -662,11 +673,12 @@ async function startEdit(id) {
   S.add = { mode: 'edit', step: 1, form: null, errors: {}, detect: null, busy: false, editId: id };
   try {
     const d = await api('GET', `/api/boxes/${id}`);
+    if (S.add.mode !== 'edit' || S.add.editId !== id) return; // navigated on before this answer came back
     const b = d.box;
     S.add.form = { ...blankForm(), ...b, password: '', qbt_pass: '', port: b.port || 22, host_key: '', forget_host_key: false, clear_qbt_pass: false };
     S.add.pinned = !!b.host_key; // the key itself never round-trips: changing host/port must clear it
     render();
-  } catch (e) { toast(e.message, 'bad'); go('/fleet'); }
+  } catch (e) { toast(e.message, 'bad'); if (S.add.mode === 'edit' && S.add.editId === id) go('/fleet'); }
 }
 function viewAdd() {
   const A = S.add;
@@ -945,7 +957,7 @@ document.addEventListener('click', async (e) => {
   try {
     if (a === 'refresh-all') { for (const b of S.boxes) api('POST', `/api/boxes/${b.id}/refresh`).catch(() => {}); toast('refreshing all boxes'); }
     else if (a === 'refresh') { await api('POST', `/api/boxes/${S.selId}/refresh`); toast('refresh requested'); }
-    else if (a === 'du') { await api('POST', `/api/boxes/${S.selId}/du`); toast('measuring directories at low priority…'); if (S.detail) { S.detail.dirs.running = true; render(); } }
+    else if (a === 'du') { const id = S.selId; await api('POST', `/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
     else if (a === 'remove') { await api('DELETE', `/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
     else if (a.startsWith('qbt:')) {
       const what = a.slice(4);

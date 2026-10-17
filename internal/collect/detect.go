@@ -109,6 +109,16 @@ func detectGuardState(host, user, pass string) (qbt.AuthState, bool) {
 func Detect(ctx context.Context, b store.Box) *DetectResult {
 	res := &DetectResult{}
 	add := func(status, format string, args ...any) {
+		// Every string or error here is box- or client-supplied: bound them
+		// like the poller does, or one hostile box inflates this response.
+		for i, a := range args {
+			switch v := a.(type) {
+			case string:
+				args[i] = clip(v, 200)
+			case error:
+				args[i] = describeErr(v)
+			}
+		}
 		res.Steps = append(res.Steps, Step{Status: status, Text: fmt.Sprintf(format, args...)})
 	}
 	if b.Port == 0 {
