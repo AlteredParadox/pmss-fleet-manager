@@ -171,13 +171,16 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	b := new(store.Box)
 	*b = *bp // the poller owns its own copy (conn() writes HostKey into it)
 	st := fromBox(b)
-	// Resume from the last persisted state so a restart does not blank the UI.
+	// Resume from the last persisted state so a restart does not blank the
+	// UI (an edit carries the live state instead and skips the read).
 	var cached BoxState
-	if _, err := m.st.GetCache(m.ctx, b.ID, "state", &cached); err == nil && cached.ID == b.ID {
-		keep := st
-		st = cached
-		st.adoptIdentity(keep)
-		st.resetVolatile()
+	if prev == nil {
+		if _, err := m.st.GetCache(m.ctx, b.ID, "state", &cached); err == nil && cached.ID == b.ID {
+			keep := st
+			st = cached
+			st.adoptIdentity(keep)
+			st.resetVolatile()
+		}
 	}
 	if prev != nil {
 		// Keep the last measured data so the UI does not blank out on edit.
@@ -310,11 +313,15 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 	}
 	m.mu.Lock()
 	p := m.pollers[b.ID]
-	prev := m.states[b.ID]
 	m.mu.Unlock()
 	if p != nil {
 		p.stopAndWait()
 	}
+	// Snapshot the state only now: a poll that was finishing while we
+	// waited has written its result, and that is what the UI should keep.
+	m.mu.Lock()
+	prev := m.states[b.ID]
+	m.mu.Unlock()
 	// Read the record only after the old poller is gone: its last
 	// successful dial could otherwise pin a host key onto the record
 	// between our write and this read.

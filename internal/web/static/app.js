@@ -265,6 +265,16 @@ function renderMain() {
     case 'settings': m.innerHTML = viewSettings(); break;
     default: m.innerHTML = viewFleet();
   }
+  if (S.view === 'box') {
+    const b = S.detail || S.boxes.find((x) => x.id === S.selId);
+    if (b && b.status === 'disabled') {
+      // Polling is off: the server refuses every action, so say so up front.
+      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
+        el.disabled = true;
+        el.title = 'polling is disabled for this box; enable it to run actions';
+      });
+    }
+  }
   afterRender();
 }
 
@@ -319,7 +329,7 @@ function fleetCards() {
     <div class="card click" data-go="/box/${b.id}">
       <div class="card-head">
         <div class="card-title"><span class="led ${b.status}" title="${esc(statusLabel(b.status))}${b.status_reason ? ' — ' + esc(b.status_reason) : ''}"></span><span class="n">${esc(b.name)}</span></div>
-        <div class="sub">${esc(b.hostname || b.host)}${b.status_reason ? ` · <span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(b.status_reason)}</span>` : ''}${retryNote(b) ? ` · <span class="muted">${esc(retryNote(b))}</span>` : ''}</div>
+        <div class="sub">${esc(b.hostname || b.host)}${b.status_reason ? ` · <span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(b.status_reason)}</span>` : ''}${(() => { const n = retryNote(b); return n ? ` · <span class="muted">${esc(n)}</span>` : ''; })()}</div>
         <div class="tags"><span class="tag">${esc(b.type)}</span>${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}</div>
       </div>
       <div style="display:grid;gap:8px">
