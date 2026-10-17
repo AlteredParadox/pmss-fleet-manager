@@ -12,6 +12,8 @@ Built for the common case of a customer with several boxes on shared hosts:
 no root, nothing to install server-side, and nothing exposed to the internet
 beyond the dashboard itself.
 
+![Fleet overview: five boxes as cards with disk, upload, rates and CPU/RAM, and headline tiles for storage, upload, torrents, containers, renewal and monthly cost](docs/screenshot.png)
+
 ## Features
 
 **Fleet view.** Every box as a card or table row with status, disk against
