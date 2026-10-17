@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"pmss-fleet-manager/internal/collect"
@@ -44,6 +45,9 @@ type Server struct {
 	// instance identifies this process; the UI reloads itself when it
 	// changes after an SSE reconnect so a rebuilt server never runs stale JS.
 	instance string
+	// settingsMu serialises the read-merge-save of PUT /api/settings so two
+	// tabs saving at once cannot lose a field or leave memory and DB apart.
+	settingsMu sync.Mutex
 
 	license, thirdParty []byte
 	version             string
@@ -822,6 +826,8 @@ func (s *Server) handleServicesSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
 	in := s.m.Settings()
 	prevKey := in.PMAPIKey
 	in.PMAPIKey = ""

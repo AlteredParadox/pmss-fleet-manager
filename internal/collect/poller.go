@@ -801,6 +801,7 @@ func (p *poller) maybeDu(ctx context.Context, st *BoxState) {
 		cached.At = at
 		cached.Enabled = p.box.DuEnabled
 		cached.Running = false
+		cached.Entries = capEntries(cached.Entries)
 		st.Dirs = cached
 	}
 	if !p.box.DuEnabled {
@@ -842,17 +843,28 @@ const (
 // 100 MB that every poll re-reads.
 func foldDu(ds []probe.DirUsage) []DirEntry {
 	out := make([]DirEntry, 0, min(len(ds), maxDuEntries+1))
-	for i, d := range ds {
-		if i >= maxDuEntries {
-			if len(out) == maxDuEntries {
-				out = append(out, DirEntry{Name: duRestName})
-			}
-			out[maxDuEntries].Bytes += d.Bytes
-			continue
-		}
+	for _, d := range ds {
 		out = append(out, DirEntry{Name: clip(d.Name, 255), Bytes: d.Bytes})
 	}
-	return out
+	return capEntries(out)
+}
+
+// capEntries keeps the first maxDuEntries entries (the list is largest
+// first) and sums the rest into one; also applied to rows restored from the
+// cache, which an older build may have written unbounded.
+func capEntries(es []DirEntry) []DirEntry {
+	if len(es) <= maxDuEntries {
+		return es
+	}
+	rest := DirEntry{Name: duRestName}
+	for _, e := range es[maxDuEntries:] {
+		if e.Bytes > 0 && rest.Bytes > math.MaxInt64-e.Bytes {
+			rest.Bytes = math.MaxInt64 // saturate rather than wrap on forged sizes
+			break
+		}
+		rest.Bytes += e.Bytes
+	}
+	return append(es[:maxDuEntries:maxDuEntries], rest)
 }
 
 func (p *poller) runDu(ctx context.Context) {
