@@ -51,6 +51,11 @@ func mibToBytes(mib float64) int64 {
 	return int64(b)
 }
 
+// gibToBytes is mibToBytes for GiB figures (same clamp, 1024x the unit).
+func gibToBytes(gib float64) int64 {
+	return mibToBytes(gib * 1024)
+}
+
 // clip bounds a remote-supplied string so a hostile box cannot bloat state,
 // the database or every SSE event. Cuts on a rune boundary.
 func clip(s string, max int) string {

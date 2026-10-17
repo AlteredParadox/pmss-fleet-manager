@@ -218,9 +218,7 @@ func (m *Manager) reattachServices() {
 			// "not responding" alerts. The next poll runs the hooks.
 			continue
 		}
-		for _, h := range m.hooks {
-			h(m.ctx, &cp)
-		}
+		m.runHooks(cp)
 	}
 	m.Publish(Event{Type: "services"})
 }

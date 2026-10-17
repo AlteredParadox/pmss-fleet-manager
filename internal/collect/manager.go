@@ -188,7 +188,7 @@ func (m *Manager) startPoller(bp *store.Box) {
 	}
 	// A login the add/edit wizard already saw rejected must not be retried
 	// by the first poll; seed before the run loop can start.
-	if ds, ok := detectGuardState(b.Host, b.QbtPort, b.QbtUser, b.QbtPass); ok {
+	if ds, ok := detectGuardState(b.Host, b.QbtUser, b.QbtPass); ok {
 		p.guard.Restore(ds)
 	}
 	m.pollers[b.ID] = p
@@ -242,6 +242,7 @@ func (m *Manager) State(id int64) (BoxState, bool) {
 }
 
 func (m *Manager) setState(s *BoxState) {
+	s.Sanitize()
 	m.mu.Lock()
 	if _, ok := m.states[s.ID]; !ok { // box was removed mid-poll
 		m.mu.Unlock()
@@ -257,9 +258,7 @@ func (m *Manager) setState(s *BoxState) {
 	cp := *s
 	m.states[s.ID] = &cp
 	m.mu.Unlock()
-	for _, h := range m.hooks {
-		h(m.ctx, &cp)
-	}
+	m.runHooks(cp)
 	sum := cp.Summary()
 	m.Publish(Event{Type: "state", BoxID: cp.ID, State: &sum})
 }
@@ -300,24 +299,38 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 		// A password was typed in: treat it as an explicit request to try
 		// again, even if it is the same one the hold was recorded for.
 		// After stopAndWait, so the old poller's last record() cannot
-		// write the hold back.
+		// write the hold back; the wizard's memory of it is dropped too.
 		_ = m.st.SetCache(ctx, b.ID, authCacheKind, qbt.AuthState{})
+		detectGuard(fresh.Host, fresh.QbtUser, fresh.QbtPass).Clear()
+	}
+	// A concurrent RemoveBox may have won: do not resurrect a deleted box.
+	m.mu.Lock()
+	_, stillHere := m.states[b.ID]
+	m.mu.Unlock()
+	if !stillHere {
+		return store.ErrNotFound
 	}
 	m.startPoller(fresh)
 	// Keep the last measured data so the UI does not blank out on edit.
 	if prev != nil {
+		var keep BoxState
 		m.mu.Lock()
-		cur := m.states[fresh.ID]
-		keep := *prev
-		keep.adoptIdentity(*cur)
-		keep.Service = cur.Service
-		keep.resetVolatile() // port/creds may have changed: re-verify before any action
-		if !fresh.Enabled {
-			keep.Status = "disabled"
+		cur, ok := m.states[fresh.ID]
+		if ok {
+			keep = *prev
+			keep.adoptIdentity(*cur)
+			keep.Service = cur.Service
+			keep.resetVolatile() // port/creds may have changed: re-verify before any action
+			switch {
+			case !fresh.Enabled:
+				keep.Status = "disabled"
+			case keep.Status == "disabled":
+				keep.Status = "pending" // re-enabled: the first poll decides
+			}
+			m.states[fresh.ID] = &keep
 		}
-		m.states[fresh.ID] = &keep
 		m.mu.Unlock()
-		if !fresh.Enabled {
+		if ok && !fresh.Enabled {
 			m.runHooks(keep) // resolve open alerts: nothing will poll this box now
 		}
 	}
@@ -383,7 +396,7 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		out, err = p.qbtRestart(ctx)
 		if err == nil {
 			p.guard.Clear() // a fresh qbittorrent-nox has a fresh failed-login counter
-			detectGuard(p.box.Host, p.box.QbtPort, p.box.QbtUser, p.box.QbtPass).Clear()
+			detectGuard(p.box.Host, p.box.QbtUser, p.box.QbtPass).Clear()
 		}
 	case "autostart":
 		out, err = p.qbtAutostart(ctx)
@@ -394,7 +407,10 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 	}
 	if err == nil && (action == "restart" || action == "stop") {
 		// The port is free until the client is back: whoever binds it next
-		// must be verified again before any credential-sending action.
+		// must be verified again before any credential-sending action. The
+		// poller also notes the time, so a poll that was already in flight
+		// cannot store the verification it made before the port was freed.
+		p.noteAction()
 		m.mutateState(id, func(s *BoxState) { s.Qbt.PortOK, s.Qbt.Reachable = false, false })
 	}
 	p.wake()

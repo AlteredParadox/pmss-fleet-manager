@@ -207,3 +207,39 @@ func TestWriteJSONRefusesNonFinite(t *testing.T) {
 		t.Fatalf("normal encode: %d %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestDetectOnEditKeepsSecretsForSavedEndpointOnly(t *testing.T) {
+	s, st := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	// A box with a stored password, pinned to a bogus key, pointing at a port that refuses fast.
+	code, body := do(t, s, "POST", "/api/boxes", `{"name":"b","host":"127.0.0.1","port":1,"user":"u","auth_method":"password","password":"S3cret","host_key":"ssh-ed25519 AAAA"}`, hdr)
+	if code != 201 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	boxes, _ := st.ListBoxes(context.Background())
+	id := boxes[0].ID
+	// Same endpoint, blank password: allowed (stored secret reused under the pin); the
+	// result must never contain the password.
+	code, body = do(t, s, "POST", "/api/detect", fmt.Sprintf(`{"id":%d,"host":"127.0.0.1","port":1,"user":"u","auth_method":"password","password":""}`, id), hdr)
+	if code != 200 || strings.Contains(body, "S3cret") {
+		t.Fatalf("same endpoint: %d leak=%v %s", code, strings.Contains(body, "S3cret"), body[:min(200, len(body))])
+	}
+	// Different host, blank password: refused rather than sending the stored secret.
+	code, body = do(t, s, "POST", "/api/detect", fmt.Sprintf(`{"id":%d,"host":"127.0.0.2","port":1,"user":"u","auth_method":"password","password":""}`, id), hdr)
+	if code != 400 || !strings.Contains(body, "re-enter") {
+		t.Fatalf("different host: %d %s", code, body)
+	}
+}
+
+func TestEditClearsSecrets(t *testing.T) {
+	s, st := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","auth_method":"password","password":"pw","qbt_user":"q","qbt_pass":"qp"}`, hdr)
+	boxes, _ := st.ListBoxes(context.Background())
+	id := boxes[0].ID
+	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b","host":"a.example","user":"u","auth_method":"key","qbt_user":"q","clear_qbt_pass":true}`, hdr)
+	b, _ := st.GetBox(context.Background(), id)
+	if b.Password != "" || b.QbtPass != "" {
+		t.Fatalf("secrets not cleared: ssh=%q qbt=%q", b.Password, b.QbtPass)
+	}
+}

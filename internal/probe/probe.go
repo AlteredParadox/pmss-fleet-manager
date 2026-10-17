@@ -63,8 +63,9 @@ type Snapshot struct {
 }
 
 // PortOwner reports who listens on port: our uid, another uid, or nobody.
-// ok is true only when the port is verifiably ours or ownership cannot be
-// determined at all; reason explains a refusal.
+// ok is true only when the port is verifiably ours; an unreadable table,
+// an unknown own uid, a foreign or contested owner all refuse, and reason
+// says why.
 func (s *Snapshot) PortOwner(port int) (ok bool, reason string) {
 	if !s.ListenersKnown {
 		// sshd's own listener is always in the table, so an empty section
@@ -135,8 +136,9 @@ func parseTZ(z string) *time.Location {
 }
 
 // finite drops NaN/Inf (which encoding/json refuses, turning the whole fleet
-// response into a 500) and magnitudes no real PMSS value approaches (1e12
-// MiB is ~1 EiB, and still converts to int64 bytes without overflow).
+// response into a 500) and magnitudes no real PMSS value approaches. The
+// unit conversions in collect clamp separately (mibToBytes/gibToBytes), and
+// BoxState.Sanitize is the final guard before serialisation.
 func finite(f float64, _ bool) float64 {
 	if math.IsNaN(f) || math.IsInf(f, 0) || math.Abs(f) > 1e12 {
 		return 0
@@ -168,8 +170,8 @@ func lastSection(raw []byte, tag string) string {
 
 // parseListeners reads the probe's listen section: one listening socket per
 // line as "h <hexport> <uid> [<hexaddr>]" from /proc/net/tcp{,6}. Only
-// sockets a 127.0.0.1 dial can reach count (v4 any/loopback, v6 any/
-// loopback/v4-mapped loopback): a socket bound to a LAN address is neither
+// sockets a 127.0.0.1 dial can reach count (v4 any/loopback, v6 any,
+// v4-mapped loopback; not ::1): a socket bound to a LAN address is neither
 // ours to use nor a threat, and a co-tenant on 127.0.0.2 or ::1 must not
 // turn our port "contested". A port listed with different reachable owners
 // becomes contestedPort.
@@ -531,7 +533,11 @@ func parseQuotaLine(text string) (vals [6]int64, ok bool) {
 				default: // space uses uppercase suffixes on a 1024 base
 					mult = float64(int64(1) << (10 * uint(strings.Index(" KMGTP", m[2]))))
 				}
-				got = append(got, int64(n*mult))
+				b := n * mult
+				if b != b || b < 0 || b > 1<<62 { // NaN, negative or absurd: unparsable column
+					break
+				}
+				got = append(got, int64(b))
 				j++
 			}
 			if len(got) == 6 {
@@ -644,14 +650,13 @@ func parseCgroup(raw string) CgroupInfo {
 	c.CPUUsageNS, _ = strconv.ParseInt(kv["cpu_usage_ns"], 10, 64)
 	if q, err := strconv.ParseFloat(kv["cpu_quota_us"], 64); err == nil && q > 0 {
 		if p, err := strconv.ParseFloat(kv["cpu_period_us"], 64); err == nil && p > 0 {
-			c.CPUQuota = q / p
+			c.CPUQuota = finite(q/p, true)
 		}
 	}
 	if m := strings.Fields(kv["cpu_max"]); len(m) == 2 && m[0] != "max" {
-		q, _ := strconv.ParseFloat(m[0], 64)
-		p, _ := strconv.ParseFloat(m[1], 64)
+		q, p := parseFinite(m[0]), parseFinite(m[1])
 		if q > 0 && p > 0 {
-			c.CPUQuota = q / p
+			c.CPUQuota = finite(q/p, true)
 		}
 	}
 	c.Pids, _ = strconv.ParseInt(kv["pids"], 10, 64)

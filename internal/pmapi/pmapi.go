@@ -154,10 +154,9 @@ func (s Service) Username() string {
 // ErrAuth means the key was rejected.
 var ErrAuth = errors.New("API key rejected")
 
-// Client fetches the feed. HTTP is injectable for tests.
+// Client fetches the feed. URL is overridable for tests (PMSS_PMAPI_URL).
 type Client struct {
-	HTTP *http.Client
-	URL  string
+	URL string
 }
 
 // Fetch downloads and parses the feed with the given key.
@@ -166,10 +165,7 @@ func (c *Client) Fetch(ctx context.Context, key string) (*Feed, []byte, error) {
 	if key == "" {
 		return nil, nil, errors.New("no API key configured")
 	}
-	hc, u := c.HTTP, c.URL
-	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
-	}
+	hc, u := &http.Client{Timeout: 30 * time.Second}, c.URL
 	if u == "" {
 		u = FeedURL
 	}
