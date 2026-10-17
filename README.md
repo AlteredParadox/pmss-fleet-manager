@@ -134,24 +134,59 @@ could not be read on an otherwise good poll (quota command hung, traffic
 file missing, docker daemon down) is kept rather than resolved and re-raised;
 switching a source off for the box resolves its alerts.
 
-## Security notes
+## Security and hardening
 
-- Box credentials (SSH password, qBittorrent password) and the Pulsed Media
-  API key are stored in plain text in the SQLite file, which is created mode
-  0600 (its -wal and -shm side files too). Prefer SSH keys or the agent. The API key is never sent to the browser.
-- The server has no authentication by default and binds to loopback. Use
+The code went through a fourteen-round adversarial review before 1.0 (SSH
+resiliency, remote-command safety, web/API, concurrency, parsers, dead code).
+These are the design decisions that came out of it.
+
+- **Tenant-only on a shared host.** Everything the dashboard reads comes from
+  your own account: `/proc`, your cgroup, your home directory and the kernel's
+  socket table. Probe output is tagged with a per-run secret delivered on
+  stdin, so another process on the host cannot inject a section, and every
+  remote string is length-bounded before it reaches state, the cache or the
+  browser.
+- **WebUI credentials never go to a port you do not own.** The qBittorrent
+  password is sent only when the socket table shows the port bound by your uid
+  alone, re-read live over the same SSH connection immediately before any
+  stop, pause or resume. A rejected login is held until the credentials change
+  or the client is restarted from the dashboard, and a ban is held 65 minutes,
+  so a bad password cannot walk the box's loopback into qBittorrent's IP ban.
+- **Host keys.** Trust on first use, pinned to host and port. A supplied key
+  never silently replaces a pin; a host or port change, or "forget the pinned
+  SSH host key" after a reinstall, clears it. Saved SSH and WebUI passwords
+  are reused only for the exact host, port and user they were saved for;
+  moving a box means re-entering them.
+- **Secrets on disk.** Box credentials and the Pulsed Media API key are stored
+  in plain text in the SQLite file, which is created mode 0600 before SQLite
+  opens it so the -wal and -shm side files inherit the mode; the data
+  directory is created 0700. Prefer SSH keys or the agent. The API key is
+  never sent to the browser and passwords are never serialised.
+- **Bounded everything.** SSH dials, handshakes (including the agent),
+  sessions and remote commands are bounded by contexts; a hung `quota` is run
+  through a detached helper so it cannot stall the probe; remote stdout is
+  capped at 16 MiB; error texts and alert titles are clipped; directory
+  listings keep the 500 largest entries.
+- **Honest state across edits and restarts.** Failed polls are persisted too,
+  so a box that is down comes back as down after a dashboard restart and its
+  acknowledged alert stays acknowledged. An alert whose source could not be
+  read on a poll is kept rather than resolved and re-raised. Retries back off
+  to every ten minutes, with "retry now" to reconnect at once.
+- **Web surface.** No authentication by default and bound to loopback: use
   `-auth`, and put it behind a reverse proxy with TLS before exposing it
-  further.
-- Host keys are trusted on first use and pinned; a changed key fails the poll
-  until you edit the box, which clears the pin when the host or port changes
-  or when you tick "forget the pinned SSH host key" after a reinstall.
-- Requests whose Host header is not a listen address, localhost or an
-  `-allowed-hosts` entry are refused, which stops DNS-rebinding pages from
-  reaching the API through the browser. Binding to a wildcard address
-  disables that check unless `-allowed-hosts` is set.
-- Install and autostart actions run shell scripts on the box as your user.
-  They are embedded in the binary and documented in
-  `internal/collect/qbtinstall.go`.
+  further. Requests whose Host header is not a listen address, localhost or an
+  `-allowed-hosts` entry are refused (binding to a wildcard address disables
+  that check unless `-allowed-hosts` is set); every mutating request must be
+  same-origin; CSP is set; bodies are capped at 1 MiB; there are no
+  state-changing GETs; every API string is HTML-escaped. Settings saves are
+  serialised and the fleet-view shortcuts write only their own field, and
+  other tabs are told to refresh, so one tab never reverts another.
+- **Scripts on the box** run as your user and are embedded in the binary
+  (documented in `internal/collect/qbtinstall.go`). Install verifies the ELF
+  magic and `--version` output before swapping the binary in atomically;
+  restart only signals processes of your uid; autostart distinguishes "no
+  crontab" from a failed read before it ever pipes into `crontab -`, replaces
+  only live lines that run the helper, and prints what it replaced.
 
 ## Development
 
@@ -209,6 +244,8 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-Written against five real Pulsed Media boxes (KVM, Dragon-R, Mesitorvi N100,
-M1000) running PMSS with qBittorrent 5.2.x. Other setups should work but have
-not been tried. Issues and pull requests welcome.
+1.0.0 is the first release. It was written against five real Pulsed Media
+boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with qBittorrent
+5.2.x and reviewed as described under *Security and hardening*. Other setups
+should work but have not been tried. Issues and pull requests welcome.
+Releases on GitHub carry linux amd64 and arm64 binaries with checksums.
