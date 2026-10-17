@@ -71,10 +71,11 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 15 * time.Second
 	}
-	auths, err := authMethods(cfg)
+	auths, cleanup, err := authMethods(cfg)
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup() // the agent socket is only needed during the handshake
 	c := &Client{cfg: cfg}
 	sshCfg := &ssh.ClientConfig{
 		User:            cfg.User,
@@ -140,8 +141,9 @@ func Fingerprint(authorizedKey string) string {
 	return "SHA256:" + strings.TrimRight(base64.StdEncoding.EncodeToString(sum[:]), "=")
 }
 
-func authMethods(cfg Config) ([]ssh.AuthMethod, error) {
+func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 	var methods []ssh.AuthMethod
+	cleanup := func() {}
 	useKey := cfg.AuthMethod == "key" || cfg.AuthMethod == ""
 	useAgent := cfg.AuthMethod == "agent" || cfg.AuthMethod == ""
 	usePass := cfg.AuthMethod == "password" || (cfg.AuthMethod == "" && cfg.Password != "")
@@ -161,14 +163,14 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, error) {
 			pem, err := os.ReadFile(p)
 			if err != nil {
 				if cfg.KeyPath != "" {
-					return nil, fmt.Errorf("read key %s: %w", p, err)
+					return nil, cleanup, fmt.Errorf("read key %s: %w", p, err)
 				}
 				continue
 			}
 			s, err := ssh.ParsePrivateKey(pem)
 			if err != nil {
 				if cfg.KeyPath != "" {
-					return nil, fmt.Errorf("parse key %s: %w", p, err)
+					return nil, cleanup, fmt.Errorf("parse key %s: %w", p, err)
 				}
 				continue
 			}
@@ -177,7 +179,7 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, error) {
 		if len(signers) > 0 {
 			methods = append(methods, ssh.PublicKeys(signers...))
 		} else if cfg.AuthMethod == "key" {
-			return nil, errors.New("ssh: no usable private key in ~/.ssh (set a key path, or the key needs a passphrase)")
+			return nil, cleanup, errors.New("ssh: no usable private key in ~/.ssh (set a key path, or the key needs a passphrase)")
 		}
 	}
 	if useAgent {
@@ -185,31 +187,37 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, error) {
 			if conn, err := net.Dial("unix", sock); err == nil {
 				ag := agent.NewClient(conn)
 				methods = append(methods, ssh.PublicKeysCallback(ag.Signers))
+				cleanup = func() { conn.Close() } // was leaked once per dial before
 			} else if cfg.AuthMethod == "agent" {
-				return nil, fmt.Errorf("ssh agent: %w", err)
+				return nil, cleanup, fmt.Errorf("ssh agent: %w", err)
 			}
 		} else if cfg.AuthMethod == "agent" {
-			return nil, errors.New("ssh agent: SSH_AUTH_SOCK not set")
+			return nil, cleanup, errors.New("ssh agent: SSH_AUTH_SOCK not set")
 		}
 	}
 	if usePass {
 		if cfg.Password == "" {
-			return nil, errors.New("ssh: password auth selected but no password set")
+			return nil, cleanup, errors.New("ssh: password auth selected but no password set")
 		}
 		methods = append(methods, ssh.Password(cfg.Password))
 		pw := cfg.Password
-		methods = append(methods, ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
+		methods = append(methods, ssh.KeyboardInteractive(func(_, _ string, questions []string, echos []bool) ([]string, error) {
+			// Answer only prompts that look like a password prompt (hidden
+			// input, or "password" in the text); never type the password
+			// into an OTP or verification prompt.
 			answers := make([]string, len(questions))
-			for i := range questions {
-				answers[i] = pw
+			for i, q := range questions {
+				if (i < len(echos) && !echos[i]) || strings.Contains(strings.ToLower(q), "password") {
+					answers[i] = pw
+				}
 			}
 			return answers, nil
 		}))
 	}
 	if len(methods) == 0 {
-		return nil, errors.New("ssh: no authentication method available (set a key, agent or password)")
+		return nil, cleanup, errors.New("ssh: no authentication method available (set a key, agent or password)")
 	}
-	return methods, nil
+	return methods, cleanup, nil
 }
 
 func expandHome(p string) string {

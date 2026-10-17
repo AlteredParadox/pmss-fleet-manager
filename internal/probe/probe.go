@@ -74,6 +74,18 @@ func (s *Snapshot) PortOwner(port int) (ok bool, reason string) {
 	return true, ""
 }
 
+// lastSection returns the name of the last section header in raw.
+func lastSection(raw []byte, tag string) string {
+	prefix := "@@" + tag
+	last := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, prefix) && len(line) > len(prefix) && !strings.ContainsAny(line, " \t") {
+			last = line[len(prefix):]
+		}
+	}
+	return last
+}
+
 // parseListeners reads /proc/net/tcp and tcp6 rows in state 0A (LISTEN).
 func parseListeners(text string) (map[int]int, bool) {
 	out := map[int]int{}
@@ -257,7 +269,9 @@ func Parse(raw []byte, now time.Time) (*Snapshot, error) { return ParseTagged(ra
 func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	s := SectionsTagged(raw, tag)
 	if _, ok := s["end"]; !ok {
-		return nil, fmt.Errorf("probe: output truncated (%d bytes)", len(raw))
+		// Name the last section that did arrive: it points at the command
+		// that hung when the probe hit its timeout on a slow box.
+		return nil, fmt.Errorf("probe: output truncated after section %q (%d bytes)", lastSection(raw, tag), len(raw))
 	}
 	snap := &Snapshot{At: now}
 	snap.UID, _ = strconv.Atoi(strings.TrimSpace(s["uid"]))

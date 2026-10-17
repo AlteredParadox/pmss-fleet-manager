@@ -42,7 +42,7 @@ S="user.slice/user-$uid.slice"
 sec(){ printf '\n@@%s%s\n' "${PMSS_TAG:-}" "$1"; }
 sec uid; echo "$uid"
 sec user; echo "$user"
-sec hostname; hostname -f 2>/dev/null || hostname
+sec hostname; timeout 5 hostname -f 2>/dev/null || hostname
 sec now; date +%s
 sec uptime; cat /proc/uptime 2>/dev/null
 sec loadavg; cat /proc/loadavg 2>/dev/null
@@ -60,8 +60,8 @@ done
 sec kernel; uname -r 2>/dev/null
 sec debian; cat /etc/debian_version 2>/dev/null
 sec pmss_version; cat /etc/seedbox/config/version 2>/dev/null
-sec df_home; df -B1 --output=size,used,avail,fstype "$home" 2>/dev/null | tail -n 1
-sec quota; quota -v -w 2>/dev/null
+sec df_home; timeout 10 df -B1 --output=size,used,avail,fstype "$home" 2>/dev/null | tail -n 1
+sec quota; timeout 15 quota -v -w 2>/dev/null
 sec quota_file; cat "$home/.quota" 2>/dev/null
 sec quota_mtime; stat -c %Y "$home/.quota" 2>/dev/null
 sec traffic; cat "$home/.trafficData" 2>/dev/null
@@ -98,7 +98,7 @@ sec listen; cat /proc/net/tcp /proc/net/tcp6 2>/dev/null
 sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version; [ -x "$home/bin/qbittorrent-nox" ] && timeout 10 "$home/bin/qbittorrent-nox" --version 2>/dev/null | head -n 1
 sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
-sec qbt_cron; crontab -l 2>/dev/null | grep -c 'bin/qbt-start' 
+sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -c 'bin/qbt-start' 
 sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
 sec end
 `
