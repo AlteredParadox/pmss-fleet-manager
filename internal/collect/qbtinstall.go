@@ -36,6 +36,8 @@ const installScript = `#!/bin/sh
 set -u
 url="$QBT_URL"
 mkdir -p "$HOME/bin" || exit 1
+# A download interrupted by a lost session leaves its temp file; sweep old ones.
+find "$HOME/bin" -maxdepth 1 -type f -name '.qbittorrent-nox.new.*' -mmin +30 -delete 2>/dev/null
 tmp="$HOME/bin/.qbittorrent-nox.new.$$"
 if command -v wget >/dev/null 2>&1; then wget -qO "$tmp" "$url"; rc=$?
 elif command -v curl >/dev/null 2>&1; then curl -fsSL -o "$tmp" "$url"; rc=$?
@@ -80,7 +82,7 @@ if ! cur=$(crontab -l 2>/dev/null); then
   msg=$(crontab -l 2>&1 >/dev/null)
   case "$msg" in *"no crontab"*) cur="" ;; *) echo "crontab -l failed: ${msg:-no details (try again)}"; exit 1 ;; esac
 fi
-( printf '%s\n' "$cur" | grep -vF "$HOME/bin/qbt-start" | grep -v '^$'
+( printf '%s\n' "$cur" | grep -vF "bin/qbt-start" | grep -v '^$'
   echo "@reboot     sleep 30; $HOME/bin/qbt-start"
   echo "*/5 * * * * $HOME/bin/qbt-start" ) | crontab - || { echo "crontab update failed"; exit 1; }
 echo "cron: @reboot and */5 entries set"

@@ -101,7 +101,7 @@ func TestLogin204(t *testing.T) {
 	}
 }
 
-func TestAuthBackoffAndBan(t *testing.T) {
+func TestAuthHoldAndBan(t *testing.T) {
 	logins := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) { logins++; w.WriteHeader(401) })
@@ -117,7 +117,7 @@ func TestAuthBackoffAndBan(t *testing.T) {
 		}
 	}
 	if logins != 1 {
-		t.Fatalf("login attempted %d times; backoff must allow only one", logins)
+		t.Fatalf("login attempted %d times; the hold must allow only one", logins)
 	}
 	if _, held := c.AuthBlocked(); !held {
 		t.Fatal("expected auth hold")

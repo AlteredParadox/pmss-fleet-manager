@@ -293,13 +293,13 @@ func (p *poller) poll(ctx context.Context) {
 	start := time.Now()
 	st, _ := p.m.State(p.box.ID)
 	st.LastPoll = start
-	st.HostKeyFP = fingerprintOrEmpty(p.hostKey())
 
 	cli, err := p.conn(ctx)
 	if err != nil {
 		p.fail(ctx, &st, err, start)
 		return
 	}
+	st.HostKeyFP = fingerprintOrEmpty(p.hostKey()) // after the dial: the first connect pins it
 	tag := probe.NewTag()
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)))
@@ -409,7 +409,7 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 	st.Qbt.Reachable = false
 	st.Qbt.PortOK = false // must be re-verified by the next successful probe
 	st.Docker.Reachable = false
-	p.m.log.Warn("poll failed", "box", p.box.Name, "failures", st.Failures, "err", err)
+	p.m.log.Warn("poll failed", "box", p.box.Name, "failures", st.Failures, "err", describeErr(err))
 	// Persist the failure as well: a restart must not restore a down box as
 	// online (the last successful poll) and walk it through "degraded".
 	st.Sanitize()
@@ -881,6 +881,7 @@ func (p *poller) runDu(ctx context.Context) {
 	p.m.mu.Lock()
 	if cur, ok := p.m.states[p.box.ID]; ok {
 		cp := *cur
+		res.Enabled = cp.Dirs.Enabled // an edit may have switched measurement off meanwhile
 		cp.Dirs = res
 		p.m.states[p.box.ID] = &cp
 	}

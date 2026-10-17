@@ -143,8 +143,8 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 		res.Box = &b
 		return res
 	}
-	res.Facts.Hostname, res.Facts.User, res.Facts.UID = snap.Hostname, snap.User, snap.UID
-	res.Facts.PMSSVersion, res.Facts.Debian = snap.Host.PMSSVersion, snap.Host.Debian
+	res.Facts.Hostname, res.Facts.User, res.Facts.UID = clip(snap.Hostname, 128), clip(snap.User, 64), snap.UID
+	res.Facts.PMSSVersion, res.Facts.Debian = clip(snap.Host.PMSSVersion, 64), clip(snap.Host.Debian, 64)
 	if snap.Host.PMSSVersion != "" {
 		add("ok", "PMSS %s on Debian %s (%s)", snap.Host.PMSSVersion, snap.Host.Debian, snap.Hostname)
 	} else {
@@ -224,7 +224,7 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 			if err != nil {
 				add("warn", "qbittorrent-nox running but Web API on 127.0.0.1:%d failed: %v", port, err)
 			} else {
-				res.Facts.QbtVersion = v
+				res.Facts.QbtVersion = clip(v, 64)
 				add("ok", "qBittorrent %s responding on port %d", v, port)
 			}
 			b.QbtEnabled = true
@@ -241,7 +241,7 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 		v, err := dc.Version(dctx)
 		if err == nil {
 			cs, _ := dc.Containers(dctx)
-			res.Facts.DockerVersion, res.Facts.Containers = v.Version, len(cs)
+			res.Facts.DockerVersion, res.Facts.Containers = clip(v.Version, 64), len(cs)
 			add("ok", "rootless docker %s · %d containers", v.Version, len(cs))
 			b.DockerEnabled = true
 		} else {

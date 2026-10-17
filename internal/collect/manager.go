@@ -33,8 +33,12 @@ import (
 	"pmss-fleet-manager/internal/store"
 )
 
-// Hook runs after each successful or failed poll with the new state.
+// Hook runs with the new state after each successful or failed poll, when a
+// disabled box is (re)started, and after a services sync re-attaches plans.
 type Hook func(ctx context.Context, s *BoxState)
+
+// ErrDisabled is returned by actions on a box whose polling is switched off.
+var ErrDisabled = errors.New("polling is disabled for this box; enable it before running actions")
 
 // Manager owns one poller per box.
 type Manager struct {
@@ -332,6 +336,9 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 	defer scancel()
 	fresh, err := m.st.GetBox(sctx, b.ID)
 	if err != nil {
+		if p != nil {
+			m.startPoller(p.box, prev) // keep polling with the old settings rather than nothing
+		}
 		return err
 	}
 	if b.QbtPass != "" {
@@ -388,7 +395,7 @@ func (m *Manager) Refresh(id int64) error {
 		return store.ErrNotFound
 	}
 	if !p.box.Enabled {
-		return errors.New("box is disabled: enable it to poll")
+		return ErrDisabled
 	}
 	p.wake()
 	return nil
@@ -411,7 +418,7 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		return "", store.ErrNotFound
 	}
 	if !p.box.Enabled {
-		return "", errors.New("polling is disabled for this box; enable it before running actions")
+		return "", ErrDisabled
 	}
 	var out string
 	var err error
@@ -463,7 +470,7 @@ func (m *Manager) ContainerAction(ctx context.Context, id int64, cid, action str
 		return store.ErrNotFound
 	}
 	if !p.box.Enabled {
-		return errors.New("polling is disabled for this box; enable it before running actions")
+		return ErrDisabled
 	}
 	err := p.containerAction(ctx, cid, action)
 	p.wake()
@@ -477,7 +484,7 @@ func (m *Manager) RunDu(id int64) error {
 		return store.ErrNotFound
 	}
 	if !p.box.Enabled {
-		return errors.New("polling is disabled for this box; enable it before running actions")
+		return ErrDisabled
 	}
 	p.forceDu()
 	return nil
@@ -512,7 +519,7 @@ func (m *Manager) RawProbe(ctx context.Context, id int64) (map[string]string, er
 		return nil, store.ErrNotFound
 	}
 	if !p.box.Enabled {
-		return nil, errors.New("polling is disabled for this box; enable it before running actions")
+		return nil, ErrDisabled
 	}
 	return p.rawProbe(ctx)
 }
