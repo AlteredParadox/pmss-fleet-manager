@@ -57,6 +57,7 @@ function fmtPct(p) { return `${Math.round(Number(p) || 0)}%`; }
 const CUR = { EUR: '€', USD: '$', GBP: '£' };
 function fmtMoney(v, cur) { const n = Number(v) || 0; return `${CUR[cur] || (cur ? cur + ' ' : '')}${n.toFixed(2)}`; }
 function cycleShort(c) { return ({ monthly: 'mo', quarterly: 'qtr', 'semi-annually': '6 mo', annually: 'yr', biennially: '2 yr', triennially: '3 yr' })[String(c || '').toLowerCase()] || (c || ''); }
+function safeHref(u) { return /^https?:\/\//i.test(String(u || '')) ? u : '#'; } // never render javascript: or data: links from API data
 function planOf(b) { return b.plan || (b.service && b.service.product) || ''; }
 function renewalOf(b) { return b.renewal || (b.service && b.service.next_due) || ''; }
 function fmtDur(sec) {
@@ -444,7 +445,7 @@ function billingRows(sv) {
   return `
       <div><span>billing</span><span>${fmtMoney(sv.recurring_amount, sv.currency)} / ${esc(cycleShort(sv.billing_cycle))}${sv.monthly && cycleShort(sv.billing_cycle) !== 'mo' ? ` <span class="muted">· ${fmtMoney(sv.monthly, sv.currency)}/mo</span>` : ''}${sv.status && sv.status !== 'Active' ? ` · <span class="warn">${esc(sv.status)}</span>` : ''}</span></div>
       <div><span>service</span><span><span class="muted">#${sv.id}${sv.registered ? ` · since ${esc(sv.registered)}` : ''}</span></span></div>
-      <div><span>links</span><span>${sv.login_url ? `<a href="${esc(sv.login_url)}" target="_blank" rel="noopener">web ui ↗</a>` : ''}${sv.permanent_address ? ` · <a href="${esc(sv.permanent_address)}" target="_blank" rel="noopener">permanent address ↗</a>` : ''}</span></div>
+      <div><span>links</span><span>${sv.login_url ? `<a href="${esc(safeHref(sv.login_url))}" target="_blank" rel="noopener">web ui ↗</a>` : ''}${sv.permanent_address ? ` · <a href="${esc(safeHref(sv.permanent_address))}" target="_blank" rel="noopener">permanent address ↗</a>` : ''}</span></div>
       ${u ? `<div><span>pm traffic</span><span class="muted" title="as tracked by Pulsed Media since ${esc(u.tracked_since || '?')}">↑ ${fmtBytes(u.sent_bytes, 1)} · ↓ ${fmtBytes(u.received_bytes, 1)}</span></div>
       <div><span>pm usage</span><span class="muted">${fmtBytes(u.disk_used_bytes, 1)} disk · ${u.cpu_hours} cpu h · ${u.torrents} torrents</span></div>` : ''}`;
 }
@@ -545,7 +546,7 @@ function tabContainers(b) {
         <span class="num">${c.has_stats ? c.cpu_pct.toFixed(1) + '%' : '—'}</span>
         <span class="num">${c.has_stats ? fmtBytes(c.mem_usage, 0) : '—'}</span>
         <span class="actions" style="justify-content:flex-end">
-          ${run ? `<button class="small" data-act="ctr:restart" data-cid="${c.id}" data-confirm="Restart ${esc(c.name)}?">restart</button><button class="small" data-act="ctr:stop" data-cid="${c.id}" data-confirm="Stop ${esc(c.name)}?">stop</button>` : `<button class="small" data-act="ctr:start" data-cid="${c.id}">start</button>`}
+          ${run ? `<button class="small" data-act="ctr:restart" data-cid="${esc(c.id)}" data-confirm="Restart ${esc(c.name)}?">restart</button><button class="small" data-act="ctr:stop" data-cid="${esc(c.id)}" data-confirm="Stop ${esc(c.name)}?">stop</button>` : `<button class="small" data-act="ctr:start" data-cid="${esc(c.id)}">start</button>`}
         </span>
       </div>`;
       }).join('')}
@@ -639,7 +640,8 @@ async function startEdit(id) {
   try {
     const d = await api('GET', `/api/boxes/${id}`);
     const b = d.box;
-    S.add.form = { ...blankForm(), ...b, password: '', qbt_pass: '', port: b.port || 22 };
+    S.add.form = { ...blankForm(), ...b, password: '', qbt_pass: '', port: b.port || 22, host_key: '', forget_host_key: false };
+    S.add.pinned = !!b.host_key; // the key itself never round-trips: changing host/port must clear it
     render();
   } catch (e) { toast(e.message, 'bad'); go('/fleet'); }
 }
@@ -689,6 +691,7 @@ function viewAdd() {
         <label class="check"><input type="checkbox" data-f="docker_enabled" ${f.docker_enabled ? 'checked' : ''}> monitor rootless docker containers</label>
         <label class="check"><input type="checkbox" data-f="du_enabled" ${f.du_enabled ? 'checked' : ''}> measure directory usage periodically (du at lowest I/O priority)</label>
         ${edit ? `<label class="check"><input type="checkbox" data-f="enabled" ${f.enabled ? 'checked' : ''}> polling enabled</label>` : ''}
+        ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins the new key)</span></label>` : ''}
       </div></details>
       <div class="form-foot">
         <button data-go="${back}">cancel</button>
@@ -838,7 +841,7 @@ function viewSettings() {
     <div class="panel"><div class="tile-label">pulsedmedia account</div>
       <label class="row">billing email<input data-s="billing_email" value="${esc(s.billing_email || '')}" placeholder="me@example.com"></label>
       <label class="row">client area<input data-s="client_area_url" value="${esc(s.client_area_url || '')}"></label>
-      ${s.client_area_url ? `<div class="row"><span></span><a href="${esc(s.client_area_url)}" target="_blank" rel="noopener">open client area ↗</a></div>` : ''}
+      ${s.client_area_url ? `<div class="row"><span></span><a href="${esc(safeHref(s.client_area_url))}" target="_blank" rel="noopener">open client area ↗</a></div>` : ''}
       <label class="row">API key<input data-s="pm_api_key" type="password" autocomplete="off" value="${esc(s.pm_api_key || '')}" placeholder="${s.clear_pm_api_key ? 'will be removed on save' : S.settings.has_pm_api_key ? '•••••••• (stored)' : 'paste key'}"></label>
       <div class="hint">Read-only customer API key from the client area (<a href="https://pulsedmedia.com/clients/index.php?m=pmapi" target="_blank" rel="noopener">?m=pmapi ↗</a>). Fills in plan names, prices and renewal dates for boxes whose host or username matches a service. Stored in the local database; leave blank to keep the current key.${S.settings.has_pm_api_key && !s.clear_pm_api_key ? ` <button class="small ghost" data-act="settings:clear-key">remove key</button>` : ''}</div>
     </div>
@@ -864,7 +867,7 @@ function viewServices() {
       ${v.services.map((sv) => { const b = sv.box_id ? boxById(sv.box_id) : null; const d = daysUntil(sv.next_due); return `
       <div class="trow">
         <div class="ellip"><div class="ellip" title="${esc(sv.product)}">${esc(sv.product)}</div><div class="sub">${esc(sv.group || '')}${sv.registered ? ` · since ${esc(sv.registered)}` : ''}</div></div>
-        <div class="ellip"><div class="ellip">${esc(sv.username || '—')}@${esc(sv.domain)}</div><div class="sub">${sv.login_url ? `<a href="${esc(sv.login_url)}" target="_blank" rel="noopener">web ui ↗</a>` : ''}${sv.permanent_address ? ` <a href="${esc(sv.permanent_address)}" target="_blank" rel="noopener">permanent ↗</a>` : ''}</div></div>
+        <div class="ellip"><div class="ellip">${esc(sv.username || '—')}@${esc(sv.domain)}</div><div class="sub">${sv.login_url ? `<a href="${esc(safeHref(sv.login_url))}" target="_blank" rel="noopener">web ui ↗</a>` : ''}${sv.permanent_address ? ` <a href="${esc(safeHref(sv.permanent_address))}" target="_blank" rel="noopener">permanent ↗</a>` : ''}</div></div>
         <span class="num">${fmtMoney(sv.recurring_amount, sv.currency)} <span class="muted">/ ${esc(cycleShort(sv.billing_cycle))}</span></span>
         <span class="num">${sv.monthly ? fmtMoney(sv.monthly, sv.currency) : '—'}</span>
         <span class="${d !== null && d <= (S.settings.renewal_warn_days || 7) ? 'warn' : ''}">${sv.next_due ? `${esc(sv.next_due)} <span class="muted">· ${d < 0 ? 'overdue' : d + 'd'}</span>` : '—'}</span>

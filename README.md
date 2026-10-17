@@ -78,6 +78,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-data` | `./data` | directory for the SQLite database (created 0700) |
 | `-auth` | none | HTTP basic auth as `user:password`; set it if you bind to a non-loopback address |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
+| `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed |
 
 ### Adding a box
 
@@ -112,7 +113,12 @@ failure it waits 20 minutes before trying again, and after a ban 65 minutes.
   `-auth`, and put it behind a reverse proxy with TLS before exposing it
   further.
 - Host keys are trusted on first use and pinned; a changed key fails the poll
-  until you edit the box, which clears the pin when the host or port changes.
+  until you edit the box, which clears the pin when the host or port changes
+  or when you tick "forget the pinned SSH host key" after a reinstall.
+- Requests whose Host header is not a listen address, localhost or an
+  `-allowed-hosts` entry are refused, which stops DNS-rebinding pages from
+  reaching the API through the browser. Binding to a wildcard address
+  disables that check unless `-allowed-hosts` is set.
 - Install and autostart actions run shell scripts on the box as your user.
   They are embedded in the binary and documented in
   `internal/collect/qbtinstall.go`.
