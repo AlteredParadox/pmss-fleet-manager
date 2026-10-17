@@ -215,30 +215,47 @@ func parseListeners(text string) (map[int]int, bool) {
 			known = true
 			continue
 		}
-		base := 10
-		if f[0] == "h" {
-			base = 16
-		} else if f[0] != "d" {
-			continue
-		}
-		port, err := strconv.ParseInt(f[1], base, 32)
-		if err != nil || port <= 0 || port > 65535 {
-			continue
-		}
-		uid, err := strconv.Atoi(f[2])
-		if err != nil {
+		port, uid, ok := listenerPortUID(f)
+		if !ok {
 			continue
 		}
 		known = true
-		if prev, dup := out[int(port)]; dup {
-			if prev != uid {
-				out[int(port)] = contestedPort
-			}
-			continue
-		}
-		out[int(port)] = uid
+		addListener(out, port, uid)
 	}
 	return out, known
+}
+
+// listenerPortUID parses the port (hex after "h", decimal after "d") and
+// the owning uid of one listener line; ok is false for any other prefix, a
+// port outside 1..65535 or a non-numeric uid.
+func listenerPortUID(f []string) (port, uid int, ok bool) {
+	base := 10
+	if f[0] == "h" {
+		base = 16
+	} else if f[0] != "d" {
+		return 0, 0, false
+	}
+	p, err := strconv.ParseInt(f[1], base, 32)
+	if err != nil || p <= 0 || p > 65535 {
+		return 0, 0, false
+	}
+	uid, err = strconv.Atoi(f[2])
+	if err != nil {
+		return 0, 0, false
+	}
+	return int(p), uid, true
+}
+
+// addListener records a port's owner; a second listing with a different
+// owner marks the port contested.
+func addListener(out map[int]int, port, uid int) {
+	if prev, dup := out[port]; dup {
+		if prev != uid {
+			out[port] = contestedPort
+		}
+		return
+	}
+	out[port] = uid
 }
 
 // HostInfo is shared-host information from /proc and /etc.
@@ -441,6 +458,15 @@ func parseHost(s map[string]string) HostInfo {
 		Debian:      strings.TrimSpace(s["debian"]),
 		PMSSVersion: strings.TrimSpace(s["pmss_version"]),
 	}
+	parseLoad(&h, s)
+	parseMeminfo(&h, s["meminfo"])
+	parseCPUInfo(&h, s)
+	h.GPU = parseDRI(s["dri"])
+	return h
+}
+
+// parseLoad fills uptime and the three load averages.
+func parseLoad(h *HostInfo, s map[string]string) {
 	if f := strings.Fields(s["uptime"]); len(f) > 0 {
 		h.UptimeSec = parseFinite(f[0])
 	}
@@ -449,7 +475,11 @@ func parseHost(s map[string]string) HostInfo {
 		h.Load5 = parseFinite(f[1])
 		h.Load15 = parseFinite(f[2])
 	}
-	for _, line := range strings.Split(s["meminfo"], "\n") {
+}
+
+// parseMeminfo fills MemTotal and MemAvail from /proc/meminfo lines (kB).
+func parseMeminfo(h *HostInfo, raw string) {
+	for _, line := range strings.Split(raw, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 2 {
 			continue
@@ -465,11 +495,20 @@ func parseHost(s map[string]string) HostInfo {
 			h.MemAvail = kb * 1024
 		}
 	}
+}
+
+// parseCPUInfo fills the core count, model name (raw and short) and flags.
+func parseCPUInfo(h *HostInfo, s map[string]string) {
 	h.NCPU, _ = strconv.Atoi(strings.TrimSpace(s["ncpu"]))
 	h.CPUModel = strings.Join(strings.Fields(s["cpu_model"]), " ")
 	h.CPUShort = ShortCPU(h.CPUModel)
 	h.CPUFlags = strings.Fields(s["cpu_flags"])
-	for _, line := range strings.Split(s["dri"], "\n") {
+}
+
+// parseDRI returns the first render node listed in the dri section, or the
+// zero GPUInfo when there is none.
+func parseDRI(raw string) GPUInfo {
+	for _, line := range strings.Split(raw, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 2 {
 			continue
@@ -489,10 +528,9 @@ func parseHost(s map[string]string) HostInfo {
 		default:
 			g.Vendor = "other"
 		}
-		h.GPU = g
-		break // first render node only
+		return g // first render node only
 	}
-	return h
+	return GPUInfo{}
 }
 
 var cpuNoise = regexp.MustCompile(`(?i)\b(Intel|AMD)?\(R\)|\(TM\)|\bCPU\b|\bProcessor\b|@\s*[0-9.]+\s*GHz|\b\d+-Core\b|\bwith Radeon Graphics\b|\bGenuine\b|\bCore\b`)
@@ -538,37 +576,7 @@ func parseQuotaLine(text string) (vals [6]int64, ok bool) {
 			if !numTok.MatchString(parts[i]) {
 				continue
 			}
-			var got []int64
-			j := i
-			for j < len(parts) && len(got) < 6 {
-				m := numTok.FindStringSubmatch(parts[j])
-				if m == nil {
-					// grace column ("6days", "none") sits after the first three and after the last three
-					if len(got) != 3 {
-						break
-					}
-					j++
-					continue
-				}
-				n, _ := strconv.ParseFloat(m[1], 64)
-				mult := 1.0
-				switch {
-				case m[2] == "":
-					if len(got) < 3 {
-						mult = 1024 // blocks are KiB
-					}
-				case m[2] >= "a": // quota-tools: inode counts use lowercase suffixes on a 1000 base
-					mult = math.Pow(1000, float64(strings.Index(" kmgtp", m[2])))
-				default: // space uses uppercase suffixes on a 1024 base
-					mult = float64(int64(1) << (10 * uint(strings.Index(" KMGTP", m[2]))))
-				}
-				b := n * mult
-				if math.IsNaN(b) || b < 0 || b > 1<<62 { // negative or absurd: unparsable column
-					break
-				}
-				got = append(got, int64(b))
-				j++
-			}
+			got := quotaColumns(parts, i)
 			if len(got) == 6 {
 				copy(vals[:], got)
 				return vals, true
@@ -577,6 +585,55 @@ func parseQuotaLine(text string) (vals [6]int64, ok bool) {
 		}
 	}
 	return vals, false
+}
+
+// quotaColumns reads up to six numeric columns starting at parts[i],
+// stepping over the grace column that may follow the first three. It stops
+// at the first column that is neither, so fewer than six means no match.
+func quotaColumns(parts []string, i int) []int64 {
+	var got []int64
+	j := i
+	for j < len(parts) && len(got) < 6 {
+		m := numTok.FindStringSubmatch(parts[j])
+		if m == nil {
+			// grace column ("6days", "none") sits after the first three and after the last three
+			if len(got) != 3 {
+				break
+			}
+			j++
+			continue
+		}
+		b, ok := quotaValue(m, len(got))
+		if !ok {
+			break
+		}
+		got = append(got, b)
+		j++
+	}
+	return got
+}
+
+// quotaValue converts one numTok match to an integer: bytes for the first
+// three columns (plain numbers are KiB), counts for the inode columns. ok is
+// false for a negative or absurd value.
+func quotaValue(m []string, col int) (int64, bool) {
+	n, _ := strconv.ParseFloat(m[1], 64)
+	mult := 1.0
+	switch {
+	case m[2] == "":
+		if col < 3 {
+			mult = 1024 // blocks are KiB
+		}
+	case m[2] >= "a": // quota-tools: inode counts use lowercase suffixes on a 1000 base
+		mult = math.Pow(1000, float64(strings.Index(" kmgtp", m[2])))
+	default: // space uses uppercase suffixes on a 1024 base
+		mult = float64(int64(1) << (10 * uint(strings.Index(" KMGTP", m[2]))))
+	}
+	b := n * mult
+	if math.IsNaN(b) || b < 0 || b > 1<<62 { // negative or absurd: unparsable column
+		return 0, false
+	}
+	return int64(b), true
 }
 
 func parseQuota(s map[string]string, now time.Time) QuotaInfo {
