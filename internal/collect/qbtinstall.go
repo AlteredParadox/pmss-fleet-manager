@@ -82,9 +82,10 @@ if ! cur=$(crontab -l 2>/dev/null); then
   msg=$(crontab -l 2>&1 >/dev/null)
   case "$msg" in *"no crontab"*) cur="" ;; *) echo "crontab -l failed: ${msg:-no details (try again)}"; exit 1 ;; esac
 fi
-# Replace lines that run the helper (either spelling of its path, followed by
-# a separator), not merely ones that mention a similarly named file; say which.
-pat='bin/qbt-start([[:space:]]|$|[>;&|])'
+# Replace lines that run the helper (either spelling of its path, optionally
+# quoted, followed by a separator), not merely ones that mention a similarly
+# named file; say which. The probe counts cron entries with the same pattern.
+pat='bin/qbt-start([[:space:]")>;&|]|$)'
 old=$(printf '%s\n' "$cur" | grep -E "$pat" || true)
 [ -n "$old" ] && printf 'cron: replacing existing qbt-start line(s):\n%s\n' "$old"
 ( printf '%s\n' "$cur" | grep -vE "$pat" | grep -v '^$'

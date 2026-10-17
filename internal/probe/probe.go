@@ -455,6 +455,9 @@ func parseHost(s map[string]string) HostInfo {
 			continue
 		}
 		kb, _ := strconv.ParseInt(f[1], 10, 64)
+		if kb < 0 || kb > 1<<50 { // a forged value: no host has an exabyte, and kb*1024 must not overflow
+			kb = 0
+		}
 		switch f[0] {
 		case "MemTotal:":
 			h.MemTotal = kb * 1024

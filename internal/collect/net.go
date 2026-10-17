@@ -82,6 +82,9 @@ func verifyPortNow(ctx context.Context, cli *sshx.Client, port int) error {
 // clip bounds a remote-supplied string so a hostile box cannot bloat state,
 // the database or every SSE event. Cuts on a rune boundary.
 func clip(s string, max int) string {
+	if max < 0 {
+		max = 0
+	}
 	if len(s) <= max {
 		return s
 	}

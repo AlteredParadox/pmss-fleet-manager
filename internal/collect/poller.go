@@ -829,6 +829,32 @@ func (p *poller) maybeDu(ctx context.Context, st *BoxState) {
 	go p.runDu(ctx)
 }
 
+// maxDuEntries bounds the per-box directory list kept in state and cache;
+// anything beyond the largest entries is summed under duRestName.
+const (
+	maxDuEntries = 500
+	duRestName   = "(smaller entries)"
+)
+
+// foldDu turns du's largest-first listing into state entries: names clipped,
+// and everything past the top maxDuEntries summed into one entry, or a
+// hostile home with millions of top-level entries makes a cache row of
+// 100 MB that every poll re-reads.
+func foldDu(ds []probe.DirUsage) []DirEntry {
+	out := make([]DirEntry, 0, min(len(ds), maxDuEntries+1))
+	for i, d := range ds {
+		if i >= maxDuEntries {
+			if len(out) == maxDuEntries {
+				out = append(out, DirEntry{Name: duRestName})
+			}
+			out[maxDuEntries].Bytes += d.Bytes
+			continue
+		}
+		out = append(out, DirEntry{Name: clip(d.Name, 255), Bytes: d.Bytes})
+	}
+	return out
+}
+
 func (p *poller) runDu(ctx context.Context) {
 	defer func() {
 		p.duMu.Lock()
@@ -870,9 +896,7 @@ func (p *poller) runDu(ctx context.Context) {
 		}
 		res.Error = describeErr(err)
 	} else {
-		for _, d := range probe.ParseDu(out) {
-			res.Entries = append(res.Entries, DirEntry{Name: clip(d.Name, 255), Bytes: d.Bytes})
-		}
+		res.Entries = foldDu(probe.ParseDu(out))
 	}
 	if err := p.m.st.SetCache(sctx, p.box.ID, "du", res); err != nil {
 		p.m.log.Warn("cache du", "box", p.box.Name, "err", err)

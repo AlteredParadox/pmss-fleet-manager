@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"pmss-fleet-manager/internal/pmapi"
+	"pmss-fleet-manager/internal/probe"
 )
 
 func TestMatchService(t *testing.T) {
@@ -160,5 +161,27 @@ func TestClip(t *testing.T) {
 	exact := strings.Repeat("😀", 128)
 	if got := clip(exact, 128); got != exact {
 		t.Fatalf("exactly max runes must not be marked: %q", got[:8])
+	}
+}
+
+// foldDu keeps the largest entries and sums the rest into one, so the state
+// and cache row stay bounded whatever the box lists.
+func TestFoldDu(t *testing.T) {
+	var ds []probe.DirUsage
+	for i := 0; i < maxDuEntries+3; i++ {
+		ds = append(ds, probe.DirUsage{Name: "d", Bytes: 10})
+	}
+	got := foldDu(ds)
+	if len(got) != maxDuEntries+1 {
+		t.Fatalf("len %d, want %d", len(got), maxDuEntries+1)
+	}
+	if last := got[maxDuEntries]; last.Name != duRestName || last.Bytes != 30 {
+		t.Fatalf("rest entry %+v", last)
+	}
+	if small := foldDu(ds[:3]); len(small) != 3 || small[2].Name != "d" {
+		t.Fatalf("short list altered: %+v", small)
+	}
+	if foldDu(nil) == nil {
+		t.Fatal("nil in, want empty non-nil out so the UI gets a list")
 	}
 }
