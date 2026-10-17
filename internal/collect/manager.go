@@ -337,6 +337,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 	fresh, err := m.st.GetBox(sctx, b.ID)
 	if err != nil {
 		if p != nil {
+			m.log.Warn("box edit saved but the record could not be re-read; polling continues with the previous settings until the next edit", "box", p.box.Name, "err", err)
 			m.startPoller(p.box, prev) // keep polling with the old settings rather than nothing
 		}
 		return err

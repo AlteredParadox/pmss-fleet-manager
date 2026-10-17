@@ -82,7 +82,12 @@ if ! cur=$(crontab -l 2>/dev/null); then
   msg=$(crontab -l 2>&1 >/dev/null)
   case "$msg" in *"no crontab"*) cur="" ;; *) echo "crontab -l failed: ${msg:-no details (try again)}"; exit 1 ;; esac
 fi
-( printf '%s\n' "$cur" | grep -vF "bin/qbt-start" | grep -v '^$'
+# Replace lines that run the helper (either spelling of its path, followed by
+# a separator), not merely ones that mention a similarly named file; say which.
+pat='bin/qbt-start([[:space:]]|$|[>;&|])'
+old=$(printf '%s\n' "$cur" | grep -E "$pat" || true)
+[ -n "$old" ] && printf 'cron: replacing existing qbt-start line(s):\n%s\n' "$old"
+( printf '%s\n' "$cur" | grep -vE "$pat" | grep -v '^$'
   echo "@reboot     sleep 30; $HOME/bin/qbt-start"
   echo "*/5 * * * * $HOME/bin/qbt-start" ) | crontab - || { echo "crontab update failed"; exit 1; }
 echo "cron: @reboot and */5 entries set"
