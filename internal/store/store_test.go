@@ -130,3 +130,29 @@ func TestOneActiveAlertPerKey(t *testing.T) {
 		t.Fatalf("raise after resolve: %v %v (resolved rows must not block a new one)", created, err)
 	}
 }
+
+func TestSetHostKeyOnlyForUnchangedEndpoint(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "d", "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	b := &Box{Name: "x", Host: "Old.example", Port: 22, User: "u", Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	// A dial of a different host must not pin onto the record.
+	s.SetHostKey(ctx, b.ID, "new.example", 22, "ssh-ed25519 WRONG")
+	if g, _ := s.GetBox(ctx, b.ID); g.HostKey != "" {
+		t.Fatal("key from another host must not be pinned")
+	}
+	s.SetHostKey(ctx, b.ID, "old.EXAMPLE", 22, "ssh-ed25519 RIGHT")
+	if g, _ := s.GetBox(ctx, b.ID); g.HostKey != "ssh-ed25519 RIGHT" {
+		t.Fatal("same endpoint (case-insensitive) must pin")
+	}
+	s.SetHostKey(ctx, b.ID, "old.example", 22, "ssh-ed25519 OTHER")
+	if g, _ := s.GetBox(ctx, b.ID); g.HostKey != "ssh-ed25519 RIGHT" {
+		t.Fatal("an existing pin must not be replaced")
+	}
+}

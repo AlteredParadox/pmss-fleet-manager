@@ -168,6 +168,19 @@ func lastSection(raw []byte, tag string) string {
 	return last
 }
 
+// PortOwnerNow evaluates ListenScript's output (uid on the first line, then
+// listen lines) for one port, with the same rules as Snapshot.PortOwner.
+func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
+	uidLine, rest, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	uid, err := strconv.Atoi(strings.TrimSpace(uidLine))
+	if err != nil {
+		return false, "could not read the account's uid on the box"
+	}
+	s := &Snapshot{UID: uid}
+	s.Listeners, s.ListenersKnown = parseListeners(rest)
+	return s.PortOwner(port)
+}
+
 // parseListeners reads the probe's listen section: one listening socket per
 // line as "h <hexport> <uid> [<hexaddr>]" from /proc/net/tcp{,6}. Only
 // sockets a 127.0.0.1 dial can reach count (v4 any/loopback, v6 any,

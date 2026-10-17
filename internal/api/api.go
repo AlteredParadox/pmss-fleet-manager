@@ -477,6 +477,7 @@ func (s *Server) handleCreateBox(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err)
 		return
 	}
+	b.HasPassword, b.HasQbtPass = b.Password != "", b.QbtPass != ""
 	writeJSON(w, 201, b)
 }
 
@@ -525,21 +526,29 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 	}
 	stored := *b
 	in.apply(b)
-	// The rules shared with detect (see endpointRules): the host-key pin
+	// The rules shared with detect (endpointChanged): the host-key pin
 	// belongs to host:port and a supplied key never replaces an existing
 	// pin; stored secrets are only ever used for the endpoint they were
 	// saved for, so a changed host/port/user with a blank password is
 	// refused rather than sent to the new host on trust-on-first-use.
 	hostChanged, userChanged := endpointChanged(&stored, b)
-	if (hostChanged || userChanged) && b.Password == "" && stored.Password != "" && (b.AuthMethod == "password" || b.AuthMethod == "") {
-		writeErr(w, 400, errors.New("re-enter the SSH password to move this box to a different host, port or user; the saved one is only used for the saved endpoint"))
-		return
+	if hostChanged || userChanged {
+		if b.Password == "" && stored.Password != "" && (b.AuthMethod == "password" || b.AuthMethod == "") {
+			writeErr(w, 400, errors.New("re-enter the SSH password to move this box to a different host, port or user; the saved one is only used for the saved endpoint"))
+			return
+		}
+		if b.QbtPass == "" && stored.QbtPass != "" && !in.ClearQbtPass {
+			writeErr(w, 400, errors.New("re-enter the WebUI password (or tick remove) to move this box to a different host, port or user; the saved one is only used for the saved endpoint"))
+			return
+		}
 	}
 	switch {
 	case in.ForgetHostKey:
 		b.HostKey = ""
 	case hostChanged:
 		b.HostKey = in.HostKey // the wizard's fresh detect result, or nothing
+	case stored.HostKey == "":
+		b.HostKey = in.HostKey // nothing pinned yet: the wizard's fresh key is as good as the poller's first contact
 	default:
 		b.HostKey = stored.HostKey
 	}

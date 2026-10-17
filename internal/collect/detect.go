@@ -259,6 +259,7 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 		b.Name = strings.SplitN(b.Host, ".", 2)[0]
 	}
 	res.OK = true
+	b.HasPassword, b.HasQbtPass = b.Password != "", b.QbtPass != ""
 	res.Box = &b
 	return res
 }

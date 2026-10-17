@@ -223,7 +223,7 @@ func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
 	}
 	if p.box.HostKey == "" && cli.HostKey() != "" {
 		p.box.HostKey = cli.HostKey()
-		if err := p.m.st.SetHostKey(ctx, p.box.ID, cli.HostKey()); err != nil {
+		if err := p.m.st.SetHostKey(ctx, p.box.ID, p.box.Host, p.box.Port, cli.HostKey()); err != nil {
 			p.m.log.Warn("pin host key", "box", p.box.Name, "err", err)
 		}
 	}
@@ -842,9 +842,10 @@ func (p *poller) runDu(ctx context.Context) {
 	// full measurement; any other failure (timeout, SSH drop, closed
 	// session) means the per-directory lines stopped part-way.
 	var exitErr *ssh.ExitError
-	interrupted := err != nil && (len(out) == 0 || !errors.As(err, &exitErr))
+	finished := errors.As(err, &exitErr) && exitErr.ExitStatus() < 128 // du's own status 1 (unreadable entries); >128 = killed
+	interrupted := err != nil && (len(out) == 0 || !finished)
 	if interrupted {
-		// Interrupted (stop, SSH drop, timeout): du prints one line per
+		// Interrupted (SSH drop, timeout, killed): du prints one line per
 		// directory as it goes, so partial output is NOT a measurement.
 		// Keep the last good one and only attach the error.
 		var prev DirsState
@@ -905,14 +906,23 @@ func (p *poller) qbtAction(ctx context.Context, action string) error {
 		if !p.box.QbtEnabled {
 			return errors.New("qBittorrent is not enabled for this box")
 		}
-		if _, err := p.conn(actx); err != nil {
+		sshc, err := p.conn(actx)
+		if err != nil {
 			return err
 		}
 		st, _ := p.m.State(p.box.ID)
 		if !st.Qbt.PortOK {
 			return errors.New("the WebUI port has not been verified as owned by this account yet (see the client error on the overview); not sending credentials")
 		}
-		cli := p.qbtClient(qbtPortFor(p.box, st.Qbt.Port))
+		port := qbtPortFor(p.box, st.Qbt.Port)
+		// The poll's verification is seconds to minutes old; on a shared
+		// host the port can change hands the moment our client exits.
+		// Re-check the socket table right before anything that would send
+		// credentials, over the connection we already hold.
+		if err := verifyPortNow(actx, sshc, port); err != nil {
+			return err
+		}
+		cli := p.qbtClient(port)
 		switch action {
 		case "stop":
 			return cli.Shutdown(actx)

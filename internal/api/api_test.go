@@ -284,3 +284,21 @@ func TestUpdateRulesForPinsAndSecrets(t *testing.T) {
 		}
 	}
 }
+
+func TestMoveRequiresWebUIPasswordToo(t *testing.T) {
+	s, st := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","auth_method":"key","qbt_user":"q","qbt_pass":"qp"}`, hdr)
+	boxes, _ := st.ListBoxes(context.Background())
+	id := boxes[0].ID
+	code, body := do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b","host":"b.example","user":"u","auth_method":"key","qbt_user":"q"}`, hdr)
+	if code != 400 || !strings.Contains(body, "WebUI password") {
+		t.Fatalf("move with saved WebUI password and blank field: %d %s", code, body)
+	}
+	if code, _ = do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b","host":"b.example","user":"u","auth_method":"key","qbt_user":"q","clear_qbt_pass":true}`, hdr); code != 200 {
+		t.Fatalf("move with remove ticked: %d", code)
+	}
+	if b, _ := st.GetBox(context.Background(), id); b.Host != "b.example" || b.QbtPass != "" {
+		t.Fatalf("after move: %+v", b)
+	}
+}

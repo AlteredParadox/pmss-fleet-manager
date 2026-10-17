@@ -17,8 +17,14 @@
 package collect
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
+	"pmss-fleet-manager/internal/probe"
+	"pmss-fleet-manager/internal/sshx"
+	"strings"
+	"time"
 )
 
 type netConn = net.Conn
@@ -54,6 +60,23 @@ func mibToBytes(mib float64) int64 {
 // gibToBytes is mibToBytes for GiB figures (same clamp, 1024x the unit).
 func gibToBytes(gib float64) int64 {
 	return mibToBytes(gib * 1024)
+}
+
+// verifyPortNow re-reads the listening sockets on the box and refuses unless
+// port is bound by the account we are logged in as. It is the live
+// counterpart of the probe's check, run immediately before an action that
+// would send WebUI credentials.
+func verifyPortNow(ctx context.Context, cli *sshx.Client, port int) error {
+	vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, _, err := cli.Run(vctx, "sh", strings.NewReader(probe.ListenScript))
+	if err != nil && len(out) == 0 {
+		return fmt.Errorf("could not re-check the WebUI port's owner: %w", err)
+	}
+	if ok, reason := probe.PortOwnerNow(out, port); !ok {
+		return errors.New("refusing to send WebUI credentials: " + reason)
+	}
+	return nil
 }
 
 // clip bounds a remote-supplied string so a hostile box cannot bloat state,

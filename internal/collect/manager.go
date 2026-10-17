@@ -296,7 +296,12 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 	// Read the record only after the old poller is gone: its last
 	// successful dial could otherwise pin a host key onto the record
 	// between our write and this read.
-	fresh, err := m.st.GetBox(ctx, b.ID)
+	// From here on the box has no poller: the restart half must not be
+	// abandoned because the browser went away mid-request, so it runs on
+	// the manager's own context, not the request's.
+	sctx, scancel := context.WithTimeout(m.ctx, 30*time.Second)
+	defer scancel()
+	fresh, err := m.st.GetBox(sctx, b.ID)
 	if err != nil {
 		return err
 	}
@@ -305,10 +310,11 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
 		// again, even if it is the same one the hold was recorded for.
 		// After stopAndWait, so the old poller's last record() cannot
 		// write the hold back; the wizard's memory of it is dropped too.
-		_ = m.st.SetCache(ctx, b.ID, authCacheKind, qbt.AuthState{})
+		_ = m.st.SetCache(sctx, b.ID, authCacheKind, qbt.AuthState{})
 		detectGuard(fresh.Host, fresh.QbtUser, fresh.QbtPass).Clear()
 	}
-	// A concurrent RemoveBox may have won: do not resurrect a deleted box.
+	// boxMu serialises edits and removals, so this only guards against a
+	// RemoveBox whose DB delete failed after the in-memory removal.
 	m.mu.Lock()
 	_, stillHere := m.states[b.ID]
 	m.mu.Unlock()
@@ -358,7 +364,11 @@ func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 	if p != nil {
 		p.stopAndWait()
 	}
-	if err := m.st.DeleteBox(ctx, id); err != nil {
+	// The box is already gone from memory: finish the delete on the
+	// manager's context so a closed browser cannot leave the row behind.
+	sctx, scancel := context.WithTimeout(m.ctx, 30*time.Second)
+	defer scancel()
+	if err := m.st.DeleteBox(sctx, id); err != nil {
 		return err
 	}
 	m.Publish(Event{Type: "removed", BoxID: id})
