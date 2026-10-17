@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -336,23 +337,43 @@ func (c *Client) MainData(ctx context.Context) (*MainData, error) {
 }
 
 // PauseAll stops every torrent (qBittorrent 5 "stop", 4.x "pause").
-func (c *Client) PauseAll(ctx context.Context) error {
-	form := url.Values{"hashes": {"all"}}
-	err := c.call(ctx, http.MethodPost, "/api/v2/torrents/stop", form, nil)
+func (c *Client) PauseAll(ctx context.Context) error { return c.stopStart(ctx, false, "all") }
+
+// ResumeAll starts every torrent.
+func (c *Client) ResumeAll(ctx context.Context) error { return c.stopStart(ctx, true, "all") }
+
+// stopStart hits the qBittorrent 5 endpoint and falls back to the 4.x name
+// when the daemon does not know it. hashes is "all" or a '|'-joined list.
+func (c *Client) stopStart(ctx context.Context, start bool, hashes string) error {
+	form := url.Values{"hashes": {hashes}}
+	v5, v4 := "/api/v2/torrents/stop", "/api/v2/torrents/pause"
+	if start {
+		v5, v4 = "/api/v2/torrents/start", "/api/v2/torrents/resume"
+	}
+	err := c.call(ctx, http.MethodPost, v5, form, nil)
 	if errors.Is(err, errNotFound) {
-		err = c.call(ctx, http.MethodPost, "/api/v2/torrents/pause", form, nil)
+		err = c.call(ctx, http.MethodPost, v4, form, nil)
 	}
 	return err
 }
 
-// ResumeAll starts every torrent.
-func (c *Client) ResumeAll(ctx context.Context) error {
-	form := url.Values{"hashes": {"all"}}
-	err := c.call(ctx, http.MethodPost, "/api/v2/torrents/start", form, nil)
-	if errors.Is(err, errNotFound) {
-		err = c.call(ctx, http.MethodPost, "/api/v2/torrents/resume", form, nil)
+// TorrentActions are the per-torrent operations TorrentAction accepts.
+var TorrentActions = map[string]bool{"stop": true, "start": true, "remove": true, "remove-data": true}
+
+// TorrentAction stops, starts or removes one torrent. "remove" keeps the
+// downloaded files on disk; "remove-data" deletes them too. The caller has
+// already checked that hash is a bare hex info-hash.
+func (c *Client) TorrentAction(ctx context.Context, action, hash string) error {
+	switch action {
+	case "stop":
+		return c.stopStart(ctx, false, hash)
+	case "start":
+		return c.stopStart(ctx, true, hash)
+	case "remove", "remove-data":
+		form := url.Values{"hashes": {hash}, "deleteFiles": {strconv.FormatBool(action == "remove-data")}}
+		return c.call(ctx, http.MethodPost, "/api/v2/torrents/delete", form, nil)
 	}
-	return err
+	return fmt.Errorf("unknown torrent action %q", action)
 }
 
 // Shutdown asks qBittorrent to exit.

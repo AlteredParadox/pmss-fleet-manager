@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -175,5 +176,38 @@ func TestAuthGuardSurvivesClientRebuild(t *testing.T) {
 	c.Version(ctx)
 	if logins != 2 {
 		t.Fatalf("after Clear, login attempts = %d, want 2", logins)
+	}
+}
+
+// Per-torrent actions address one hash, fall back from the qBittorrent 5
+// endpoint names to the 4.x ones, and only "remove-data" deletes files.
+func TestTorrentAction(t *testing.T) {
+	var got []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("v4.6.0")) })
+	for _, p := range []string{"pause", "resume", "delete"} {
+		p := p
+		mux.HandleFunc("/api/v2/torrents/"+p, func(w http.ResponseWriter, r *http.Request) {
+			got = append(got, p+" "+r.FormValue("hashes")+" "+r.FormValue("deleteFiles"))
+		})
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:8080", "admin", "secret")
+	ctx := context.Background()
+	h := "0123456789abcdef0123456789abcdef01234567"
+	for _, a := range []string{"stop", "start", "remove", "remove-data"} {
+		if err := c.TorrentAction(ctx, a, h); err != nil {
+			t.Fatalf("%s: %v", a, err)
+		}
+	}
+	want := []string{"pause " + h + " ", "resume " + h + " ", "delete " + h + " false", "delete " + h + " true"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls %q, want %q", got, want)
+	}
+	if err := c.TorrentAction(ctx, "recheck", h); err == nil {
+		t.Fatal("unknown action accepted")
 	}
 }

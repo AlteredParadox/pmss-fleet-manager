@@ -978,26 +978,10 @@ func (p *poller) qbtAction(ctx context.Context, action string) error {
 		}
 		return nil
 	case "stop", "pause", "resume":
-		if !p.box.QbtEnabled {
-			return errors.New("qBittorrent is not enabled for this box")
-		}
-		sshc, err := p.conn(actx)
+		cli, err := p.qbtWebUI(actx)
 		if err != nil {
 			return err
 		}
-		st, _ := p.m.State(p.box.ID)
-		if !st.Qbt.PortOK {
-			return errors.New("the WebUI port has not been verified as owned by this account yet (see the client error on the overview); not sending credentials")
-		}
-		port := qbtPortFor(p.box, st.Qbt.Port)
-		// The poll's verification is seconds to minutes old; on a shared
-		// host the port can change hands the moment our client exits.
-		// Re-check the socket table right before anything that would send
-		// credentials, over the connection we already hold.
-		if err := verifyPortNow(actx, sshc, port); err != nil {
-			return err
-		}
-		cli := p.qbtClient(port)
 		switch action {
 		case "stop":
 			return cli.Shutdown(actx)
@@ -1008,6 +992,43 @@ func (p *poller) qbtAction(ctx context.Context, action string) error {
 		}
 	}
 	return fmt.Errorf("unknown action %q", action)
+}
+
+// qbtWebUI returns a client for the box's WebUI after every check that must
+// precede sending its credentials: monitoring on, SSH up, the port verified
+// as this account's by the last poll and re-verified right now.
+func (p *poller) qbtWebUI(ctx context.Context) (*qbt.Client, error) {
+	if !p.box.QbtEnabled {
+		return nil, errors.New("qBittorrent is not enabled for this box")
+	}
+	sshc, err := p.conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	st, _ := p.m.State(p.box.ID)
+	if !st.Qbt.PortOK {
+		return nil, errors.New("the WebUI port has not been verified as owned by this account yet (see the client error on the overview); not sending credentials")
+	}
+	port := qbtPortFor(p.box, st.Qbt.Port)
+	// The poll's verification is seconds to minutes old; on a shared
+	// host the port can change hands the moment our client exits.
+	// Re-check the socket table right before anything that would send
+	// credentials, over the connection we already hold.
+	if err := verifyPortNow(ctx, sshc, port); err != nil {
+		return nil, err
+	}
+	return p.qbtClient(port), nil
+}
+
+// torrentAction runs one qbt.TorrentActions entry against a single torrent.
+func (p *poller) torrentAction(ctx context.Context, hash, action string) error {
+	actx, cancel := context.WithTimeout(ctx, apiTimeout)
+	defer cancel()
+	cli, err := p.qbtWebUI(actx)
+	if err != nil {
+		return err
+	}
+	return cli.TorrentAction(actx, action, hash)
 }
 
 func (p *poller) containerAction(ctx context.Context, cid, action string) error {
