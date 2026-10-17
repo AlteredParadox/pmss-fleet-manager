@@ -649,6 +649,11 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		qs.Version = clip(v, 64)
 		versionOK = true
 	}
+	// Peer discovery settings decide where private-tracker torrents may go,
+	// so they are shown per box; another small request per poll.
+	if pr, err := cli.Preferences(actx); err == nil {
+		qs.Discovery = Discovery{Known: true, DHT: pr.DHT, PeX: pr.PeX, LSD: pr.LSD}
+	}
 	qs.Reachable = true
 	ss := md.ServerState
 	if f, err := strconv.ParseFloat(strings.TrimSpace(ss.GlobalRatio), 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) && f >= 0 && f < 1e9 {

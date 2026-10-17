@@ -105,6 +105,7 @@ h1{margin:2px 0 0;font-size:22px;font-weight:600;letter-spacing:-.01em}
 .led.offline{background:var(--bad);box-shadow:0 0 8px var(--bad)}
 .led.pending,.led.disabled{background:var(--dim)}
 .tag{font-size:10px;padding:2px 7px;border:1px solid var(--line);border-radius:2px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;flex:none;max-width:100%;overflow-wrap:anywhere;line-height:1.4}
+.tag.discovery{color:var(--warn);border-color:var(--warn);text-transform:none} /* DHT/PeX/LSD on: not for private-tracker torrents */
 .meter{height:4px;background:var(--line);border-radius:2px;overflow:hidden}
 .meter>i{display:block;height:100%;background:var(--accent);border-radius:2px}
 .meter.thick{height:6px}

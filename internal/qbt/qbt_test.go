@@ -58,6 +58,9 @@ func TestClientFlow(t *testing.T) {
 	mux.HandleFunc("/api/v2/sync/maindata", auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"server_state":{"dl_info_speed":100,"up_info_speed":2000,"global_ratio":"4.21"},"torrents":{"abc":{"name":"x","state":"uploading","size":10}}}`))
 	}))
+	mux.HandleFunc("/api/v2/app/preferences", auth(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"dht":true,"pex":false,"lsd":true,"max_ratio":2}`))
+	}))
 	mux.HandleFunc("/api/v2/torrents/pause", auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.FormValue("hashes") != "all" {
 			w.WriteHeader(400)
@@ -75,6 +78,9 @@ func TestClientFlow(t *testing.T) {
 	md, err := c.MainData(ctx)
 	if err != nil || md.ServerState.UPInfoSpeed != 2000 || md.Torrents["abc"].Hash != "abc" {
 		t.Fatalf("maindata %+v %v", md, err)
+	}
+	if pr, err := c.Preferences(ctx); err != nil || !pr.DHT || pr.PeX || !pr.LSD {
+		t.Fatalf("preferences %+v %v", pr, err)
 	}
 	if err := c.PauseAll(ctx); err != nil { // /stop is 404 here, falls back to /pause
 		t.Fatal(err)

@@ -28,7 +28,9 @@ aggregate bandwidth, torrents, containers, next renewal and monthly cost.
 - Overview: disk, upload with limit/bonus/throttle state, bandwidth, CPU/RAM,
   client and autostart status, plan and billing.
 - Traffic: daily upload/download bars for the rolling 30 days PMSS tracks.
-- Torrents: the full list from qBittorrent with filter; add torrents by
+- Torrents: DHT / PeX / local peer discovery state in the header (and a card
+  tag when any is on, for deciding where private-tracker torrents may go);
+  the full list from qBittorrent with filter; add torrents by
   magnet, URL or `.torrent` file (optionally into a category, or stopped);
   stop / start / remove (with or without the files) per torrent; pause all /
   resume all; and start / stop / restart of the client.
