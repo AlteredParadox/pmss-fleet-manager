@@ -251,6 +251,18 @@ func (p *poller) sshDialUnix(path string) dockerx.Dialer {
 	}
 }
 
+// explainSessionError turns the two errors a box produces when sshd accepts
+// the login and then drops the session (seen when the tenant's slice is out
+// of memory and the session process is killed as it starts) into something
+// a user can act on; other errors pass through.
+func explainSessionError(err error) error {
+	msg := err.Error()
+	if strings.Contains(msg, "unexpected packet in response to channel open") || strings.Contains(msg, "connection reset by peer") {
+		return fmt.Errorf("SSH login succeeded but the box dropped the session immediately (%v); the account's slice may be out of memory or sessions may be blocked for this user, check it from the Pulsed Media web interface", err)
+	}
+	return err
+}
+
 var errStopped = errors.New("this box was just edited or removed; retry the action")
 
 // safePoll turns a panic in a poll (a parser bug on hostile box output) into
@@ -288,7 +300,7 @@ func (p *poller) poll(ctx context.Context) {
 			p.ssh = nil
 		}
 		p.mu.Unlock()
-		p.fail(ctx, &st, fmt.Errorf("probe: %v %s", err, strings.TrimSpace(string(stderr))), start)
+		p.fail(ctx, &st, fmt.Errorf("probe: %w %s", explainSessionError(err), strings.TrimSpace(string(stderr))), start)
 		return
 	}
 	snap, err := probe.ParseTagged(out, tag, time.Now())
