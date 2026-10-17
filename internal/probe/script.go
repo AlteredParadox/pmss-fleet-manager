@@ -40,6 +40,20 @@ S="user.slice/user-$uid.slice"
 # Each header starts with a newline: files like ~/.trafficLimit have no trailing newline,
 # which would otherwise glue the next header onto the value.
 sec(){ printf '\n@@%s%s\n' "${PMSS_TAG:-}" "$1"; }
+# bounded SECS CMD...: run CMD detached and print what it wrote within SECS.
+# timeout is not enough for quota/df: a call stuck in the kernel on a busy
+# or hung filesystem (uninterruptible sleep) cannot be killed, and timeout
+# then waits for it, which stalled whole probes on one box. Here nothing
+# waits on the child; it is abandoned after the deadline and the section is
+# simply empty (the parser falls back to ~/.quota for quota).
+bounded(){
+  secs=$1; shift
+  f=$(mktemp 2>/dev/null) || f="${TMPDIR:-/tmp}/.pmss-probe.$$.$secs"
+  ( "$@" >"$f" 2>/dev/null ) & bp=$!
+  i=0; while [ $i -lt "$secs" ] && kill -0 $bp 2>/dev/null; do sleep 1; i=$((i+1)); done
+  kill -9 $bp 2>/dev/null
+  cat "$f" 2>/dev/null; rm -f "$f"
+}
 sec uid; echo "$uid"
 sec user; echo "$user"
 sec hostname; timeout 5 hostname -f 2>/dev/null || hostname
@@ -61,8 +75,8 @@ done
 sec kernel; uname -r 2>/dev/null
 sec debian; cat /etc/debian_version 2>/dev/null
 sec pmss_version; cat /etc/seedbox/config/version 2>/dev/null
-sec df_home; timeout 10 df -B1 --output=size,used,avail,fstype "$home" 2>/dev/null | tail -n 1
-sec quota; timeout 15 quota -v -w 2>/dev/null
+sec df_home; bounded 10 df -B1 --output=size,used,avail,fstype "$home" | tail -n 1
+sec quota; bounded 10 quota -v -w
 sec quota_file; cat "$home/.quota" 2>/dev/null
 sec quota_mtime; stat -c %Y "$home/.quota" 2>/dev/null
 sec traffic; cat "$home/.trafficData" 2>/dev/null
