@@ -111,3 +111,34 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("cascade: %v", err)
 	}
 }
+
+func TestOneActiveAlertPerKey(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "d", "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	b := &Box{Name: "x", Host: "h", User: "u", Port: 22, Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := s.RaiseAlert(ctx, b.ID, "k", "warn", "one"); err != nil || !created {
+		t.Fatalf("first raise: %v %v", created, err)
+	}
+	// A concurrent evaluation that lost the race hits the partial unique
+	// index on its INSERT; RaiseAlert must treat that as "already raised".
+	now := "2026-01-01T00:00:00Z"
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO alerts (box_id, key, severity, title, active, acked, created_at, updated_at) VALUES (?,?,?,?,1,0,?,?)`, b.ID, "k", "warn", "dup", now, now); err == nil {
+		t.Fatal("duplicate active alert must be rejected by the index")
+	}
+	if created, err := s.RaiseAlert(ctx, b.ID, "k", "bad", "two"); err != nil || created {
+		t.Fatalf("second raise: %v %v", created, err)
+	}
+	if err := s.ResolveAlert(ctx, b.ID, "k"); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := s.RaiseAlert(ctx, b.ID, "k", "warn", "three"); err != nil || !created {
+		t.Fatalf("raise after resolve: %v %v (resolved rows must not block a new one)", created, err)
+	}
+}

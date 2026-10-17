@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -200,6 +201,11 @@ func (s *Store) migrate() error {
 			active INTEGER NOT NULL DEFAULT 1, acked INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL, resolved_at TEXT)`,
 		`CREATE INDEX IF NOT EXISTS alerts_box_key ON alerts(box_id, key, active)`,
+		// Two evaluations of the same box can race (a poll hook and a
+		// services sync); the partial unique index makes the second insert
+		// fail instead of duplicating the alert. Dedupe before creating it.
+		`DELETE FROM alerts WHERE active=1 AND id NOT IN (SELECT MIN(id) FROM alerts WHERE active=1 GROUP BY box_id, key)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS alerts_active_unique ON alerts(box_id, key) WHERE active=1`,
 		`CREATE TABLE IF NOT EXISTS box_cache (
 			box_id INTEGER NOT NULL REFERENCES boxes(id) ON DELETE CASCADE,
 			kind TEXT NOT NULL, json TEXT NOT NULL, at TEXT NOT NULL,
@@ -457,6 +463,9 @@ func (s *Store) RaiseAlert(ctx context.Context, boxID int64, key, severity, titl
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO alerts (box_id, key, severity, title, active, acked, created_at, updated_at) VALUES (?,?,?,?,1,0,?,?)`,
 		boxID, key, severity, title, now, now)
+	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		return false, nil // raised concurrently by another evaluation
+	}
 	return err == nil, err
 }
 

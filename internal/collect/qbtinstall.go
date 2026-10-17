@@ -44,9 +44,11 @@ else echo "neither wget nor curl available"; exit 1; fi
 magic=$(head -c 4 "$tmp" | od -An -tx1 | tr -d ' \n')
 [ "$magic" = "7f454c46" ] || { echo "downloaded file is not an ELF binary (got $(head -c 200 "$tmp" | tr -d '\n' | cut -c1-120))"; rm -f "$tmp"; exit 1; }
 chmod 700 "$tmp"
-old=$("$HOME/bin/qbittorrent-nox" --version 2>/dev/null | head -n 1)
-new=$(timeout 20 "$tmp" --version 2>/dev/null | head -n 1)
+# stdin is this script: redirect it so neither binary can read the rest of it.
+old=$(timeout 10 "$HOME/bin/qbittorrent-nox" --version </dev/null 2>/dev/null | head -n 1)
+new=$(timeout 20 "$tmp" --version </dev/null 2>/dev/null | head -n 1)
 [ -n "$new" ] || { echo "new binary does not run on this host"; rm -f "$tmp"; exit 1; }
+case "$new" in *qBittorrent*) ;; *) echo "downloaded file is not qBittorrent (--version printed: $new)"; rm -f "$tmp"; exit 1;; esac
 mv -f "$tmp" "$HOME/bin/qbittorrent-nox" || { rm -f "$tmp"; exit 1; }
 echo "installed: $new"
 echo "previous: ${old:-none}"
@@ -72,7 +74,12 @@ cat > "$HOME/bin/qbt-start" <<'PMSSMGR_EOF'
 chmod 700 "$HOME/bin/qbt-start" && echo "helper: created ~/bin/qbt-start"
 fi
 command -v screen >/dev/null 2>&1 || echo "warning: 'screen' not found on this box; qbt-start needs it"
-( crontab -l 2>/dev/null | grep -v 'bin/qbt-start'
+# Read the existing crontab first and distinguish "none yet" from a real
+# failure: piping a failed crontab -l into crontab - would wipe every entry.
+if ! cur=$(crontab -l 2>&1); then
+  case "$cur" in *"no crontab"*) cur="" ;; *) echo "crontab -l failed: $cur"; exit 1 ;; esac
+fi
+( printf '%s\n' "$cur" | grep -vF "$HOME/bin/qbt-start" | grep -v '^$'
   echo "@reboot     sleep 30; $HOME/bin/qbt-start"
   echo "*/5 * * * * $HOME/bin/qbt-start" ) | crontab - || { echo "crontab update failed"; exit 1; }
 echo "cron: @reboot and */5 entries set"

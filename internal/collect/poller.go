@@ -63,6 +63,11 @@ type poller struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 	once   sync.Once
+
+	// ctx is cancelled by stopAndWait so an in-flight poll, du or action
+	// aborts promptly instead of blocking a box edit/removal for minutes.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func newPoller(m *Manager, b *store.Box) *poller {
@@ -77,11 +82,29 @@ func (p *poller) wake() {
 }
 
 func (p *poller) stopAndWait() {
-	p.once.Do(func() { close(p.stopCh) })
+	p.once.Do(func() {
+		close(p.stopCh)
+		if p.cancel != nil {
+			p.cancel()
+		}
+	})
 	if p.box.Enabled {
 		<-p.doneCh
 	}
 	p.closeConns()
+}
+
+// stopped reports whether this poller was retired by an edit or removal;
+// an action that still holds it must not open new connections on it.
+func (p *poller) stopped() bool {
+	return p.ctx != nil && p.ctx.Err() != nil
+}
+
+// hostKey reads the pinned key under the lock (conn() writes it).
+func (p *poller) hostKey() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.box.HostKey
 }
 
 func (p *poller) closeConns() {
@@ -117,6 +140,20 @@ func (p *poller) run(ctx context.Context) {
 		if interval < 5*time.Second {
 			interval = 5 * time.Second
 		}
+		// Back off a box that keeps failing: a wrong password would
+		// otherwise hit sshd every interval forever, and on a shared host a
+		// fail2ban-style guard would ban the dashboard for every tenant.
+		// Doubles per failure after the second, capped at 10 minutes; a
+		// manual refresh (wake) still polls immediately.
+		if st, ok := p.m.State(p.box.ID); ok && st.Failures >= 3 {
+			back := interval << uint(min(st.Failures-2, 6))
+			if back > 10*time.Minute {
+				back = 10 * time.Minute
+			}
+			if back > interval {
+				interval = back
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -130,6 +167,9 @@ func (p *poller) run(ctx context.Context) {
 
 // conn returns a live SSH client, connecting if needed.
 func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
+	if p.stopped() {
+		return nil, errors.New("this box was just edited or removed; retry the action")
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.ssh != nil {
@@ -214,7 +254,7 @@ func (p *poller) poll(ctx context.Context) {
 	start := time.Now()
 	st, _ := p.m.State(p.box.ID)
 	st.LastPoll = start
-	st.HostKeyFP = fingerprintOrEmpty(p.box.HostKey)
+	st.HostKeyFP = fingerprintOrEmpty(p.hostKey())
 
 	cli, err := p.conn(ctx)
 	if err != nil {
@@ -631,7 +671,9 @@ func (p *poller) forceDu() {
 
 func (p *poller) maybeDu(ctx context.Context, st *BoxState) {
 	st.Dirs.Enabled = p.box.DuEnabled
-	if st.Dirs.At.IsZero() {
+	// The persisted state keeps Dirs.At but drops the entries (Summary), so
+	// reload the full du result whenever the live state has none.
+	if len(st.Dirs.Entries) == 0 {
 		var cached DirsState
 		if at, err := p.m.st.GetCache(ctx, p.box.ID, "du", &cached); err == nil {
 			cached.At = at
@@ -683,15 +725,22 @@ func (p *poller) runDu(ctx context.Context) {
 	dctx, cancel := context.WithTimeout(ctx, duTimeout)
 	defer cancel()
 	out, _, err := cli.Run(dctx, "sh", strings.NewReader(probe.DuScript))
+	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer scancel()
 	res := DirsState{Enabled: true, At: time.Now()}
 	if err != nil && len(out) == 0 {
+		// Interrupted (stop, SSH drop, timeout): keep the last good
+		// measurement and only attach the error, instead of replacing six
+		// hours of data with an empty list.
+		var prev DirsState
+		if at, gerr := p.m.st.GetCache(sctx, p.box.ID, "du", &prev); gerr == nil {
+			res.Entries, res.At = prev.Entries, at
+		}
 		res.Error = describeErr(err)
 	}
 	for _, d := range probe.ParseDu(out) {
 		res.Entries = append(res.Entries, DirEntry{Name: clip(d.Name, 255), Bytes: d.Bytes})
 	}
-	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer scancel()
 	if err := p.m.st.SetCache(sctx, p.box.ID, "du", res); err != nil {
 		p.m.log.Warn("cache du", "box", p.box.Name, "err", err)
 	}
