@@ -489,6 +489,23 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 	if len(req.URLs) == 0 && len(req.Files) == 0 {
 		return res, errors.New("nothing to add")
 	}
+	body, ctype, err := addBody(req)
+	if err != nil {
+		return res, err
+	}
+	var out string
+	if err := c.callBody(ctx, http.MethodPost, "/api/v2/torrents/add", ctype, body, &out); err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && he.Code == http.StatusConflict {
+			return res, ErrAddRejected // 5.2+: nothing was added
+		}
+		return res, err
+	}
+	return parseAddResult(out)
+}
+
+// addBody builds the multipart form for torrents/add.
+func addBody(req AddRequest) ([]byte, string, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	if len(req.URLs) > 0 {
@@ -506,39 +523,41 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 	for _, f := range req.Files {
 		fw, err := mw.CreateFormFile("torrents", f.Name)
 		if err != nil {
-			return res, err
+			return nil, "", err
 		}
 		if _, err := fw.Write(f.Data); err != nil {
-			return res, err
+			return nil, "", err
 		}
 	}
 	if err := mw.Close(); err != nil {
-		return res, err
+		return nil, "", err
 	}
-	var out string
-	if err := c.callBody(ctx, http.MethodPost, "/api/v2/torrents/add", mw.FormDataContentType(), buf.Bytes(), &out); err != nil {
-		var he *HTTPError
-		if errors.As(err, &he) && he.Code == http.StatusConflict {
-			return res, ErrAddRejected // 5.2+: nothing was added
-		}
-		return res, err
-	}
+	return buf.Bytes(), mw.FormDataContentType(), nil
+}
+
+// parseAddResult reads a 2xx torrents/add body: "Ok."/"Fails." up to 5.1,
+// a JSON count object from 5.2 on. Anything else counts as an uncounted
+// success, since the status already said the request was accepted.
+func parseAddResult(out string) (AddResult, error) {
+	var res AddResult
 	out = strings.TrimSpace(out)
 	if strings.HasPrefix(out, "Fails") {
 		return res, ErrAddRejected
 	}
-	if strings.HasPrefix(out, "{") { // 5.2+ counts
-		var counts struct {
-			Success int `json:"success_count"`
-			Failure int `json:"failure_count"`
-			Pending int `json:"pending_count"`
-		}
-		if err := json.Unmarshal([]byte(out), &counts); err == nil {
-			res = AddResult{Counted: true, Added: max(counts.Success, 0), Failed: max(counts.Failure, 0), Pending: max(counts.Pending, 0)}
-			if res.Added == 0 && res.Pending == 0 {
-				return res, ErrAddRejected
-			}
-		}
+	if !strings.HasPrefix(out, "{") {
+		return res, nil
+	}
+	var counts struct {
+		Success int `json:"success_count"`
+		Failure int `json:"failure_count"`
+		Pending int `json:"pending_count"`
+	}
+	if err := json.Unmarshal([]byte(out), &counts); err != nil {
+		return res, nil
+	}
+	res = AddResult{Counted: true, Added: max(counts.Success, 0), Failed: max(counts.Failure, 0), Pending: max(counts.Pending, 0)}
+	if res.Added == 0 && res.Pending == 0 {
+		return res, ErrAddRejected
 	}
 	return res, nil
 }

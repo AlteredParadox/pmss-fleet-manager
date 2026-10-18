@@ -664,7 +664,7 @@ func nonNeg64(n int64) int64 {
 
 // unit clamps a fraction from the WebUI to [0, 1].
 func unit(f float64) float64 {
-	if f < 0 || f != f { // negative or NaN
+	if f < 0 || math.IsNaN(f) {
 		return 0
 	}
 	if f > 1 {
