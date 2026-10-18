@@ -229,7 +229,8 @@ func TestTorrentAction(t *testing.T) {
 }
 
 // Add posts a multipart torrents/add with links, files and options, and
-// reads qBittorrent's "Fails." answer as ErrAddRejected and 415 as ErrBadTorrent.
+// reads every answer shape: "Ok." (≤5.1), JSON counts and 409 (5.2+) as
+// ErrAddRejected, 415 as ErrBadTorrent, other non-2xx as *HTTPError.
 func TestAdd(t *testing.T) {
 	answer := "Ok."
 	var seen map[string]string

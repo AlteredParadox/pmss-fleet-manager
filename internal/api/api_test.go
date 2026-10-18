@@ -401,7 +401,7 @@ func TestBoxInputHostUser(t *testing.T) {
 		t.Fatalf("valid input rejected: %v", err)
 	}
 	for _, in := range []boxInput{
-		{Host: "a@evil.example", User: "u"}, {Host: "evil.example/#", User: "u"}, {Host: "a b", User: "u"},
+		{Host: "a@evil.example", User: "u"}, {Host: "evil.example/#", User: "u"}, {Host: "a b", User: "u"}, {Host: "..", User: "u"}, {Host: "-x.example", User: "u"},
 		{Host: "h", User: "../x"}, {Host: "h", User: "a b"}, {Host: "h", User: "a/b"},
 	} {
 		if err := in.validate(); err == nil {
