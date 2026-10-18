@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"strings"
 	"time"
 
@@ -221,9 +220,7 @@ func wantRenewal(s *collect.BoxState, set store.Settings) []want {
 	var active []want
 	name := s.Name
 	if renewal := s.EffectiveRenewal(); renewal != "" {
-		if d, err := time.Parse("2006-01-02", renewal); err == nil {
-			// Floor: for the day after the due date this is -1, not 0.
-			days := int(math.Floor(time.Until(d.Add(24*time.Hour)).Hours() / 24))
+		if days, ok := daysUntilDate(renewal, time.Now()); ok {
 			switch {
 			case days < 0:
 				active = append(active, want{"renewal", "bad", fmt.Sprintf("%s renewal date %s has passed", name, renewal)})
@@ -233,6 +230,22 @@ func wantRenewal(s *collect.BoxState, set store.Settings) []want {
 		}
 	}
 	return active
+}
+
+// daysUntilDate counts calendar days from now's date to a YYYY-MM-DD date,
+// in now's location: 0 on the day itself, -1 the day after. A renewal date
+// is a civil date, not an instant, so the count changes at local midnight
+// (not UTC midnight) and DST days do not shift it; the browser does the
+// same arithmetic in daysUntil.
+func daysUntilDate(ymd string, now time.Time) (int, bool) {
+	d, err := time.ParseInLocation("2006-01-02", ymd, now.Location())
+	if err != nil {
+		return 0, false
+	}
+	y, m, dd := now.Date()
+	today := time.Date(y, m, dd, 0, 0, 0, 0, time.UTC)
+	due := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
+	return int(due.Sub(today).Hours() / 24), true
 }
 
 // reconcile persists the wanted alerts, resolves the open ones this poll no

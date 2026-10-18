@@ -18,6 +18,7 @@ package alerts
 
 import (
 	"testing"
+	"time"
 
 	"pmss-fleet-manager/internal/collect"
 )
@@ -50,5 +51,36 @@ func TestRecheckable(t *testing.T) {
 	off.Docker.Enabled, off.Docker.Reachable = false, false
 	if !recheckable(&off, "container:plex") {
 		t.Error("container alert stranded after docker monitoring was turned off")
+	}
+}
+
+// Renewal dates are civil dates: the count rolls at local midnight, is 0 on
+// the day itself and -1 the day after, and a DST change does not shift it.
+func TestDaysUntilDate(t *testing.T) {
+	chi, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Skip("no tz database")
+	}
+	cases := []struct {
+		now  time.Time
+		ymd  string
+		want int
+	}{
+		{time.Date(2026, 10, 17, 19, 30, 0, 0, chi), "2026-10-17", 0}, // evening of the due day, already past UTC midnight
+		{time.Date(2026, 10, 17, 23, 59, 0, 0, chi), "2026-10-17", 0},
+		{time.Date(2026, 10, 18, 0, 1, 0, 0, chi), "2026-10-17", -1},
+		{time.Date(2026, 10, 17, 1, 0, 0, 0, chi), "2026-10-24", 7},
+		{time.Date(2026, 10, 30, 12, 0, 0, 0, chi), "2026-11-02", 3}, // across the DST change on Nov 1
+		{time.Date(2026, 3, 7, 12, 0, 0, 0, chi), "2026-03-09", 2},   // across the DST change on Mar 8
+		{time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC), "2026-10-17", 0},
+	}
+	for _, c := range cases {
+		got, ok := daysUntilDate(c.ymd, c.now)
+		if !ok || got != c.want {
+			t.Errorf("daysUntilDate(%s, %s) = %d,%v; want %d", c.ymd, c.now, got, ok, c.want)
+		}
+	}
+	if _, ok := daysUntilDate("soon", time.Now()); ok {
+		t.Error("garbage date accepted")
 	}
 }
