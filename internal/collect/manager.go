@@ -272,7 +272,12 @@ func (m *Manager) State(id int64) (BoxState, bool) {
 	return *s, true
 }
 
-func (m *Manager) setState(s *BoxState) {
+func (m *Manager) setState(s *BoxState) { m.setStateWith(s, nil) }
+
+// setStateWith stores s as the box's state; fix, when given, runs on it
+// under the store lock right before it is stored, so a concurrent
+// mutateState cannot slip in between the poller's last look and the store.
+func (m *Manager) setStateWith(s *BoxState, fix func(*BoxState)) {
 	s.Sanitize()
 	m.mu.Lock()
 	if _, ok := m.states[s.ID]; !ok { // box was removed mid-poll
@@ -285,6 +290,9 @@ func (m *Manager) setState(s *BoxState) {
 	if _, ok := m.states[s.ID]; !ok {
 		m.mu.Unlock()
 		return
+	}
+	if fix != nil {
+		fix(s)
 	}
 	cp := *s
 	m.states[s.ID] = &cp
@@ -541,17 +549,17 @@ func (m *Manager) SetDiscovery(ctx context.Context, id int64, want map[string]bo
 }
 
 // AddTorrents adds links and/or .torrent files to the box's qBittorrent.
-func (m *Manager) AddTorrents(ctx context.Context, id int64, req qbt.AddRequest) error {
+func (m *Manager) AddTorrents(ctx context.Context, id int64, req qbt.AddRequest) (qbt.AddResult, error) {
 	p := m.poller(id)
 	if p == nil {
-		return store.ErrNotFound
+		return qbt.AddResult{}, store.ErrNotFound
 	}
 	if !p.box.Enabled {
-		return ErrDisabled
+		return qbt.AddResult{}, ErrDisabled
 	}
-	err := p.addTorrents(ctx, req)
+	res, err := p.addTorrents(ctx, req)
 	p.wake()
-	return err
+	return res, err
 }
 
 // RunDu forces a directory usage measurement.

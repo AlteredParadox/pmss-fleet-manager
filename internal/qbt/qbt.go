@@ -292,7 +292,7 @@ func (c *Client) callBody(ctx context.Context, method, path, ctype string, paylo
 		return ErrBadTorrent
 	}
 	if code < 200 || code >= 300 {
-		return fmt.Errorf("qbittorrent: %s http %d: %s", path, code, strings.TrimSpace(string(body)))
+		return &HTTPError{Path: path, Code: code, Body: strings.TrimSpace(string(body))}
 	}
 	if out == nil {
 		return nil
@@ -411,14 +411,24 @@ func (c *Client) stopStart(ctx context.Context, start bool, hashes string) error
 	return err
 }
 
+// HTTPError is a non-2xx answer from the WebUI that no sentinel covers.
+type HTTPError struct {
+	Path string
+	Code int
+	Body string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("qbittorrent: %s http %d: %s", e.Path, e.Code, e.Body)
+}
+
 // ErrBadTorrent is returned when qBittorrent rejects an upload as not a
 // torrent file (HTTP 415).
 var ErrBadTorrent = errors.New("qbittorrent: not a valid torrent file")
 
-// ErrAddRejected is returned when qBittorrent answers "Fails." to an add:
-// nothing in the request was added. qBittorrent 5 gives that answer both for
-// an unparsable link and for a torrent that is already in the session, so
-// the message names both.
+// ErrAddRejected is returned when qBittorrent added nothing: "Fails." from
+// 4.x and 5.0/5.1, HTTP 409 from 5.2+. Both an unparsable link and a torrent
+// that is already in the session end there, so the message names both.
 var ErrAddRejected = errors.New("qbittorrent: nothing was added — the torrent is already present, or the link is not a valid magnet or torrent")
 
 // ValidHash reports whether h is a v1 (40 hex) or v2 (64 hex) info-hash in
@@ -445,12 +455,23 @@ type AddRequest struct {
 	Stopped  bool // add without starting (qBittorrent 5 "stopped", 4.x "paused"); false leaves the client's own default in force
 }
 
-// Add posts torrents/add as multipart. qBittorrent answers 200 "Ok." when it
-// accepted at least one entry and 200 "Fails." when it added nothing (bad
-// link or already present), so the body is checked as well as the status.
-func (c *Client) Add(ctx context.Context, req AddRequest) error {
+// AddResult is what qBittorrent reported about an add. Counted is false on
+// 4.x and 5.0/5.1, which only say "Ok." (at least one entry was accepted);
+// 5.2+ returns per-entry counts.
+type AddResult struct {
+	Counted bool
+	Added   int // torrents now in the session
+	Failed  int // rejected: already present or not a torrent
+	Pending int // http(s) links qBittorrent is still fetching
+}
+
+// Add posts torrents/add as multipart. Up to 5.1 qBittorrent answers 200
+// "Ok." when it accepted at least one entry and 200 "Fails." when it added
+// nothing; 5.2+ answers a JSON count object, or 409 when nothing was added.
+func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
+	var res AddResult
 	if len(req.URLs) == 0 && len(req.Files) == 0 {
-		return errors.New("nothing to add")
+		return res, errors.New("nothing to add")
 	}
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -469,23 +490,41 @@ func (c *Client) Add(ctx context.Context, req AddRequest) error {
 	for _, f := range req.Files {
 		fw, err := mw.CreateFormFile("torrents", f.Name)
 		if err != nil {
-			return err
+			return res, err
 		}
 		if _, err := fw.Write(f.Data); err != nil {
-			return err
+			return res, err
 		}
 	}
 	if err := mw.Close(); err != nil {
-		return err
+		return res, err
 	}
 	var out string
 	if err := c.callBody(ctx, http.MethodPost, "/api/v2/torrents/add", mw.FormDataContentType(), buf.Bytes(), &out); err != nil {
-		return err
+		var he *HTTPError
+		if errors.As(err, &he) && he.Code == http.StatusConflict {
+			return res, ErrAddRejected // 5.2+: nothing was added
+		}
+		return res, err
 	}
-	if strings.HasPrefix(strings.TrimSpace(out), "Fails") {
-		return ErrAddRejected
+	out = strings.TrimSpace(out)
+	if strings.HasPrefix(out, "Fails") {
+		return res, ErrAddRejected
 	}
-	return nil
+	if strings.HasPrefix(out, "{") { // 5.2+ counts
+		var counts struct {
+			Success int `json:"success_count"`
+			Failure int `json:"failure_count"`
+			Pending int `json:"pending_count"`
+		}
+		if err := json.Unmarshal([]byte(out), &counts); err == nil {
+			res = AddResult{Counted: true, Added: counts.Success, Failed: counts.Failure, Pending: counts.Pending}
+			if res.Added == 0 && res.Pending == 0 {
+				return res, ErrAddRejected
+			}
+		}
+	}
+	return res, nil
 }
 
 // Per-torrent operations TorrentAction accepts.

@@ -74,9 +74,14 @@ type poller struct {
 	cancel context.CancelFunc
 
 	actionMu sync.Mutex
-	actionAt time.Time       // last stop/restart, see QbtAction
-	discAt   time.Time       // last SetDiscovery write, see noteDiscovery
-	discWant map[string]bool // what that write set
+	actionAt time.Time            // last stop/restart, see QbtAction
+	discWant map[string]discWrite // per-key SetDiscovery writes, see noteDiscovery
+}
+
+// discWrite is one value SetDiscovery wrote and when.
+type discWrite struct {
+	v  bool
+	at time.Time
 }
 
 func (p *poller) noteAction() {
@@ -93,16 +98,17 @@ func (p *poller) actionSince(t time.Time) bool {
 }
 
 // noteDiscovery records a successful app/setPreferences write so a poll
-// that read the preferences before it cannot publish the old values. Keys
-// are merged: a poll that straddles two writes must see both.
+// that read the preferences before it cannot publish the old values. Each
+// key keeps its own write time: a poll that straddles two writes sees both,
+// and a key written before the poll started is left to what the poll read.
 func (p *poller) noteDiscovery(want map[string]bool) {
 	p.actionMu.Lock()
-	p.discAt = time.Now()
 	if p.discWant == nil {
-		p.discWant = map[string]bool{}
+		p.discWant = map[string]discWrite{}
 	}
+	now := time.Now()
 	for k, v := range want {
-		p.discWant[k] = v
+		p.discWant[k] = discWrite{v: v, at: now}
 	}
 	p.actionMu.Unlock()
 }
@@ -112,18 +118,33 @@ func (p *poller) noteDiscovery(want map[string]bool) {
 func (p *poller) overlayDiscovery(start time.Time, d *Discovery) {
 	p.actionMu.Lock()
 	defer p.actionMu.Unlock()
-	if !p.discAt.After(start) || !d.Known {
+	if !d.Known {
 		return
 	}
-	for k, v := range p.discWant {
+	for k, w := range p.discWant {
+		if !w.at.After(start) {
+			continue
+		}
 		switch k {
 		case "dht":
-			d.DHT = v
+			d.DHT = w.v
 		case "pex":
-			d.PeX = v
+			d.PeX = w.v
 		case "lsd":
-			d.LSD = v
+			d.LSD = w.v
 		}
+	}
+}
+
+// afterPoll is run under the store lock as the poll's state is published:
+// a stop/restart or discovery write that landed while the poll was in
+// flight (even during record()) must not be undone by what the poll read.
+func (p *poller) afterPoll(start time.Time) func(*BoxState) {
+	return func(s *BoxState) {
+		if p.actionSince(start) {
+			s.Qbt.PortOK, s.Qbt.Reachable = false, false
+		}
+		p.overlayDiscovery(start, &s.Qbt.Discovery)
 	}
 }
 
@@ -238,6 +259,9 @@ func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
 		if ctx.Err() != nil {
 			// The caller gave up (browser navigated away mid-action),
 			// the connection did not fail: keep it for the next poll.
+			if p.stopped() {
+				return nil, errStopped // the box was edited/removed: say so
+			}
 			return nil, ctx.Err()
 		}
 		p.ssh.Close()
@@ -386,12 +410,11 @@ func (p *poller) poll(ctx context.Context) {
 		return
 	}
 	p.maybeDu(ctx, &st)
-	if p.actionSince(start) {
-		// stop/restart ran while this poll was in flight: the ownership it
-		// verified is from before the port was freed.
-		st.Qbt.PortOK, st.Qbt.Reachable = false, false
-	}
-	p.overlayDiscovery(start, &st.Qbt.Discovery)
+	// stop/restart ran while this poll was in flight: the ownership it
+	// verified is from before the port was freed. Applied here so classify
+	// sees it, and again under the store lock (afterPoll) for anything that
+	// lands between here and the publish.
+	p.afterPoll(start)(&st)
 	st.Unpolled = false
 	st.Failures = 0
 	st.NextPoll, st.Backoff = time.Time{}, false
@@ -402,7 +425,7 @@ func (p *poller) poll(ctx context.Context) {
 
 	st.Sanitize() // before the cache write as well as the in-memory store
 	p.record(ctx, &st)
-	p.m.setState(&st)
+	p.m.setStateWith(&st, p.afterPoll(start))
 }
 
 // retryInterval is the poll interval for a box with the given number of
@@ -615,6 +638,17 @@ func nonNeg64(n int64) int64 {
 	return n
 }
 
+// unit clamps a fraction from the WebUI to [0, 1].
+func unit(f float64) float64 {
+	if f < 0 || f != f { // negative or NaN
+		return 0
+	}
+	if f > 1 {
+		return 1
+	}
+	return f
+}
+
 // torrentHash keeps a hash only when it is one. A hostile WebUI could emit
 // ".." and the browser would then POST /qbt/torrents/../stop, which the mux
 // cleans into the box-level shutdown route; without a hash the row simply
@@ -744,7 +778,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 			qs.Errored++
 		}
 		qs.Torrents = append(qs.Torrents, TorrentView{
-			Hash: torrentHash(t.Hash), Name: clip(t.Name, 400), Size: t.Size, Progress: t.Progress, UpBps: t.UPSpeed, DownBps: t.DLSpeed,
+			Hash: torrentHash(t.Hash), Name: clip(t.Name, 400), Size: nonNeg64(t.Size), Progress: unit(t.Progress), UpBps: t.UPSpeed, DownBps: t.DLSpeed,
 			Ratio: t.Ratio, State: clip(t.State, 32), Kind: kind, AddedOn: t.AddedOn, Category: clip(t.Category, 100),
 			Uploaded: nonNeg64(t.Uploaded), Downloaded: nonNeg64(t.Downloaded),
 			Seeds: nonNeg(t.Seeds), SeedsSwarm: nonNeg(t.SeedsSwarm), Peers: nonNeg(t.Peers), PeersSwarm: nonNeg(t.PeersSwarm),
@@ -1126,12 +1160,12 @@ func (p *poller) setDiscovery(ctx context.Context, prefs map[string]any) error {
 
 // addTorrents uploads links and files to the box's WebUI after the same
 // preflight as every other credential-sending action.
-func (p *poller) addTorrents(ctx context.Context, req qbt.AddRequest) error {
+func (p *poller) addTorrents(ctx context.Context, req qbt.AddRequest) (qbt.AddResult, error) {
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 	cli, err := p.qbtWebUI(actx)
 	if err != nil {
-		return err
+		return qbt.AddResult{}, err
 	}
 	return cli.Add(actx, req)
 }

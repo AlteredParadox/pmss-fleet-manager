@@ -392,11 +392,11 @@ type boxInput struct {
 
 func (in boxInput) validate() error {
 	in.Host = strings.TrimSpace(in.Host)
-	if in.Host == "" || strings.ContainsAny(in.Host, " /") {
-		return errors.New("hostname is required")
+	if in.Host == "" || !hostChars(in.Host) {
+		return errors.New("hostname is required: letters, digits, dots and dashes only")
 	}
-	if strings.TrimSpace(in.User) == "" {
-		return errors.New("username is required")
+	if u := strings.TrimSpace(in.User); u == "" || !userChars(u) {
+		return errors.New("username is required: letters, digits, dot, dash and underscore only")
 	}
 	if in.Port < 0 || in.Port > 65535 {
 		return errors.New("invalid port")
@@ -718,11 +718,12 @@ func (s *Server) handleQbtAction(w http.ResponseWriter, r *http.Request) {
 }
 
 // Limits on one add request. A .torrent is normally tens of kilobytes; the
-// per-file cap leaves room for very large piece tables without letting a
-// browser push an arbitrary amount through the box's WebUI.
+// per-file cap leaves room for the piece tables of multi-terabyte and hybrid
+// v1+v2 torrents, and the body cap (framing included) bounds what one
+// request pushes through the box's WebUI within the action timeout.
 const (
 	addMaxBody    = 40 << 20
-	addMaxFile    = 2 << 20 // real .torrent files are tens of KB; 20 of these must fit the 30 s action budget
+	addMaxFile    = 8 << 20
 	addMaxFiles   = 20
 	addMaxURLs    = 50
 	addMaxURLLen  = 4000
@@ -794,7 +795,7 @@ func addRequestFromForm(r *http.Request) (qbt.AddRequest, error) {
 		req.Files = append(req.Files, qbt.TorrentFile{Name: name, Data: data})
 	}
 	req.Category = strings.TrimSpace(r.FormValue("category"))
-	if len(req.Category) > addMaxCatLen || strings.ContainsAny(req.Category, "\x00\n\r") {
+	if utf8.RuneCountInString(req.Category) > addMaxCatLen || strings.ContainsAny(req.Category, "\x00\n\r") {
 		return req, errors.New("invalid category")
 	}
 	switch r.FormValue("stopped") {
@@ -864,7 +865,8 @@ func (s *Server) handleAddTorrents(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	if err := s.m.AddTorrents(ctx, id, req); err != nil {
+	res, err := s.m.AddTorrents(ctx, id, req)
+	if err != nil {
 		code := actionCode(err)
 		if errors.Is(err, qbt.ErrBadTorrent) {
 			code = 422
@@ -874,7 +876,35 @@ func (s *Server) handleAddTorrents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, code, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "links": len(req.URLs), "files": len(req.Files)})
+	writeJSON(w, 200, map[string]any{"ok": true, "links": len(req.URLs), "files": len(req.Files),
+		"counted": res.Counted, "added": res.Added, "failed": res.Failed, "pending": res.Pending})
+}
+
+// hostChars accepts a DNS-shaped host name; the UI builds https links from
+// it, so '@', '/', '#', '?' and quotes must never get in.
+func hostChars(h string) bool {
+	if len(h) > 253 {
+		return false
+	}
+	for _, r := range h {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '.' && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// userChars accepts a Unix account name as used in the user-<name> path.
+func userChars(u string) bool {
+	if len(u) > 64 {
+		return false
+	}
+	for _, r := range u {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '.' && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // validTorrentHash accepts a v1 (40 hex) or v2 (64 hex) info-hash, in either
