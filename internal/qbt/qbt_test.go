@@ -19,6 +19,7 @@ package qbt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -448,5 +449,79 @@ func TestLoginSharesDroppedAttempt(t *testing.T) {
 	}
 	if n := logins.Load(); n != 2 {
 		t.Fatalf("a later independent call must be allowed its own attempt; logins = %d", n)
+	}
+}
+
+// Clients are rebuilt on reconnect and the wizard makes a fresh one per
+// click, all on the box's one guard: a dropped login is shared across them
+// too, so together they still make one attempt.
+func TestDroppedLoginSharedAcrossClients(t *testing.T) {
+	defer func(d time.Duration) { loginShareWindow = d }(loginShareWindow)
+	loginShareWindow = 200 * time.Millisecond
+	var logins atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		logins.Add(1)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		conn.Close()
+	})
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	dial := func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }
+	g := &AuthGuard{}
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		c := NewWithGuard(dial, "127.0.0.1:1", "admin", "pw", g) // a different client each time
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.Version(context.Background()); err == nil {
+				t.Error("want an error from the dropped login")
+			}
+		}()
+	}
+	wg.Wait()
+	if n := logins.Load(); n != 1 {
+		t.Fatalf("6 clients on one guard made %d login attempts; want 1", n)
+	}
+}
+
+// A success is the cookie of the client that made it: another client on
+// the same guard logs in for itself rather than retrying without a session.
+func TestSuccessNotSharedAcrossClients(t *testing.T) {
+	var logins atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		n := logins.Add(1)
+		http.SetCookie(w, &http.Cookie{Name: "SID", Value: fmt.Sprintf("s%d", n)})
+		w.Write([]byte("Ok."))
+	})
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) {
+		if c, _ := r.Cookie("SID"); c == nil {
+			w.WriteHeader(403)
+			return
+		}
+		w.Write([]byte("v5.2.4"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	dial := func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }
+	g := &AuthGuard{}
+	a := NewWithGuard(dial, "127.0.0.1:1", "admin", "pw", g)
+	b := NewWithGuard(dial, "127.0.0.1:1", "admin", "pw", g)
+	for _, c := range []*Client{a, b} {
+		if v, err := c.Version(context.Background()); err != nil || v != "v5.2.4" {
+			t.Fatalf("version: %q %v", v, err)
+		}
+	}
+	if n := logins.Load(); n != 2 {
+		t.Fatalf("two clients need two sessions; logins = %d", n)
 	}
 }

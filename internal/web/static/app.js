@@ -203,7 +203,11 @@ function loadTorrentsSoon() {
   const wait = Math.max(0, torLast + TOR_MIN_MS - Date.now());
   torTimer = setTimeout(() => { torTimer = 0; if (S.view === 'torrents') void loadTorrents(); }, wait);
 }
+// Direct callers (route, resync, actions) share the guard: one in flight,
+// and a direct load supersedes a scheduled one.
 async function loadTorrents() {
+  if (torInflight) { torDirty = true; return; }
+  if (torTimer) { clearTimeout(torTimer); torTimer = 0; }
   const seq = ++torSeq;
   torInflight = true; torDirty = false;
   try {
