@@ -23,6 +23,7 @@ const S = {
   boxes: [], totals: {}, unacked: 0, settings: {}, detail: null,
   alerts: [], filter: '', live: false,
   torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
+  torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, enabled, qbt}]
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
 };
@@ -123,7 +124,7 @@ function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const parts = h.split('/').filter(Boolean);
   const view = parts[0] || 'fleet';
-  S.view = ['fleet', 'box', 'add', 'alerts', 'settings', 'edit'].includes(view) ? view : 'fleet';
+  S.view = ['fleet', 'torrents', 'box', 'add', 'alerts', 'settings', 'edit'].includes(view) ? view : 'fleet';
   if (S.view === 'box') {
     S.selId = Number(parts[1]) || null;
     S.tab = parts[2] || 'overview';
@@ -136,6 +137,7 @@ function route() {
     resetAdd();
   }
   if (S.view === 'alerts') void loadAlerts();
+  if (S.view === 'torrents') void loadTorrents();
   if (S.view === 'settings') { S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; void loadServices(); }
   S.filter = '';
   S.torAdd = null;
@@ -177,6 +179,13 @@ async function loadDetail(id) {
     }
   }
 }
+async function loadTorrents() {
+  try {
+    const d = await api('GET', '/api/torrents');
+    S.torrents = d.boxes || [];
+  } catch (e) { toast(`torrents: ${e.message}`, 'bad'); }
+  if (S.view === 'torrents') render();
+}
 async function loadServices() { try { S.services = await api('GET', '/api/services'); } catch (e) { S.services = { configured: false, services: [], error: e.message }; } if (S.view === 'settings') render(); }
 async function loadAlerts() {
   try { S.alerts = await api('GET', '/api/alerts'); render(); } catch (e) { toast(`alerts: ${e.message}`, 'bad'); }
@@ -191,7 +200,7 @@ function connectEvents() {
     S.live = true;
     if (wasDown) { // resync everything missed while disconnected (e.g. a server restart)
       await loadState();
-      if (S.view === 'box' && S.selId) void loadDetail(S.selId); else if (S.view === 'alerts') void loadAlerts();
+      if (S.view === 'box' && S.selId) void loadDetail(S.selId); else if (S.view === 'alerts') void loadAlerts(); else if (S.view === 'torrents') void loadTorrents();
       render();
     } else renderSide();
     wasDown = false;
@@ -205,6 +214,7 @@ function connectEvents() {
     S.boxes.sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
     recomputeTotals();
     if (S.view === 'box' && S.selId === e.box_id) void loadDetail(e.box_id);
+    else if (S.view === 'torrents') void loadTorrents();
     else if (S.view === 'fleet') render(); else renderSide();
   });
   es.addEventListener('removed', (ev) => {
@@ -273,6 +283,7 @@ function renderSide() {
   $('#side').innerHTML = `
     <div class="brand"><div class="led"></div><div class="name">FLEET<span>.ctl</span></div></div>
     <button class="nav ${navActive('fleet')}" data-go="/fleet"><span>fleet</span></button>
+    <button class="nav ${navActive('torrents')}" data-go="/torrents"><span>torrents</span></button>
     <button class="nav ${navActive('add')}" data-go="/add"><span>add box</span></button>
     <button class="nav ${navActive('alerts')}" data-go="/alerts"><span>alerts</span>${S.unacked ? `<span class="badge">${S.unacked}</span>` : ''}</button>
     <button class="nav ${navActive('settings')}" data-go="/settings"><span>settings</span></button>
@@ -290,6 +301,7 @@ function renderMain() {
   const m = $('#main');
   switch (S.view) {
     case 'box': m.innerHTML = viewBox(); break;
+    case 'torrents': m.innerHTML = viewTorrents(); break;
     case 'add': case 'edit': m.innerHTML = viewAdd(); break;
     case 'alerts': m.innerHTML = viewAlerts(); break;
     case 'settings': m.innerHTML = viewSettings(); break;
@@ -628,9 +640,8 @@ function tabTorrents(b) {
   if (!q.enabled) return `<div class="empty">qBittorrent monitoring is off for this box — enable it under <a href="#/edit/${b.id}">edit</a>.</div>`;
   const f = S.filter.trim().toLowerCase();
   let list = q.torrents || [];
-  if (f) list = list.filter((t) => t.name.toLowerCase().includes(f) || (t.category || '').toLowerCase().includes(f) || t.kind.includes(f));
+  if (f) list = list.filter((t) => torrentMatches(t, f));
   const shown = list.slice(0, 300);
-  const kindColor = { seeding: 'var(--ok)', leeching: 'var(--accent)', paused: 'var(--dim)', checking: 'var(--warn)', error: 'var(--bad)', unknown: 'var(--dim)' };
   return `<div class="table tor-table" style="overflow:hidden">
     <div class="thead-tools">
       <div style="font-size:12px"><b>qBittorrent ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${discoveryNote(q, b)}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
@@ -644,19 +655,74 @@ function tabTorrents(b) {
     ${S.torAdd ? torAddForm(b, list) : ''}
     <div style="overflow:auto">
       <div class="trow head"><span>name</span><span>size</span><span>progress</span><span>up</span><span>down</span><span>ratio</span><span></span></div>
-      ${shown.length === 0 ? `<div class="trow"><span class="muted">${q.total === 0 ? 'no torrents' : 'no matches'}</span></div>` : shown.map((t) => `
-      <div class="trow">
-        <div style="min-width:0;display:flex;align-items:center;gap:8px" title="${esc(t.name)}"><span class="led" style="width:6px;height:6px;background:${kindColor[t.kind] || 'var(--dim)'}"></span><span class="ellip">${esc(t.name)}</span></div>
+      ${shown.length === 0 ? `<div class="trow"><span class="muted">${q.total === 0 ? 'no torrents' : 'no matches'}</span></div>` : shown.map((t) => torrentRow(b, t, '')).join('')}
+      ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
+    </div>
+  </div>`;
+}
+const KIND_COLOR = { seeding: 'var(--ok)', leeching: 'var(--accent)', paused: 'var(--dim)', checking: 'var(--warn)', error: 'var(--bad)', unknown: 'var(--dim)' };
+const torrentMatches = (t, f) => t.name.toLowerCase().includes(f) || (t.category || '').toLowerCase().includes(f) || t.kind.includes(f);
+// One torrent row, shared by the per-box tab and the fleet-wide list; lead
+// is an optional first cell (the box, in the fleet-wide list).
+function torrentRow(b, t, lead) {
+  const color = KIND_COLOR[t.kind] || 'var(--dim)';
+  return `
+      <div class="trow">${lead}
+        <div style="min-width:0;display:flex;align-items:center;gap:8px" title="${esc(t.name)}"><span class="led" style="width:6px;height:6px;background:${color}"></span><span class="ellip">${esc(t.name)}</span></div>
         <span class="muted num">${fmtBytes(t.size, 1)}</span>
-        <div><div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted)"><span>${esc(t.kind === 'unknown' ? t.state : t.kind)}</span><span>${(t.progress * 100).toFixed(t.progress < 1 ? 1 : 0)}%</span></div><div class="meter" style="height:3px;margin-top:3px"><i style="width:${t.progress * 100}%;background:${kindColor[t.kind] || 'var(--dim)'}"></i></div></div>
+        <div><div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted)"><span>${esc(t.kind === 'unknown' ? t.state : t.kind)}</span><span>${(t.progress * 100).toFixed(t.progress < 1 ? 1 : 0)}%</span></div><div class="meter" style="height:3px;margin-top:3px"><i style="width:${t.progress * 100}%;background:${color}"></i></div></div>
         <span class="num ${t.up_bps ? 'up' : 'dim'}">${fmtBps(t.up_bps)}</span>
         <span class="num ${t.down_bps ? 'down' : 'dim'}">${fmtBps(t.down_bps)}</span>
         <span class="num">${t.ratio >= 0 ? t.ratio.toFixed(2) : '∞'}</span>
         <div class="actions">${torrentButtons(b, t)}</div>
-      </div>`).join('')}
-      ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
+      </div>`;
+}
+
+/* ----- fleet-wide torrents ----- */
+function viewTorrents() {
+  const boxes = S.torrents;
+  if (boxes === null) return `<div class="head"><div><div class="eyebrow">PMSS</div><h1>Torrents</h1></div></div><div class="empty">loading…</div>`;
+  const f = S.filter.trim().toLowerCase();
+  const sum = { total: 0, seeding: 0, leeching: 0, paused: 0, errored: 0 };
+  const rows = [];
+  const notes = [];
+  for (const b of boxes) {
+    const q = b.qbt;
+    for (const k of Object.keys(sum)) sum[k] += q[k] || 0;
+    if (!q.reachable) notes.push(`<span class="warn">${esc(b.name)}: ${b.status === 'disabled' ? 'polling disabled' : 'client not responding'}${q.error ? ' — ' + esc(q.error) : ''}</span>`);
+    for (const t of q.torrents || []) if (!f || torrentMatches(t, f) || b.name.toLowerCase().includes(f)) rows.push([b, t]);
+  }
+  // Same order as the per-box tab (active first, busiest first), then by
+  // box so one box's idle torrents stay together.
+  rows.sort(([ba, a], [bb, c]) => {
+    const ra = a.up_bps + a.down_bps, rb = c.up_bps + c.down_bps;
+    if ((ra > 0) !== (rb > 0)) return ra > 0 ? -1 : 1;
+    if (ra !== rb) return rb - ra;
+    return ba.name.localeCompare(bb.name) || ba.id - bb.id;
+  });
+  const shown = rows.slice(0, 500);
+  const qbtBoxes = boxes.length;
+  return `<div class="head"><div><div class="eyebrow">PMSS</div><h1>Torrents</h1></div></div>
+  <div class="table tor-table tor-all" style="overflow:hidden;margin-top:16px">
+    <div class="thead-tools">
+      <div style="font-size:12px"><b>${sum.total} torrents</b> <span class="muted">· ${qbtBoxes} seedbox${qbtBoxes === 1 ? '' : 'es'} · ${sum.seeding} seeding · ${sum.leeching} leeching · ${sum.paused} paused${sum.errored ? ` · <span class="bad">${sum.errored} error</span>` : ''}${notes.length ? ' · ' + notes.join(' · ') : ''}</span></div>
+      <div class="actions"><input class="filter" placeholder="filter name, category, state or box…" data-filter value="${esc(S.filter)}" style="max-width:260px"></div>
+    </div>
+    <div style="overflow:auto">
+      <div class="trow head"><span>seedbox</span><span>name</span><span>size</span><span>progress</span><span>up</span><span>down</span><span>ratio</span><span></span></div>
+      ${qbtBoxes === 0 ? `<div class="trow"><span class="muted">no box has qBittorrent monitoring enabled</span></div>`
+        : shown.length === 0 ? `<div class="trow"><span class="muted">${sum.total === 0 ? 'no torrents' : 'no matches'}</span></div>`
+        : shown.map(([b, t]) => torrentRow(b, t, boxCell(b))).join('')}
+      ${rows.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${rows.length} — refine the filter</span></div>` : ''}
     </div>
   </div>`;
+}
+// The seedbox cell: a link to the box's own torrents tab, with the enabled
+// discovery mechanisms in parentheses so private-tracker placement is
+// visible per row.
+function boxCell(b) {
+  const on = discoveryOn(b.qbt);
+  return `<div class="ellip" title="${esc(b.name)}${on.length ? ' · ' + esc(on.join(', ')) + ' enabled' : ''}"><a href="#/box/${b.id}/torrents">${esc(b.name)}</a>${on.length ? ` <span class="warn">(${esc(on.join(' · '))})</span>` : ''}</div>`;
 }
 /* ---------- peer discovery (DHT / PeX / LSD) ---------- */
 const DISCOVERY = [['dht', 'DHT'], ['pex', 'PeX'], ['lsd', 'LSD']];
@@ -704,7 +770,8 @@ function torAddForm(b, list) {
 // names the size so the two cannot be mistaken for each other.
 function torrentButtons(b, t) {
   if (!t.hash) return '';
-  const h = `data-hash="${esc(t.hash)}"`;
+  const off = b.status === 'disabled' ? ' disabled title="polling is disabled for this box; enable it to run actions"' : '';
+  const h = `data-hash="${esc(t.hash)}" data-box="${b.id}"${off}`;
   const name = esc(t.name);
   return `${t.kind === 'paused'
     ? `<button class="small" data-act="tor:start" ${h}>start</button>`
@@ -1187,8 +1254,9 @@ async function qbtAction(a, act) {
 async function torrentAction(a, act) {
   const what = a.slice(4);
   act.disabled = true;
-  await api('POST', `/api/boxes/${S.selId}/qbt/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
+  await api('POST', `/api/boxes/${act.dataset.box || S.selId}/qbt/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
   toast(`torrent ${{ stop: 'stopped', start: 'started', remove: 'removed', 'remove-data': 'removed with its files' }[what]}`, 'ok');
+  if (S.view === 'torrents') void loadTorrents();
 }
 async function discoveryAction(a, act) {
   const k = a.slice(5), on = !act.dataset.on;

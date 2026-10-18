@@ -121,6 +121,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/boxes", s.handleListBoxes)
 	mux.HandleFunc("POST /api/boxes", s.handleCreateBox)
 	mux.HandleFunc("GET /api/boxes/{id}", s.handleGetBox)
+	mux.HandleFunc("GET /api/torrents", s.handleTorrents)
 	mux.HandleFunc("PUT /api/boxes/{id}", s.handleUpdateBox)
 	mux.HandleFunc("DELETE /api/boxes/{id}", s.handleDeleteBox)
 	mux.HandleFunc("POST /api/boxes/{id}/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
@@ -497,6 +498,31 @@ func (s *Server) handleCreateBox(w http.ResponseWriter, r *http.Request) {
 	}
 	b.HasPassword, b.HasQbtPass = b.Password != "", b.QbtPass != ""
 	writeJSON(w, 201, b)
+}
+
+// torrentsBox is one box in the fleet-wide torrent list: identity and
+// status, plus the full qBittorrent view including its torrents.
+type torrentsBox struct {
+	ID      int64            `json:"id"`
+	Name    string           `json:"name"`
+	Type    string           `json:"type"`
+	Status  string           `json:"status"`
+	Enabled bool             `json:"enabled"`
+	Qbt     collect.QbtState `json:"qbt"`
+}
+
+// handleTorrents returns every box that has qBittorrent monitoring on,
+// with its torrents, for the combined view. Boxes without it are left out.
+func (s *Server) handleTorrents(w http.ResponseWriter, r *http.Request) {
+	states := s.m.States()
+	out := make([]torrentsBox, 0, len(states))
+	for _, st := range states {
+		if !st.Qbt.Enabled {
+			continue
+		}
+		out = append(out, torrentsBox{ID: st.ID, Name: st.Name, Type: st.Type, Status: st.Status, Enabled: st.Enabled, Qbt: st.Qbt})
+	}
+	writeJSON(w, 200, map[string]any{"boxes": out})
 }
 
 func (s *Server) handleGetBox(w http.ResponseWriter, r *http.Request) {
