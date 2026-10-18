@@ -245,3 +245,22 @@ func TestOverlayDiscovery(t *testing.T) {
 		t.Error("overlay faked a known state")
 	}
 }
+
+// The failure path keeps a du result that was merged into the stored state
+// while the failed poll was in flight; the success path stores its own.
+func TestStoreFixKeepsDirs(t *testing.T) {
+	p := &poller{}
+	start := time.Now()
+	stored := &BoxState{Dirs: DirsState{Running: false, At: time.Now()}}
+	snap := BoxState{Dirs: DirsState{Running: true}}
+	p.storeFix(start, true)(&snap, stored)
+	if snap.Dirs.Running {
+		t.Error("failure path dropped the merged du result")
+	}
+	snap = BoxState{Dirs: DirsState{Running: true}}
+	p.storeFix(start, false)(&snap, stored)
+	if !snap.Dirs.Running {
+		t.Error("success path must keep its own Dirs")
+	}
+	p.storeFix(start, true)(&snap, nil) // no stored state: nothing to keep
+}

@@ -850,7 +850,7 @@ func ParseDu(raw []byte) []DirUsage {
 // links from it, so a value with '@', '/', '#' or quotes from a hostile box
 // must not become a link to another origin; such a value is dropped.
 func hostnameField(h string) string {
-	if h == "" || len(h) > 253 {
+	if h == "" || len(h) > 253 || h[0] == '.' || h[0] == '-' {
 		return ""
 	}
 	for _, r := range h {
