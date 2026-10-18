@@ -51,11 +51,6 @@ type Client struct {
 	cookie string // session cookie header value, set by Login
 
 	guard *AuthGuard
-	// Login attempts are numbered so a caller refused while another's
-	// attempt was in flight can take that attempt's outcome (under mu).
-	loginGen uint64
-	loginErr error
-	loginAt  time.Time
 }
 
 // banRetryAfter is the hold after qBittorrent reports the IP banned: its
@@ -85,9 +80,19 @@ type AuthGuard struct {
 	// send the same rejected credentials before the first failure was
 	// recorded, and five of those is qBittorrent's ban threshold.
 	loginMu sync.Mutex
-	err     error
-	until   time.Time // zero = until cleared
-	key     string    // credentials fingerprint the hold applies to
+	// Attempts are numbered (under mu) so a caller refused while another's
+	// attempt was in flight can take that attempt's outcome. The guard is
+	// shared by every client built for the box, so a failure is shared
+	// across clients too; a success is only reusable by the client that
+	// holds the resulting cookie (lastBy).
+	loginGen uint64
+	loginErr error
+	loginAt  time.Time
+	loginKey string // credentials the last attempt used; a failure is shared only with those
+	lastBy   *Client
+	err      error
+	until    time.Time // zero = until cleared
+	key      string    // credentials fingerprint the hold applies to
 }
 
 // AuthState is the persistable form of a guard.
@@ -109,8 +114,14 @@ func (g *AuthGuard) fail(err error, until time.Time, key string) {
 	g.mu.Unlock()
 }
 
-// Clear ends any hold (call after the client was restarted).
-func (g *AuthGuard) Clear() { g.fail(nil, time.Time{}, "") }
+// Clear ends any hold (call after the client was restarted) and forgets
+// the last attempt's outcome, so the next refused request may log in.
+func (g *AuthGuard) Clear() {
+	g.mu.Lock()
+	g.err, g.until, g.key = nil, time.Time{}, ""
+	g.loginErr, g.loginAt, g.lastBy = nil, time.Time{}, nil
+	g.mu.Unlock()
+}
 
 // Blocked reports whether logins with the given credentials are suspended.
 func (g *AuthGuard) Blocked(key string) (error, bool) {
@@ -245,10 +256,11 @@ func (c *Client) Login(ctx context.Context) error {
 // Caller holds guard.loginMu.
 func (c *Client) attempt(ctx context.Context) error {
 	err := c.login(ctx)
-	c.mu.Lock()
-	c.loginGen++
-	c.loginErr, c.loginAt = err, time.Now()
-	c.mu.Unlock()
+	g := c.guard
+	g.mu.Lock()
+	g.loginGen++
+	g.loginErr, g.loginAt, g.loginKey, g.lastBy = err, time.Now(), c.credsKey(), c
+	g.mu.Unlock()
 	return err
 }
 
@@ -259,9 +271,9 @@ func (c *Client) attempt(ctx context.Context) error {
 var loginShareWindow = 2 * time.Second
 
 func (c *Client) curGen() uint64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.loginGen
+	c.guard.mu.Lock()
+	defer c.guard.mu.Unlock()
+	return c.guard.loginGen
 }
 
 // loginAfter logs in for a request that was refused, where gen is the login
@@ -269,16 +281,23 @@ func (c *Client) curGen() uint64 {
 // (another caller's, which this one waited on), its outcome is shared: nil
 // means the retry can use the new session, an error (rejection, or a
 // connection that dropped mid-login) is returned without sending the
-// credentials again. So is a failure from the last loginShareWindow. Any
-// other refused request makes its own attempt.
+// credentials again. So is a failure from the last loginShareWindow, by
+// any client on this guard. A success is reused only by the client that
+// made it (the cookie is its own); another client logs in for itself,
+// which is safe because the credentials are known good. Any other refused
+// request makes its own attempt.
 func (c *Client) loginAfter(ctx context.Context, gen uint64) error {
 	c.guard.loginMu.Lock()
 	defer c.guard.loginMu.Unlock()
-	c.mu.Lock()
-	cur, last, at := c.loginGen, c.loginErr, c.loginAt
-	c.mu.Unlock()
-	if cur != gen || (last != nil && time.Since(at) < loginShareWindow) {
+	g := c.guard
+	g.mu.Lock()
+	cur, last, at, by, same := g.loginGen, g.loginErr, g.loginAt, g.lastBy, g.loginKey == c.credsKey()
+	g.mu.Unlock()
+	if last != nil && same && (cur != gen || time.Since(at) < loginShareWindow) {
 		return last
+	}
+	if last == nil && cur != gen && by == c {
+		return nil
 	}
 	return c.attempt(ctx)
 }

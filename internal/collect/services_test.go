@@ -351,10 +351,11 @@ func TestInFlightSyncDiscardedOnKeyChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	release := make(chan struct{})
+	release, arrived := make(chan struct{}), make(chan struct{}, 1)
 	feedA := `{"client_id":1,"currency":"EUR","services":[{"id":5,"product":"A","status":"Active","recurring_amount":"10","billing_cycle":"Monthly"}]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-API-Key") == "key-a" {
+			arrived <- struct{}{}
 			<-release // hold A's fetch open across the key change
 			w.Write([]byte(feedA))
 			return
@@ -373,7 +374,7 @@ func TestInFlightSyncDiscardedOnKeyChange(t *testing.T) {
 	m.settings.Store(&a)
 	done := make(chan error, 1)
 	go func() { done <- m.SyncServices(ctx) }()
-	time.Sleep(50 * time.Millisecond) // A's fetch is now blocked in the handler
+	<-arrived // A's fetch is now blocked in the handler
 	b := a
 	b.PMAPIKey = "key-b"
 	m.settings.Store(&b) // the swap SetSettings does, without starting B's sync
