@@ -18,6 +18,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -40,12 +41,25 @@ func TestRoundTrip(t *testing.T) {
 	}
 	got.Password = "" // keep
 	got.Plan = "Dragon-R"
-	if err := s.UpdateBox(ctx, got); err != nil {
+	if err := s.UpdateBox(ctx, got, Clears{}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = s.GetBox(ctx, b.ID)
 	if got.Password != "pw" || got.Plan != "Dragon-R" {
 		t.Fatalf("update kept secret? %+v", got)
+	}
+	got.QbtPass = "newqbt"
+	if err := s.UpdateBox(ctx, got, Clears{Password: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetBox(ctx, b.ID)
+	if got.Password != "" || got.QbtPass != "newqbt" {
+		t.Fatalf("clear+replace in one update: %+v", got)
+	}
+	gone := *got
+	gone.ID = 9999
+	if err := s.UpdateBox(ctx, &gone, Clears{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update of a missing row: %v", err)
 	}
 
 	st, _ := s.GetSettings(ctx)

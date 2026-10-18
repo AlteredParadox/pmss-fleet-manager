@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -322,5 +324,82 @@ func TestValidHash(t *testing.T) {
 		if ValidHash(h) != ok {
 			t.Errorf("ValidHash(%q) = %v", h, !ok)
 		}
+	}
+}
+
+// Concurrent callers that all find the guard open must share one login
+// attempt: each sending the rejected credentials would reach qBittorrent's
+// ban threshold of five on its own.
+func TestLoginSingleFlight(t *testing.T) {
+	var logins atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) { logins.Add(1); w.WriteHeader(401) })
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:1", "admin", "wrong")
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.Version(context.Background()); !errors.Is(err, ErrAuth) {
+				t.Errorf("want ErrAuth, got %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := logins.Load(); n != 1 {
+		t.Fatalf("login attempted %d times by 8 concurrent calls; want exactly 1", n)
+	}
+}
+
+// A caller refused while another caller's login is in flight retries with
+// the new session instead of logging in again.
+func TestLoginAfterReusesFreshSession(t *testing.T) {
+	var logins atomic.Int32
+	var mu sync.Mutex
+	authed := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		logins.Add(1)
+		http.SetCookie(w, &http.Cookie{Name: "SID", Value: "s1"})
+		mu.Lock()
+		authed = true
+		mu.Unlock()
+		w.Write([]byte("Ok."))
+	})
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) {
+		if c, _ := r.Cookie("SID"); c == nil || c.Value != "s1" {
+			w.WriteHeader(403)
+			return
+		}
+		w.Write([]byte("v5.2.4"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:1", "admin", "right")
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if v, err := c.Version(context.Background()); err != nil || v != "v5.2.4" {
+				t.Errorf("version: %q %v", v, err)
+			}
+		}()
+	}
+	wg.Wait()
+	// Callers refused before the first login finished reuse its cookie;
+	// at most the ones that raced the cookie publication log in again.
+	if n := logins.Load(); n < 1 || n > 2 {
+		t.Fatalf("logins = %d; want 1 (or 2 at the very most)", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !authed {
+		t.Fatal("never logged in")
 	}
 }

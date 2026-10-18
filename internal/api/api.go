@@ -605,24 +605,11 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 	// Secrets: a blank field keeps the saved one, so clearing is explicit.
 	// The SSH password is dropped when the box no longer authenticates with
 	// one; the WebUI password on request, unless a new one was typed.
-	clearSSH := in.AuthMethod == "key" || in.AuthMethod == "agent"
-	clearQbt := in.ClearQbtPass && in.QbtPass == ""
-	// Two writes: a client that drops (or a shutdown) between them must not
-	// leave the secret cleared and the rest of the edit unsaved.
-	ctx := context.WithoutCancel(r.Context())
-	if clearSSH || clearQbt {
-		if err := s.st.ClearSecrets(ctx, id, clearSSH, clearQbt); err != nil {
-			writeErr(w, 500, err)
-			return
-		}
-		if clearSSH {
-			b.Password = ""
-		}
-		if clearQbt {
-			b.QbtPass = ""
-		}
+	clear := store.Clears{
+		Password: in.AuthMethod == "key" || in.AuthMethod == "agent",
+		QbtPass:  in.ClearQbtPass && in.QbtPass == "",
 	}
-	if err := s.m.UpdateBox(ctx, b); err != nil {
+	if err := s.m.UpdateBox(r.Context(), b, clear); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeErr(w, 404, err)
 			return

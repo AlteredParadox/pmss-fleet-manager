@@ -17,8 +17,14 @@
 package collect
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +32,7 @@ import (
 
 	"pmss-fleet-manager/internal/pmapi"
 	"pmss-fleet-manager/internal/probe"
+	"pmss-fleet-manager/internal/store"
 )
 
 func TestMatchService(t *testing.T) {
@@ -268,4 +275,69 @@ func TestStoreFixKeepsDirs(t *testing.T) {
 		t.Error("success path must take a newer merged du result")
 	}
 	p.storeFix(start, true)(&snap, nil) // no stored state: nothing to keep
+}
+
+// Replacing the API key drops the feed fetched with the old one at once, in
+// memory and on disk, so a failed sync for the new key cannot leave the old
+// account's services on the boxes, now or after a restart.
+func TestKeyChangeForgetsFeed(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer bad.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmapi.URL = bad.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+
+	raw := []byte(`{"client_id":1,"currency":"EUR","services":[{"id":5,"product":"P","status":"Active","recurring_amount":"10","billing_cycle":"Monthly"}]}`)
+	feed, err := pmapi.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := m.Settings()
+	a.PMAPIKey = "key-a"
+	m.settings.Store(&a)
+	m.svcMu.Lock()
+	m.svc = servicesCache{feed: feed, syncedAt: time.Now()}
+	m.svcMu.Unlock()
+	if err := st.SetValue(ctx, svcCacheKey, string(raw)); err != nil {
+		t.Fatal(err)
+	}
+
+	b := a
+	b.PMAPIKey = "key-b"
+	m.SetSettings(b)
+	m.svcMu.RLock()
+	f := m.svc.feed
+	m.svcMu.RUnlock()
+	if f != nil {
+		t.Fatal("old key's feed still cached right after the key change")
+	}
+	if v, _ := st.GetValue(ctx, svcCacheKey); v != "" {
+		t.Fatalf("old key's feed still persisted: %q", v)
+	}
+	// The sync for key-b fails (500); the old feed must not come back.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m.svcMu.RLock()
+		errStr, f := m.svc.err, m.svc.feed
+		m.svcMu.RUnlock()
+		if f != nil {
+			t.Fatal("failed sync for the new key reattached the old feed")
+		}
+		if errStr != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sync for the new key never ran")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

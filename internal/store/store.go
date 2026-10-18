@@ -293,33 +293,38 @@ func (s *Store) CreateBox(ctx context.Context, b *Box) error {
 	return err
 }
 
-// UpdateBox writes all mutable fields. Empty Password/QbtPass keep the stored secret.
-func (s *Store) UpdateBox(ctx context.Context, b *Box) error {
-	now := time.Now().UTC()
-	b.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `UPDATE boxes SET name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
-		password=CASE WHEN ?='' THEN password ELSE ? END, host_key=?, type=?, plan=?, datacenter=?, renewal=?,
-		qbt_enabled=?, qbt_port=?, qbt_user=?, qbt_pass=CASE WHEN ?='' THEN qbt_pass ELSE ? END, qbt_start_cmd=?,
-		docker_enabled=?, du_enabled=?, enabled=?, updated_at=? WHERE id=?`,
-		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, b.Password, b.Password, b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
-		b.QbtEnabled, b.QbtPort, b.QbtUser, b.QbtPass, b.QbtPass, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
-		now.Format(time.RFC3339), b.ID)
-	return err
+// Clears names the stored secrets an update removes. A blank Password or
+// QbtPass on the Box keeps the stored value, so removing one is explicit.
+type Clears struct {
+	Password bool // the SSH password
+	QbtPass  bool // the WebUI password
 }
 
-// ClearSecrets blanks the stored SSH password and/or WebUI password. The
-// normal update keeps a secret when the field is blank, so this is the only
-// way to remove one.
-func (s *Store) ClearSecrets(ctx context.Context, id int64, ssh, qbt bool) error {
-	if ssh {
-		if _, err := s.db.ExecContext(ctx, `UPDATE boxes SET password='' WHERE id=?`, id); err != nil {
-			return err
-		}
+// UpdateBox writes all mutable fields in one statement. For each secret the
+// outcome is clear, keep (blank field) or replace, so an edit and the
+// removal of a password it implies land together or not at all. A missing
+// row is ErrNotFound.
+func (s *Store) UpdateBox(ctx context.Context, b *Box, clear Clears) error {
+	now := time.Now().UTC()
+	b.UpdatedAt = now
+	if clear.Password {
+		b.Password = ""
 	}
-	if qbt {
-		if _, err := s.db.ExecContext(ctx, `UPDATE boxes SET qbt_pass='' WHERE id=?`, id); err != nil {
-			return err
-		}
+	if clear.QbtPass {
+		b.QbtPass = ""
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
+		password=CASE WHEN ? THEN '' WHEN ?='' THEN password ELSE ? END, host_key=?, type=?, plan=?, datacenter=?, renewal=?,
+		qbt_enabled=?, qbt_port=?, qbt_user=?, qbt_pass=CASE WHEN ? THEN '' WHEN ?='' THEN qbt_pass ELSE ? END, qbt_start_cmd=?,
+		docker_enabled=?, du_enabled=?, enabled=?, updated_at=? WHERE id=?`,
+		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clear.Password, b.Password, b.Password, b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
+		b.QbtEnabled, b.QbtPort, b.QbtUser, clear.QbtPass, b.QbtPass, b.QbtPass, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
+		now.Format(time.RFC3339), b.ID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

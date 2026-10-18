@@ -81,3 +81,27 @@ func TestParseAmount(t *testing.T) {
 		t.Fatalf("odd amount must not reject the feed: %v", err)
 	}
 }
+
+// The key is a custom header, which Go forwards across redirects to any
+// host; the client must refuse to follow one instead.
+func TestFetchRefusesRedirect(t *testing.T) {
+	var leaked bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") != "" {
+			leaked = true
+		}
+		w.Write([]byte(sample))
+	}))
+	defer other.Close()
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL, http.StatusFound)
+	}))
+	defer feed.Close()
+	c := &Client{URL: feed.URL}
+	if _, _, err := c.Fetch(context.Background(), "k"); err == nil {
+		t.Fatal("redirected fetch must fail")
+	}
+	if leaked {
+		t.Fatal("API key was sent to the redirect target")
+	}
+}
