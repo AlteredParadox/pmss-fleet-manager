@@ -272,10 +272,11 @@ func (m *Manager) State(id int64) (BoxState, bool) {
 	return *s, true
 }
 
-// setStateWith stores s as the box's state; fix, when given, runs on it
-// under the store lock right before it is stored, so a concurrent
-// mutateState cannot slip in between the poller's last look and the store.
-func (m *Manager) setStateWith(s *BoxState, fix func(*BoxState)) {
+// setStateWith stores s as the box's state; fix runs on it under the store
+// lock right before it is stored, with the state being replaced, so a
+// concurrent mutateState or du merge cannot slip in between the poller's
+// last look and the store.
+func (m *Manager) setStateWith(s *BoxState, fix func(s, stored *BoxState)) {
 	s.Sanitize()
 	m.mu.Lock()
 	if _, ok := m.states[s.ID]; !ok { // box was removed mid-poll
@@ -289,9 +290,7 @@ func (m *Manager) setStateWith(s *BoxState, fix func(*BoxState)) {
 		m.mu.Unlock()
 		return
 	}
-	if fix != nil {
-		fix(s)
-	}
+	fix(s, m.states[s.ID])
 	cp := *s
 	m.states[s.ID] = &cp
 	m.mu.Unlock()
@@ -453,8 +452,10 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		// again before any credential-sending action. The poller also notes
 		// the time, so a poll that was already in flight cannot store the
 		// verification it made before the port was freed.
-		p.noteAction()
-		m.mutateState(id, func(s *BoxState) { s.Qbt.PortOK, s.Qbt.Reachable = false, false })
+		m.mutateState(id, func(s *BoxState) {
+			p.noteAction() // under the store lock: a poll's store is either before both or after both
+			s.Qbt.PortOK, s.Qbt.Reachable = false, false
+		})
 	}
 	p.wake()
 	return out, err
@@ -525,8 +526,8 @@ func (m *Manager) SetDiscovery(ctx context.Context, id int64, want map[string]bo
 	}
 	err := p.setDiscovery(ctx, prefs)
 	if err == nil {
-		p.noteDiscovery(want)
 		m.mutateState(id, func(s *BoxState) {
+			p.noteDiscovery(want) // under the store lock, see QbtAction
 			if !s.Qbt.Discovery.Known {
 				return
 			}

@@ -227,8 +227,11 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Write(append(b, '\n'))
 }
 
+// writeErr sends an error message. It is clipped: action errors can carry
+// output from the box's own docker daemon or start command, and the text
+// ends up in a toast.
 func writeErr(w http.ResponseWriter, code int, err error) {
-	writeJSON(w, code, map[string]string{"error": err.Error()})
+	writeJSON(w, code, map[string]string{"error": clipStr(err.Error(), 600)})
 }
 
 func idParam(r *http.Request) (int64, error) {
@@ -451,6 +454,9 @@ func (in boxInput) apply(b *store.Box) {
 	}
 	if b.Name == "" {
 		b.Name = strings.SplitN(b.Host, ".", 2)[0]
+		if net.ParseIP(b.Host) != nil { // "192" is no name for 192.0.2.1
+			b.Name = b.Host
+		}
 	}
 }
 
@@ -884,7 +890,7 @@ func (s *Server) handleAddTorrents(w http.ResponseWriter, r *http.Request) {
 // hostChars accepts a DNS-shaped host name; the UI builds https links from
 // it, so '@', '/', '#', '?' and quotes must never get in.
 func hostChars(h string) bool {
-	if len(h) > 253 || h[0] == '.' || h[0] == '-' { // the first label is the box's default name
+	if h == "" || len(h) > 253 || h[0] == '.' || h[0] == '-' { // the first label is the box's default name
 		return false
 	}
 	for _, r := range h {

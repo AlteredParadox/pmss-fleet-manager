@@ -394,7 +394,8 @@ func TestClipStr(t *testing.T) {
 }
 
 // Host and user end up in https links the UI builds, so the server rejects
-// characters that would change the link's origin or path.
+// characters that would change the link's origin or path, and a host whose
+// first label is empty (it is the box's default name).
 func TestBoxInputHostUser(t *testing.T) {
 	ok := boxInput{Host: "lt5-1.pulsedmedia.com", User: "alice_01"}
 	if err := ok.validate(); err != nil {

@@ -136,15 +136,30 @@ func (p *poller) overlayDiscovery(start time.Time, d *Discovery) {
 	}
 }
 
-// afterPoll is run under the store lock as the poll's state is published:
-// a stop/restart or discovery write that landed while the poll was in
-// flight (even during record()) must not be undone by what the poll read.
+// afterPoll reconciles the poll's result with what happened while it was
+// in flight: a stop/restart or discovery write must not be undone by what
+// the poll read. It runs once before classify (so the status reflects it)
+// and again under the store lock as the state is published (for anything
+// that landed in between, even during record()).
 func (p *poller) afterPoll(start time.Time) func(*BoxState) {
 	return func(s *BoxState) {
 		if p.actionSince(start) {
 			s.Qbt.PortOK, s.Qbt.Reachable = false, false
 		}
 		p.overlayDiscovery(start, &s.Qbt.Discovery)
+	}
+}
+
+// storeFix adapts afterPoll to setStateWith. keepDirs is for the failure
+// path: that poll measured nothing, so a du result merged into the stored
+// state while it was in flight is newer than its snapshot and is kept.
+func (p *poller) storeFix(start time.Time, keepDirs bool) func(s, stored *BoxState) {
+	fix := p.afterPoll(start)
+	return func(s, stored *BoxState) {
+		fix(s)
+		if keepDirs && stored != nil {
+			s.Dirs = stored.Dirs
+		}
 	}
 }
 
@@ -425,7 +440,7 @@ func (p *poller) poll(ctx context.Context) {
 
 	st.Sanitize() // before the cache write as well as the in-memory store
 	p.record(ctx, &st)
-	p.m.setStateWith(&st, p.afterPoll(start))
+	p.m.setStateWith(&st, p.storeFix(start, false))
 }
 
 // retryInterval is the poll interval for a box with the given number of
@@ -483,7 +498,7 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 	// online (the last successful poll) and walk it through "degraded".
 	st.Sanitize()
 	p.record(ctx, st)
-	p.m.setStateWith(st, p.afterPoll(start))
+	p.m.setStateWith(st, p.storeFix(start, true))
 }
 
 func classify(st *BoxState) (string, string) {

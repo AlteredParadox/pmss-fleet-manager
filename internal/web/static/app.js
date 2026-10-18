@@ -780,7 +780,7 @@ function addToast(r, stopped) {
 // "no matches".
 function emptyTorrents(total, list, status) {
   if (total === 0) return 'no torrents';
-  if (!list || list.length === 0) return status === 'disabled' ? 'polling is disabled, so the torrent list is not loaded' : 'torrent list not loaded yet — waiting for the next poll';
+  if (!list || list.length === 0) return status === 'disabled' ? 'the counted torrents are on boxes whose polling is disabled, so their list is not loaded' : 'torrent list not loaded yet — waiting for the next poll';
   return 'no matches';
 }
 // Why a box's torrents are missing from the fleet view. A box whose client
