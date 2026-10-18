@@ -188,3 +188,47 @@ func TestFoldDu(t *testing.T) {
 		t.Fatalf("restored row not capped: len %d", len(capped))
 	}
 }
+
+// A hash from the WebUI is kept only when it is one: a hostile client's ".."
+// would otherwise be POSTed as a path segment and path-cleaned by the mux.
+func TestTorrentHash(t *testing.T) {
+	v1 := "0123456789ABCDEF0123456789abcdef01234567"
+	if got := torrentHash(v1); got != strings.ToLower(v1) {
+		t.Errorf("v1 hash → %q", got)
+	}
+	if got := torrentHash(v1 + v1[:24]); got != strings.ToLower(v1+v1[:24]) {
+		t.Errorf("v2 hash → %q", got)
+	}
+	for _, h := range []string{"..", "", "all", v1[:39], v1 + "0", v1[:39] + "g", strings.Repeat("a", 65)} {
+		if torrentHash(h) != "" {
+			t.Errorf("%q kept", h)
+		}
+	}
+}
+
+// A SetDiscovery write that lands while a poll is in flight must not be
+// undone when that poll publishes the values it read before the write.
+func TestOverlayDiscovery(t *testing.T) {
+	p := &poller{}
+	start := time.Now()
+	d := Discovery{Known: true, DHT: true}
+	p.overlayDiscovery(start, &d)
+	if !d.DHT {
+		t.Fatal("overlay without a write changed the value")
+	}
+	p.noteDiscovery(map[string]bool{"dht": false, "lsd": true})
+	p.overlayDiscovery(start, &d)
+	if d.DHT || !d.LSD || d.PeX {
+		t.Errorf("overlay after write: %+v", d)
+	}
+	later := Discovery{Known: true, DHT: true}
+	p.overlayDiscovery(time.Now(), &later) // a poll that started after the write read the truth
+	if !later.DHT {
+		t.Error("overlay applied to a poll that started after the write")
+	}
+	unknown := Discovery{}
+	p.overlayDiscovery(start, &unknown)
+	if unknown.Known || unknown.LSD {
+		t.Error("overlay faked a known state")
+	}
+}

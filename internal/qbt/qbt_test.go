@@ -229,7 +229,7 @@ func TestTorrentAction(t *testing.T) {
 }
 
 // Add posts a multipart torrents/add with links, files and options, and
-// reads qBittorrent's "Fails." / 415 answers as ErrBadTorrent.
+// reads qBittorrent's "Fails." answer as ErrAddRejected and 415 as ErrBadTorrent.
 func TestAdd(t *testing.T) {
 	answer := "Ok."
 	var seen map[string]string
@@ -268,8 +268,17 @@ func TestAdd(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, seen[k], v)
 		}
 	}
+	// Not stopped: neither field may be sent, or the client's own
+	// "add stopped" default would be overridden.
+	seen = nil
+	if err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:def"}}); err != nil {
+		t.Fatal(err)
+	}
+	if seen["stopped"] != "" || seen["paused"] != "" {
+		t.Errorf("unstopped add sent stopped=%q paused=%q", seen["stopped"], seen["paused"])
+	}
 	answer = "Fails."
-	if err := c.Add(ctx, req); !errors.Is(err, ErrBadTorrent) {
+	if err := c.Add(ctx, req); !errors.Is(err, ErrAddRejected) {
 		t.Fatalf("Fails. → %v", err)
 	}
 	answer = "415"
@@ -278,5 +287,14 @@ func TestAdd(t *testing.T) {
 	}
 	if err := c.Add(ctx, AddRequest{}); err == nil {
 		t.Fatal("empty add accepted")
+	}
+}
+
+func TestValidHash(t *testing.T) {
+	v1 := "0123456789abcdef0123456789ABCDEF01234567"
+	for h, ok := range map[string]bool{v1: true, v1 + v1[:24]: true, v1[:39]: false, v1 + "0": false, "..": false, "": false, v1[:39] + "…": false} {
+		if ValidHash(h) != ok {
+			t.Errorf("ValidHash(%q) = %v", h, !ok)
+		}
 	}
 }

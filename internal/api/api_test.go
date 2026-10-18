@@ -380,3 +380,15 @@ func TestTorrentsList(t *testing.T) {
 		}
 	}
 }
+
+func TestClipStr(t *testing.T) {
+	if got := clipStr("abcdef", 3); got != "abc…" {
+		t.Errorf("ascii clip = %q", got)
+	}
+	if got := clipStr("héllo", 2); got != "h…" { // 'é' is two bytes; never split it
+		t.Errorf("rune clip = %q", got)
+	}
+	if got := clipStr("short", 10); got != "short" {
+		t.Errorf("no clip = %q", got)
+	}
+}

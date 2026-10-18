@@ -433,7 +433,7 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap := &Snapshot{At: now}
 	snap.UID, _ = strconv.Atoi(strings.TrimSpace(s["uid"]))
 	snap.User = strings.TrimSpace(s["user"])
-	snap.Hostname = strings.TrimSpace(s["hostname"])
+	snap.Hostname = hostnameField(strings.TrimSpace(s["hostname"]))
 	if ts, err := strconv.ParseInt(strings.TrimSpace(s["now"]), 10, 64); err == nil && ts > 0 {
 		snap.At = time.Unix(ts, 0)
 	}
@@ -844,4 +844,19 @@ func ParseDu(raw []byte) []DirUsage {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Bytes > out[j].Bytes })
 	return out
+}
+
+// hostnameField accepts only a DNS-shaped host name. The UI builds https
+// links from it, so a value with '@', '/', '#' or quotes from a hostile box
+// must not become a link to another origin; such a value is dropped.
+func hostnameField(h string) string {
+	if h == "" || len(h) > 253 {
+		return ""
+	}
+	for _, r := range h {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '.' && r != '-' {
+			return ""
+		}
+	}
+	return h
 }

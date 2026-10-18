@@ -179,9 +179,12 @@ async function loadDetail(id) {
     }
   }
 }
+let torSeq = 0; // one reload per state event; only the newest response may land
 async function loadTorrents() {
+  const seq = ++torSeq;
   try {
     const d = await api('GET', '/api/torrents');
+    if (seq !== torSeq) return;
     S.torrents = d.boxes || [];
   } catch (e) { toast(`torrents: ${e.message}`, 'bad'); }
   if (S.view === 'torrents') render();
@@ -226,7 +229,7 @@ function connectEvents() {
     if ((S.view === 'box' || S.view === 'edit') && S.selId === e.box_id) {
       if (S.removingId !== e.box_id) { toast('that box was removed', 'bad'); }
       go('/fleet');
-    } else if (S.view === 'alerts') { void loadAlerts(); } else { render(); }
+    } else if (S.view === 'alerts') { void loadAlerts(); } else if (S.view === 'torrents') { void loadTorrents(); } else { render(); }
   });
   es.addEventListener('settings', () => {
     // Saved from another tab: refresh our copy. On the settings form, fields
@@ -649,13 +652,13 @@ function tabTorrents(b) {
         <input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">
         <button class="small" data-act="qbt:pause" data-confirm="Pause all torrents on ${esc(b.name)}?">pause all</button>
         <button class="small" data-act="qbt:resume">resume all</button>
-        <button class="small ${S.torAdd ? 'on' : ''}" data-act="tor-add:toggle">${S.torAdd ? 'close' : 'add'}</button>
+        <button class="small" data-act="tor-add:toggle">${S.torAdd ? 'close' : 'add'}</button>
       </div>
     </div>
-    ${S.torAdd ? torAddForm(b, list) : ''}
+    ${S.torAdd ? torAddForm(b, q.torrents || []) : ''}
     <div style="overflow:auto">
       ${TOR_HEAD('')}
-      ${shown.length === 0 ? `<div class="trow"><span class="muted">${q.total === 0 ? 'no torrents' : 'no matches'}</span></div>` : shown.map((t) => torrentRow(b, t, '')).join('')}
+      ${shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(q.total, q.torrents)}</span></div>` : shown.map((t) => torrentRow(b, t, '')).join('')}
       ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
     </div>
   </div>`;
@@ -726,7 +729,7 @@ function viewTorrents() {
     <div style="overflow:auto">
       ${TOR_HEAD('<span>seedbox</span>')}
       ${qbtBoxes === 0 ? `<div class="trow"><span class="muted">no box has qBittorrent monitoring enabled</span></div>`
-        : shown.length === 0 ? `<div class="trow"><span class="muted">${sum.total === 0 ? 'no torrents' : 'no matches'}</span></div>`
+        : shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(sum.total, S.torrents.flatMap((b) => b.qbt?.torrents || []))}</span></div>`
         : shown.map(([b, t]) => torrentRow(b, t, boxCell(b))).join('')}
       ${rows.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${rows.length} — refine the filter</span></div>` : ''}
     </div>
@@ -759,6 +762,14 @@ function discoveryNote(q, b) {
     return `<button class="disc ${on ? 'warn' : ''}" data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(b.name)}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
   }).join(' · ');
 }
+// Text for an empty torrent table. After a restart the cached counts are
+// restored but the list is not until the first poll, so say so rather than
+// "no matches".
+function emptyTorrents(total, list) {
+  if (total === 0) return 'no torrents';
+  if (!list || list.length === 0) return 'torrent list not loaded yet — waiting for the next poll';
+  return 'no matches';
+}
 // The add-torrent form. Its draft lives in S.torAdd because every state
 // event re-renders the tab; File objects are kept there too, since a file
 // input cannot be refilled, and the chosen names are listed beside it.
@@ -788,7 +799,7 @@ function torrentButtons(b, t) {
   const off = b.status === 'disabled' ? ' disabled title="polling is disabled for this box; enable it to run actions"' : '';
   const h = `data-hash="${esc(t.hash)}" data-box="${b.id}"${off}`;
   const name = esc(t.name);
-  return `${t.kind === 'paused'
+  return `${t.kind === 'paused' || t.kind === 'error' // error/missingFiles are stopped torrents: start is what recovers them
     ? `<button class="small" data-act="tor:start" ${h}>start</button>`
     : `<button class="small" data-act="tor:stop" ${h} data-confirm="Stop ${name} on ${esc(b.name)}?">stop</button>`}
     <button class="small ghost" data-act="tor:remove" ${h} data-confirm="Remove ${name} from qBittorrent on ${esc(b.name)}? The downloaded files stay on disk.">remove</button>

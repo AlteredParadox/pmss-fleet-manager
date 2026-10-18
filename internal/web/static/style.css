@@ -107,8 +107,8 @@ h1{margin:2px 0 0;font-size:22px;font-weight:600;letter-spacing:-.01em}
 .tag{font-size:10px;padding:2px 7px;border:1px solid var(--line);border-radius:2px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;flex:none;max-width:100%;overflow-wrap:anywhere;line-height:1.4}
 .tag.discovery{color:var(--warn);border-color:var(--warn);text-transform:none}
 button.disc{background:none;border:1px dashed var(--line);padding:0 5px;font-size:inherit;color:var(--muted);line-height:1.4} /* DHT/PeX/LSD toggles in the torrents header */
-button.disc.warn{color:var(--warn);border-color:var(--warn)}
-button.disc:hover{color:var(--text)} /* DHT/PeX/LSD on: not for private-tracker torrents */
+button.disc.warn{color:var(--warn);border-color:var(--warn)} /* DHT/PeX/LSD on: not for private-tracker torrents */
+button.disc:hover{color:var(--text)}
 .meter{height:4px;background:var(--line);border-radius:2px;overflow:hidden}
 .meter>i{display:block;height:100%;background:var(--accent);border-radius:2px}
 .meter.thick{height:6px}
@@ -129,7 +129,7 @@ button.disc:hover{color:var(--text)} /* DHT/PeX/LSD on: not for private-tracker 
 .fleet-table .trow>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tor-table .trow{grid-template-columns:minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 210px;min-width:1280px;padding:10px 16px}
 .tor-table .swarm{font-size:10.5px}
-.tor-table .trow .actions,.tor-table .thead-tools .actions{flex-wrap:nowrap;justify-content:flex-end}
+.tor-table .trow .actions,.tor-table .thead-tools .actions{flex-wrap:nowrap;justify-content:flex-end} /* filter + pause/resume on one line, stop/remove/+files on one line */
 .tor-all .trow{grid-template-columns:minmax(150px,1fr) minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 210px;min-width:1440px} /* fleet-wide list: seedbox column first */
 .tor-all .trow a{color:var(--text);text-decoration:none}
 .tor-all .trow a:hover{color:var(--accent)}
@@ -138,7 +138,7 @@ button.disc:hover{color:var(--text)} /* DHT/PeX/LSD on: not for private-tracker 
 .tor-add input[type=file]{padding:5px 8px;font-size:11px}
 .tor-add label.row{display:flex;gap:6px;align-items:center;font-size:12px;white-space:nowrap}
 .tor-add label.row input{width:auto}
-@media (max-width:900px){.tor-add{grid-template-columns:1fr 1fr}} /* filter + pause/resume on one line, stop/remove/+files on one line */
+@media (max-width:900px){.tor-add{grid-template-columns:1fr 1fr}}
 .tor-table .trow.head{padding:8px 16px;font-size:10.5px}
 .ctr-table .trow{grid-template-columns:minmax(160px,1.3fr) minmax(200px,1.5fr) 110px minmax(140px,1fr) 90px 110px 150px;min-width:960px;padding:10px 16px}
 .ctr-table .trow.head{padding:8px 16px;font-size:10.5px}
