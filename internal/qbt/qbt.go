@@ -74,10 +74,15 @@ var ErrAuth = errors.New("qbittorrent rejected the WebUI username/password; logi
 // which resets qBittorrent's counter). A guard outlives the Client it is
 // attached to; the poller keeps one per box and persists it.
 type AuthGuard struct {
-	mu    sync.Mutex
-	err   error
-	until time.Time // zero = until cleared
-	key   string    // credentials fingerprint the hold applies to
+	mu sync.Mutex
+	// loginMu admits one login attempt at a time. Without it, callers that
+	// all saw the guard open (a poll and a few torrent clicks) would each
+	// send the same rejected credentials before the first failure was
+	// recorded, and five of those is qBittorrent's ban threshold.
+	loginMu sync.Mutex
+	err     error
+	until   time.Time // zero = until cleared
+	key     string    // credentials fingerprint the hold applies to
 }
 
 // AuthState is the persistable form of a guard.
@@ -215,12 +220,42 @@ func (c *Client) send(ctx context.Context, method, path, ctype string, body []by
 		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	return resp.StatusCode, b, resp, err
 }
 
-// Login authenticates. With localhost auth bypass qBittorrent answers Ok. to anything.
+// maxBody bounds any one response. A maindata for a few thousand torrents
+// is a few MiB; every poller may hold one of these at once.
+const maxBody = 16 << 20
+
+// Login authenticates. With localhost auth bypass qBittorrent answers Ok. to
+// anything. One attempt runs at a time per guard; a caller that waited for
+// another's attempt then sees its outcome through the guard.
 func (c *Client) Login(ctx context.Context) error {
+	c.guard.loginMu.Lock()
+	defer c.guard.loginMu.Unlock()
+	return c.login(ctx)
+}
+
+func (c *Client) currentCookie() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cookie
+}
+
+// loginAfter logs in for a request that was refused while carrying the
+// cookie sent, unless another caller logged in meanwhile: the retry then
+// simply uses the new session instead of sending the credentials again.
+func (c *Client) loginAfter(ctx context.Context, sent string) error {
+	c.guard.loginMu.Lock()
+	defer c.guard.loginMu.Unlock()
+	if cur := c.currentCookie(); cur != "" && cur != sent {
+		return nil
+	}
+	return c.login(ctx)
+}
+
+func (c *Client) login(ctx context.Context) error {
 	if err, held := c.guard.Blocked(c.credsKey()); held {
 		return err
 	}
@@ -269,6 +304,7 @@ func (c *Client) call(ctx context.Context, method, path string, form url.Values,
 
 // callBody is call for an arbitrary request body (multipart uploads).
 func (c *Client) callBody(ctx context.Context, method, path, ctype string, payload []byte, out any) error {
+	sent := c.currentCookie()
 	code, body, _, err := c.send(ctx, method, path, ctype, payload)
 	if err != nil {
 		return err
@@ -278,7 +314,7 @@ func (c *Client) callBody(ctx context.Context, method, path, ctype string, paylo
 			c.guard.fail(ErrBanned, time.Now().Add(banRetryAfter), "")
 			return ErrBanned
 		}
-		if err := c.Login(ctx); err != nil {
+		if err := c.loginAfter(ctx, sent); err != nil {
 			return err
 		}
 		code, body, _, err = c.send(ctx, method, path, ctype, payload)

@@ -158,7 +158,8 @@ async function loadState() {
     S.settings = d.settings || {};
     applyTheme(S.view === 'settings' && S.settingsDraft && S.settingsTouched.theme ? S.settingsDraft.theme : S.settings.theme); // keep an unsaved preview
     if (!S.fleetViewTouched) S.fleetView = S.settings.fleet_view || 'cards';
-  } catch (e) { toast(`state: ${e.message}`, 'bad'); }
+    return true;
+  } catch (e) { toast(`state: ${e.message}`, 'bad'); return false; }
 }
 async function loadDetail(id) {
   if (!id) return;
@@ -180,6 +181,13 @@ async function loadDetail(id) {
   }
 }
 let torSeq = 0; // one reload per state event; only the newest response may land
+let torTimer = 0;
+// Events from several boxes arrive within milliseconds of each other; one
+// reload of the combined view covers them all.
+function loadTorrentsSoon() {
+  if (torTimer) return;
+  torTimer = setTimeout(() => { torTimer = 0; void loadTorrents(); }, 300);
+}
 async function loadTorrents() {
   const seq = ++torSeq;
   try {
@@ -199,16 +207,28 @@ function applyTheme(t) {
 function connectEvents() {
   const es = new EventSource('/api/events');
   let wasDown = false;
-  es.onopen = async () => {
+  let resyncGen = 0;
+  // Events missed while disconnected (a box removed during a server restart,
+  // say) are only recovered by a full reload, and nothing later will repeat
+  // them: keep trying until one lands or the stream drops again.
+  const resync = async () => {
+    const gen = ++resyncGen;
+    for (let wait = 2000; S.live && gen === resyncGen; wait = Math.min(wait * 2, 30000)) {
+      if (await loadState()) {
+        if (gen !== resyncGen) return;
+        if (S.view === 'box' && S.selId) void loadDetail(S.selId); else if (S.view === 'alerts') void loadAlerts(); else if (S.view === 'torrents') void loadTorrents();
+        render();
+        return;
+      }
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  };
+  es.onopen = () => {
     S.live = true;
-    if (wasDown) { // resync everything missed while disconnected (e.g. a server restart)
-      await loadState();
-      if (S.view === 'box' && S.selId) void loadDetail(S.selId); else if (S.view === 'alerts') void loadAlerts(); else if (S.view === 'torrents') void loadTorrents();
-      render();
-    } else renderSide();
+    if (wasDown) void resync(); else renderSide();
     wasDown = false;
   };
-  es.onerror = () => { S.live = false; wasDown = true; renderSide(); };
+  es.onerror = () => { S.live = false; wasDown = true; resyncGen++; renderSide(); };
   es.addEventListener('state', (ev) => {
     const e = JSON.parse(ev.data);
     if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
@@ -217,7 +237,7 @@ function connectEvents() {
     S.boxes.sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
     recomputeTotals();
     if (S.view === 'box' && S.selId === e.box_id) void loadDetail(e.box_id);
-    else if (S.view === 'torrents') void loadTorrents();
+    else if (S.view === 'torrents') loadTorrentsSoon();
     else if (S.view === 'fleet') render(); else renderSide();
   });
   es.addEventListener('removed', (ev) => {
@@ -229,7 +249,7 @@ function connectEvents() {
     if ((S.view === 'box' || S.view === 'edit') && S.selId === e.box_id) {
       if (S.removingId !== e.box_id) { toast('that box was removed', 'bad'); }
       go('/fleet');
-    } else if (S.view === 'alerts') { void loadAlerts(); } else if (S.view === 'torrents') { void loadTorrents(); } else { render(); }
+    } else if (S.view === 'alerts') { void loadAlerts(); } else if (S.view === 'torrents') { loadTorrentsSoon(); } else { render(); }
   });
   es.addEventListener('settings', () => {
     // Saved from another tab: refresh our copy. On the settings form, fields
@@ -260,6 +280,7 @@ function recomputeTotals() {
   const t = { count: 0, online: 0, disk_used: 0, disk_quota: 0, traffic_out: 0, traffic_in: 0, up_bps: 0, down_bps: 0, torrents: 0, seeding: 0, containers: 0, next_renewal: '', last_poll: '',
     monthly_cost: 0, monthly_cost_fleet: S.totals?.monthly_cost_fleet || 0, currency: S.totals?.currency || '' };
   let last = 0;
+  const seenSvc = new Set(); // two boxes on one service count it once, as the server does
   for (const b of S.boxes) {
     t.count++;
     if (b.status === 'online' || b.status === 'degraded') t.online++;
@@ -269,7 +290,7 @@ function recomputeTotals() {
     t.torrents += b.qbt.total; t.seeding += b.qbt.seeding; t.containers += b.docker.running;
     const r = renewalOf(b);
     if (r && (!t.next_renewal || r < t.next_renewal)) t.next_renewal = r;
-    if (b.service) { t.monthly_cost += b.service.monthly || 0; t.currency = b.service.currency; }
+    if (b.service && !seenSvc.has(b.service.id)) { seenSvc.add(b.service.id); t.monthly_cost += b.service.monthly || 0; t.currency = b.service.currency; }
     const lp = new Date(b.last_poll).getTime();
     if (lp > last) last = lp;
   }
@@ -1290,7 +1311,13 @@ document.addEventListener('click', async (e) => {
 /* data-act handlers, one per action group. API errors propagate to the click
    handler, which shows the toast and re-enables the button. */
 async function boxAction(a) {
-  if (a === 'refresh-all') { for (const b of S.boxes) { api('POST', `/api/boxes/${b.id}/refresh`).catch(() => {}); } toast('refreshing all boxes'); }
+  if (a === 'refresh-all') {
+    const live = S.boxes.filter((b) => b.status !== 'disabled');
+    const rs = await Promise.allSettled(live.map((b) => api('POST', `/api/boxes/${b.id}/refresh`)));
+    const failed = rs.filter((r) => r.status === 'rejected').length;
+    if (failed) toast(`refresh requested for ${live.length - failed} of ${live.length} boxes; ${failed} failed`, 'warn');
+    else toast(`refresh requested for ${live.length} boxes`);
+  }
   else if (a === 'refresh') { await api('POST', `/api/boxes/${S.selId}/refresh`); toast('refresh requested'); }
   else if (a === 'du') { const id = S.selId; await api('POST', `/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
   else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }

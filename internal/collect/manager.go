@@ -55,10 +55,11 @@ type Manager struct {
 	hooks  []Hook
 	latest latestRelease
 
-	boxMu sync.Mutex // serialises AddBox/UpdateBox/RemoveBox
-	pmapi *pmapi.Client
-	svcMu sync.RWMutex
-	svc   servicesCache
+	boxMu  sync.Mutex // serialises AddBox/UpdateBox/RemoveBox
+	pmapi  *pmapi.Client
+	svcMu  sync.RWMutex
+	svc    servicesCache
+	syncMu sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -93,6 +94,10 @@ func (m *Manager) Settings() store.Settings { return *m.settings.Load() }
 func (m *Manager) SetSettings(s store.Settings) {
 	prev := m.settings.Swap(&s)
 	if prev.PMAPIKey != s.PMAPIKey && m.ctx != nil {
+		// The cached feed belongs to the old key: drop it first, so a
+		// failed sync for the new key cannot leave the old account's
+		// services, costs and renewal dates on the boxes.
+		m.forgetServices(m.ctx)
 		go m.SyncServices(m.ctx)
 	}
 	if prev.PollIntervalSec == s.PollIntervalSec {
@@ -315,10 +320,10 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 }
 
 // UpdateBox persists changes and restarts the poller with fresh connections.
-func (m *Manager) UpdateBox(ctx context.Context, b *store.Box) error {
+func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clear store.Clears) error {
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
-	if err := m.st.UpdateBox(ctx, b); err != nil {
+	if err := m.st.UpdateBox(ctx, b, clear); err != nil {
 		return err
 	}
 	m.mu.Lock()

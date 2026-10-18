@@ -16,3 +16,6 @@ config.local.yaml
 # test and release artifacts
 *.test
 coverage.out
+
+# external review notes (local only)
+gpt_review_*.md

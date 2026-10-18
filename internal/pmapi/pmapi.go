@@ -166,7 +166,13 @@ func (c *Client) Fetch(ctx context.Context, key string) (*Feed, []byte, error) {
 	if key == "" {
 		return nil, nil, errors.New("no API key configured")
 	}
-	hc, u := &http.Client{Timeout: 30 * time.Second}, c.URL
+	// The key travels in a custom header, which Go (unlike Authorization)
+	// forwards unchanged across redirects to any host or scheme. The feed
+	// has one fixed URL, so a redirect is refused rather than followed.
+	hc := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return fmt.Errorf("feed redirected to %s://%s; refusing to send the API key there", req.URL.Scheme, req.URL.Host)
+	}}
+	u := c.URL
 	if u == "" {
 		u = FeedURL
 	}

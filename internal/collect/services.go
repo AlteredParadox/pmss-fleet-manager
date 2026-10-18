@@ -149,17 +149,27 @@ func (m *Manager) loadServicesCache(ctx context.Context) {
 	m.svcMu.Unlock()
 }
 
+// forgetServices drops the cached feed, in memory and on disk, and detaches
+// it from every box. Used when the key is cleared or replaced: a feed
+// fetched with one key must never be shown under another, not even after a
+// restart.
+func (m *Manager) forgetServices(ctx context.Context) {
+	m.svcMu.Lock()
+	m.svc = servicesCache{}
+	m.svcMu.Unlock()
+	_ = m.st.SetValue(ctx, svcCacheKey, "")
+	m.reattachServices()
+}
+
 // SyncServices fetches the customer API feed now, caches it, and re-attaches
-// services to every box. It is safe to call concurrently; calls overlap only
-// in doing redundant work.
+// services to every box. Calls are serialised, so the cache always holds the
+// most recent fetch; a sync whose key was replaced while it ran is discarded.
 func (m *Manager) SyncServices(ctx context.Context) error {
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
 	key := m.Settings().PMAPIKey
 	if key == "" {
-		m.svcMu.Lock()
-		m.svc = servicesCache{}
-		m.svcMu.Unlock()
-		_ = m.st.SetValue(ctx, svcCacheKey, "")
-		m.reattachServices()
+		m.forgetServices(ctx)
 		return errors.New("no Pulsed Media API key configured")
 	}
 	fctx, cancel := context.WithTimeout(ctx, 45*time.Second)

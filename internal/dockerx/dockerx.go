@@ -63,7 +63,7 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20)) // a few hundred containers is well under 1 MiB
 	if err != nil {
 		return err
 	}
