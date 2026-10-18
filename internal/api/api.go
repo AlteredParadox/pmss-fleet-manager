@@ -53,6 +53,7 @@ type Server struct {
 	st   *store.Store
 	m    *collect.Manager
 	auth string // "user:pass" or ""
+	basePath string // URL path prefix for reverse-proxy deployments
 	mux  *http.ServeMux
 	// instance identifies this process; the UI reloads itself when it
 	// changes after an SSE reconnect so a rebuilt server never runs stale JS.
@@ -108,59 +109,71 @@ const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inl
 	"font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 // New builds the handler tree.
-func New(st *store.Store, m *collect.Manager, basicAuth string) *Server {
-	s := &Server{st: st, m: m, auth: basicAuth, mux: http.NewServeMux(),
+func New(st *store.Store, m *collect.Manager, basicAuth string, basePath string) *Server {
+	s := &Server{st: st, m: m, auth: basicAuth, basePath: basePath, mux: http.NewServeMux(),
 		instance: strconv.FormatInt(time.Now().UnixNano(), 36)}
 	s.routes()
 	return s
 }
 
 func (s *Server) routes() {
+	bp := s.basePath
 	mux := s.mux
-	mux.HandleFunc("GET /api/state", s.handleState)
-	mux.HandleFunc("GET /api/events", s.handleEvents)
-	mux.HandleFunc("GET /api/boxes", s.handleListBoxes)
-	mux.HandleFunc("POST /api/boxes", s.handleCreateBox)
-	mux.HandleFunc("GET /api/boxes/{id}", s.handleGetBox)
-	mux.HandleFunc("GET /api/torrents", s.handleTorrents)
-	mux.HandleFunc("PUT /api/boxes/{id}", s.handleUpdateBox)
-	mux.HandleFunc("DELETE /api/boxes/{id}", s.handleDeleteBox)
-	mux.HandleFunc("POST /api/boxes/{id}/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
-	mux.HandleFunc("POST /api/boxes/{id}/refresh", s.handleRefresh)
-	mux.HandleFunc("POST /api/boxes/{id}/du", s.handleDu)
-	mux.HandleFunc("POST /api/boxes/{id}/qbt/{action}", s.handleQbtAction)
-	mux.HandleFunc("POST /api/boxes/{id}/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
-	mux.HandleFunc("POST /api/boxes/{id}/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
-	mux.HandleFunc("POST /api/boxes/{id}/qbt/discovery", s.handleSetDiscovery)
-	mux.HandleFunc("POST /api/boxes/{id}/containers/{cid}/{action}", s.handleContainerAction)
-	mux.HandleFunc("POST /api/detect", s.handleDetect)
-	mux.HandleFunc("GET /api/alerts", s.handleAlerts)
-	mux.HandleFunc("POST /api/alerts/ack-all", s.handleAckAll)
-	mux.HandleFunc("POST /api/alerts/{id}/ack", s.handleAck)
-	mux.HandleFunc("DELETE /api/alerts/{id}", s.handleDeleteAlert)
-	mux.HandleFunc("POST /api/alerts/clear-resolved", s.handleClearResolved)
-	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
-	mux.HandleFunc("PUT /api/settings", s.handleSetSettings)
+	mux.HandleFunc("GET " + bp + "/api/state", s.handleState)
+	mux.HandleFunc("GET " + bp + "/api/events", s.handleEvents)
+	mux.HandleFunc("GET " + bp + "/api/boxes", s.handleListBoxes)
+	mux.HandleFunc("POST " + bp + "/api/boxes", s.handleCreateBox)
+	mux.HandleFunc("GET " + bp + "/api/boxes/{id}", s.handleGetBox)
+	mux.HandleFunc("GET " + bp + "/api/torrents", s.handleTorrents)
+	mux.HandleFunc("PUT " + bp + "/api/boxes/{id}", s.handleUpdateBox)
+	mux.HandleFunc("DELETE " + bp + "/api/boxes/{id}", s.handleDeleteBox)
+	mux.HandleFunc("POST " + bp + "/api/boxes/{id}/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
+	mux.HandleFunc("POST " + bp + "/api/boxes/{id}/refresh", s.handleRefresh)
+	mux.HandleFunc("POST " + bp + "/api/boxes/{id}/du", s.handleDu)
+	mux.HandleFunc("POST " + bp + "/api/boxes/{id}/qbt/{action}", s.handleQbtAction)
+	mux.HandleFunc("POST " + bp + "/api/boxes/{id}/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
+	mux.HandleFunc("POST " + bp + "/api/boxes/{id}/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
+	mux.HandleFunc("POST " + bp + "/api/boxes/{id}/qbt/discovery", s.handleSetDiscovery)
+	mux.HandleFunc("POST " + bp + "/api/boxes/{id}/containers/{cid}/{action}", s.handleContainerAction)
+	mux.HandleFunc("POST " + bp + "/api/detect", s.handleDetect)
+	mux.HandleFunc("GET " + bp + "/api/alerts", s.handleAlerts)
+	mux.HandleFunc("POST " + bp + "/api/alerts/ack-all", s.handleAckAll)
+	mux.HandleFunc("POST " + bp + "/api/alerts/{id}/ack", s.handleAck)
+	mux.HandleFunc("DELETE " + bp + "/api/alerts/{id}", s.handleDeleteAlert)
+	mux.HandleFunc("POST " + bp + "/api/alerts/clear-resolved", s.handleClearResolved)
+	mux.HandleFunc("GET " + bp + "/api/settings", s.handleGetSettings)
+	mux.HandleFunc("PUT " + bp + "/api/settings", s.handleSetSettings)
 	// AGPL §13: the license, the third-party notices and the Corresponding
 	// Source offer are served WITHOUT basic auth (see isPublicPath).
-	mux.HandleFunc("GET /license", s.serveLegalText(func() []byte { return s.license }, "license text unavailable"))
-	mux.HandleFunc("GET /third-party-licenses", s.serveLegalText(func() []byte { return s.thirdParty }, "third-party notices unavailable"))
-	mux.HandleFunc("GET /source", s.handleSource)
-	mux.HandleFunc("GET /api/services", s.handleServices)
-	mux.HandleFunc("POST /api/services/sync", s.handleServicesSync)
+	mux.HandleFunc("GET " + bp + "/license", s.serveLegalText(func() []byte { return s.license }, "license text unavailable"))
+	mux.HandleFunc("GET " + bp + "/third-party-licenses", s.serveLegalText(func() []byte { return s.thirdParty }, "third-party notices unavailable"))
+	mux.HandleFunc("GET " + bp + "/source", s.handleSource)
+	mux.HandleFunc("GET " + bp + "/api/services", s.handleServices)
+	mux.HandleFunc("POST " + bp + "/api/services/sync", s.handleServicesSync)
 
 	static, _ := fs.Sub(web.FS, "static")
 	fileServer := http.FileServer(http.FS(static))
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET " + bp + "/static/", http.StripPrefix(bp + "/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "" || strings.HasSuffix(r.URL.Path, "/") { // no directory listings, no second copy of the page
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set(hdrCacheControl, "no-cache")
+		// Substitute __BASE_PATH__ in app.js for reverse-proxy deployments.
+		if r.URL.Path == "app.js" && bp != "" {
+			b, err := fs.ReadFile(static, r.URL.Path)
+			if err == nil {
+				s := string(b)
+				s = strings.ReplaceAll(s, "__BASE_PATH__", bp)
+				w.Header().Set("Content-Type", "application/javascript")
+				w.Write([]byte(s))
+				return
+			}
+		}
 		fileServer.ServeHTTP(w, r)
 	})))
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
+	mux.HandleFunc("GET " + bp + "/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != bp+"/" {
 			http.NotFound(w, r)
 			return
 		}
@@ -168,6 +181,11 @@ func (s *Server) routes() {
 		if err != nil {
 			http.Error(w, "index missing", 500)
 			return
+		}
+		if bp != "" {
+			s := string(b)
+			s = strings.ReplaceAll(s, "__BASE_PATH__", bp)
+			b = []byte(s)
 		}
 		w.Header().Set(hdrContentType, "text/html; charset=utf-8")
 		w.Header().Set(hdrCacheControl, noStore)

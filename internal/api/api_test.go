@@ -47,7 +47,7 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 		t.Fatal(err)
 	}
 	t.Cleanup(m.Stop)
-	return New(st, m, ""), st
+	return New(st, m, "", ""), st
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string, hdr map[string]string) (int, string) {

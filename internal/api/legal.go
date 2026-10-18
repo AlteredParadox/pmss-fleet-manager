@@ -19,6 +19,7 @@ package api
 import (
 	"net/http"
 	"regexp"
+	"strings"
 )
 
 // sourceBaseURL is where the Corresponding Source is published. AGPL §13
@@ -64,7 +65,7 @@ func (s *Server) sourceURL() string {
 // §13 obliges the source offer to every network user, and a login wall
 // would defeat it.
 func isPublicPath(p string) bool {
-	return p == "/license" || p == "/third-party-licenses" || p == "/source"
+	return strings.HasSuffix(p, "/license") || strings.HasSuffix(p, "/third-party-licenses") || strings.HasSuffix(p, "/source")
 }
 
 // serveLegalText serves an embedded text blob as plain UTF-8. The body is
