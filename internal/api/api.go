@@ -396,7 +396,7 @@ type boxInput struct {
 func (in boxInput) validate() error {
 	in.Host = strings.TrimSpace(in.Host)
 	if in.Host == "" || !hostChars(in.Host) {
-		return errors.New("hostname is required: letters, digits, dots and dashes only")
+		return errors.New("hostname is required: letters, digits, dots and dashes only, not starting with a dot or dash")
 	}
 	if u := strings.TrimSpace(in.User); u == "" || !userChars(u) {
 		return errors.New("username is required: letters, digits, dot, dash and underscore only")
@@ -718,7 +718,8 @@ func (s *Server) handleQbtAction(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out, err := s.m.QbtAction(ctx, id, action)
 	if err != nil {
-		writeJSON(w, actionCode(err), map[string]string{"error": err.Error(), "output": out})
+		// Same clip as writeErr: the start command's stderr rides in err.
+		writeJSON(w, actionCode(err), map[string]string{"error": clipStr(err.Error(), 600), "output": clipStr(out, 4000)})
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "output": out})

@@ -257,10 +257,15 @@ func TestStoreFixKeepsDirs(t *testing.T) {
 	if snap.Dirs.Running {
 		t.Error("failure path dropped the merged du result")
 	}
-	snap = BoxState{Dirs: DirsState{Running: true}}
+	snap = BoxState{Dirs: DirsState{Running: true, At: stored.Dirs.At}}
 	p.storeFix(start, false)(&snap, stored)
 	if !snap.Dirs.Running {
-		t.Error("success path must keep its own Dirs")
+		t.Error("success path must keep a du it just started (same At)")
+	}
+	snap = BoxState{Dirs: DirsState{Running: true, At: stored.Dirs.At.Add(-time.Hour)}}
+	p.storeFix(start, false)(&snap, stored)
+	if snap.Dirs.Running {
+		t.Error("success path must take a newer merged du result")
 	}
 	p.storeFix(start, true)(&snap, nil) // no stored state: nothing to keep
 }

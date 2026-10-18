@@ -150,14 +150,20 @@ func (p *poller) afterPoll(start time.Time) func(*BoxState) {
 	}
 }
 
-// storeFix adapts afterPoll to setStateWith. keepDirs is for the failure
-// path: that poll measured nothing, so a du result merged into the stored
-// state while it was in flight is newer than its snapshot and is kept.
+// storeFix adapts afterPoll to setStateWith and keeps the freshest Dirs: a
+// du result merged into the stored state while the poll was in flight is
+// newer than anything the poll carries. The failure path (keepDirs) takes
+// the stored Dirs wholesale, since that poll measured nothing; the success
+// path takes them only when they are newer (a du this poll just started
+// shares the stored At and is kept as Running).
 func (p *poller) storeFix(start time.Time, keepDirs bool) func(s, stored *BoxState) {
 	fix := p.afterPoll(start)
 	return func(s, stored *BoxState) {
 		fix(s)
-		if keepDirs && stored != nil {
+		if stored == nil {
+			return
+		}
+		if keepDirs || stored.Dirs.At.After(s.Dirs.At) {
 			s.Dirs = stored.Dirs
 		}
 	}
@@ -951,8 +957,11 @@ func (p *poller) maybeDu(ctx context.Context, st *BoxState) {
 	}
 	p.duMu.Lock()
 	defer p.duMu.Unlock()
+	// Running mirrors the goroutine, not the last stored value: a du that
+	// died before it measured anything (no connection) must not leave
+	// "measuring…" on screen until the next interval.
+	st.Dirs.Running = p.duRunning
 	if p.duRunning {
-		st.Dirs.Running = true
 		return
 	}
 	hours := p.m.Settings().DuIntervalHours
