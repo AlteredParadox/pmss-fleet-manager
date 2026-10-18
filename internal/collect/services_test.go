@@ -221,11 +221,18 @@ func TestOverlayDiscovery(t *testing.T) {
 	if d.DHT || !d.LSD || d.PeX {
 		t.Errorf("overlay after write: %+v", d)
 	}
-	p.noteDiscovery(map[string]bool{"pex": true}) // second write: keys merge, the first write is not forgotten
+	between := time.Now()
+	time.Sleep(time.Millisecond)
+	p.noteDiscovery(map[string]bool{"pex": true}) // second write
 	d = Discovery{Known: true, DHT: true}
-	p.overlayDiscovery(start, &d)
+	p.overlayDiscovery(start, &d) // a poll straddling both writes sees both
 	if d.DHT || !d.LSD || !d.PeX {
 		t.Errorf("overlay after two writes: %+v", d)
+	}
+	mid := Discovery{Known: true, DHT: true}
+	p.overlayDiscovery(between, &mid) // started after write 1: only write 2 applies, dht stays as read
+	if !mid.DHT || !mid.PeX {
+		t.Errorf("overlay for a poll between the writes: %+v", mid)
 	}
 	later := Discovery{Known: true, DHT: true}
 	p.overlayDiscovery(time.Now(), &later) // a poll that started after the write read the truth

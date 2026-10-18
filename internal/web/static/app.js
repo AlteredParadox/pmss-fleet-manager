@@ -23,7 +23,7 @@ const S = {
   boxes: [], totals: {}, unacked: 0, settings: {}, detail: null,
   alerts: [], filter: '', live: false,
   torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
-  torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, enabled, qbt}]
+  torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, qbt}]
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
 };
@@ -658,7 +658,7 @@ function tabTorrents(b) {
     ${S.torAdd ? torAddForm(b, q.torrents || []) : ''}
     <div style="overflow:auto">
       ${TOR_HEAD('')}
-      ${shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(q.total, q.torrents)}</span></div>` : shown.map((t) => torrentRow(b, t, '')).join('')}
+      ${shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(q.total, q.torrents, b.status)}</span></div>` : shown.map((t) => torrentRow(b, t, '')).join('')}
       ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
     </div>
   </div>`;
@@ -707,7 +707,7 @@ function viewTorrents() {
   for (const b of boxes) {
     const q = b.qbt;
     for (const k of Object.keys(sum)) sum[k] += q[k] || 0;
-    if (!q.reachable) notes.push(`<span class="warn">${esc(b.name)}: ${b.status === 'disabled' ? 'polling disabled' : 'client not responding'}${q.error ? ' — ' + esc(q.error) : ''}</span>`);
+    if (!q.reachable) notes.push(`<span class="warn">${esc(b.name)}: ${unreachableNote(b)}${q.error && b.status === 'online' ? ' — ' + esc(q.error) : ''}</span>`);
     for (const t of q.torrents || []) if (!f || torrentMatches(t, f) || b.name.toLowerCase().includes(f)) rows.push([b, t]);
   }
   // Same order as the per-box tab (active first, busiest first), then by
@@ -729,7 +729,7 @@ function viewTorrents() {
     <div style="overflow:auto">
       ${TOR_HEAD('<span>seedbox</span>')}
       ${qbtBoxes === 0 ? `<div class="trow"><span class="muted">no box has qBittorrent monitoring enabled</span></div>`
-        : shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(sum.total, S.torrents.flatMap((b) => b.qbt?.torrents || []))}</span></div>`
+        : shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(sum.total, S.torrents.flatMap((b) => b.qbt?.torrents || []), boxes.every((b) => b.status === 'disabled') ? 'disabled' : '')}</span></div>`
         : shown.map(([b, t]) => torrentRow(b, t, boxCell(b))).join('')}
       ${rows.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${rows.length} — refine the filter</span></div>` : ''}
     </div>
@@ -762,13 +762,33 @@ function discoveryNote(q, b) {
     return `<button class="disc ${on ? 'warn' : ''}" data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(b.name)}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
   }).join(' · ');
 }
+// Toast after an add. qBittorrent 5.2+ reports per-entry counts; older
+// clients only say that at least one entry was accepted.
+function addToast(r, stopped) {
+  const tail = stopped ? ' (stopped)' : '';
+  if (!r?.counted) {
+    const n = (r?.links || 0) + (r?.files || 0);
+    return `${n} torrent${n === 1 ? '' : 's'} sent to qBittorrent${tail}`;
+  }
+  const parts = [`${r.added} added${tail}`];
+  if (r.pending) parts.push(`${r.pending} still being fetched`);
+  if (r.failed) parts.push(`${r.failed} not added (already present or not a torrent)`);
+  return parts.join(', ');
+}
 // Text for an empty torrent table. After a restart the cached counts are
 // restored but the list is not until the first poll, so say so rather than
 // "no matches".
-function emptyTorrents(total, list) {
+function emptyTorrents(total, list, status) {
   if (total === 0) return 'no torrents';
-  if (!list || list.length === 0) return 'torrent list not loaded yet — waiting for the next poll';
+  if (!list || list.length === 0) return status === 'disabled' ? 'polling is disabled, so the torrent list is not loaded' : 'torrent list not loaded yet — waiting for the next poll';
   return 'no matches';
+}
+// Why a box's torrents are missing from the fleet view: the box itself may
+// be unreachable, in which case qBittorrent is not the one to blame.
+function unreachableNote(b) {
+  if (b.status === 'disabled') return 'polling disabled';
+  if (b.status === 'online') return 'client not responding';
+  return `box ${esc(b.status || 'unknown')}`;
 }
 // The add-torrent form. Its draft lives in S.torAdd because every state
 // event re-renders the tab; File objects are kept there too, since a file
@@ -1303,9 +1323,8 @@ async function torAddAction(a) {
   d.busy = true; render();
   try {
     const r = await api('POST', `/api/boxes/${S.selId}/qbt/torrents`, fd);
-    const n = (r?.links || 0) + (r?.files || 0);
-    toast(`${n} torrent${n === 1 ? '' : 's'} sent to qBittorrent${d.stopped ? ' (stopped)' : ''}`, 'ok');
-    S.torAdd = null;
+    toast(addToast(r, d.stopped), r?.counted && r.failed ? 'warn' : 'ok');
+    if (S.torAdd === d) S.torAdd = null; // not a draft the user opened meanwhile
   } finally {
     if (S.torAdd) S.torAdd.busy = false;
     render();

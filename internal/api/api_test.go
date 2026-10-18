@@ -392,3 +392,20 @@ func TestClipStr(t *testing.T) {
 		t.Errorf("no clip = %q", got)
 	}
 }
+
+// Host and user end up in https links the UI builds, so the server rejects
+// characters that would change the link's origin or path.
+func TestBoxInputHostUser(t *testing.T) {
+	ok := boxInput{Host: "lt5-1.pulsedmedia.com", User: "alice_01"}
+	if err := ok.validate(); err != nil {
+		t.Fatalf("valid input rejected: %v", err)
+	}
+	for _, in := range []boxInput{
+		{Host: "a@evil.example", User: "u"}, {Host: "evil.example/#", User: "u"}, {Host: "a b", User: "u"},
+		{Host: "h", User: "../x"}, {Host: "h", User: "a b"}, {Host: "h", User: "a/b"},
+	} {
+		if err := in.validate(); err == nil {
+			t.Errorf("%+v accepted", in)
+		}
+	}
+}

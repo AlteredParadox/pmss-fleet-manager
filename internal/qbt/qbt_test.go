@@ -247,8 +247,15 @@ func TestAdd(t *testing.T) {
 			f.Close()
 			seen["file:"+fh.Filename] = string(b)
 		}
-		if answer == "415" {
+		switch answer {
+		case "415":
 			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		case "409":
+			w.WriteHeader(http.StatusConflict)
+			return
+		case "500":
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		w.Write([]byte(answer))
@@ -259,8 +266,8 @@ func TestAdd(t *testing.T) {
 	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:8080", "admin", "secret")
 	ctx := context.Background()
 	req := AddRequest{URLs: []string{"magnet:?xt=urn:btih:abc", "https://x/y.torrent"}, Files: []TorrentFile{{Name: "a.torrent", Data: []byte("d4:infoe")}}, Category: "linux", Stopped: true}
-	if err := c.Add(ctx, req); err != nil {
-		t.Fatal(err)
+	if res, err := c.Add(ctx, req); err != nil || res.Counted {
+		t.Fatalf("Ok. → %+v %v", res, err)
 	}
 	want := map[string]string{"urls": "magnet:?xt=urn:btih:abc\nhttps://x/y.torrent", "category": "linux", "stopped": "true", "paused": "true", "file:a.torrent": "d4:infoe"}
 	for k, v := range want {
@@ -271,21 +278,39 @@ func TestAdd(t *testing.T) {
 	// Not stopped: neither field may be sent, or the client's own
 	// "add stopped" default would be overridden.
 	seen = nil
-	if err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:def"}}); err != nil {
+	if _, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:def"}}); err != nil {
 		t.Fatal(err)
 	}
 	if seen["stopped"] != "" || seen["paused"] != "" {
 		t.Errorf("unstopped add sent stopped=%q paused=%q", seen["stopped"], seen["paused"])
 	}
 	answer = "Fails."
-	if err := c.Add(ctx, req); !errors.Is(err, ErrAddRejected) {
+	if _, err := c.Add(ctx, req); !errors.Is(err, ErrAddRejected) {
 		t.Fatalf("Fails. → %v", err)
 	}
 	answer = "415"
-	if err := c.Add(ctx, req); !errors.Is(err, ErrBadTorrent) {
+	if _, err := c.Add(ctx, req); !errors.Is(err, ErrBadTorrent) {
 		t.Fatalf("415 → %v", err)
 	}
-	if err := c.Add(ctx, AddRequest{}); err == nil {
+	// qBittorrent 5.2+: counts on success, 409 when nothing was added.
+	answer = `{"success_count":1,"failure_count":2,"pending_count":0,"added_torrent_ids":["x"]}`
+	if res, err := c.Add(ctx, req); err != nil || !res.Counted || res.Added != 1 || res.Failed != 2 {
+		t.Fatalf("5.2 counts → %+v %v", res, err)
+	}
+	answer = `{"success_count":0,"failure_count":0,"pending_count":2}`
+	if res, err := c.Add(ctx, req); err != nil || res.Pending != 2 {
+		t.Fatalf("5.2 pending → %+v %v", res, err)
+	}
+	answer = "409"
+	if _, err := c.Add(ctx, req); !errors.Is(err, ErrAddRejected) {
+		t.Fatalf("409 → %v", err)
+	}
+	answer = "500"
+	var he *HTTPError
+	if _, err := c.Add(ctx, req); !errors.As(err, &he) || he.Code != 500 {
+		t.Fatalf("500 → %v", err)
+	}
+	if _, err := c.Add(ctx, AddRequest{}); err == nil {
 		t.Fatal("empty add accepted")
 	}
 }
