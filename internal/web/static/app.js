@@ -88,10 +88,16 @@ function fmtAgo(iso) {
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
   return `${Math.floor(s / 86400)} d ago`;
 }
+// Calendar days from today to a YYYY-MM-DD date: 0 on the day itself, -1 the
+// day after. Both ends are taken as civil dates in the browser's zone (the
+// server does the same in its zone), so the count changes at local midnight
+// and a DST day does not shift it.
 function daysUntil(ymd) {
-  if (!ymd) return null;
-  const d = new Date(ymd + 'T23:59:59');
-  return Math.ceil((d - Date.now()) / 86400e3);
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd || '');
+  if (!m) return null;
+  const now = new Date();
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((Date.UTC(+m[1], +m[2] - 1, +m[3]) - today) / 86400e3);
 }
 function levelClass(pct, threshold) {
   if (pct >= 100 || pct >= threshold) return 'bad';
@@ -347,7 +353,7 @@ function renderMain() {
 /* ----- fleet ----- */
 function viewFleet() {
   const t = S.totals || {};
-  const renew = t.next_renewal ? `${esc(t.next_renewal.slice(5))} <small>· ${daysUntil(t.next_renewal)}d</small>` : '—';
+  const renew = t.next_renewal ? `${esc(t.next_renewal.slice(5))} <small>· ${daysUntil(t.next_renewal) < 0 ? 'overdue' : daysUntil(t.next_renewal) + 'd'}</small>` : '—';
   const body = S.boxes.length === 0
     ? `<div class="empty">no boxes yet — <a href="#/add">add your first box</a></div>`
     : (S.fleetView === 'table' ? fleetTable() : fleetCards());

@@ -29,9 +29,11 @@ import (
 	"time"
 )
 
-// installScript downloads a static qbittorrent-nox build to ~/bin, verifies it
-// is an ELF binary that runs, then swaps it in atomically. $QBT_URL is set by
-// the caller through the environment prefix.
+// installScript downloads a static qbittorrent-nox build to ~/bin, checks it
+// is an ELF binary of plausible size that runs and calls itself qBittorrent
+// (a sanity check, not authentication: the download is trusted as much as
+// its source), then swaps it in atomically. $QBT_URL is set by the caller
+// through the environment prefix.
 const installScript = `#!/bin/sh
 set -u
 url="$QBT_URL"
@@ -41,9 +43,12 @@ find "$HOME/bin" -maxdepth 1 -type f -name '.qbittorrent-nox.new.*' -mmin +30 -d
 tmp="$HOME/bin/.qbittorrent-nox.new.$$"
 # --https-only / --proto: a redirect must not downgrade the download to plain HTTP.
 if command -v wget >/dev/null 2>&1; then wget -q --https-only -O "$tmp" "$url"; rc=$?
-elif command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --proto-redir '=https' -o "$tmp" "$url"; rc=$?
+elif command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp" "$url"; rc=$?
 else echo "neither wget nor curl available"; exit 1; fi
 [ "$rc" -eq 0 ] && [ -s "$tmp" ] || { echo "download failed (exit $rc)"; rm -f "$tmp"; exit 1; }
+# The static build is ~30 MB; anything far above that is not it.
+size=$(wc -c < "$tmp")
+[ "$size" -le 209715200 ] || { echo "downloaded file is too large to be qbittorrent-nox ($size bytes)"; rm -f "$tmp"; exit 1; }
 magic=$(head -c 4 "$tmp" | od -An -tx1 | tr -d ' \n')
 [ "$magic" = "7f454c46" ] || { echo "downloaded file is not an ELF binary (got $(head -c 200 "$tmp" | tr -d '\n' | cut -c1-120))"; rm -f "$tmp"; exit 1; }
 chmod 700 "$tmp"
