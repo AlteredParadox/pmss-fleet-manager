@@ -353,3 +353,30 @@ func TestAddRequestFromForm(t *testing.T) {
 		}
 	}
 }
+
+// The fleet-wide torrent list is a JSON object with a boxes array, limited
+// to boxes with qBittorrent monitoring on.
+func TestTorrentsList(t *testing.T) {
+	srv, st := newTestServer(t)
+	ctx := context.Background()
+	if err := st.CreateBox(ctx, &store.Box{Name: "x", Host: "h", User: "u", Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	code, body := do(t, srv, "GET", "/api/torrents", "", nil)
+	var out struct {
+		Boxes []struct {
+			ID  int64 `json:"id"`
+			Qbt struct {
+				Enabled bool `json:"enabled"`
+			} `json:"qbt"`
+		} `json:"boxes"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil || code != 200 {
+		t.Fatalf("list: %d %s", code, body)
+	}
+	for _, b := range out.Boxes {
+		if !b.Qbt.Enabled {
+			t.Errorf("box %d listed without qBittorrent monitoring", b.ID)
+		}
+	}
+}
