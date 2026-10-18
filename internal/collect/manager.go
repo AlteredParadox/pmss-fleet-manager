@@ -272,8 +272,6 @@ func (m *Manager) State(id int64) (BoxState, bool) {
 	return *s, true
 }
 
-func (m *Manager) setState(s *BoxState) { m.setStateWith(s, nil) }
-
 // setStateWith stores s as the box's state; fix, when given, runs on it
 // under the store lock right before it is stored, so a concurrent
 // mutateState cannot slip in between the poller's last look and the store.

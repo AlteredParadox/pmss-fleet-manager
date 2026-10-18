@@ -35,6 +35,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Dialer opens a connection to the WebUI listener.
@@ -245,7 +246,7 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 	c.guard.Clear()
 	if code < 200 || code >= 300 {
-		return fmt.Errorf("qbittorrent: login http %d: %s", code, strings.TrimSpace(string(body)))
+		return fmt.Errorf("qbittorrent: login http %d: %s", code, clipBody(body))
 	}
 	// 204 = no body, no cookie: qBittorrent did not need a new session (auth
 	// already satisfied by a bypass rule). Later calls simply go without a cookie.
@@ -292,7 +293,7 @@ func (c *Client) callBody(ctx context.Context, method, path, ctype string, paylo
 		return ErrBadTorrent
 	}
 	if code < 200 || code >= 300 {
-		return &HTTPError{Path: path, Code: code, Body: strings.TrimSpace(string(body))}
+		return &HTTPError{Path: path, Code: code, Body: clipBody(body)}
 	}
 	if out == nil {
 		return nil
@@ -411,6 +412,21 @@ func (c *Client) stopStart(ctx context.Context, start bool, hashes string) error
 	return err
 }
 
+// clipBody keeps the start of a response body for an error message: the
+// text reaches the UI as a toast, and a hostile or broken WebUI could send
+// megabytes.
+func clipBody(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) <= 300 {
+		return s
+	}
+	cut := 300
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
 // HTTPError is a non-2xx answer from the WebUI that no sentinel covers.
 type HTTPError struct {
 	Path string
@@ -518,7 +534,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 			Pending int `json:"pending_count"`
 		}
 		if err := json.Unmarshal([]byte(out), &counts); err == nil {
-			res = AddResult{Counted: true, Added: counts.Success, Failed: counts.Failure, Pending: counts.Pending}
+			res = AddResult{Counted: true, Added: max(counts.Success, 0), Failed: max(counts.Failure, 0), Pending: max(counts.Pending, 0)}
 			if res.Added == 0 && res.Pending == 0 {
 				return res, ErrAddRejected
 			}

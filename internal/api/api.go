@@ -504,10 +504,11 @@ func (s *Server) handleCreateBox(w http.ResponseWriter, r *http.Request) {
 // torrentsBox is one box in the fleet-wide torrent list: identity and
 // status, plus the full qBittorrent view including its torrents.
 type torrentsBox struct {
-	ID     int64            `json:"id"`
-	Name   string           `json:"name"`
-	Status string           `json:"status"`
-	Qbt    collect.QbtState `json:"qbt"`
+	ID           int64            `json:"id"`
+	Name         string           `json:"name"`
+	Status       string           `json:"status"`
+	StatusReason string           `json:"status_reason,omitempty"`
+	Qbt          collect.QbtState `json:"qbt"`
 }
 
 // handleTorrents returns every box that has qBittorrent monitoring on,
@@ -519,7 +520,7 @@ func (s *Server) handleTorrents(w http.ResponseWriter, r *http.Request) {
 		if !st.Qbt.Enabled {
 			continue
 		}
-		out = append(out, torrentsBox{ID: st.ID, Name: st.Name, Status: st.Status, Qbt: st.Qbt})
+		out = append(out, torrentsBox{ID: st.ID, Name: st.Name, Status: st.Status, StatusReason: st.StatusReason, Qbt: st.Qbt})
 	}
 	writeJSON(w, 200, map[string]any{"boxes": out})
 }
@@ -883,7 +884,7 @@ func (s *Server) handleAddTorrents(w http.ResponseWriter, r *http.Request) {
 // hostChars accepts a DNS-shaped host name; the UI builds https links from
 // it, so '@', '/', '#', '?' and quotes must never get in.
 func hostChars(h string) bool {
-	if len(h) > 253 {
+	if len(h) > 253 || h[0] == '.' || h[0] == '-' { // the first label is the box's default name
 		return false
 	}
 	for _, r := range h {

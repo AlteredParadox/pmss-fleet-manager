@@ -476,11 +476,14 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 	st.Qbt.PortOK = false // must be re-verified by the next successful probe
 	st.Docker.Reachable = false
 	p.m.log.Warn("poll failed", "box", p.box.Name, "failures", st.Failures, "err", describeErr(err))
+	// st is the snapshot from the poll's start: a discovery toggle that
+	// landed while this poll was in flight must survive the failure too.
+	p.afterPoll(start)(st)
 	// Persist the failure as well: a restart must not restore a down box as
 	// online (the last successful poll) and walk it through "degraded".
 	st.Sanitize()
 	p.record(ctx, st)
-	p.m.setState(st)
+	p.m.setStateWith(st, p.afterPoll(start))
 }
 
 func classify(st *BoxState) (string, string) {
