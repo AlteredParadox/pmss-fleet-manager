@@ -169,9 +169,12 @@ These are the design decisions that came out of it.
 - **WebUI credentials never go to a port you do not own.** The qBittorrent
   password is sent only when the socket table shows the port bound by your uid
   alone, re-read live over the same SSH connection immediately before any
-  stop, pause or resume. A rejected login is held until the credentials change
-  or the client is restarted from the dashboard, and a ban is held 65 minutes,
-  so a bad password cannot walk the box's loopback into qBittorrent's IP ban.
+  stop, pause or resume. One login attempt runs at a time per box and its
+  outcome is shared with every request that was waiting on it, so a burst of
+  actions sends the credentials once. A rejected login is held until the
+  credentials change or the client is restarted from the dashboard, and a
+  ban is held 65 minutes, so a bad password cannot walk the box's loopback
+  into qBittorrent's IP ban.
 - **Host keys.** Trust on first use, pinned to host and port. A supplied key
   never silently replaces a pin; a host or port change, or "forget the pinned
   SSH host key" after a reinstall, clears it. Saved SSH and WebUI passwords
@@ -272,14 +275,23 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.2.0 is the current release. The code was written against five real Pulsed
+1.2.1 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and reviewed as described under *Security and hardening*.
-1.2.0 adds torrent management: per-torrent stop, start and remove (with or
+1.2.0 added torrent management: per-torrent stop, start and remove (with or
 without files), adding torrents by magnet, URL or .torrent file, DHT / PeX /
 LSD shown per box and toggled from the torrents header, a fleet-wide
 torrents view, lifetime transfer and swarm columns, and per-box links to the
-data directory and qBittorrent web UI; it was followed by five further review
-rounds (two consecutive clean). Other setups should work but have not been
+data directory and qBittorrent web UI. 1.2.1 is a hardening release from two
+rounds of an independent external review: one qBittorrent login attempt at a
+time per box, shared across concurrent actions, so a dropped or rejected
+login can never be repeated into a ban; the Pulsed Media feed cache is tied
+to the API key that fetched it and dropped the moment the key changes;
+cancelled services no longer count towards costs or renewal alerts; box edits
+clear and save secrets in one write; the API key is never forwarded on a
+redirect; the installer downloads HTTPS-only under a size limit; renewal
+days are calendar days in the dashboard host's zone; and the browser
+recovers from a failed first load and coalesces torrent-view refreshes.
+Other setups should work but have not been
 tried. Issues and pull requests welcome. Releases on GitHub carry linux amd64
 and arm64 binaries with checksums.
