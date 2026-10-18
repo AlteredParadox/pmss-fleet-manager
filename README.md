@@ -270,11 +270,14 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.1.0 is the current release. The code was written against five real Pulsed
+1.2.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
-qBittorrent 5.2.x and reviewed as described under *Security and hardening*;
-1.1.0 adds the SonarCloud clean-up (mechanical fixes, pure-extraction
-refactors of the most complex functions, documented exceptions) with no
-behaviour change. Other setups should work but have not been tried. Issues
-and pull requests welcome. Releases on GitHub carry linux amd64 and arm64
-binaries with checksums.
+qBittorrent 5.2.x and reviewed as described under *Security and hardening*.
+1.2.0 adds torrent management: per-torrent stop, start and remove (with or
+without files), adding torrents by magnet, URL or .torrent file, DHT / PeX /
+LSD shown per box and toggled from the torrents header, a fleet-wide
+torrents view, lifetime transfer and swarm columns, and per-box links to the
+data directory and qBittorrent web UI; it was followed by five further review
+rounds (two consecutive clean). Other setups should work but have not been
+tried. Issues and pull requests welcome. Releases on GitHub carry linux amd64
+and arm64 binaries with checksums.
