@@ -392,14 +392,57 @@ func TestLoginAfterReusesFreshSession(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	// Callers refused before the first login finished reuse its cookie;
-	// at most the ones that raced the cookie publication log in again.
-	if n := logins.Load(); n < 1 || n > 2 {
-		t.Fatalf("logins = %d; want 1 (or 2 at the very most)", n)
+	// Callers refused before the first login finished take its outcome;
+	// only a request sent after it and still refused would log in again.
+	if n := logins.Load(); n != 1 {
+		t.Fatalf("logins = %d; want 1", n)
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if !authed {
 		t.Fatal("never logged in")
+	}
+}
+
+// A login whose connection drops after the credentials were sent is still
+// one attempt against qBittorrent's counter: waiters share that failure
+// instead of each sending the credentials again. A later, independent call
+// may retry.
+func TestLoginSharesDroppedAttempt(t *testing.T) {
+	var logins atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		logins.Add(1)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		conn.Close() // qBittorrent saw the credentials; the dashboard sees no answer
+	})
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:1", "admin", "pw")
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.Version(context.Background()); err == nil {
+				t.Error("want an error from the dropped login")
+			}
+		}()
+	}
+	wg.Wait()
+	if n := logins.Load(); n != 1 {
+		t.Fatalf("8 concurrent calls made %d login attempts; want 1", n)
+	}
+	if _, err := c.Version(context.Background()); err == nil {
+		t.Fatal("want an error")
+	}
+	if n := logins.Load(); n != 2 {
+		t.Fatalf("a later independent call must be allowed its own attempt; logins = %d", n)
 	}
 }

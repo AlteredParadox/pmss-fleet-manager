@@ -281,8 +281,8 @@ func totals(states []collect.BoxState) Totals {
 		if r := b.EffectiveRenewal(); r != "" && (t.NextRenew == "" || r < t.NextRenew) {
 			t.NextRenew = r
 		}
-		if b.Service != nil && !seenSvc[b.Service.ID] {
-			seenSvc[b.Service.ID] = true // two boxes on one service count it once
+		if b.Service != nil && collect.ServiceActive(b.Service.Status) && !seenSvc[b.Service.ID] {
+			seenSvc[b.Service.ID] = true // two boxes on one service count it once; inactive ones are history
 			t.MonthlyCost += b.Service.Monthly
 			t.Currency = b.Service.Currency
 		}

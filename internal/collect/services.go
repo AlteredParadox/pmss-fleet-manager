@@ -18,6 +18,9 @@ package collect
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -108,10 +111,30 @@ type servicesCache struct {
 }
 
 const (
-	svcCacheKey   = "pmapi_feed"
-	svcCacheAtKey = "pmapi_feed_at"
-	svcInterval   = 6 * time.Hour
+	svcCacheKey = "pmapi_cache" // one record: feed, sync time and the key's fingerprint
+	svcInterval = 6 * time.Hour
 )
+
+// svcCacheRecord is the persisted cache. KeyFP ties the feed to the API key
+// that produced it, so a feed is never restored under a different key.
+type svcCacheRecord struct {
+	KeyFP    string          `json:"key_fp"`
+	SyncedAt time.Time       `json:"synced_at"`
+	Feed     json.RawMessage `json:"feed"`
+}
+
+// keyFingerprint is a short, non-reversible identity for an API key.
+func keyFingerprint(key string) string {
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:8])
+}
+
+// serviceActive reports whether a service is current: only those count
+// towards costs and API-derived renewal dates. Inactive ones stay visible.
+func serviceActive(status string) bool { return strings.EqualFold(status, "active") }
+
+// ServiceActive is serviceActive for other packages (the API totals).
+func ServiceActive(status string) bool { return serviceActive(status) }
 
 // decorate attaches the matching service to a state. Caller must not hold m.mu.
 func (m *Manager) decorate(s *BoxState) {
@@ -122,30 +145,53 @@ func (m *Manager) decorate(s *BoxState) {
 	if feed == nil {
 		return
 	}
-	if svc, how := matchService(feed.Services, s.Host, s.User); svc != nil {
+	// An active service wins over a cancelled one on the same host (a
+	// cancel-and-reorder); an inactive match is still shown, for history.
+	svc, how := matchService(activeServices(feed.Services), s.Host, s.User)
+	if svc == nil {
+		svc, how = matchService(feed.Services, s.Host, s.User)
+	}
+	if svc != nil {
 		si := toInfo(*svc, feed.Currency)
 		si.MatchedBy = how
 		s.Service = &si
 	}
 }
 
-// loadServicesCache restores the last feed from the database at startup.
+func activeServices(all []pmapi.Service) []pmapi.Service {
+	out := make([]pmapi.Service, 0, len(all))
+	for _, s := range all {
+		if serviceActive(s.Status) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// loadServicesCache restores the last feed from the database at startup,
+// only if it was fetched with the key that is configured now.
 func (m *Manager) loadServicesCache(ctx context.Context) {
-	if m.Settings().PMAPIKey == "" {
+	// Pre-1.2.1 cache keys carried no key identity: drop them.
+	_ = m.st.SetValue(ctx, "pmapi_feed", "")
+	_ = m.st.SetValue(ctx, "pmapi_feed_at", "")
+	key := m.Settings().PMAPIKey
+	if key == "" {
 		return
 	}
 	raw, err := m.st.GetValue(ctx, svcCacheKey)
 	if err != nil || raw == "" {
 		return
 	}
-	feed, err := pmapi.Parse([]byte(raw))
+	var rec svcCacheRecord
+	if err := json.Unmarshal([]byte(raw), &rec); err != nil || rec.KeyFP != keyFingerprint(key) {
+		return
+	}
+	feed, err := pmapi.Parse(rec.Feed)
 	if err != nil {
 		return
 	}
-	at, _ := m.st.GetValue(ctx, svcCacheAtKey)
-	t, _ := time.Parse(time.RFC3339, at)
 	m.svcMu.Lock()
-	m.svc = servicesCache{feed: feed, syncedAt: t}
+	m.svc = servicesCache{feed: feed, syncedAt: rec.SyncedAt}
 	m.svcMu.Unlock()
 }
 
@@ -157,7 +203,11 @@ func (m *Manager) forgetServices(ctx context.Context) {
 	m.svcMu.Lock()
 	m.svc = servicesCache{}
 	m.svcMu.Unlock()
-	_ = m.st.SetValue(ctx, svcCacheKey, "")
+	if err := m.st.SetValue(ctx, svcCacheKey, ""); err != nil {
+		// Not fatal: the record carries the old key's fingerprint, so a
+		// restart under the new key refuses it anyway.
+		m.log.Warn("clear services cache", "err", err)
+	}
 	m.reattachServices()
 }
 
@@ -175,12 +225,15 @@ func (m *Manager) SyncServices(ctx context.Context) error {
 	fctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	feed, raw, err := m.pmapi.Fetch(fctx, key)
+	m.svcMu.Lock()
+	// Checked under the cache lock: SetSettings swaps the key before it
+	// clears the cache (under this lock), so a fetch for a replaced key
+	// either sees the new key here and is discarded, or commits before
+	// the clear and is wiped by it. Either way the old key's feed is gone.
 	if m.Settings().PMAPIKey != key {
-		// The key was changed or cleared while this fetch was in flight: the
-		// sync for the new key (or the clear) owns the cache now.
+		m.svcMu.Unlock()
 		return errors.New("api key changed during sync; superseded")
 	}
-	m.svcMu.Lock()
 	if err != nil {
 		m.svc.err = err.Error()
 		m.svcMu.Unlock()
@@ -188,11 +241,13 @@ func (m *Manager) SyncServices(ctx context.Context) error {
 		m.Publish(Event{Type: "services"})
 		return err
 	}
-	m.svc = servicesCache{feed: feed, syncedAt: time.Now()}
-	m.svcMu.Unlock()
-	if err := m.st.SetValue(ctx, svcCacheKey, string(raw)); err == nil {
-		_ = m.st.SetValue(ctx, svcCacheAtKey, time.Now().UTC().Format(time.RFC3339))
+	now := time.Now()
+	m.svc = servicesCache{feed: feed, syncedAt: now}
+	rec, _ := json.Marshal(svcCacheRecord{KeyFP: keyFingerprint(key), SyncedAt: now.UTC(), Feed: raw})
+	if err := m.st.SetValue(ctx, svcCacheKey, string(rec)); err != nil {
+		m.log.Warn("persist services cache", "err", err)
 	}
+	m.svcMu.Unlock()
 	m.log.Info("pmapi sync", "services", len(feed.Services))
 	m.reattachServices()
 	return nil
