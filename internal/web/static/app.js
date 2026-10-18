@@ -644,7 +644,7 @@ function tabTorrents(b) {
   const shown = list.slice(0, 300);
   return `<div class="table tor-table" style="overflow:hidden">
     <div class="thead-tools">
-      <div style="font-size:12px"><b>qBittorrent ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${discoveryNote(q, b)}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
+      <div style="font-size:12px"><b>qBittorrent ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${discoveryNote(q, b)}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
       <div class="actions">
         <input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">
         <button class="small" data-act="qbt:pause" data-confirm="Pause all torrents on ${esc(b.name)}?">pause all</button>
@@ -654,13 +654,24 @@ function tabTorrents(b) {
     </div>
     ${S.torAdd ? torAddForm(b, list) : ''}
     <div style="overflow:auto">
-      <div class="trow head"><span>name</span><span>size</span><span>progress</span><span>up</span><span>down</span><span>ratio</span><span></span></div>
+      ${TOR_HEAD('')}
       ${shown.length === 0 ? `<div class="trow"><span class="muted">${q.total === 0 ? 'no torrents' : 'no matches'}</span></div>` : shown.map((t) => torrentRow(b, t, '')).join('')}
       ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
     </div>
   </div>`;
 }
 const KIND_COLOR = { seeding: 'var(--ok)', leeching: 'var(--accent)', paused: 'var(--dim)', checking: 'var(--warn)', error: 'var(--bad)', unknown: 'var(--dim)' };
+// Column headings shared by both torrent tables; lead is the optional first
+// heading (the seedbox, in the fleet-wide list).
+const TOR_HEAD = (lead) => `<div class="trow head">${lead}<span>name</span><span>size</span><span>progress</span><span>up</span><span>down</span><span title="lifetime uploaded">uploaded</span><span title="lifetime downloaded">downloaded</span><span>ratio</span><span title="connected seeds (swarm total)">seeds</span><span title="connected peers (swarm total)">peers</span><span></span></div>`;
+// Lifetime transfer summed over a list, for the table headers.
+function transferNote(list) {
+  let up = 0, down = 0;
+  for (const t of list) { up += t.uploaded || 0; down += t.downloaded || 0; }
+  return list.length ? ` · ↑ ${fmtBytes(up, 1)} ↓ ${fmtBytes(down, 1)} lifetime` : '';
+}
+// "3 <swarm>/120</swarm>": connected count, then the swarm size when known.
+const swarmCell = (n, swarm) => `<span class="num">${n}${swarm ? `<span class="muted swarm">/${swarm}</span>` : ''}</span>`;
 const torrentMatches = (t, f) => t.name.toLowerCase().includes(f) || (t.category || '').toLowerCase().includes(f) || t.kind.includes(f);
 // One torrent row, shared by the per-box tab and the fleet-wide list; lead
 // is an optional first cell (the box, in the fleet-wide list).
@@ -673,7 +684,11 @@ function torrentRow(b, t, lead) {
         <div><div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted)"><span>${esc(t.kind === 'unknown' ? t.state : t.kind)}</span><span>${(t.progress * 100).toFixed(t.progress < 1 ? 1 : 0)}%</span></div><div class="meter" style="height:3px;margin-top:3px"><i style="width:${t.progress * 100}%;background:${color}"></i></div></div>
         <span class="num ${t.up_bps ? 'up' : 'dim'}">${fmtBps(t.up_bps)}</span>
         <span class="num ${t.down_bps ? 'down' : 'dim'}">${fmtBps(t.down_bps)}</span>
+        <span class="num ${t.uploaded ? '' : 'dim'}">${fmtBytes(t.uploaded || 0, 1)}</span>
+        <span class="num ${t.downloaded ? '' : 'dim'}">${fmtBytes(t.downloaded || 0, 1)}</span>
         <span class="num">${t.ratio >= 0 ? t.ratio.toFixed(2) : '∞'}</span>
+        ${swarmCell(t.seeds || 0, t.seeds_swarm)}
+        ${swarmCell(t.peers || 0, t.peers_swarm)}
         <div class="actions">${torrentButtons(b, t)}</div>
       </div>`;
 }
@@ -705,11 +720,11 @@ function viewTorrents() {
   return `<div class="head"><div><div class="eyebrow">PMSS</div><h1>Torrents</h1></div></div>
   <div class="table tor-table tor-all" style="overflow:hidden;margin-top:16px">
     <div class="thead-tools">
-      <div style="font-size:12px"><b>${sum.total} torrents</b> <span class="muted">· ${qbtBoxes} seedbox${qbtBoxes === 1 ? '' : 'es'} · ${sum.seeding} seeding · ${sum.leeching} leeching · ${sum.paused} paused${sum.errored ? ` · <span class="bad">${sum.errored} error</span>` : ''}${notes.length ? ' · ' + notes.join(' · ') : ''}</span></div>
+      <div style="font-size:12px"><b>${sum.total} torrents</b> <span class="muted">· ${qbtBoxes} seedbox${qbtBoxes === 1 ? '' : 'es'} · ${sum.seeding} seeding · ${sum.leeching} leeching · ${sum.paused} paused${sum.errored ? ` · <span class="bad">${sum.errored} error</span>` : ''}${transferNote(boxes.flatMap((b) => b.qbt.torrents || []))}${notes.length ? ' · ' + notes.join(' · ') : ''}</span></div>
       <div class="actions"><input class="filter" placeholder="filter name, category, state or box…" data-filter value="${esc(S.filter)}" style="max-width:260px"></div>
     </div>
     <div style="overflow:auto">
-      <div class="trow head"><span>seedbox</span><span>name</span><span>size</span><span>progress</span><span>up</span><span>down</span><span>ratio</span><span></span></div>
+      ${TOR_HEAD('<span>seedbox</span>')}
       ${qbtBoxes === 0 ? `<div class="trow"><span class="muted">no box has qBittorrent monitoring enabled</span></div>`
         : shown.length === 0 ? `<div class="trow"><span class="muted">${sum.total === 0 ? 'no torrents' : 'no matches'}</span></div>`
         : shown.map(([b, t]) => torrentRow(b, t, boxCell(b))).join('')}

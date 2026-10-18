@@ -25,8 +25,10 @@ aggregate bandwidth, torrents, containers, next renewal and monthly cost.
 
 **Torrents.** Every seedbox's torrents in one table, busiest first, with the
 box name (and whichever of DHT / PeX / LSD is enabled on it in parentheses)
-linking to that box's torrents tab; the same filter and per-torrent stop /
-start / remove controls as the per-box tab.
+linking to that box's torrents tab; the same columns (size, progress, rates,
+lifetime uploaded / downloaded, ratio, connected seeds and peers with the
+swarm size), filter and per-torrent stop / start / remove controls as the
+per-box tab.
 
 **Per box.**
 

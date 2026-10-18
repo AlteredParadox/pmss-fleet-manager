@@ -557,6 +557,21 @@ func dailySeries(out, in map[string]float64, now time.Time) []DayPoint {
 	return pts
 }
 
+// nonNeg clamps qBittorrent's -1 "unknown" (or anything hostile) to 0.
+func nonNeg(n int) int {
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+func nonNeg64(n int64) int64 {
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
 func (p *poller) qbtClient(port int) *qbt.Client {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -677,6 +692,8 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		qs.Torrents = append(qs.Torrents, TorrentView{
 			Hash: clip(t.Hash, 64), Name: clip(t.Name, 400), Size: t.Size, Progress: t.Progress, UpBps: t.UPSpeed, DownBps: t.DLSpeed,
 			Ratio: t.Ratio, State: clip(t.State, 32), Kind: kind, AddedOn: t.AddedOn, Category: clip(t.Category, 100),
+			Uploaded: nonNeg64(t.Uploaded), Downloaded: nonNeg64(t.Downloaded),
+			Seeds: nonNeg(t.Seeds), SeedsSwarm: nonNeg(t.SeedsSwarm), Peers: nonNeg(t.Peers), PeersSwarm: nonNeg(t.PeersSwarm),
 		})
 	}
 	qs.Total = len(qs.Torrents)

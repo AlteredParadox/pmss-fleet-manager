@@ -330,6 +330,14 @@ type Torrent struct {
 	State    string  `json:"state"`
 	AddedOn  int64   `json:"added_on"`
 	Category string  `json:"category"`
+	// Lifetime transfer and swarm size. The *Swarm counts are what the
+	// tracker/DHT reports and come back as -1 when unknown.
+	Uploaded   int64 `json:"uploaded"`
+	Downloaded int64 `json:"downloaded"`
+	Seeds      int   `json:"num_seeds"`
+	SeedsSwarm int   `json:"num_complete"`
+	Peers      int   `json:"num_leechs"`
+	PeersSwarm int   `json:"num_incomplete"`
 }
 
 // ServerState is the global state block from sync/maindata.

@@ -186,6 +186,14 @@ type TorrentView struct {
 	Kind     string  `json:"kind"` // seeding | leeching | paused | checking | error | unknown
 	AddedOn  int64   `json:"-"`    // sort key only
 	Category string  `json:"category,omitempty"`
+	// Lifetime bytes and swarm: connected seeds/peers, and the swarm-wide
+	// counts when the tracker reported them (0 when unknown).
+	Uploaded   int64 `json:"uploaded"`
+	Downloaded int64 `json:"downloaded"`
+	Seeds      int   `json:"seeds"`
+	SeedsSwarm int   `json:"seeds_swarm"`
+	Peers      int   `json:"peers"`
+	PeersSwarm int   `json:"peers_swarm"`
 }
 
 // QbtState is the torrent client view.
