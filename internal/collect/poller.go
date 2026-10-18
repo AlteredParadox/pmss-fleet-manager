@@ -93,11 +93,17 @@ func (p *poller) actionSince(t time.Time) bool {
 }
 
 // noteDiscovery records a successful app/setPreferences write so a poll
-// that read the preferences before it cannot publish the old values.
+// that read the preferences before it cannot publish the old values. Keys
+// are merged: a poll that straddles two writes must see both.
 func (p *poller) noteDiscovery(want map[string]bool) {
 	p.actionMu.Lock()
 	p.discAt = time.Now()
-	p.discWant = want
+	if p.discWant == nil {
+		p.discWant = map[string]bool{}
+	}
+	for k, v := range want {
+		p.discWant[k] = v
+	}
 	p.actionMu.Unlock()
 }
 
