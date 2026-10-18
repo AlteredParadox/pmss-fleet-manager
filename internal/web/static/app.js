@@ -1,4 +1,3 @@
-window.__BASE_PATH='__BASE_PATH__';
 // pmss-fleet-manager — a single-pane dashboard for Pulsed Media seedboxes.
 // Copyright (C) 2026 AlteredParadox
 //
@@ -19,14 +18,18 @@ window.__BASE_PATH='__BASE_PATH__';
 (() => {
 'use strict';
 
-const BASE = window.__BASE_PATH || '';
+// The page is only ever served at <base-path>/ (the server redirects
+// <base-path> to it), so the prefix is whatever precedes that final slash:
+// '' at the root, '/fleet' behind a proxy that forwards the sub-path. Taking
+// it from the URL rather than baking it into this file also works when the
+// proxy strips the prefix before forwarding, since it strips it again here.
+const BASE = location.pathname.replace(/\/+$/, '');
 
 const S = {
   view: 'fleet', fleetView: 'cards', tab: 'overview', selId: null,
   boxes: [], totals: {}, unacked: 0, settings: {}, detail: null,
   alerts: [], filter: '', live: false,
   torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
-  basePath: BASE,
   torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, status_reason, qbt}]
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
@@ -1261,7 +1264,7 @@ function viewSettings() {
     <div class="panel"><div class="tile-label">about &amp; licensing</div>
       <div class="row"><span>version</span><span>${esc(S.version || 'dev')}</span></div>
       <div class="hint">pmss-fleet-manager is free software under the GNU Affero General Public License v3 or later. Because you are using it over a network, you are entitled to its source code.</div>
-      <div class="row" style="justify-content:flex-start;gap:16px"><a href="${esc(S.basePath)}/license" target="_blank" rel="noopener">license ↗</a><a href="${esc(S.basePath)}/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
+      <div class="row" style="justify-content:flex-start;gap:16px"><a href="${esc(BASE)}/license" target="_blank" rel="noopener">license ↗</a><a href="${esc(BASE)}/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || BASE + '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
     </div>
   </div>
   ${viewServices()}`;

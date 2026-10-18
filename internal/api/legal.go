@@ -19,7 +19,6 @@ package api
 import (
 	"net/http"
 	"regexp"
-	"strings"
 )
 
 // sourceBaseURL is where the Corresponding Source is published. AGPL §13
@@ -63,9 +62,10 @@ func (s *Server) sourceURL() string {
 
 // isPublicPath reports whether a route is served without basic auth. AGPL
 // §13 obliges the source offer to every network user, and a login wall
-// would defeat it.
-func isPublicPath(p string) bool {
-	return strings.HasSuffix(p, "/license") || strings.HasSuffix(p, "/third-party-licenses") || strings.HasSuffix(p, "/source")
+// would defeat it. The match is exact under the configured base path so
+// no other route (an {action} segment named "license", say) escapes auth.
+func (s *Server) isPublicPath(p string) bool {
+	return p == s.basePath+"/license" || p == s.basePath+"/third-party-licenses" || p == s.basePath+"/source"
 }
 
 // serveLegalText serves an embedded text blob as plain UTF-8. The body is

@@ -53,7 +53,7 @@ func main() {
 	allowedHosts := flag.String("allowed-hosts", os.Getenv("PMSS_ALLOWED_HOSTS"), "extra Host header names to serve (e.g. a reverse-proxy name), comma-separated; the listen addresses and localhost are always allowed")
 	dataDir := flag.String("data", envOr("PMSS_DATA", "./data"), "directory for the SQLite database")
 	auth := flag.String("auth", os.Getenv("PMSS_AUTH"), "optional HTTP basic auth as user:password")
-	basePath := flag.String("base-path", os.Getenv("PMSS_BASE_PATH"), "URL path prefix for reverse-proxy deployments (e.g. /user-satoshi/fleet)")
+	basePath := flag.String("base-path", os.Getenv("PMSS_BASE_PATH"), "URL path prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged (e.g. /fleet)")
 	logLevel := flag.String("log", envOr("PMSS_LOG", "info"), "log level: debug, info, warn, error")
 	flag.Parse()
 
@@ -101,7 +101,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	handler := api.New(st, mgr, *auth, *basePath)
+	bp, err := api.NormalizeBasePath(*basePath)
+	if err != nil {
+		log.Error("invalid -base-path", "err", err)
+		os.Exit(1)
+	}
+	if bp != "" {
+		log.Info("serving under base path", "path", bp)
+	}
+	handler := api.New(st, mgr, *auth, bp)
 	handler.SetLegal(legal.License, legal.ThirdPartyLicenses)
 	handler.SetVersion(version)
 	hosts, wildcard := allowedHostList(addrs, *allowedHosts)
