@@ -90,7 +90,7 @@ make build                                 # or: go build -o pmss-fleet-manager 
 ```
 
 Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
-`PMSS_AUTH`, `PMSS_LOG`, `PMSS_ALLOWED_HOSTS`:
+`PMSS_AUTH`, `PMSS_LOG`, `PMSS_ALLOWED_HOSTS`, `PMSS_BASE_PATH`:
 
 | flag | default | meaning |
 |---|---|---|
@@ -99,6 +99,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-auth` | none | HTTP basic auth as `user:password`; set it if you bind to a non-loopback address |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed |
+| `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
 
 ### Adding a box
 

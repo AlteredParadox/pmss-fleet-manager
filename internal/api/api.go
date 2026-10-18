@@ -53,7 +53,11 @@ type Server struct {
 	st   *store.Store
 	m    *collect.Manager
 	auth string // "user:pass" or ""
-	mux  *http.ServeMux
+	// basePath is the URL prefix every route is served under when a reverse
+	// proxy forwards the dashboard from a sub-path unchanged ("" or "/fleet";
+	// see NormalizeBasePath). The SPA derives the same prefix from its own URL.
+	basePath string
+	mux      *http.ServeMux
 	// instance identifies this process; the UI reloads itself when it
 	// changes after an SSE reconnect so a rebuilt server never runs stale JS.
 	instance string
@@ -107,51 +111,86 @@ func (s *Server) hostAllowed(hostport string) bool {
 const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
 	"font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
-// New builds the handler tree.
-func New(st *store.Store, m *collect.Manager, basicAuth string) *Server {
-	s := &Server{st: st, m: m, auth: basicAuth, mux: http.NewServeMux(),
+// New builds the handler tree. basePath is validated with NormalizeBasePath;
+// an invalid value is a programming error (main validates user input first).
+func New(st *store.Store, m *collect.Manager, basicAuth string, basePath string) *Server {
+	bp, err := NormalizeBasePath(basePath)
+	if err != nil {
+		panic("api.New: " + err.Error())
+	}
+	s := &Server{st: st, m: m, auth: basicAuth, basePath: bp, mux: http.NewServeMux(),
 		instance: strconv.FormatInt(time.Now().UnixNano(), 36)}
 	s.routes()
 	return s
 }
 
+// NormalizeBasePath turns the -base-path flag into the form routes are
+// registered under: "" for the root, otherwise a clean absolute path without
+// a trailing slash ("/fleet", "/user/fleet"). A missing leading slash is
+// added; "/" means the root. Characters that would be read as a pattern
+// wildcard or that cannot appear in a request path are rejected rather than
+// left to panic inside ServeMux.
+func NormalizeBasePath(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", nil
+	}
+	if strings.ContainsAny(p, "{}?# \t\n\r") {
+		return "", fmt.Errorf("base path %q may not contain braces, '?', '#' or whitespace", p)
+	}
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("base path %q contains a control character", p)
+		}
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	p = path.Clean(p)
+	if p == "/" {
+		return "", nil
+	}
+	return p, nil
+}
+
 func (s *Server) routes() {
+	bp := s.basePath
 	mux := s.mux
-	mux.HandleFunc("GET /api/state", s.handleState)
-	mux.HandleFunc("GET /api/events", s.handleEvents)
-	mux.HandleFunc("GET /api/boxes", s.handleListBoxes)
-	mux.HandleFunc("POST /api/boxes", s.handleCreateBox)
-	mux.HandleFunc("GET /api/boxes/{id}", s.handleGetBox)
-	mux.HandleFunc("GET /api/torrents", s.handleTorrents)
-	mux.HandleFunc("PUT /api/boxes/{id}", s.handleUpdateBox)
-	mux.HandleFunc("DELETE /api/boxes/{id}", s.handleDeleteBox)
-	mux.HandleFunc("POST /api/boxes/{id}/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
-	mux.HandleFunc("POST /api/boxes/{id}/refresh", s.handleRefresh)
-	mux.HandleFunc("POST /api/boxes/{id}/du", s.handleDu)
-	mux.HandleFunc("POST /api/boxes/{id}/qbt/{action}", s.handleQbtAction)
-	mux.HandleFunc("POST /api/boxes/{id}/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
-	mux.HandleFunc("POST /api/boxes/{id}/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
-	mux.HandleFunc("POST /api/boxes/{id}/qbt/discovery", s.handleSetDiscovery)
-	mux.HandleFunc("POST /api/boxes/{id}/containers/{cid}/{action}", s.handleContainerAction)
-	mux.HandleFunc("POST /api/detect", s.handleDetect)
-	mux.HandleFunc("GET /api/alerts", s.handleAlerts)
-	mux.HandleFunc("POST /api/alerts/ack-all", s.handleAckAll)
-	mux.HandleFunc("POST /api/alerts/{id}/ack", s.handleAck)
-	mux.HandleFunc("DELETE /api/alerts/{id}", s.handleDeleteAlert)
-	mux.HandleFunc("POST /api/alerts/clear-resolved", s.handleClearResolved)
-	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
-	mux.HandleFunc("PUT /api/settings", s.handleSetSettings)
+	mux.HandleFunc("GET "+bp+"/api/state", s.handleState)
+	mux.HandleFunc("GET "+bp+"/api/events", s.handleEvents)
+	mux.HandleFunc("GET "+bp+"/api/boxes", s.handleListBoxes)
+	mux.HandleFunc("POST "+bp+"/api/boxes", s.handleCreateBox)
+	mux.HandleFunc("GET "+bp+"/api/boxes/{id}", s.handleGetBox)
+	mux.HandleFunc("GET "+bp+"/api/torrents", s.handleTorrents)
+	mux.HandleFunc("PUT "+bp+"/api/boxes/{id}", s.handleUpdateBox)
+	mux.HandleFunc("DELETE "+bp+"/api/boxes/{id}", s.handleDeleteBox)
+	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
+	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/refresh", s.handleRefresh)
+	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/du", s.handleDu)
+	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/qbt/{action}", s.handleQbtAction)
+	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
+	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
+	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/qbt/discovery", s.handleSetDiscovery)
+	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/containers/{cid}/{action}", s.handleContainerAction)
+	mux.HandleFunc("POST "+bp+"/api/detect", s.handleDetect)
+	mux.HandleFunc("GET "+bp+"/api/alerts", s.handleAlerts)
+	mux.HandleFunc("POST "+bp+"/api/alerts/ack-all", s.handleAckAll)
+	mux.HandleFunc("POST "+bp+"/api/alerts/{id}/ack", s.handleAck)
+	mux.HandleFunc("DELETE "+bp+"/api/alerts/{id}", s.handleDeleteAlert)
+	mux.HandleFunc("POST "+bp+"/api/alerts/clear-resolved", s.handleClearResolved)
+	mux.HandleFunc("GET "+bp+"/api/settings", s.handleGetSettings)
+	mux.HandleFunc("PUT "+bp+"/api/settings", s.handleSetSettings)
 	// AGPL §13: the license, the third-party notices and the Corresponding
 	// Source offer are served WITHOUT basic auth (see isPublicPath).
-	mux.HandleFunc("GET /license", s.serveLegalText(func() []byte { return s.license }, "license text unavailable"))
-	mux.HandleFunc("GET /third-party-licenses", s.serveLegalText(func() []byte { return s.thirdParty }, "third-party notices unavailable"))
-	mux.HandleFunc("GET /source", s.handleSource)
-	mux.HandleFunc("GET /api/services", s.handleServices)
-	mux.HandleFunc("POST /api/services/sync", s.handleServicesSync)
+	mux.HandleFunc("GET "+bp+"/license", s.serveLegalText(func() []byte { return s.license }, "license text unavailable"))
+	mux.HandleFunc("GET "+bp+"/third-party-licenses", s.serveLegalText(func() []byte { return s.thirdParty }, "third-party notices unavailable"))
+	mux.HandleFunc("GET "+bp+"/source", s.handleSource)
+	mux.HandleFunc("GET "+bp+"/api/services", s.handleServices)
+	mux.HandleFunc("POST "+bp+"/api/services/sync", s.handleServicesSync)
 
 	static, _ := fs.Sub(web.FS, "static")
 	fileServer := http.FileServer(http.FS(static))
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET "+bp+"/static/", http.StripPrefix(bp+"/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "" || strings.HasSuffix(r.URL.Path, "/") { // no directory listings, no second copy of the page
 			http.NotFound(w, r)
 			return
@@ -159,8 +198,11 @@ func (s *Server) routes() {
 		w.Header().Set(hdrCacheControl, "no-cache")
 		fileServer.ServeHTTP(w, r)
 	})))
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
+	// The page lives only at <base-path>/ (ServeMux redirects <base-path> to
+	// it). index.html and app.js refer to static/ and api/ relative to that
+	// URL, so no prefix is written into the served files.
+	mux.HandleFunc("GET "+bp+"/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != bp+"/" {
 			http.NotFound(w, r)
 			return
 		}
@@ -181,7 +223,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unexpected Host header; start with -allowed-hosts to serve this name", http.StatusMisdirectedRequest)
 		return
 	}
-	if s.auth != "" && !isPublicPath(r.URL.Path) {
+	if s.auth != "" && !s.isPublicPath(r.URL.Path) {
 		u, p, ok := r.BasicAuth()
 		if !ok || subtle.ConstantTimeCompare([]byte(u+":"+p), []byte(s.auth)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="pmss-fleet-manager"`)
@@ -193,7 +235,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", csp)
-	if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet {
+	if strings.HasPrefix(r.URL.Path, s.basePath+"/api/") && r.Method != http.MethodGet {
 		// Same-origin check against CSRF from other sites in the browser.
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !sameOrigin(origin, r.Host) {

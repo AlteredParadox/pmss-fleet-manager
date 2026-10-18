@@ -37,6 +37,12 @@ import (
 
 func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
+	return newTestServerWith(t, "", "")
+}
+
+// newTestServerWith builds a server with basic auth and a base path set.
+func newTestServerWith(t *testing.T, auth, basePath string) (*Server, *store.Store) {
+	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +53,7 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 		t.Fatal(err)
 	}
 	t.Cleanup(m.Stop)
-	return New(st, m, ""), st
+	return New(st, m, auth, basePath), st
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string, hdr map[string]string) (int, string) {

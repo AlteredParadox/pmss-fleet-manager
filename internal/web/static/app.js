@@ -18,6 +18,13 @@
 (() => {
 'use strict';
 
+// The page is only ever served at <base-path>/ (the server redirects
+// <base-path> to it), so the prefix is whatever precedes that final slash:
+// '' at the root, '/fleet' behind a proxy that forwards the sub-path. Taking
+// it from the URL rather than baking it into this file also works when the
+// proxy strips the prefix before forwarding, since it strips it again here.
+const BASE = location.pathname.replace(/\/+$/, '');
+
 const S = {
   view: 'fleet', fleetView: 'cards', tab: 'overview', selId: null,
   boxes: [], totals: {}, unacked: 0, settings: {}, detail: null,
@@ -157,7 +164,7 @@ const go = (hash) => { location.hash = hash; };
 /* ---------- data ---------- */
 async function loadState() {
   try {
-    const d = await api('GET', '/api/state');
+    const d = await api('GET', BASE + '/api/state');
     if (d.instance && S.instance && d.instance !== S.instance) { location.reload(); return; } // server was rebuilt: pick up new JS/CSS
     S.instance = d.instance || S.instance;
     S.version = d.version; S.sourceUrl = d.source_url;
@@ -174,7 +181,7 @@ async function loadState() {
 async function loadDetail(id) {
   if (!id) return;
   try {
-    const d = await api('GET', `/api/boxes/${id}`);
+    const d = await api('GET', `${BASE}/api/boxes/${id}`);
     if (S.selId !== id) return;
     S.detail = d.state;
     render();
@@ -211,16 +218,16 @@ async function loadTorrents() {
   const seq = ++torSeq;
   torInflight = true; torDirty = false;
   try {
-    const d = await api('GET', '/api/torrents');
+    const d = await api('GET', BASE + '/api/torrents');
     if (seq === torSeq) S.torrents = d.boxes || [];
   } catch (e) { toast(`torrents: ${e.message}`, 'bad'); }
   torInflight = false; torLast = Date.now();
   if (S.view === 'torrents') render();
   if (torDirty) loadTorrentsSoon();
 }
-async function loadServices() { try { S.services = await api('GET', '/api/services'); } catch (e) { S.services = { configured: false, services: [], error: e.message }; } if (S.view === 'settings') render(); }
+async function loadServices() { try { S.services = await api('GET', BASE + '/api/services'); } catch (e) { S.services = { configured: false, services: [], error: e.message }; } if (S.view === 'settings') render(); }
 async function loadAlerts() {
-  try { S.alerts = await api('GET', '/api/alerts'); render(); } catch (e) { toast(`alerts: ${e.message}`, 'bad'); }
+  try { S.alerts = await api('GET', BASE + '/api/alerts'); render(); } catch (e) { toast(`alerts: ${e.message}`, 'bad'); }
 }
 function applyTheme(t) {
   document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
@@ -233,7 +240,7 @@ function renderSoon() {
   requestAnimationFrame(() => { rafPending = false; render(); });
 }
 function connectEvents() {
-  const es = new EventSource('/api/events');
+  const es = new EventSource(BASE + '/api/events');
   let wasDown = false;
   let resyncGen = 0;
   // Events missed while disconnected (a box removed during a server restart,
@@ -1003,7 +1010,7 @@ function resetAdd() { S.add = { mode: 'add', step: 1, form: blankForm(), errors:
 async function startEdit(id) {
   S.add = { mode: 'edit', step: 1, form: null, errors: {}, detect: null, busy: false, editId: id };
   try {
-    const d = await api('GET', `/api/boxes/${id}`);
+    const d = await api('GET', `${BASE}/api/boxes/${id}`);
     if (S.add.mode !== 'edit' || S.add.editId !== id) return; // navigated on before this answer came back
     const b = d.box;
     S.add.form = { ...blankForm(), ...b, password: '', qbt_pass: '', port: b.port || 22, host_key: '', forget_host_key: false, clear_qbt_pass: false };
@@ -1166,7 +1173,7 @@ async function runDetect() {
   const A = S.add;
   A.detect = null; A.busy = true; render();
   try {
-    const res = await api('POST', '/api/detect', payload(A.form));
+    const res = await api('POST', BASE + '/api/detect', payload(A.form));
     A.detect = res;
     if (res.ok && res.box) {
       // Adopt detected facts into the form where the user left defaults.
@@ -1187,11 +1194,11 @@ async function confirmAdd() {
   A.busy = true; render();
   try {
     if (A.mode === 'edit') {
-      await api('PUT', `/api/boxes/${A.editId}`, payload(A.form));
+      await api('PUT', `${BASE}/api/boxes/${A.editId}`, payload(A.form));
       toast('box updated', 'ok');
       go(`/box/${A.editId}`);
     } else {
-      const b = await api('POST', '/api/boxes', payload(A.form));
+      const b = await api('POST', BASE + '/api/boxes', payload(A.form));
       toast(`${b.name} added to fleet`, 'ok');
       await loadState();
       resetAdd();
@@ -1257,7 +1264,7 @@ function viewSettings() {
     <div class="panel"><div class="tile-label">about &amp; licensing</div>
       <div class="row"><span>version</span><span>${esc(S.version || 'dev')}</span></div>
       <div class="hint">pmss-fleet-manager is free software under the GNU Affero General Public License v3 or later. Because you are using it over a network, you are entitled to its source code.</div>
-      <div class="row" style="justify-content:flex-start;gap:16px"><a href="/license" target="_blank" rel="noopener">license ↗</a><a href="/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
+      <div class="row" style="justify-content:flex-start;gap:16px"><a href="${esc(BASE)}/license" target="_blank" rel="noopener">license ↗</a><a href="${esc(BASE)}/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || BASE + '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
     </div>
   </div>
   ${viewServices()}`;
@@ -1313,7 +1320,7 @@ document.addEventListener('click', async (e) => {
     render();
     // Send only this field: the server merges it onto its current settings,
     // so a stale copy in this tab cannot revert changes made elsewhere.
-    api('PUT', '/api/settings', { card_min_px: S.settings.card_min_px }).then((d) => { S.settings = d; }).catch((err) => toast(err.message, 'bad'));
+    api('PUT', BASE + '/api/settings', { card_min_px: S.settings.card_min_px }).then((d) => { S.settings = d; }).catch((err) => toast(err.message, 'bad'));
     return;
   }
   const fv = e.target.closest('[data-fleetview]');
@@ -1343,33 +1350,33 @@ document.addEventListener('click', async (e) => {
 async function boxAction(a) {
   if (a === 'refresh-all') {
     const live = S.boxes.filter((b) => b.status !== 'disabled');
-    const rs = await Promise.allSettled(live.map((b) => api('POST', `/api/boxes/${b.id}/refresh`)));
+    const rs = await Promise.allSettled(live.map((b) => api('POST', `${BASE}/api/boxes/${b.id}/refresh`)));
     const failed = rs.filter((r) => r.status === 'rejected').length;
     if (failed) toast(`refresh requested for ${live.length - failed} of ${live.length} boxes; ${failed} failed`, 'warn');
     else toast(`refresh requested for ${live.length} boxes`);
   }
-  else if (a === 'refresh') { await api('POST', `/api/boxes/${S.selId}/refresh`); toast('refresh requested'); }
-  else if (a === 'du') { const id = S.selId; await api('POST', `/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
-  else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
+  else if (a === 'refresh') { await api('POST', `${BASE}/api/boxes/${S.selId}/refresh`); toast('refresh requested'); }
+  else if (a === 'du') { const id = S.selId; await api('POST', `${BASE}/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
+  else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `${BASE}/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
 }
 async function qbtAction(a, act) {
   const what = a.slice(4);
   act.disabled = true;
   if (what === 'install') toast('downloading qbittorrent-nox on the box…');
-  const r = await api('POST', `/api/boxes/${S.selId}/qbt/${what}`);
+  const r = await api('POST', `${BASE}/api/boxes/${S.selId}/qbt/${what}`);
   toast(`qBittorrent ${what}: ok${r?.output ? ' — ' + r.output.split('\n').slice(0, 2).join(' · ') : ''}`, 'ok');
 }
 async function torrentAction(a, act) {
   const what = a.slice(4);
   act.disabled = true;
-  await api('POST', `/api/boxes/${act.dataset.box || S.selId}/qbt/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
+  await api('POST', `${BASE}/api/boxes/${act.dataset.box || S.selId}/qbt/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
   toast(`torrent ${{ stop: 'stopped', start: 'started', remove: 'removed', 'remove-data': 'removed with its files' }[what]}`, 'ok');
   if (S.view === 'torrents') void loadTorrents();
 }
 async function discoveryAction(a, act) {
   const k = a.slice(5), on = !act.dataset.on;
   act.disabled = true;
-  await api('POST', `/api/boxes/${S.selId}/qbt/discovery`, { [k]: on });
+  await api('POST', `${BASE}/api/boxes/${S.selId}/qbt/discovery`, { [k]: on });
   toast(`${k.toUpperCase()} ${on ? 'enabled' : 'disabled'}`, 'ok');
   await loadDetail(S.selId);
 }
@@ -1384,7 +1391,7 @@ async function torAddAction(a) {
   d.files.forEach((f) => fd.append('torrents', f, f.name));
   d.busy = true; render();
   try {
-    const r = await api('POST', `/api/boxes/${S.selId}/qbt/torrents`, fd);
+    const r = await api('POST', `${BASE}/api/boxes/${S.selId}/qbt/torrents`, fd);
     toast(addToast(r, d.stopped), r?.counted && r.failed ? 'warn' : 'ok');
     if (S.torAdd === d) S.torAdd = null; // not a draft the user opened meanwhile
   } finally {
@@ -1393,26 +1400,26 @@ async function torAddAction(a) {
   }
 }
 async function containerAction(a, act) {
-  act.disabled = true; await api('POST', `/api/boxes/${S.selId}/containers/${act.dataset.cid}/${a.slice(4)}`); toast(`container ${a.slice(4)} ok`, 'ok');
+  act.disabled = true; await api('POST', `${BASE}/api/boxes/${S.selId}/containers/${act.dataset.cid}/${a.slice(4)}`); toast(`container ${a.slice(4)} ok`, 'ok');
 }
 async function alertsAction(a, act) {
-  if (a === 'ack') { act.disabled = true; await api('POST', `/api/alerts/${act.dataset.id}/ack`); toast('acknowledged', 'ok'); await loadAlerts(); }
-  else if (a === 'ack-all') { await api('POST', '/api/alerts/ack-all'); toast('all alerts acknowledged', 'ok'); await loadAlerts(); }
-  else if (a === 'alert:dismiss') { act.disabled = true; await api('DELETE', `/api/alerts/${act.dataset.id}`); await loadAlerts(); }
-  else if (a === 'alerts:clear-resolved') { await api('POST', '/api/alerts/clear-resolved'); toast('resolved alerts cleared', 'ok'); await loadAlerts(); }
+  if (a === 'ack') { act.disabled = true; await api('POST', `${BASE}/api/alerts/${act.dataset.id}/ack`); toast('acknowledged', 'ok'); await loadAlerts(); }
+  else if (a === 'ack-all') { await api('POST', BASE + '/api/alerts/ack-all'); toast('all alerts acknowledged', 'ok'); await loadAlerts(); }
+  else if (a === 'alert:dismiss') { act.disabled = true; await api('DELETE', `${BASE}/api/alerts/${act.dataset.id}`); await loadAlerts(); }
+  else if (a === 'alerts:clear-resolved') { await api('POST', BASE + '/api/alerts/clear-resolved'); toast('resolved alerts cleared', 'ok'); await loadAlerts(); }
 }
 async function settingsAction(a) {
   if (a === 'settings:save') {
     const d = { ...S.settingsDraft };
     for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px']) d[k] = Number(d[k]);
     const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
-    S.settings = await api('PUT', '/api/settings', d); S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
+    S.settings = await api('PUT', BASE + '/api/settings', d); S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
     if (keyChanged) { S.services = null; setTimeout(loadServices, 1500); }
   }
   else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; render(); }
 }
 async function servicesAction(a, act) {
-  if (a === 'svc:sync') { act.disabled = true; toast('syncing services from pulsedmedia.com…'); S.services = await api('POST', '/api/services/sync'); await loadState(); toast(`synced ${S.services.services.length} services`, 'ok'); render(); }
+  if (a === 'svc:sync') { act.disabled = true; toast('syncing services from pulsedmedia.com…'); S.services = await api('POST', BASE + '/api/services/sync'); await loadState(); toast(`synced ${S.services.services.length} services`, 'ok'); render(); }
   else if (a === 'svc:add') {
     const sv = (S.services?.services || []).find((x) => String(x.id) === act.dataset.id);
     if (!sv) return;
