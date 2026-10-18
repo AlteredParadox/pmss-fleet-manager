@@ -180,11 +180,6 @@ func (c *Client) Close() {
 	}
 }
 
-func (c *Client) do(ctx context.Context, method, path string, form url.Values) (int, []byte, error) {
-	code, body, _, err := c.doResp(ctx, method, path, form)
-	return code, body, err
-}
-
 // doResp sends a URL-encoded form (or a bare request when form is nil).
 func (c *Client) doResp(ctx context.Context, method, path string, form url.Values) (int, []byte, *http.Response, error) {
 	if form == nil {
@@ -417,8 +412,23 @@ func (c *Client) stopStart(ctx context.Context, start bool, hashes string) error
 }
 
 // ErrBadTorrent is returned when qBittorrent rejects an upload as not a
-// torrent file (HTTP 415) or answers "Fails." to an add.
-var ErrBadTorrent = errors.New("qbittorrent: not a valid torrent or magnet")
+// torrent file (HTTP 415).
+var ErrBadTorrent = errors.New("qbittorrent: not a valid torrent file")
+
+// ErrAddRejected is returned when qBittorrent answers "Fails." to an add:
+// nothing in the request was added. qBittorrent 5 gives that answer both for
+// an unparsable link and for a torrent that is already in the session, so
+// the message names both.
+var ErrAddRejected = errors.New("qbittorrent: nothing was added — the torrent is already present, or the link is not a valid magnet or torrent")
+
+// ValidHash reports whether h is a v1 (40 hex) or v2 (64 hex) info-hash in
+// either case. Everything that names a torrent to the WebUI goes through it.
+func ValidHash(h string) bool {
+	if len(h) != 40 && len(h) != 64 {
+		return false
+	}
+	return strings.Trim(strings.ToLower(h), "0123456789abcdef") == ""
+}
 
 // TorrentFile is one uploaded .torrent for Add.
 type TorrentFile struct {
@@ -432,12 +442,12 @@ type AddRequest struct {
 	URLs     []string
 	Files    []TorrentFile
 	Category string
-	Stopped  bool // add without starting (qBittorrent 5 "stopped", 4.x "paused")
+	Stopped  bool // add without starting (qBittorrent 5 "stopped", 4.x "paused"); false leaves the client's own default in force
 }
 
 // Add posts torrents/add as multipart. qBittorrent answers 200 "Ok." when it
-// accepted the request and 200 "Fails." when nothing in it was usable, so
-// the body is checked as well as the status.
+// accepted at least one entry and 200 "Fails." when it added nothing (bad
+// link or already present), so the body is checked as well as the status.
 func (c *Client) Add(ctx context.Context, req AddRequest) error {
 	if len(req.URLs) == 0 && len(req.Files) == 0 {
 		return errors.New("nothing to add")
@@ -450,9 +460,12 @@ func (c *Client) Add(ctx context.Context, req AddRequest) error {
 	if req.Category != "" {
 		_ = mw.WriteField("category", req.Category)
 	}
-	stopped := strconv.FormatBool(req.Stopped)
-	_ = mw.WriteField("stopped", stopped) // 5.x name
-	_ = mw.WriteField("paused", stopped)  // 4.x name; unknown fields are ignored
+	if req.Stopped {
+		// Only ever sent as true: an explicit false would override the
+		// client's "add torrents stopped" preference, which is the user's.
+		_ = mw.WriteField("stopped", "true") // 5.x name
+		_ = mw.WriteField("paused", "true")  // 4.x name; unknown fields are ignored
+	}
 	for _, f := range req.Files {
 		fw, err := mw.CreateFormFile("torrents", f.Name)
 		if err != nil {
@@ -470,7 +483,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) error {
 		return err
 	}
 	if strings.HasPrefix(strings.TrimSpace(out), "Fails") {
-		return ErrBadTorrent
+		return ErrAddRejected
 	}
 	return nil
 }

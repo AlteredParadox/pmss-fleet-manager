@@ -519,6 +519,7 @@ func (m *Manager) SetDiscovery(ctx context.Context, id int64, want map[string]bo
 	}
 	err := p.setDiscovery(ctx, prefs)
 	if err == nil {
+		p.noteDiscovery(want)
 		m.mutateState(id, func(s *BoxState) {
 			if !s.Qbt.Discovery.Known {
 				return

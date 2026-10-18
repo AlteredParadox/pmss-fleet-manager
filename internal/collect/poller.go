@@ -74,7 +74,9 @@ type poller struct {
 	cancel context.CancelFunc
 
 	actionMu sync.Mutex
-	actionAt time.Time // last stop/restart, see QbtAction
+	actionAt time.Time       // last stop/restart, see QbtAction
+	discAt   time.Time       // last SetDiscovery write, see noteDiscovery
+	discWant map[string]bool // what that write set
 }
 
 func (p *poller) noteAction() {
@@ -88,6 +90,35 @@ func (p *poller) actionSince(t time.Time) bool {
 	p.actionMu.Lock()
 	defer p.actionMu.Unlock()
 	return p.actionAt.After(t)
+}
+
+// noteDiscovery records a successful app/setPreferences write so a poll
+// that read the preferences before it cannot publish the old values.
+func (p *poller) noteDiscovery(want map[string]bool) {
+	p.actionMu.Lock()
+	p.discAt = time.Now()
+	p.discWant = want
+	p.actionMu.Unlock()
+}
+
+// overlayDiscovery applies the values written by SetDiscovery after the
+// poll started on top of what the poll read, so the UI never flips back.
+func (p *poller) overlayDiscovery(start time.Time, d *Discovery) {
+	p.actionMu.Lock()
+	defer p.actionMu.Unlock()
+	if !p.discAt.After(start) || !d.Known {
+		return
+	}
+	for k, v := range p.discWant {
+		switch k {
+		case "dht":
+			d.DHT = v
+		case "pex":
+			d.PeX = v
+		case "lsd":
+			d.LSD = v
+		}
+	}
 }
 
 func newPoller(m *Manager, b *store.Box) *poller {
@@ -197,6 +228,11 @@ func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
 		cancel()
 		if err == nil {
 			return p.ssh, nil
+		}
+		if ctx.Err() != nil {
+			// The caller gave up (browser navigated away mid-action),
+			// the connection did not fail: keep it for the next poll.
+			return nil, ctx.Err()
 		}
 		p.ssh.Close()
 		p.ssh = nil
@@ -349,6 +385,7 @@ func (p *poller) poll(ctx context.Context) {
 		// verified is from before the port was freed.
 		st.Qbt.PortOK, st.Qbt.Reachable = false, false
 	}
+	p.overlayDiscovery(start, &st.Qbt.Discovery)
 	st.Unpolled = false
 	st.Failures = 0
 	st.NextPoll, st.Backoff = time.Time{}, false
@@ -572,6 +609,17 @@ func nonNeg64(n int64) int64 {
 	return n
 }
 
+// torrentHash keeps a hash only when it is one. A hostile WebUI could emit
+// ".." and the browser would then POST /qbt/torrents/../stop, which the mux
+// cleans into the box-level shutdown route; without a hash the row simply
+// has no buttons.
+func torrentHash(h string) string {
+	if !qbt.ValidHash(h) {
+		return ""
+	}
+	return strings.ToLower(h)
+}
+
 func (p *poller) qbtClient(port int) *qbt.Client {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -690,7 +738,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 			qs.Errored++
 		}
 		qs.Torrents = append(qs.Torrents, TorrentView{
-			Hash: clip(t.Hash, 64), Name: clip(t.Name, 400), Size: t.Size, Progress: t.Progress, UpBps: t.UPSpeed, DownBps: t.DLSpeed,
+			Hash: torrentHash(t.Hash), Name: clip(t.Name, 400), Size: t.Size, Progress: t.Progress, UpBps: t.UPSpeed, DownBps: t.DLSpeed,
 			Ratio: t.Ratio, State: clip(t.State, 32), Kind: kind, AddedOn: t.AddedOn, Category: clip(t.Category, 100),
 			Uploaded: nonNeg64(t.Uploaded), Downloaded: nonNeg64(t.Downloaded),
 			Seeds: nonNeg(t.Seeds), SeedsSwarm: nonNeg(t.SeedsSwarm), Peers: nonNeg(t.Peers), PeersSwarm: nonNeg(t.PeersSwarm),
@@ -1039,7 +1087,13 @@ func (p *poller) qbtWebUI(ctx context.Context) (*qbt.Client, error) {
 	if err := verifyPortNow(ctx, sshc, port); err != nil {
 		return nil, err
 	}
-	return p.qbtClient(port), nil
+	cli := p.qbtClient(port)
+	if err, held := cli.AuthBlocked(); held {
+		// Same hold the poll honours: during a ban every request would
+		// re-arm it, so none is sent.
+		return nil, err
+	}
+	return cli, nil
 }
 
 // torrentAction runs one qbt.TorrentActions entry against a single torrent.

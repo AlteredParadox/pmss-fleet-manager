@@ -370,3 +370,15 @@ func TestPortOwnerNow(t *testing.T) {
 		}
 	}
 }
+
+// The UI builds https links from the hostname, so only DNS-shaped names pass.
+func TestHostnameField(t *testing.T) {
+	for in, want := range map[string]string{
+		"odin.pulsedmedia.com": "odin.pulsedmedia.com", "lt5-1-57.example": "lt5-1-57.example", "box": "box",
+		"evil.example/#": "", "x@evil.example": "", "a b": "", `a"b`: "", "": "", strings.Repeat("a", 254): "",
+	} {
+		if got := hostnameField(in); got != want {
+			t.Errorf("hostnameField(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"pmss-fleet-manager/internal/collect"
 	"pmss-fleet-manager/internal/qbt"
@@ -503,12 +504,10 @@ func (s *Server) handleCreateBox(w http.ResponseWriter, r *http.Request) {
 // torrentsBox is one box in the fleet-wide torrent list: identity and
 // status, plus the full qBittorrent view including its torrents.
 type torrentsBox struct {
-	ID      int64            `json:"id"`
-	Name    string           `json:"name"`
-	Type    string           `json:"type"`
-	Status  string           `json:"status"`
-	Enabled bool             `json:"enabled"`
-	Qbt     collect.QbtState `json:"qbt"`
+	ID     int64            `json:"id"`
+	Name   string           `json:"name"`
+	Status string           `json:"status"`
+	Qbt    collect.QbtState `json:"qbt"`
 }
 
 // handleTorrents returns every box that has qBittorrent monitoring on,
@@ -520,7 +519,7 @@ func (s *Server) handleTorrents(w http.ResponseWriter, r *http.Request) {
 		if !st.Qbt.Enabled {
 			continue
 		}
-		out = append(out, torrentsBox{ID: st.ID, Name: st.Name, Type: st.Type, Status: st.Status, Enabled: st.Enabled, Qbt: st.Qbt})
+		out = append(out, torrentsBox{ID: st.ID, Name: st.Name, Status: st.Status, Qbt: st.Qbt})
 	}
 	writeJSON(w, 200, map[string]any{"boxes": out})
 }
@@ -723,7 +722,7 @@ func (s *Server) handleQbtAction(w http.ResponseWriter, r *http.Request) {
 // browser push an arbitrary amount through the box's WebUI.
 const (
 	addMaxBody    = 40 << 20
-	addMaxFile    = 8 << 20
+	addMaxFile    = 2 << 20 // real .torrent files are tens of KB; 20 of these must fit the 30 s action budget
 	addMaxFiles   = 20
 	addMaxURLs    = 50
 	addMaxURLLen  = 4000
@@ -734,7 +733,7 @@ const (
 // validTorrentURL accepts magnet links and http(s) URLs to .torrent files,
 // which is what qBittorrent's torrents/add fetches itself.
 func validTorrentURL(u string) bool {
-	if len(u) > addMaxURLLen || strings.ContainsAny(u, " \t\r\n") {
+	if len(u) > addMaxURLLen || strings.ContainsAny(u, " \t\r\n\x00") {
 		return false
 	}
 	l := strings.ToLower(u)
@@ -812,7 +811,11 @@ func clipStr(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) { // never split a rune
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 // handleSetDiscovery takes {"dht":bool,"pex":bool,"lsd":bool} (any subset).
@@ -865,6 +868,8 @@ func (s *Server) handleAddTorrents(w http.ResponseWriter, r *http.Request) {
 		code := actionCode(err)
 		if errors.Is(err, qbt.ErrBadTorrent) {
 			code = 422
+		} else if errors.Is(err, qbt.ErrAddRejected) {
+			code = 409
 		}
 		writeErr(w, code, err)
 		return
@@ -874,12 +879,7 @@ func (s *Server) handleAddTorrents(w http.ResponseWriter, r *http.Request) {
 
 // validTorrentHash accepts a v1 (40 hex) or v2 (64 hex) info-hash, in either
 // case; anything else never reaches the WebUI.
-func validTorrentHash(h string) bool {
-	if len(h) != 40 && len(h) != 64 {
-		return false
-	}
-	return strings.Trim(strings.ToLower(h), "0123456789abcdef") == ""
-}
+func validTorrentHash(h string) bool { return qbt.ValidHash(h) }
 
 func (s *Server) handleTorrentAction(w http.ResponseWriter, r *http.Request) {
 	id, err := idParam(r)
