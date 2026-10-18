@@ -51,6 +51,11 @@ type Client struct {
 	cookie string // session cookie header value, set by Login
 
 	guard *AuthGuard
+	// Login attempts are numbered so a caller refused while another's
+	// attempt was in flight can take that attempt's outcome (under mu).
+	loginGen uint64
+	loginErr error
+	loginAt  time.Time
 }
 
 // banRetryAfter is the hold after qBittorrent reports the IP banned: its
@@ -229,30 +234,53 @@ func (c *Client) send(ctx context.Context, method, path, ctype string, body []by
 const maxBody = 16 << 20
 
 // Login authenticates. With localhost auth bypass qBittorrent answers Ok. to
-// anything. One attempt runs at a time per guard; a caller that waited for
-// another's attempt then sees its outcome through the guard.
+// anything. One attempt runs at a time per guard.
 func (c *Client) Login(ctx context.Context) error {
 	c.guard.loginMu.Lock()
 	defer c.guard.loginMu.Unlock()
-	return c.login(ctx)
+	return c.attempt(ctx)
 }
 
-func (c *Client) currentCookie() string {
+// attempt runs one login and publishes its outcome as a new generation.
+// Caller holds guard.loginMu.
+func (c *Client) attempt(ctx context.Context) error {
+	err := c.login(ctx)
+	c.mu.Lock()
+	c.loginGen++
+	c.loginErr, c.loginAt = err, time.Now()
+	c.mu.Unlock()
+	return err
+}
+
+// loginShareWindow: after a failed attempt, requests refused within this
+// long take that failure too, even ones sent after it completed. Without
+// it a burst of actions straddling a dropped login would each retry. A
+// call after the window may try again. Variable so tests can shorten it.
+var loginShareWindow = 2 * time.Second
+
+func (c *Client) curGen() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.cookie
+	return c.loginGen
 }
 
-// loginAfter logs in for a request that was refused while carrying the
-// cookie sent, unless another caller logged in meanwhile: the retry then
-// simply uses the new session instead of sending the credentials again.
-func (c *Client) loginAfter(ctx context.Context, sent string) error {
+// loginAfter logs in for a request that was refused, where gen is the login
+// generation when that request was sent. If an attempt completed since
+// (another caller's, which this one waited on), its outcome is shared: nil
+// means the retry can use the new session, an error (rejection, or a
+// connection that dropped mid-login) is returned without sending the
+// credentials again. So is a failure from the last loginShareWindow. Any
+// other refused request makes its own attempt.
+func (c *Client) loginAfter(ctx context.Context, gen uint64) error {
 	c.guard.loginMu.Lock()
 	defer c.guard.loginMu.Unlock()
-	if cur := c.currentCookie(); cur != "" && cur != sent {
-		return nil
+	c.mu.Lock()
+	cur, last, at := c.loginGen, c.loginErr, c.loginAt
+	c.mu.Unlock()
+	if cur != gen || (last != nil && time.Since(at) < loginShareWindow) {
+		return last
 	}
-	return c.login(ctx)
+	return c.attempt(ctx)
 }
 
 func (c *Client) login(ctx context.Context) error {
@@ -304,7 +332,7 @@ func (c *Client) call(ctx context.Context, method, path string, form url.Values,
 
 // callBody is call for an arbitrary request body (multipart uploads).
 func (c *Client) callBody(ctx context.Context, method, path, ctype string, payload []byte, out any) error {
-	sent := c.currentCookie()
+	gen := c.curGen()
 	code, body, _, err := c.send(ctx, method, path, ctype, payload)
 	if err != nil {
 		return err
@@ -314,7 +342,7 @@ func (c *Client) callBody(ctx context.Context, method, path, ctype string, paylo
 			c.guard.fail(ErrBanned, time.Now().Add(banRetryAfter), "")
 			return ErrBanned
 		}
-		if err := c.loginAfter(ctx, sent); err != nil {
+		if err := c.loginAfter(ctx, gen); err != nil {
 			return err
 		}
 		code, body, _, err = c.send(ctx, method, path, ctype, payload)

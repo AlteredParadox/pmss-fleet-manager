@@ -286,9 +286,11 @@ func (s BoxState) EffectivePlan() string {
 	return s.Service.Product
 }
 
-// EffectiveRenewal is the manual renewal date, else the API next-due date.
+// EffectiveRenewal is the manual renewal date, else the next-due date of the
+// matched service if that service is active. A cancelled service's due date
+// is history, not a renewal to alert on.
 func (s BoxState) EffectiveRenewal() string {
-	if s.Renewal != "" || s.Service == nil {
+	if s.Renewal != "" || s.Service == nil || !serviceActive(s.Service.Status) {
 		return s.Renewal
 	}
 	return s.Service.NextDue

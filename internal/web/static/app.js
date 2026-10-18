@@ -68,7 +68,7 @@ function retryNote(b) {
   return `retry ${s < 5 ? 'now' : s < 90 ? `in ${s}s` : `in ${Math.round(s / 60)} min`}${b.backoff ? ', backed off' : ''}`;
 }
 function planOf(b) { return b.plan || b.service?.product || ''; }
-function renewalOf(b) { return b.renewal || b.service?.next_due || ''; }
+function renewalOf(b) { return b.renewal || (/^active$/i.test(b.service?.status || '') ? b.service.next_due : '') || ''; } // as EffectiveRenewal
 function fmtDur(sec) {
   sec = Math.max(0, Math.floor(Number(sec) || 0));
   const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
@@ -93,11 +93,14 @@ function fmtAgo(iso) {
 // server does the same in its zone), so the count changes at local midnight
 // and a DST day does not shift it.
 function daysUntil(ymd) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd || '');
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
   if (!m) return null;
+  const due = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+  const dd = new Date(due);
+  if (dd.getUTCMonth() !== +m[2] - 1 || dd.getUTCDate() !== +m[3]) return null; // 2026-02-30 is not a date
   const now = new Date();
   const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
-  return Math.round((Date.UTC(+m[1], +m[2] - 1, +m[3]) - today) / 86400e3);
+  return Math.round((due - today) / 86400e3);
 }
 function levelClass(pct, threshold) {
   if (pct >= 100 || pct >= threshold) return 'bad';
@@ -164,6 +167,7 @@ async function loadState() {
     S.settings = d.settings || {};
     applyTheme(S.view === 'settings' && S.settingsDraft && S.settingsTouched.theme ? S.settingsDraft.theme : S.settings.theme); // keep an unsaved preview
     if (!S.fleetViewTouched) S.fleetView = S.settings.fleet_view || 'cards';
+    S.baseline = true; // a full snapshot has landed at least once
     return true;
   } catch (e) { toast(`state: ${e.message}`, 'bad'); return false; }
 }
@@ -186,22 +190,29 @@ async function loadDetail(id) {
     }
   }
 }
-let torSeq = 0; // one reload per state event; only the newest response may land
-let torTimer = 0;
-// Events from several boxes arrive within milliseconds of each other; one
-// reload of the combined view covers them all.
+let torSeq = 0; // only the newest response may land
+let torTimer = 0, torInflight = false, torDirty = false, torLast = 0;
+const TOR_MIN_MS = 2000;
+// Every box's state event asks for the combined view, and pollers are
+// staggered, so events trickle in one at a time. Keep at most one request
+// in flight, at most one every TOR_MIN_MS, and one trailing reload for
+// whatever arrived during a request.
 function loadTorrentsSoon() {
+  if (torInflight) { torDirty = true; return; }
   if (torTimer) return;
-  torTimer = setTimeout(() => { torTimer = 0; void loadTorrents(); }, 300);
+  const wait = Math.max(0, torLast + TOR_MIN_MS - Date.now());
+  torTimer = setTimeout(() => { torTimer = 0; if (S.view === 'torrents') void loadTorrents(); }, wait);
 }
 async function loadTorrents() {
   const seq = ++torSeq;
+  torInflight = true; torDirty = false;
   try {
     const d = await api('GET', '/api/torrents');
-    if (seq !== torSeq) return;
-    S.torrents = d.boxes || [];
+    if (seq === torSeq) S.torrents = d.boxes || [];
   } catch (e) { toast(`torrents: ${e.message}`, 'bad'); }
+  torInflight = false; torLast = Date.now();
   if (S.view === 'torrents') render();
+  if (torDirty) loadTorrentsSoon();
 }
 async function loadServices() { try { S.services = await api('GET', '/api/services'); } catch (e) { S.services = { configured: false, services: [], error: e.message }; } if (S.view === 'settings') render(); }
 async function loadAlerts() {
@@ -209,6 +220,13 @@ async function loadAlerts() {
 }
 function applyTheme(t) {
   document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
+}
+let rafPending = false;
+// One fleet rebuild per frame, however many box events land in it.
+function renderSoon() {
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(() => { rafPending = false; render(); });
 }
 function connectEvents() {
   const es = new EventSource('/api/events');
@@ -231,7 +249,9 @@ function connectEvents() {
   };
   es.onopen = () => {
     S.live = true;
-    if (wasDown) void resync(); else renderSide();
+    // Also when the boot-time snapshot failed: the stream alone never
+    // delivers settings, totals or boxes that have not polled since.
+    if (wasDown || !S.baseline) void resync(); else renderSide();
     wasDown = false;
   };
   es.onerror = () => { S.live = false; wasDown = true; resyncGen++; renderSide(); };
@@ -244,7 +264,7 @@ function connectEvents() {
     recomputeTotals();
     if (S.view === 'box' && S.selId === e.box_id) void loadDetail(e.box_id);
     else if (S.view === 'torrents') loadTorrentsSoon();
-    else if (S.view === 'fleet') render(); else renderSide();
+    else if (S.view === 'fleet') renderSoon(); else renderSide();
   });
   es.addEventListener('removed', (ev) => {
     const e = JSON.parse(ev.data);
@@ -296,7 +316,7 @@ function recomputeTotals() {
     t.torrents += b.qbt.total; t.seeding += b.qbt.seeding; t.containers += b.docker.running;
     const r = renewalOf(b);
     if (r && (!t.next_renewal || r < t.next_renewal)) t.next_renewal = r;
-    if (b.service && !seenSvc.has(b.service.id)) { seenSvc.add(b.service.id); t.monthly_cost += b.service.monthly || 0; t.currency = b.service.currency; }
+    if (b.service && /^active$/i.test(b.service.status) && !seenSvc.has(b.service.id)) { seenSvc.add(b.service.id); t.monthly_cost += b.service.monthly || 0; t.currency = b.service.currency; }
     const lp = new Date(b.last_poll).getTime();
     if (lp > last) last = lp;
   }

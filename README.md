@@ -65,7 +65,8 @@ crontab lines.
 **Alerts.** Unreachable box, suspended account, disk at threshold or over
 quota, traffic at threshold, throttled, qBittorrent or Docker down, container
 exited non-zero, process memory near the slice limit, a kernel OOM kill in
-the slice, renewal within N days or overdue. Alerts
+the slice, renewal within N days or overdue (counted in calendar days of the
+dashboard host's time zone; keep it the same as yours). Alerts
 auto-resolve, can be acknowledged or dismissed, and the count shows in the
 sidebar. Live updates arrive over server-sent events.
 
@@ -75,7 +76,8 @@ are matched to boxes by hostname and username, which fills in plan name, price
 per cycle and per month, next due date, web UI and permanent-address links, and
 Pulsed Media's own usage accounting. Services you have not added yet get an
 "add box" shortcut. The feed is synced every six hours and on demand. Manual
-plan and renewal values on a box take precedence.
+plan and renewal values on a box take precedence. Cancelled services stay
+listed but count towards neither costs nor renewal alerts.
 
 ## Run
 

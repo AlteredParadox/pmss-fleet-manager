@@ -341,3 +341,115 @@ func TestKeyChangeForgetsFeed(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A sync whose fetch was in flight when the key was replaced must not commit
+// its feed: the check runs under the cache lock after the fetch returns.
+func TestInFlightSyncDiscardedOnKeyChange(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	release := make(chan struct{})
+	feedA := `{"client_id":1,"currency":"EUR","services":[{"id":5,"product":"A","status":"Active","recurring_amount":"10","billing_cycle":"Monthly"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") == "key-a" {
+			<-release // hold A's fetch open across the key change
+			w.Write([]byte(feedA))
+			return
+		}
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmapi.URL = srv.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	a := m.Settings()
+	a.PMAPIKey = "key-a"
+	m.settings.Store(&a)
+	done := make(chan error, 1)
+	go func() { done <- m.SyncServices(ctx) }()
+	time.Sleep(50 * time.Millisecond) // A's fetch is now blocked in the handler
+	b := a
+	b.PMAPIKey = "key-b"
+	m.settings.Store(&b) // the swap SetSettings does, without starting B's sync
+	m.forgetServices(ctx)
+	close(release)
+	if err := <-done; err == nil {
+		t.Fatal("superseded sync must report so")
+	}
+	m.svcMu.RLock()
+	f := m.svc.feed
+	m.svcMu.RUnlock()
+	if f != nil {
+		t.Fatal("in-flight sync for the old key committed its feed")
+	}
+	if v, _ := st.GetValue(ctx, svcCacheKey); v != "" {
+		t.Fatalf("old key's feed persisted: %q", v)
+	}
+}
+
+// The persisted cache names the key that produced it; a restart under a
+// different key refuses it even when the clear never reached the disk.
+func TestLoadServicesCacheChecksKey(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	rec, _ := json.Marshal(svcCacheRecord{KeyFP: keyFingerprint("key-a"), SyncedAt: time.Now(),
+		Feed: json.RawMessage(`{"client_id":1,"currency":"EUR","services":[{"id":5,"product":"A","status":"Active","recurring_amount":"10","billing_cycle":"Monthly"}]}`)})
+	if err := st.SetValue(ctx, svcCacheKey, string(rec)); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		key  string
+		want bool
+	}{{"key-a", true}, {"key-b", false}, {"", false}} {
+		m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		s := m.Settings()
+		s.PMAPIKey = c.key
+		m.settings.Store(&s)
+		m.loadServicesCache(ctx)
+		if got := m.svc.feed != nil; got != c.want {
+			t.Errorf("key %q: feed restored = %v, want %v", c.key, got, c.want)
+		}
+	}
+}
+
+// An active service wins over a cancelled one on the same host; a lone
+// cancelled match is still attached (history) but yields no renewal date.
+func TestDecoratePrefersActiveService(t *testing.T) {
+	sb := func(u string) *pmapi.Access { return &pmapi.Access{Username: u} }
+	m := &Manager{}
+	m.svc = servicesCache{feed: &pmapi.Feed{Currency: "EUR", Services: []pmapi.Service{
+		{ID: 1, Domain: "typhon.pulsedmedia.com", Status: "Cancelled", NextDue: "2026-01-01", Seedbox: sb("rc2")},
+		{ID: 2, Domain: "typhon.pulsedmedia.com", Status: "Active", NextDue: "2027-01-01", Seedbox: sb("rc2")},
+		{ID: 3, Domain: "old.pulsedmedia.com", Status: "Cancelled", NextDue: "2025-01-01", Seedbox: sb("rc9")},
+	}}}
+	s := &BoxState{Host: "typhon.pulsedmedia.com", User: "rc2"}
+	m.decorate(s)
+	if s.Service == nil || s.Service.ID != 2 {
+		t.Fatalf("want the active service 2, got %+v", s.Service)
+	}
+	if s.EffectiveRenewal() != "2027-01-01" {
+		t.Fatalf("renewal = %q", s.EffectiveRenewal())
+	}
+	s = &BoxState{Host: "old.pulsedmedia.com", User: "rc9"}
+	m.decorate(s)
+	if s.Service == nil || s.Service.ID != 3 {
+		t.Fatalf("a cancelled service should still be shown, got %+v", s.Service)
+	}
+	if s.EffectiveRenewal() != "" {
+		t.Fatalf("a cancelled service's due date is not a renewal, got %q", s.EffectiveRenewal())
+	}
+	s.Renewal = "2026-12-01"
+	if s.EffectiveRenewal() != "2026-12-01" {
+		t.Fatal("manual renewal must still win")
+	}
+}

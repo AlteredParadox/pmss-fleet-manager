@@ -42,7 +42,9 @@ mkdir -p "$HOME/bin" || exit 1
 find "$HOME/bin" -maxdepth 1 -type f -name '.qbittorrent-nox.new.*' -mmin +30 -delete 2>/dev/null
 tmp="$HOME/bin/.qbittorrent-nox.new.$$"
 # --https-only / --proto: a redirect must not downgrade the download to plain HTTP.
-if command -v wget >/dev/null 2>&1; then wget -q --https-only -O "$tmp" "$url"; rc=$?
+# wget has no size option: the subshell's file-size limit (ulimit -f, 512-byte
+# blocks under dash = 200 MiB) stops a runaway download as it is written.
+if command -v wget >/dev/null 2>&1; then (ulimit -f 409600; exec wget -q --https-only -O "$tmp" "$url"); rc=$?
 elif command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp" "$url"; rc=$?
 else echo "neither wget nor curl available"; exit 1; fi
 [ "$rc" -eq 0 ] && [ -s "$tmp" ] || { echo "download failed (exit $rc)"; rm -f "$tmp"; exit 1; }

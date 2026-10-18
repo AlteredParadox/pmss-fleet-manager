@@ -410,3 +410,17 @@ func TestBoxInputHostUser(t *testing.T) {
 		}
 	}
 }
+
+// Box cost totals count each active service once; cancelled matches and
+// their due dates are history.
+func TestTotalsActiveServicesOnce(t *testing.T) {
+	act := &collect.ServiceInfo{ID: 1, Status: "Active", Monthly: 10, Currency: "EUR", NextDue: "2027-01-01"}
+	old := &collect.ServiceInfo{ID: 2, Status: "Cancelled", Monthly: 99, Currency: "EUR", NextDue: "2020-01-01"}
+	tt := totals([]collect.BoxState{{Service: act}, {Service: act}, {Service: old}})
+	if tt.MonthlyCost != 10 {
+		t.Fatalf("monthly = %v, want 10 (shared service once, cancelled excluded)", tt.MonthlyCost)
+	}
+	if tt.NextRenew != "2027-01-01" {
+		t.Fatalf("next renewal = %q; the cancelled service's old due date must not win", tt.NextRenew)
+	}
+}
