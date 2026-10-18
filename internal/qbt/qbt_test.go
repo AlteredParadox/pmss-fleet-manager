@@ -27,6 +27,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestClientFlow(t *testing.T) {
@@ -409,6 +410,8 @@ func TestLoginAfterReusesFreshSession(t *testing.T) {
 // instead of each sending the credentials again. A later, independent call
 // may retry.
 func TestLoginSharesDroppedAttempt(t *testing.T) {
+	defer func(d time.Duration) { loginShareWindow = d }(loginShareWindow)
+	loginShareWindow = 200 * time.Millisecond
 	var logins atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
@@ -439,6 +442,7 @@ func TestLoginSharesDroppedAttempt(t *testing.T) {
 	if n := logins.Load(); n != 1 {
 		t.Fatalf("8 concurrent calls made %d login attempts; want 1", n)
 	}
+	time.Sleep(loginShareWindow + 50*time.Millisecond)
 	if _, err := c.Version(context.Background()); err == nil {
 		t.Fatal("want an error")
 	}

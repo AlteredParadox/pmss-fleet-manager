@@ -55,6 +55,7 @@ type Client struct {
 	// attempt was in flight can take that attempt's outcome (under mu).
 	loginGen uint64
 	loginErr error
+	loginAt  time.Time
 }
 
 // banRetryAfter is the hold after qBittorrent reports the IP banned: its
@@ -246,10 +247,16 @@ func (c *Client) attempt(ctx context.Context) error {
 	err := c.login(ctx)
 	c.mu.Lock()
 	c.loginGen++
-	c.loginErr = err
+	c.loginErr, c.loginAt = err, time.Now()
 	c.mu.Unlock()
 	return err
 }
+
+// loginShareWindow: after a failed attempt, requests refused within this
+// long take that failure too, even ones sent after it completed. Without
+// it a burst of actions straddling a dropped login would each retry. A
+// call after the window may try again. Variable so tests can shorten it.
+var loginShareWindow = 2 * time.Second
 
 func (c *Client) curGen() uint64 {
 	c.mu.Lock()
@@ -262,15 +269,15 @@ func (c *Client) curGen() uint64 {
 // (another caller's, which this one waited on), its outcome is shared: nil
 // means the retry can use the new session, an error (rejection, or a
 // connection that dropped mid-login) is returned without sending the
-// credentials again. A request sent after that attempt and still refused
-// is independent and makes its own attempt.
+// credentials again. So is a failure from the last loginShareWindow. Any
+// other refused request makes its own attempt.
 func (c *Client) loginAfter(ctx context.Context, gen uint64) error {
 	c.guard.loginMu.Lock()
 	defer c.guard.loginMu.Unlock()
 	c.mu.Lock()
-	cur, last := c.loginGen, c.loginErr
+	cur, last, at := c.loginGen, c.loginErr, c.loginAt
 	c.mu.Unlock()
-	if cur != gen {
+	if cur != gen || (last != nil && time.Since(at) < loginShareWindow) {
 		return last
 	}
 	return c.attempt(ctx)
