@@ -358,9 +358,10 @@ checksums, and a matching container image on GHCR.
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
-**1.3.0** takes in a full read-through of the code by the PMSS maintainers
-(thanks, [MagnaCapax](https://github.com/MagnaCapax)), plus the follow-ups
-they suggested. The minor bump is for the first item, a behaviour change.
+**1.3.0** takes in a full read-through of the code by Väinämöinen, the PMSS
+maintainers' review agent (thanks, [MagnaCapax](https://github.com/MagnaCapax)),
+plus the follow-ups it suggested. The minor bump is for the first item, a
+behaviour change.
 
 - The Host-header check stays on for wildcard binds (every container): IP
   addresses and localhost are served, any other name needs `-allowed-hosts`.
