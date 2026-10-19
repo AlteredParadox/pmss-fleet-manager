@@ -75,7 +75,10 @@ function retryNote(b) {
   return `retry ${s < 5 ? 'now' : s < 90 ? `in ${s}s` : `in ${Math.round(s / 60)} min`}${b.backoff ? ', backed off' : ''}`;
 }
 function planOf(b) { return b.plan || b.service?.product || ''; }
-function renewalOf(b) { return b.renewal || (/^active$/i.test(b.service?.status || '') ? b.service.next_due : '') || ''; } // as EffectiveRenewal
+// serviceRenewal mirrors the server's EffectiveRenewal: an active or suspended
+// (usually overdue) service's next due date is a renewal; a cancelled one's is history.
+function serviceRenewal(sv) { return sv && /^(active|suspended)$/i.test(sv.status || '') ? sv.next_due || '' : ''; }
+function renewalOf(b) { return b.renewal || serviceRenewal(b.service); }
 function fmtDur(sec) {
   sec = Math.max(0, Math.floor(Number(sec) || 0));
   const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
@@ -1011,9 +1014,9 @@ function blankForm() {
   return { name: '', host: '', port: 22, user: '', auth_method: '', key_path: '', password: '', type: 'seedbox', plan: '', datacenter: '', renewal: '',
     qbt_enabled: true, qbt_port: 0, qbt_user: '', qbt_pass: '', qbt_start_cmd: '', docker_enabled: false, du_enabled: true, enabled: true, host_key: '' };
 }
-function resetAdd() { S.add = { mode: 'add', step: 1, form: blankForm(), errors: {}, detect: null, busy: false, editId: null }; }
+function resetAdd() { S.add = { mode: 'add', step: 1, form: blankForm(), errors: {}, detect: null, busy: false, editId: null, service: null }; }
 async function startEdit(id) {
-  S.add = { mode: 'edit', step: 1, form: null, errors: {}, detect: null, busy: false, editId: id };
+  S.add = { mode: 'edit', step: 1, form: null, errors: {}, detect: null, busy: false, editId: id, service: boxById(id)?.service || null };
   try {
     const d = await api('GET', `${BASE}/api/boxes/${id}`);
     if (S.add.mode !== 'edit' || S.add.editId !== id) return; // navigated on before this answer came back
@@ -1099,10 +1102,11 @@ function addStep1(A, f, E, edit, back) {
       ${addUserAuthFields(f, E)}
       ${addKeyPasswordFields(f, E, edit)}
       <div class="f3">
-        <label class="f">plan <span class="hint">(optional)</span><input data-f="plan" value="${esc(f.plan)}" placeholder="Dragon-R 2TB"></label>
+        <label class="f">plan <span class="hint">(optional)</span><input data-f="plan" value="${esc(f.plan)}" placeholder="${esc(A.service?.product || 'Dragon-R 2TB')}"></label>
         <label class="f">datacenter<input data-f="datacenter" value="${esc(f.datacenter)}" placeholder="Helsinki, FI"></label>
         <label class="f">renewal date<input data-f="renewal" type="date" value="${esc(f.renewal)}"></label>
       </div>
+      ${addServiceHint(A.service)}
       <details class="adv" ${edit ? 'open' : ''}><summary>qBittorrent, docker and measurement options</summary><div>
         ${addQbtFields(f, edit)}
         ${addDockerDuFields(f)}
@@ -1118,6 +1122,14 @@ function addStep1(A, f, E, edit, back) {
 /* step 2: the detect log */
 function addDetectLog(steps, mark) {
   return steps.map((s) => `<div><span class="mk ${s.status === 'run' ? 'pulse' : ''}" style="color:${mark[s.status]?.[1]}">${mark[s.status]?.[0] || '·'}</span><span style="color:${s.status === 'fail' ? 'var(--bad)' : s.status === 'info' ? 'var(--muted)' : 'var(--text)'}">${esc(s.text)}</span></div>`).join('');
+}
+// addServiceHint explains why plan and renewal are left blank when the box is
+// matched to a Pulsed Media service: the API values stay live, a typed value
+// would freeze at today's date and go stale after the next billing cycle.
+function addServiceHint(sv) {
+  if (!sv) return '';
+  const r = serviceRenewal(sv);
+  return `<div class="hint">Matched to the Pulsed Media service <b>${esc(sv.product)}</b>${r ? `, renews ${esc(r)}` : ''}. Plan and renewal date are taken from the API and stay in sync as it changes; fill them in above only to override them with fixed values.</div>`;
 }
 function addStep2(A, f, edit) {
   const D = A.detect;
@@ -1141,11 +1153,19 @@ function addDetectedFacts(f, F, pb) {
         <div><span>traffic limit</span><span>${F.traffic_limit_bytes ? fmtBytes(F.traffic_limit_bytes, 1) + ' / 30 days' : 'unlimited or unknown'}</span></div>
         <div><span>resources</span><span>${F.ram_limit_bytes ? fmtBytes(F.ram_limit_bytes, 0) + ' RAM' : '—'}${F.cpu_quota_cpus ? ` · ${F.cpu_quota_cpus.toFixed(1)} CPUs` : ''}</span></div>`;
 }
-function addDetectedServiceFacts(f, F, pb) {
+function addDetectedServiceFacts(f, F, pb, sv) {
   return `<div><span>client</span><span>${pb.qbt_enabled ? `qBittorrent ${esc(F.qbt_version || '(not responding)')} on port ${F.qbt_port}` : 'none'}</span></div>
         <div><span>docker</span><span>${pb.docker_enabled ? `${esc(F.docker_version || 'enabled, daemon down')}${F.containers ? ` · ${F.containers} containers` : ''}` : 'no'}</span></div>
         <div><span>host key</span><span class="muted">${esc(F.host_key_fp || '')}</span></div>
-        <div><span>plan / renewal</span><span>${esc(f.plan || '—')} · ${esc(f.renewal || '—')}</span></div>`;
+        <div><span>plan / renewal</span><span>${addPlanRenewalCell(f, sv)}</span></div>`;
+}
+// addPlanRenewalCell shows what the box will display after saving: a typed value, else the matched service's, marked as API-sourced.
+function addPlanRenewalCell(f, sv) {
+  const api = (v) => `${esc(v)} <span class="muted" title="from the Pulsed Media API, kept in sync">·api</span>`;
+  const r = serviceRenewal(sv);
+  const plan = f.plan ? esc(f.plan) : sv?.product ? api(sv.product) : '—';
+  const ren = f.renewal ? esc(f.renewal) : r ? api(r) : '—';
+  return `${plan} · ${ren}`;
 }
 function addStep3(A, f, edit) {
   const D = A.detect, F = D.facts || {}, pb = D.box || {};
@@ -1153,7 +1173,7 @@ function addStep3(A, f, edit) {
       <div class="tile-label">detected</div>
       <div class="rows">
         ${addDetectedFacts(f, F, pb)}
-        ${addDetectedServiceFacts(f, F, pb)}
+        ${addDetectedServiceFacts(f, F, pb, A.service)}
       </div>
       <div class="form-foot">
         <button data-act="add:back">← back</button>
@@ -1432,6 +1452,7 @@ async function servicesAction(a, act) {
     const sv = (S.services?.services || []).find((x) => String(x.id) === act.dataset.id);
     if (!sv) return;
     resetAdd();
+    S.add.service = sv; // plan and renewal are not copied into the form: see addServiceHint
     Object.assign(S.add.form, { name: sv.username, host: sv.domain, user: sv.username, type: /storage/i.test(sv.product) ? 'storage' : 'seedbox' });
     go('/add');
   }

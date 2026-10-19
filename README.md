@@ -81,8 +81,11 @@ sidebar. Live updates arrive over server-sent events.
 are matched to boxes by hostname and username, which fills in plan name, price
 per cycle and per month, next due date, web UI and permanent-address links, and
 Pulsed Media's own usage accounting. Services you have not added yet get an
-"add box" shortcut. The feed is synced every six hours and on demand. Manual
-plan and renewal values on a box take precedence. Only Active and Suspended
+"add box" shortcut; it prefills the host and username and leaves plan and
+renewal date blank on purpose, so the box keeps showing the live API values
+(the wizard says so and previews them). The feed is synced every six hours and
+on demand. Manual plan and renewal values on a box take precedence, and a
+typed renewal date does not follow the next billing cycle. Only Active and Suspended
 services count towards costs and renewal alerts; any other status (Cancelled,
 Terminated, Pending, Fraud, Completed) stays listed but counts towards
 neither.
