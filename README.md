@@ -349,37 +349,77 @@ every PR and `make license-headers` stamps any new file.
 1.3.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and reviewed as described under *Security and hardening*.
-1.2.0 added torrent management: per-torrent stop, start and remove (with or
-without files), adding torrents by magnet, URL or .torrent file, DHT / PeX /
-LSD shown per box and toggled from the torrents header, a fleet-wide
-torrents view, lifetime transfer and swarm columns, and per-box links to the
-data directory and qBittorrent web UI. 1.2.1 is a hardening release from two
-rounds of an independent external review: one qBittorrent login attempt at a
-time per box, shared across concurrent actions, so a dropped or rejected
-login can never be repeated into a ban; the Pulsed Media feed cache is tied
-to the API key that fetched it and dropped the moment the key changes;
-cancelled services no longer count towards costs or renewal alerts; box edits
-clear and save secrets in one write; the API key is never forwarded on a
-redirect; the installer downloads over HTTPS under a size limit; renewal
-days are calendar days in the dashboard host's zone; and the browser
-recovers from a failed first load and coalesces torrent-view refreshes.
-1.2.2 adds `-base-path` for running under a reverse-proxy sub-path, the
-first outside contribution (thanks, doomio). 1.2.3 adds the container image
-on GHCR, built by the same release pipeline as the binaries. 1.2.4 keeps the
-WebUI port-ownership check working on hosts where Pulsed Media's
-socket-table privacy option has made `/proc/net/tcp` root-only (the probe
-falls back to `ss -tlnp`), and names the fix when a container cannot write
-its data directory (Unraid: `--user 99:100`). 1.3.0 takes in a full
-read-through by the PMSS maintainers (thanks, MagnaCapax): the Host-header
-check stays on for wildcard binds (IP addresses and localhost are served,
-other names need `-allowed-hosts`, which is why this is 1.3 and not 1.2.5),
-autostart no longer removes crontab lines that merely mention the helper and
-saves the previous crontab first, qBittorrent enabled in the Pulsed Media
-panel is detected and left to PMSS, fractional `cpu_hours` no longer drop
-the billing feed, suspended services count towards renewals, acknowledged
-alerts come back when they escalate, and more. On top of that the installer
-verifies downloads against GitHub's release digest and the web font is
-embedded, so the page makes no third-party requests.
-Other setups should work but have not been
-tried. Issues and pull requests welcome. Releases on GitHub carry linux amd64
-and arm64 binaries with checksums, and a matching container image on GHCR.
+Other setups should work but have not been tried. Issues and pull requests
+welcome. Releases on GitHub carry linux amd64 and arm64 binaries with
+checksums, and a matching container image on GHCR.
+
+### Release history
+
+Newest first; each release's full notes are on the
+[releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.3.0** takes in a full read-through of the code by the PMSS maintainers
+(thanks, [MagnaCapax](https://github.com/MagnaCapax)), plus the follow-ups
+they suggested. The minor bump is for the first item, a behaviour change.
+
+- The Host-header check stays on for wildcard binds (every container): IP
+  addresses and localhost are served, any other name needs `-allowed-hosts`.
+- Autostart no longer removes crontab lines that merely mention
+  `~/bin/qbt-start`, runs byte-wise so odd bytes cannot corrupt the crontab,
+  and saves the previous crontab to `~/.config/pmss-fleet-manager/crontab.bak`.
+- qBittorrent switched on in the Pulsed Media panel is detected and left to
+  PMSS's own watchdog; install and autostart are not offered there.
+- The installer verifies downloads against the sha256 digest GitHub
+  publishes for the release asset; curl is preferred over wget.
+- The JetBrains Mono web font is embedded, so the page makes no third-party
+  requests.
+- Also: fractional `cpu_hours` no longer reject the billing feed; suspended
+  services count towards costs and renewals; an acknowledged alert comes
+  back when it escalates; the throttle meter shows only while throttled;
+  oversize qBittorrent responses are an explicit error; `-auth` needs both
+  halves; the wizard shows the detected WebUI port as a hint instead of
+  pinning it; forgetting a pinned host key asks for confirmation; an
+  unreadable SSH key in the container is named in the error.
+
+**1.2.4**
+
+- The WebUI port-ownership check keeps working on hosts where Pulsed Media's
+  socket-table privacy option has made `/proc/net/tcp` root-only: the probe
+  falls back to `ss -tlnp`.
+- A container that cannot write its data directory says so and names the
+  fix (Unraid: `--user 99:100`).
+
+**1.2.3** adds the container image on GHCR, built by the same release
+pipeline as the binaries, with Go 1.27.
+
+**1.2.2** adds `-base-path` for running under a reverse-proxy sub-path, the
+first outside contribution (thanks, [doomio](https://github.com/doomio)).
+
+**1.2.1** is a hardening release from two rounds of an independent external
+review.
+
+- One qBittorrent login attempt at a time per box, shared across concurrent
+  actions, so a dropped or rejected login can never be repeated into a ban.
+- The Pulsed Media feed cache is tied to the API key that fetched it and
+  dropped the moment the key changes; the key is never forwarded on a
+  redirect.
+- Cancelled services no longer count towards costs or renewal alerts.
+- Box edits clear and save secrets in one write.
+- The installer downloads over HTTPS under a size limit.
+- Renewal days are calendar days in the dashboard host's zone.
+- The browser recovers from a failed first load and coalesces torrent-view
+  refreshes.
+
+**1.2.0** adds torrent management.
+
+- Per-torrent stop, start and remove (with or without files); adding
+  torrents by magnet, URL or `.torrent` file.
+- DHT / PeX / LSD shown per box and toggled from the torrents header.
+- A fleet-wide torrents view with lifetime transfer and swarm columns.
+- Per-box links to the data directory and the qBittorrent web UI.
+
+**1.1.0** is a code-quality release: SonarCloud findings, complexity
+refactors by pure extraction, no behaviour change.
+
+**1.0.0** is the first release, after ten rounds of adversarial review of the
+probe, the credential gate and the UI.
