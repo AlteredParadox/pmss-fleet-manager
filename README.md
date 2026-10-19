@@ -349,7 +349,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.3.0 is the current release. The code was written against five real Pulsed
+1.3.1 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -360,6 +360,16 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.3.1**
+
+- The add-box shortcut in the Services table no longer looks as if it drops
+  the plan and renewal date. Those fields stay blank on purpose so the box
+  keeps showing the live API values; the wizard now says so, uses the
+  service's plan as the placeholder and previews both values in the review
+  step, marked as API-sourced. (#77, #78)
+- The page counts a Suspended service's due date as a renewal, matching the
+  server since 1.3.0.
 
 **1.3.0** takes in a full read-through of the code by Väinämöinen, the PMSS
 maintainers' review agent (thanks, [MagnaCapax](https://github.com/MagnaCapax)),
