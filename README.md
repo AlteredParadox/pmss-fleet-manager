@@ -120,7 +120,13 @@ docker run -d --name pmss-fleet-manager \
   PMSS_AUTH=me:secret` or `-e PMSS_BASE_PATH=/fleet` configure it.
 - The process runs as uid 65532. A named volume as above works out of the
   box; a bind-mounted directory has to be writable by that uid (`chown
-  65532:65532 ./data`), or run the container with `--user "$(id -u)"`.
+  65532:65532 ./data`), or run the container with `--user "$(id -u)"`. If
+  it is not, the container exits at once with a log line naming the
+  directory, the uid it ran as and both fixes.
+- **Unraid:** appdata folders belong to `nobody:users`, so either put
+  `--user 99:100` in the template's *Extra Parameters* or `chown -R
+  65532:65532 /mnt/user/appdata/pmss-fleet-manager`. The image does not read
+  `PUID`/`PGID`; `--user` is the equivalent.
 - Set `TZ` to the zone you want renewal days counted in; without it the
   container is UTC.
 - Boxes that authenticate with an SSH key need the key inside the container:

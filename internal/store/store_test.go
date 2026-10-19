@@ -19,6 +19,8 @@ package store
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -168,5 +170,26 @@ func TestSetHostKeyOnlyForUnchangedEndpoint(t *testing.T) {
 	s.SetHostKey(ctx, b.ID, "old.example", 22, "ssh-ed25519 OTHER")
 	if g, _ := s.GetBox(ctx, b.ID); g.HostKey != "ssh-ed25519 RIGHT" {
 		t.Fatal("an existing pin must not be replaced")
+	}
+}
+
+// A data directory the process cannot write must surface as fs.ErrPermission
+// so main can print the chown / --user hint instead of a bare error.
+func TestOpenUnwritableDirIsPermissionError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	_, err := Open(filepath.Join(dir, "test.db"))
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("Open in a read-only dir: %v, want fs.ErrPermission", err)
+	}
+	_, err = Open(filepath.Join(dir, "sub", "test.db"))
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("Open with an uncreatable subdir: %v, want fs.ErrPermission", err)
 	}
 }

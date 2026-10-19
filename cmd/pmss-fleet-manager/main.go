@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -85,6 +86,15 @@ func main() {
 
 	st, err := store.Open(filepath.Join(*dataDir, "pmss-fleet-manager.db"))
 	if err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			// The usual cause is a bind-mounted data directory owned by
+			// another user: the container runs as uid 65532 (nonroot) and
+			// Unraid's appdata, for one, belongs to nobody:users (99:100).
+			log.Error("data directory is not writable by this process",
+				"dir", *dataDir, "uid", os.Getuid(), "gid", os.Getgid(), "err", err,
+				"fix", fmt.Sprintf("make the directory writable for uid %d (chown %d:%d %s), or run the container with --user set to the directory's owner (Unraid: --user 99:100)", os.Getuid(), os.Getuid(), os.Getgid(), *dataDir))
+			os.Exit(1)
+		}
 		log.Error("open store", "err", err)
 		os.Exit(1)
 	}
