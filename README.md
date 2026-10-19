@@ -81,7 +81,7 @@ listed but count towards neither costs nor renewal alerts.
 
 ## Run
 
-Requires Go 1.26 or later to build. No other runtime dependencies.
+Requires Go 1.27 or later to build (go.mod names the exact toolchain and the go command fetches it). No other runtime dependencies.
 
 ```sh
 make build                                 # or: go build -o pmss-fleet-manager ./cmd/pmss-fleet-manager
@@ -306,7 +306,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.2.2 is the current release. The code was written against five real Pulsed
+1.2.3 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and reviewed as described under *Security and hardening*.
 1.2.0 added torrent management: per-torrent stop, start and remove (with or
@@ -324,7 +324,8 @@ redirect; the installer downloads HTTPS-only under a size limit; renewal
 days are calendar days in the dashboard host's zone; and the browser
 recovers from a failed first load and coalesces torrent-view refreshes.
 1.2.2 adds `-base-path` for running under a reverse-proxy sub-path, the
-first outside contribution (thanks, doomio).
+first outside contribution (thanks, doomio). 1.2.3 adds the container image
+on GHCR, built by the same release pipeline as the binaries.
 Other setups should work but have not been
 tried. Issues and pull requests welcome. Releases on GitHub carry linux amd64
 and arm64 binaries with checksums, and a matching container image on GHCR.
