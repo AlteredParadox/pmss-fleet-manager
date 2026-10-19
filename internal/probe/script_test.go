@@ -83,6 +83,11 @@ func TestQbtCronPattern(t *testing.T) {
 		{`*/5 * * * * "$HOME/bin/qbt-start"`, true},
 		{"@reboot ~/bin/qbt-start", true},
 		{"*/5 * * * * '${HOME}/bin/qbt-start'", true},
+		{"*/5 * * * * ~/bin/qbt-start >/dev/null 2>&1", true}, // the hand-written quiet variant
+		{"@reboot sleep 30; $HOME/bin/qbt-start > /dev/null 2>&1", true},
+		{"*/5 * * * * ~/bin/qbt-start >>~/qbt.log 2>&1", true},
+		{"*/5 * * * * ~/bin/qbt-start >/dev/null 2>&1; ~/bin/other", false},
+		{"*/5 * * * * ~/bin/qbt-start >/dev/null | tee log", false},
 		{"0 3 * * * ~/bin/backup.sh && ~/bin/qbt-start", false}, // the user's own compound line
 		{"*/5 * * * * ~/bin/qbt-start; ~/bin/other", false},
 		{"@reboot sleep 30; nice -n5 ~/bin/qbt-start", false},

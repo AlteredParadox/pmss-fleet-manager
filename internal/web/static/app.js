@@ -505,6 +505,7 @@ function boxPowerBtn(b, q) {
     : `<button data-act="qbt:start">start client</button>`) : '';
 }
 function boxInstallBtn(b, q) {
+  if (q.pmss_managed) return '';
   return (q.enabled || q.installed || b.type === 'seedbox')
     ? `<button data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(b.name) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(b.name) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
 }
@@ -588,13 +589,14 @@ function ovHostStatusRows(b) {
       <div><span>last poll</span><span>${fmtAgo(b.last_poll)}${b.poll_ms ? ` <span class="muted">· ${b.poll_ms} ms</span>` : ''}</span></div>`;
 }
 function ovClientRows(q) {
-  return `<div><span>client</span><span>${q.enabled ? `qBittorrent ${esc(q.version || '')}${q.reachable ? '' : ' <span class="warn">(not responding)</span>'}` : (q.installed ? 'qbittorrent-nox present, monitoring off' : '—')}</span></div>
+  return `<div><span>client</span><span>${q.enabled ? `qBittorrent ${esc(q.version || '')}${q.reachable ? '' : ' <span class="warn">(not responding)</span>'}` : (q.installed ? 'qbittorrent-nox present, monitoring off' : '—')}${q.pmss_managed ? ' · <span class="muted" title="qBittorrent is switched on in the Pulsed Media panel: PMSS runs, restarts and configures it, so install and autostart here are off">panel-managed</span>' : ''}</span></div>
       ${q.enabled && !q.reachable && q.error ? `<div><span>client error</span><span class="warn" style="text-align:right">${esc(q.error)}</span></div>` : ''}`;
 }
 function ovBinaryRow(q) {
   return `<div><span>binary</span><span>${q.binary_version ? esc(q.binary_version) : (q.installed ? 'present' : 'not installed')}${q.latest_version ? ` <span class="muted">· latest ${esc(q.latest_version)}</span>` : ''}${q.update_available ? ' · <span class="warn">update available</span>' : ''}${q.restart_needed ? ' · <span class="warn">restart to apply</span>' : ''}</span></div>`;
 }
 function ovAutostartRow(b, q) {
+  if (q.pmss_managed) return `<div><span>autostart</span><span class="muted">Pulsed Media watchdog</span></div>`;
   return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'} <button class="small ghost" data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button></span></div>`;
 }
 // binary + autostart rows: shown whenever the client is monitored or at least present on the box.

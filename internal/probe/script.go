@@ -141,12 +141,14 @@ sec end
 // QbtCronPattern is the grep -E pattern, as one double-quoted sh word, for a
 // crontab line whose command is nothing but the qbt-start helper: a schedule
 // (five fields or an @keyword), optionally "sleep N;", then the helper's
-// path ($HOME/bin, ~/bin or an absolute .../bin, optionally quoted) and the
-// end of the line. Those are the two shapes autostart writes. A line that
-// runs anything else as well, such as "backup.sh && qbt-start", is the
-// user's own and does not match, so autostart keeps it and the probe does
-// not count it. Both use this pattern; run it under LC_ALL=C.
-const QbtCronPattern = `"^[[:space:]]*(@[a-z]+|[^#@[:space:]]+([[:space:]]+[^[:space:]]+){4})[[:space:]]+(sleep[[:space:]]+[0-9]+[[:space:]]*;[[:space:]]*)?[\"']?([\$]HOME|[\$][{]HOME[}]|~|/[^[:space:]\"';&|]*)/bin/qbt-start[\"']?[[:space:]]*\$"`
+// path ($HOME/bin, ~/bin or an absolute .../bin, optionally quoted),
+// optionally redirections such as ">/dev/null 2>&1", and the end of the
+// line. Those are the two shapes autostart writes plus the hand-written
+// quiet variant. A line that runs anything else as well, such as
+// "backup.sh && qbt-start", is the user's own and does not match, so
+// autostart keeps it and the probe does not count it. Both use this
+// pattern; run it under LC_ALL=C.
+const QbtCronPattern = `"^[[:space:]]*(@[a-z]+|[^#@[:space:]]+([[:space:]]+[^[:space:]]+){4})[[:space:]]+(sleep[[:space:]]+[0-9]+[[:space:]]*;[[:space:]]*)?[\"']?([\$]HOME|[\$][{]HOME[}]|~|/[^[:space:]\"';&|]*)/bin/qbt-start[\"']?([[:space:]]*[0-9]*[<>]{1,2}&?[[:space:]]*[^[:space:];&|<>]*)*[[:space:]]*\$"`
 
 // ListenScript prints the account's uid and the listening sockets in the
 // same form as the probe's listen section, for a live ownership re-check

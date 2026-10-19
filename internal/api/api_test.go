@@ -95,6 +95,17 @@ func TestAlertAckFlow(t *testing.T) {
 		t.Fatalf("ack-all: %d", code)
 	}
 	// Cross-site is refused.
+	// Only http and https count as this page: an opaque or odd scheme on the
+	// right host:port is not it.
+	for _, o := range []string{"null", "ftp://dash.local:8080", "dash.local:8080"} {
+		if code, _ = do(t, srv, "POST", "/api/alerts/1/ack", "", map[string]string{"Origin": o}); code != 403 {
+			t.Fatalf("Origin %q = %d, want 403", o, code)
+		}
+	}
+	code, _ = do(t, srv, "POST", "/api/alerts/1/ack", "", map[string]string{"Origin": "https://dash.local:8080"})
+	if code == 403 {
+		t.Fatal("https origin on this host must pass")
+	}
 	code, _ = do(t, srv, "POST", "/api/alerts/1/ack", "", map[string]string{"Origin": "http://evil.example"})
 	if code != 403 {
 		t.Fatalf("csrf: %d", code)

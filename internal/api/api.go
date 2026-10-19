@@ -260,9 +260,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
+// sameOrigin accepts an Origin of this host over http or https. The
+// dashboard never terminates TLS itself, so the scheme the browser saw is
+// not knowable here and both are allowed; any other scheme, or an opaque
+// "null" origin, is not this page.
 func sameOrigin(origin, host string) bool {
-	origin = strings.TrimPrefix(strings.TrimPrefix(origin, schemeHTTP), schemeHTTPS)
-	return strings.EqualFold(origin, host)
+	scheme, rest, ok := strings.Cut(origin, "://")
+	if !ok || (scheme != "http" && scheme != "https") {
+		return false
+	}
+	return strings.EqualFold(rest, host)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
