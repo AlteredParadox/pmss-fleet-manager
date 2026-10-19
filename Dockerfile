@@ -46,10 +46,16 @@ COPY --from=build /out/pmss-fleet-manager /pmss-fleet-manager
 # writable by the process (the store creates the database there, 0700).
 COPY --from=build --chown=nonroot:nonroot /out/data /data
 # Inside a container the dashboard must listen on all interfaces to be
-# reachable through the published port; the Host-header check is therefore
-# off unless PMSS_ALLOWED_HOSTS is set (see README, "Security and hardening").
+# reachable through the published port. On that wildcard bind the
+# Host-header check serves localhost and any IP address; any other name,
+# such as a reverse proxy's, must be listed in PMSS_ALLOWED_HOSTS (see
+# README, "Security and hardening").
+# HOME is fixed so SSH keys are looked up in /home/nonroot/.ssh even under a
+# `--user` uid that has no passwd entry here (Unraid's 99:100), where HOME
+# would otherwise be /.
 ENV PMSS_LISTEN=0.0.0.0:8080 \
-    PMSS_DATA=/data
+    PMSS_DATA=/data \
+    HOME=/home/nonroot
 VOLUME /data
 EXPOSE 8080
 USER nonroot:nonroot

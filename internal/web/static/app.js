@@ -505,6 +505,7 @@ function boxPowerBtn(b, q) {
     : `<button data-act="qbt:start">start client</button>`) : '';
 }
 function boxInstallBtn(b, q) {
+  if (q.pmss_managed) return '';
   return (q.enabled || q.installed || b.type === 'seedbox')
     ? `<button data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(b.name) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(b.name) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
 }
@@ -567,10 +568,13 @@ function ovUploadPanel(b, tt) {
 function ovBandwidthPanel(b) {
   const tr = b.traffic;
   const rateNote = b.rates.source === 'qbt' ? 'live from qBittorrent' : b.rates.source === 'pmss-15min' ? 'PMSS 15-min average (refreshed twice an hour)' : 'no rate source';
+  // PMSS's cap_mbit is the upload rate the account is held to while it is
+  // over its traffic limit, not a standing cap: only meter against it then.
+  const cap = tr.throttled && tr.cap_mbit ? tr.cap_mbit : 0;
   return `<div class="panel"><div class="tile-label">bandwidth now</div>
       <div class="tile-value"><span class="nw"><span class="up">↑</span> ${fmtBits(b.rates.up_bps)}</span> <small class="nw"><span class="down">↓</span> ${fmtBits(b.rates.down_bps)}</small></div>
-      ${tr.cap_mbit ? `<div class="meter thick" title="upload vs. the account's ${tr.cap_mbit} Mbit/s cap"><i style="width:${Math.min(100, (b.rates.up_bps / (tr.cap_mbit * 1e6)) * 100)}%"></i></div>` : ''}
-      <div class="note">${rateNote}${tr.cap_mbit ? ` · cap ${tr.cap_mbit} Mbit/s` : ''}</div></div>`;
+      ${cap ? `<div class="meter thick" title="upload vs. the ${cap} Mbit/s it is throttled to"><i style="width:${Math.min(100, (b.rates.up_bps / (cap * 1e6)) * 100)}%"></i></div>` : ''}
+      <div class="note">${rateNote}${cap ? ` · throttled to ${cap} Mbit/s` : ''}</div></div>`;
 }
 function ovCpuRamPanel(b) {
   return `<div class="panel"><div class="tile-label">cpu / ram</div>
@@ -585,13 +589,14 @@ function ovHostStatusRows(b) {
       <div><span>last poll</span><span>${fmtAgo(b.last_poll)}${b.poll_ms ? ` <span class="muted">· ${b.poll_ms} ms</span>` : ''}</span></div>`;
 }
 function ovClientRows(q) {
-  return `<div><span>client</span><span>${q.enabled ? `qBittorrent ${esc(q.version || '')}${q.reachable ? '' : ' <span class="warn">(not responding)</span>'}` : (q.installed ? 'qbittorrent-nox present, monitoring off' : '—')}</span></div>
+  return `<div><span>client</span><span>${q.enabled ? `qBittorrent ${esc(q.version || '')}${q.reachable ? '' : ' <span class="warn">(not responding)</span>'}` : (q.installed ? 'qbittorrent-nox present, monitoring off' : '—')}${q.pmss_managed ? ' · <span class="muted" title="qBittorrent is switched on in the Pulsed Media panel: PMSS runs, restarts and configures it, so install and autostart here are off">panel-managed</span>' : ''}</span></div>
       ${q.enabled && !q.reachable && q.error ? `<div><span>client error</span><span class="warn" style="text-align:right">${esc(q.error)}</span></div>` : ''}`;
 }
 function ovBinaryRow(q) {
   return `<div><span>binary</span><span>${q.binary_version ? esc(q.binary_version) : (q.installed ? 'present' : 'not installed')}${q.latest_version ? ` <span class="muted">· latest ${esc(q.latest_version)}</span>` : ''}${q.update_available ? ' · <span class="warn">update available</span>' : ''}${q.restart_needed ? ' · <span class="warn">restart to apply</span>' : ''}</span></div>`;
 }
 function ovAutostartRow(b, q) {
+  if (q.pmss_managed) return `<div><span>autostart</span><span class="muted">Pulsed Media watchdog</span></div>`;
   return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'} <button class="small ghost" data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button></span></div>`;
 }
 // binary + autostart rows: shown whenever the client is monitored or at least present on the box.
@@ -649,7 +654,7 @@ function billingRows(sv) {
       <div><span>billing</span><span>${fmtMoney(sv.recurring_amount, sv.currency)} / ${esc(cycleShort(sv.billing_cycle))}${sv.monthly && cycleShort(sv.billing_cycle) !== 'mo' ? ` <span class="muted">· ${fmtMoney(sv.monthly, sv.currency)}/mo</span>` : ''}${sv.status && sv.status !== 'Active' ? ` · <span class="warn">${esc(sv.status)}</span>` : ''}</span></div>
       <div><span>service</span><span><span class="muted">#${sv.id}${sv.registered ? ` · since ${esc(sv.registered)}` : ''}</span></span></div>
       ${u ? `<div><span>pm traffic</span><span class="muted" title="as tracked by Pulsed Media since ${esc(u.tracked_since || '?')}">↑ ${fmtBytes(u.sent_bytes, 1)} · ↓ ${fmtBytes(u.received_bytes, 1)}</span></div>
-      <div><span>pm usage</span><span class="muted">${fmtBytes(u.disk_used_bytes, 1)} disk · ${u.cpu_hours} cpu h · ${u.torrents} torrents</span></div>` : ''}`;
+      <div><span>pm usage</span><span class="muted">${fmtBytes(u.disk_used_bytes, 1)} disk · ${u.cpu_hours == null ? '—' : Number(u.cpu_hours).toFixed(1)} cpu h · ${u.torrents} torrents</span></div>` : ''}`;
 }
 function tabTraffic(b) {
   const tr = b.traffic;
@@ -1068,9 +1073,11 @@ function addKeyPasswordFields(f, E, edit) {
       </div>`;
 }
 function addQbtFields(f, edit) {
+  // The detected port is only a hint: a saved 0 keeps following qBittorrent.conf.
+  const D = S.add.detect, dp = !Number(f.qbt_port) && D && D.box ? Number(D.box.qbt_port) || 0 : 0;
   return `<label class="check"><input type="checkbox" data-f="qbt_enabled" ${f.qbt_enabled ? 'checked' : ''}> monitor qbittorrent-nox via its Web API (tunnelled over SSH)</label>
         <div class="f3">
-          <label class="f">WebUI port <span class="hint">(0 = detect from config)</span><input data-f="qbt_port" type="number" min="0" max="65535" value="${f.qbt_port || 0}"></label>
+          <label class="f">WebUI port <span class="hint">(0 = detect from config${dp ? `; detected ${dp}` : ''})</span><input data-f="qbt_port" type="number" min="0" max="65535" value="${f.qbt_port || 0}"></label>
           <label class="f">WebUI user<input data-f="qbt_user" value="${esc(f.qbt_user)}" autocomplete="off"></label>
           <label class="f">WebUI password${edit ? ` <span class="hint">${f.has_qbt_pass ? '(blank keeps saved)' : '(none saved)'}</span>` : ''}<input data-f="qbt_pass" type="password" value="${esc(f.qbt_pass)}" autocomplete="new-password"></label>
         </div>
@@ -1083,7 +1090,7 @@ function addDockerDuFields(f) {
 // Checkboxes that only make sense for an existing box (each renders empty in add mode).
 function addEditExtras(A, f, edit) {
   return `${edit ? `<label class="check"><input type="checkbox" data-f="enabled" ${f.enabled ? 'checked' : ''}> polling enabled</label>` : ''}
-        ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins the new key)</span></label>` : ''}
+        ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins whatever key answers)</span></label>` : ''}
         ${edit && f.has_qbt_pass ? `<label class="check"><input type="checkbox" data-f="clear_qbt_pass" ${f.clear_qbt_pass ? 'checked' : ''}> remove the saved WebUI password <span class="hint">(the SSH password is removed automatically when auth is switched to key or agent)</span></label>` : ''}`;
 }
 function addStep1(A, f, E, edit, back) {
@@ -1180,7 +1187,8 @@ async function runDetect() {
       const b = res.box;
       A.form.host_key = b.host_key || '';
       if (!A.form.name) A.form.name = b.name;
-      if (!A.form.qbt_port) A.form.qbt_port = b.qbt_port || 0;
+      // qbt_port stays as typed: 0 follows qBittorrent.conf on every poll, so
+      // the detected port is shown as a hint instead of being pinned.
       A.form.qbt_enabled = b.qbt_enabled;
       A.form.docker_enabled = b.docker_enabled;
     }
@@ -1465,6 +1473,15 @@ document.addEventListener('input', (e) => {
   if (f && S.add.form) {
     const k = f.dataset.f;
     S.add.form[k] = f.type === 'checkbox' ? f.checked : f.value;
+    // Forgetting the pin makes the next connect trust whatever key answers,
+    // and with password auth the saved SSH password goes to it: say so
+    // once, at the moment of ticking, rather than refusing.
+    if (k === 'forget_host_key' && f.checked) {
+      const fm = S.add.form, pw = fm.auth_method === 'password' || (!fm.auth_method && (fm.has_password || fm.password));
+      if (pw && !confirm('The next connect will trust and pin whatever host key answers, and the SSH password will be sent to it. Only do this after a reinstall or migration you expect. Forget the pinned key?')) {
+        f.checked = false; fm.forget_host_key = false;
+      }
+    }
     // A host key belongs to host:port; anything detect saw for a previous
     // endpoint must not be carried to a new one (or saved as its pin).
     if (k === 'host' || k === 'port' || k === 'user') { S.add.form.host_key = ''; if (k !== 'user') S.add.pinned = false; }

@@ -16,6 +16,13 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+/* JetBrains Mono 2.304, embedded (SIL Open Font License 1.1, fonts/OFL.txt):
+   the page makes no request to a third party at view time. */
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url(fonts/JetBrainsMono-Regular.woff2) format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:500;font-display:swap;src:url(fonts/JetBrainsMono-Medium.woff2) format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:600;font-display:swap;src:url(fonts/JetBrainsMono-SemiBold.woff2) format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:700;font-display:swap;src:url(fonts/JetBrainsMono-Bold.woff2) format('woff2')}
+
 :root{
   --bg:#0b0e13;--panel:#11151d;--panel2:#161b25;--line:#1f2633;--text:#e6e9ef;--muted:#8b93a3;--dim:#5a6272;
   --accent:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;

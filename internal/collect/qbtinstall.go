@@ -21,37 +21,48 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"pmss-fleet-manager/internal/probe"
 )
 
-// installScript downloads a static qbittorrent-nox build to ~/bin, checks it
-// is an ELF binary of plausible size that runs and calls itself qBittorrent
-// (a sanity check, not authentication: the download is trusted as much as
-// its source), then swaps it in atomically. $QBT_URL is set by the caller
-// through the environment prefix.
+// installScript downloads a static qbittorrent-nox build to ~/bin, verifies
+// its sha256 against the digest GitHub publishes for the release asset when
+// the caller could fetch one ($QBT_SHA256, 64 hex digits or empty), checks
+// it is an ELF binary of plausible size that runs and calls itself
+// qBittorrent, then swaps it in atomically. Without a digest the ELF and
+// --version checks are a sanity check, not authentication: the download is
+// then trusted as much as its source. $QBT_URL and $QBT_SHA256 are set by
+// the caller through the environment prefix.
 const installScript = `#!/bin/sh
 set -u
-url="$QBT_URL"
+LC_ALL=C; export LC_ALL
+url="$QBT_URL"; want="${QBT_SHA256:-}"
 mkdir -p "$HOME/bin" || exit 1
 # A download interrupted by a lost session leaves its temp file; sweep old ones.
 find "$HOME/bin" -maxdepth 1 -type f -name '.qbittorrent-nox.new.*' -mmin +30 -delete 2>/dev/null
 tmp="$HOME/bin/.qbittorrent-nox.new.$$"
-# --https-only / --proto: a redirect must not downgrade the download to plain HTTP.
-# wget has no size option: the subshell's file-size limit (ulimit -f, 512-byte
-# blocks under dash = 200 MiB) stops a runaway download as it is written.
-if command -v wget >/dev/null 2>&1; then (ulimit -f 409600; exec wget -q --https-only -O "$tmp" "$url"); rc=$?
-elif command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp" "$url"; rc=$?
-else echo "neither wget nor curl available"; exit 1; fi
+# curl first: --proto / --proto-redir stop a redirect from downgrading the
+# download to plain HTTP. wget is only the fallback: its --https-only applies
+# to recursive downloads alone, so that path relies on the source not
+# redirecting to http. wget has no size option either: the subshell's
+# file-size limit (ulimit -f, 512-byte blocks under dash = 200 MiB) stops a
+# runaway download as it is written.
+if command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp" "$url"; rc=$?
+elif command -v wget >/dev/null 2>&1; then (ulimit -f 409600; exec wget -q -O "$tmp" "$url"); rc=$?
+else echo "neither curl nor wget available"; exit 1; fi
 [ "$rc" -eq 0 ] && [ -s "$tmp" ] || { echo "download failed (exit $rc)"; rm -f "$tmp"; exit 1; }
 # The static build is ~30 MB; anything far above that is not it.
 size=$(wc -c < "$tmp")
 [ "$size" -le 209715200 ] || { echo "downloaded file is too large to be qbittorrent-nox ($size bytes)"; rm -f "$tmp"; exit 1; }
-magic=$(head -c 4 "$tmp" | od -An -tx1 | tr -d ' \n')
+` + verifyChecksumShell + `magic=$(head -c 4 "$tmp" | od -An -tx1 | tr -d ' \n')
 [ "$magic" = "7f454c46" ] || { echo "downloaded file is not an ELF binary (got $(head -c 200 "$tmp" | tr -d '\n' | cut -c1-120))"; rm -f "$tmp"; exit 1; }
 chmod 700 "$tmp"
 # stdin is this script: redirect it so neither binary can read the rest of it.
@@ -73,9 +84,13 @@ fi
 `
 
 // autostartScript installs the helper (if missing) and the two crontab lines,
-// idempotently: existing qbt-start lines are replaced, everything else kept.
+// idempotently: existing lines that run only the helper are replaced,
+// everything else kept, and the previous crontab is saved first.
 const autostartScript = `#!/bin/sh
 set -u
+# Byte-wise: under a UTF-8 locale grep silently drops lines with invalid
+# UTF-8, and they would then be missing from what is piped into crontab -.
+LC_ALL=C; export LC_ALL
 mkdir -p "$HOME/bin" || exit 1
 if [ -e "$HOME/bin/qbt-start" ]; then echo "helper: ~/bin/qbt-start already exists, left as is"
 else
@@ -90,13 +105,17 @@ if ! cur=$(crontab -l 2>/dev/null); then
   msg=$(crontab -l 2>&1 >/dev/null)
   case "$msg" in *"no crontab"*) cur="" ;; *) echo "crontab -l failed: ${msg:-no details (try again)}"; exit 1 ;; esac
 fi
-# Replace live (non-comment) lines that run the helper (either spelling of its
-# path, optionally quoted, followed by a separator), not merely ones that
-# mention a similarly named file; say which. The probe counts cron entries
-# with the same pattern.
-pat="^[[:space:]]*[^#[:space:]].*bin/qbt-start([[:space:]\"')>;&|]|\$)"
+# Replace only lines whose whole command is the helper (the shapes written
+# below); a line that runs it together with something else is the user's and
+# stays. Say which lines go. The probe counts cron entries with the same
+# pattern (probe.QbtCronPattern).
+pat=` + probe.QbtCronPattern + `
 old=$(printf '%s\n' "$cur" | grep -E "$pat" || true)
 [ -n "$old" ] && printf 'cron: replacing existing qbt-start line(s):\n%s\n' "$old"
+# Keep a copy of the crontab as it was, overwritten on every run.
+bak="$HOME/.config/pmss-fleet-manager/crontab.bak"
+( umask 077; mkdir -p "$HOME/.config/pmss-fleet-manager" && rm -f "$bak" && printf '%s\n' "$cur" > "$bak" ) || { echo "could not save the current crontab to $bak; not changing it"; exit 1; }
+echo "cron: previous crontab saved to ~/.config/pmss-fleet-manager/crontab.bak"
 ( printf '%s\n' "$cur" | grep -vE "$pat" | grep -v '^$'
   echo "@reboot     sleep 30; $HOME/bin/qbt-start"
   echo "*/5 * * * * $HOME/bin/qbt-start" ) | crontab - || { echo "crontab update failed"; exit 1; }
@@ -120,16 +139,129 @@ else
 fi
 `
 
+// verifyChecksumShell compares $tmp's sha256 with $want when one was given
+// (the download is deleted on a mismatch) and says either way whether the
+// file was verified. Its own constant so a test can run it on a file.
+const verifyChecksumShell = `if [ -n "$want" ]; then
+  got=$(sha256sum "$tmp" 2>/dev/null | cut -d' ' -f1)
+  [ -n "$got" ] || { echo "sha256sum is not available on this box; cannot verify the download"; rm -f "$tmp"; exit 1; }
+  [ "$got" = "$want" ] || { echo "checksum mismatch: the download's sha256 is $got, the release says $want"; rm -f "$tmp"; exit 1; }
+  echo "checksum: sha256 matches the GitHub release digest"
+else
+  echo "checksum: not verified (no release digest for this URL); relying on the ELF and --version checks"
+fi
+`
+
 var safeURL = regexp.MustCompile(`^https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$`)
+
+// githubAPI is the API base the digest lookup uses; a test points it at a
+// local server.
+var githubAPI = "https://api.github.com"
+
+// releaseAssetAPI maps a GitHub release download URL to the API endpoint
+// describing that release and the asset's file name:
+//
+//	https://github.com/O/R/releases/latest/download/NAME -> /repos/O/R/releases/latest
+//	https://github.com/O/R/releases/download/TAG/NAME    -> /repos/O/R/releases/tags/TAG
+//
+// ok is false for any other URL (a mirror, a fork's raw file), which then
+// installs without a digest.
+func releaseAssetAPI(download string) (api, asset string, ok bool) {
+	u, err := url.Parse(download)
+	if err != nil || u.Scheme != "https" || !strings.EqualFold(u.Host, "github.com") {
+		return "", "", false
+	}
+	p := strings.Split(strings.Trim(u.Path, "/"), "/")
+	switch {
+	case len(p) == 6 && p[2] == "releases" && p[3] == "latest" && p[4] == "download":
+		return githubAPI + "/repos/" + p[0] + "/" + p[1] + "/releases/latest", p[5], true
+	case len(p) == 6 && p[2] == "releases" && p[3] == "download":
+		return githubAPI + "/repos/" + p[0] + "/" + p[1] + "/releases/tags/" + p[4], p[5], true
+	}
+	return "", "", false
+}
+
+var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// releaseDigest fetches the sha256 GitHub records for the asset a download
+// URL names. It returns the lower-case hex digest, or "" with the reason it
+// could not be had; the install then goes ahead unverified and says so.
+func releaseDigest(ctx context.Context, download string) (digest, reason string) {
+	api, asset, ok := releaseAssetAPI(download)
+	if !ok {
+		return "", "not a GitHub release asset URL"
+	}
+	rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodGet, api, nil)
+	if err != nil {
+		return "", err.Error()
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "pmss-fleet-manager")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "GitHub API: " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Sprintf("GitHub API answered HTTP %d", resp.StatusCode)
+	}
+	var rel struct {
+		Assets []struct {
+			Name   string `json:"name"`
+			Digest string `json:"digest"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
+		return "", "GitHub API: " + err.Error()
+	}
+	for _, a := range rel.Assets {
+		if a.Name != asset {
+			continue
+		}
+		d, found := strings.CutPrefix(a.Digest, "sha256:")
+		d = strings.ToLower(d)
+		if !found || !sha256Hex.MatchString(d) {
+			return "", "the release lists no sha256 digest for " + asset
+		}
+		return d, ""
+	}
+	return "", "the release has no asset named " + asset
+}
 
 // shellQuote single-quotes a string for POSIX sh.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// errPMSSManagedQbt refuses install and autostart on an account where the
+// PMSS panel has qBittorrent enabled: its watchdog starts the system
+// qbittorrent-nox and enforces its own config, so a second, self-managed
+// build would fight it.
+var errPMSSManagedQbt = errors.New("qBittorrent on this account is managed by Pulsed Media's panel; disable it there before installing or autostarting your own build")
+
+// pmssManagedQbt reports whether the last snapshot saw the PMSS panel's
+// qBittorrent marker on this account.
+func (p *poller) pmssManagedQbt() bool {
+	st, ok := p.m.State(p.box.ID)
+	return ok && st.Qbt.PMSSManaged
+}
+
 func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, error) {
+	if p.pmssManagedQbt() {
+		return "", errPMSSManagedQbt
+	}
 	if !safeURL.MatchString(downloadURL) {
 		return "", errors.New("download URL must be https and contain only URL characters")
+	}
+	// The digest comes from GitHub's API on the dashboard host, the file
+	// from GitHub's CDN on the box: a swapped download on either path fails
+	// the comparison. No digest is not an error, only an unverified install.
+	digest, why := releaseDigest(ctx, downloadURL)
+	note := ""
+	if digest == "" {
+		note = "digest: " + why + "\n"
 	}
 	cli, err := p.conn(ctx)
 	if err != nil {
@@ -137,15 +269,18 @@ func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, er
 	}
 	ictx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	out, stderr, err := cli.Run(ictx, "QBT_URL="+shellQuote(downloadURL)+" sh", strings.NewReader(installScript))
-	text := strings.TrimSpace(string(out) + "\n" + string(stderr))
+	out, stderr, err := cli.Run(ictx, "QBT_URL="+shellQuote(downloadURL)+" QBT_SHA256="+shellQuote(digest)+" sh", strings.NewReader(installScript))
+	text := strings.TrimSpace(note + string(out) + "\n" + string(stderr))
 	if err != nil {
-		return text, fmt.Errorf("install failed: %s", firstLine(text, err))
+		return text, fmt.Errorf("install failed: %s", firstLine(strings.TrimPrefix(text, note), err))
 	}
 	return text, nil
 }
 
 func (p *poller) qbtAutostart(ctx context.Context) (string, error) {
+	if p.pmssManagedQbt() {
+		return "", errPMSSManagedQbt
+	}
 	cli, err := p.conn(ctx)
 	if err != nil {
 		return "", err

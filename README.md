@@ -55,12 +55,18 @@ per-box tab.
 
 **qBittorrent lifecycle.** Install or update `~/bin/qbittorrent-nox` from the
 [userdocs static build](https://github.com/userdocs/qbittorrent-nox-static)
-(URL configurable), with an ELF and `--version` check before the binary is
-swapped in atomically. The dashboard checks the latest GitHub release every
+(URL configurable). The download's sha256 is checked against the digest
+GitHub publishes for the release asset (any GitHub release URL; other
+sources install unverified and say so), then an ELF and `--version` check
+runs before the binary is swapped in atomically. The dashboard checks the latest GitHub release every
 six hours and flags boxes that are behind or that need a restart to pick up a
 new binary. "Set up autostart" writes a `~/bin/qbt-start` screen launcher and
 the `@reboot` and `*/5 * * * *` crontab entries without touching other
-crontab lines.
+crontab lines (a line that runs the helper along with something else is
+kept), after saving the previous crontab to
+`~/.config/pmss-fleet-manager/crontab.bak`. Where qBittorrent is enabled in
+the Pulsed Media panel, PMSS runs and configures it itself: the dashboard
+still monitors it, but refuses to install or autostart a build of its own.
 
 **Alerts.** Unreachable box, suspended account, disk at threshold or over
 quota, traffic at threshold, throttled, qBittorrent or Docker down, container
@@ -76,8 +82,10 @@ are matched to boxes by hostname and username, which fills in plan name, price
 per cycle and per month, next due date, web UI and permanent-address links, and
 Pulsed Media's own usage accounting. Services you have not added yet get an
 "add box" shortcut. The feed is synced every six hours and on demand. Manual
-plan and renewal values on a box take precedence. Cancelled services stay
-listed but count towards neither costs nor renewal alerts.
+plan and renewal values on a box take precedence. Only Active and Suspended
+services count towards costs and renewal alerts; any other status (Cancelled,
+Terminated, Pending, Fraud, Completed) stays listed but counts towards
+neither.
 
 ## Run
 
@@ -98,7 +106,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-data` | `./data` | directory for the SQLite database (created 0700) |
 | `-auth` | none | HTTP basic auth as `user:password`; set it if you bind to a non-loopback address |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
-| `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed |
+| `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
 | `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
 
 ### Running in a container
@@ -126,16 +134,22 @@ docker run -d --name pmss-fleet-manager \
 - **Unraid:** appdata folders belong to `nobody:users`, so either put
   `--user 99:100` in the template's *Extra Parameters* or `chown -R
   65532:65532 /mnt/user/appdata/pmss-fleet-manager`. The image does not read
-  `PUID`/`PGID`; `--user` is the equivalent.
+  `PUID`/`PGID`; `--user` is the equivalent. SSH keys are looked up in
+  `/home/nonroot/.ssh` whatever `--user` says, since the image sets `HOME`.
 - Set `TZ` to the zone you want renewal days counted in; without it the
   container is UTC.
 - Boxes that authenticate with an SSH key need the key inside the container:
   mount it read-only, for example `-v ~/.ssh/id_ed25519:/home/nonroot/.ssh/id_ed25519:ro`,
-  or point the box's key path at wherever you mount it. For an agent, mount
-  the socket and pass `SSH_AUTH_SOCK`. Password auth needs nothing extra.
-- Because it listens on all interfaces, the Host-header check is off unless
-  you set `PMSS_ALLOWED_HOSTS`; publishing the port on `127.0.0.1` as above
-  and fronting it with a TLS reverse proxy is the intended setup.
+  or point the box's key path at wherever you mount it. The mounted key must
+  be readable by the uid the container runs as: copy it, `chown 65532` and
+  `chmod 600` the copy, or run with `--user` matching the file's owner. An
+  unreadable default key is named in the connection error. For an agent,
+  mount the socket and pass `SSH_AUTH_SOCK`. Password auth needs nothing extra.
+- Because it listens on all interfaces, the Host-header check serves
+  `localhost` and any IP address; any other name, such as the one a reverse
+  proxy uses, has to be listed in `PMSS_ALLOWED_HOSTS`. Publishing the port on
+  `127.0.0.1` as above and fronting it with a TLS reverse proxy is the
+  intended setup.
 
 ### Adding a box
 
@@ -156,7 +170,10 @@ confirm the port is still bound by your account. Switching SSH auth to a key or 
 removes the saved SSH password; a checkbox removes the saved WebUI password.
 The pinned host key belongs to the host and port: it is kept while they are
 unchanged, cleared when they change or when you tick "forget the pinned SSH
-host key", and a key the wizard saw never replaces an existing pin.
+host key", and a key the wizard saw never replaces an existing pin. Because
+the first connect after forgetting trusts whatever key answers, and with
+password auth sends the SSH password to it, ticking "forget" asks you to
+confirm.
 
 ### qBittorrent access
 
@@ -239,18 +256,31 @@ These are the design decisions that came out of it.
 - **Web surface.** No authentication by default and bound to loopback: use
   `-auth`, and put it behind a reverse proxy with TLS before exposing it
   further. Requests whose Host header is not a listen address, localhost or an
-  `-allowed-hosts` entry are refused (binding to a wildcard address disables
-  that check unless `-allowed-hosts` is set); every mutating request must be
-  same-origin; CSP is set; bodies are capped at 1 MiB; there are no
-  state-changing GETs; every API string is HTML-escaped. Settings saves are
+  `-allowed-hosts` entry are refused (on a wildcard bind, whose addresses
+  cannot be listed, any IP address is served as well); every mutating request
+  must be same-origin. A reverse proxy must pass the client's Host header
+  through, port included (nginx: `proxy_set_header Host $http_host;`), and
+  that name must be listed in `-allowed-hosts`; otherwise mutating requests
+  fail the same-origin check or every request is refused. CSP is set; request
+  bodies are capped at 1 MiB, torrent uploads at 40 MiB; there are no
+  state-changing GETs; every API string is HTML-escaped. The page makes no
+  request to any third party: its JetBrains Mono web font is embedded
+  (SIL Open Font License, see `THIRD_PARTY_LICENSES.md`), so viewers' addresses
+  stay with your dashboard and it works offline. Settings saves are
   serialised and the fleet-view shortcuts write only their own field, and
   other tabs are told to refresh, so one tab never reverts another.
 - **Scripts on the box** run as your user and are embedded in the binary
-  (documented in `internal/collect/qbtinstall.go`). Install verifies the ELF
-  magic and `--version` output before swapping the binary in atomically;
+  (documented in `internal/collect/qbtinstall.go`). Install verifies the
+  download's sha256 against the GitHub release digest (fetched by the
+  dashboard host, compared on the box, so a swapped file on either path
+  fails), then the ELF magic and `--version` output, before swapping the
+  binary in atomically;
   restart only signals processes of your uid; autostart distinguishes "no
-  crontab" from a failed read before it ever pipes into `crontab -`, replaces
-  only live lines that run the helper, and prints what it replaced.
+  crontab" from a failed read before it ever pipes into `crontab -`, saves
+  the previous crontab first, replaces only lines that run nothing but the
+  helper, and prints what it replaced. Downloads use curl, which refuses a
+  redirect to plain HTTP; the wget fallback relies on the source not
+  redirecting to http.
 
 ## Development
 
@@ -330,7 +360,7 @@ login can never be repeated into a ban; the Pulsed Media feed cache is tied
 to the API key that fetched it and dropped the moment the key changes;
 cancelled services no longer count towards costs or renewal alerts; box edits
 clear and save secrets in one write; the API key is never forwarded on a
-redirect; the installer downloads HTTPS-only under a size limit; renewal
+redirect; the installer downloads over HTTPS under a size limit; renewal
 days are calendar days in the dashboard host's zone; and the browser
 recovers from a failed first load and coalesces torrent-view refreshes.
 1.2.2 adds `-base-path` for running under a reverse-proxy sub-path, the

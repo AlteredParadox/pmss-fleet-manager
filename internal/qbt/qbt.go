@@ -236,12 +236,18 @@ func (c *Client) send(ctx context.Context, method, path, ctype string, body []by
 		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	// One byte over the cap tells a body that was cut off from one that
+	// fits: a truncated maindata would otherwise fail as malformed JSON.
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err == nil && len(b) > maxBody {
+		return resp.StatusCode, nil, resp, fmt.Errorf("qbittorrent: response from %s is larger than %d MiB", path, maxBody>>20)
+	}
 	return resp.StatusCode, b, resp, err
 }
 
 // maxBody bounds any one response. A maindata for a few thousand torrents
-// is a few MiB; every poller may hold one of these at once.
+// is a few MiB; every poller may hold one of these at once. A larger
+// response is an error, never silently truncated.
 const maxBody = 16 << 20
 
 // Login authenticates. With localhost auth bypass qBittorrent answers Ok. to

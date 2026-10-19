@@ -67,3 +67,49 @@ func TestScriptRunsLocally(t *testing.T) {
 		t.Fatalf("du produced no rows: %s", errb.String())
 	}
 }
+
+// QbtCronPattern decides which crontab lines autostart replaces and the
+// probe counts: only lines whose whole command is the helper.
+func TestQbtCronPattern(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	cases := []struct {
+		line string
+		want bool
+	}{
+		{"@reboot     sleep 30; /home/ragnar/bin/qbt-start", true}, // the two lines autostart writes
+		{"*/5 * * * * /home/ragnar/bin/qbt-start", true},
+		{`*/5 * * * * "$HOME/bin/qbt-start"`, true},
+		{"@reboot ~/bin/qbt-start", true},
+		{"*/5 * * * * '${HOME}/bin/qbt-start'", true},
+		{"*/5 * * * * ~/bin/qbt-start >/dev/null 2>&1", true}, // the hand-written quiet variant
+		{"@reboot sleep 30; $HOME/bin/qbt-start > /dev/null 2>&1", true},
+		{"*/5 * * * * ~/bin/qbt-start >>~/qbt.log 2>&1", true},
+		{"*/5 * * * * ~/bin/qbt-start >/dev/null 2>&1; ~/bin/other", false},
+		{"*/5 * * * * ~/bin/qbt-start >/dev/null | tee log", false},
+		{"0 3 * * * ~/bin/backup.sh && ~/bin/qbt-start", false}, // the user's own compound line
+		{"*/5 * * * * ~/bin/qbt-start; ~/bin/other", false},
+		{"@reboot sleep 30; nice -n5 ~/bin/qbt-start", false},
+		{"# */5 * * * * /home/ragnar/bin/qbt-start", false}, // commented out
+		{"*/5 * * * * ~/bin/qbt-starter", false},
+		{"*/5 * * * * ~/bin/qbt-start.old", false},
+		{"MAILTO=qbt-start", false},
+	}
+	var in strings.Builder
+	for _, c := range cases {
+		in.WriteString(c.line + "\n")
+	}
+	cmd := exec.Command("sh", "-c", "LC_ALL=C; export LC_ALL; grep -E "+QbtCronPattern)
+	cmd.Stdin = strings.NewReader(in.String())
+	out, _ := cmd.Output() // grep exits 1 when nothing matches
+	matched := map[string]bool{}
+	for _, l := range strings.Split(string(out), "\n") {
+		matched[l] = true
+	}
+	for _, c := range cases {
+		if matched[c.line] != c.want {
+			t.Errorf("%q: matched = %v, want %v", c.line, matched[c.line], c.want)
+		}
+	}
+}

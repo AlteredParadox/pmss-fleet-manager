@@ -223,13 +223,19 @@ func detectLimitFacts(snap *probe.Snapshot, res *DetectResult, add addStep) {
 // QbtPort from what it finds.
 func detectQbt(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *store.Box, res *DetectResult, add addStep) {
 	// qBittorrent
-	if b.Type == "storage" && !b.QbtEnabled && !snap.Qbt.BinaryPresent && !snap.Qbt.Running {
+	if b.Type == "storage" && !b.QbtEnabled && !snap.Qbt.BinaryPresent && !snap.Qbt.Running && !snap.Qbt.PMSSManaged {
 		add("info", "storage box: no torrent client expected")
 		return
 	}
 	port := qbtPortFor(b, snap.Qbt.ConfPort)
 	res.Facts.QbtPort = port
 	switch {
+	case snap.Qbt.PMSSManaged && !snap.Qbt.Running:
+		// PMSS's watchdog runs the system qbittorrent-nox, not one in ~/bin,
+		// and starts it again on its own: keep monitoring it.
+		add("warn", "qBittorrent is managed by the Pulsed Media panel and is currently not running (WebUI port %d)", port)
+		b.QbtEnabled = true
+		b.QbtPort = port
 	case !snap.Qbt.BinaryPresent && !snap.Qbt.Running:
 		add("warn", "qbittorrent-nox not found in ~/bin and not running")
 		b.QbtEnabled = false
@@ -238,7 +244,7 @@ func detectQbt(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *s
 		b.QbtEnabled = true
 		b.QbtPort = port
 	case qbtNeedsCreds(snap, b) != "":
-		add("warn", "qBittorrent on port %d requires a WebUI login (localhost bypass is off) — enter the WebUI user/password, or enable 'Bypass authentication for clients on localhost'; not attempting a login to avoid an IP ban", port)
+		add("warn", "qBittorrent on port %d requires a WebUI login (localhost bypass is off) — enter the WebUI user/password; not attempting a login to avoid an IP ban", port)
 		b.QbtEnabled = true
 		b.QbtPort = port
 	default:

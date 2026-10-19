@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -94,6 +95,17 @@ func TestAlertAckFlow(t *testing.T) {
 		t.Fatalf("ack-all: %d", code)
 	}
 	// Cross-site is refused.
+	// Only http and https count as this page: an opaque or odd scheme on the
+	// right host:port is not it.
+	for _, o := range []string{"null", "ftp://dash.local:8080", "dash.local:8080"} {
+		if code, _ = do(t, srv, "POST", "/api/alerts/1/ack", "", map[string]string{"Origin": o}); code != 403 {
+			t.Fatalf("Origin %q = %d, want 403", o, code)
+		}
+	}
+	code, _ = do(t, srv, "POST", "/api/alerts/1/ack", "", map[string]string{"Origin": "https://dash.local:8080"})
+	if code == 403 {
+		t.Fatal("https origin on this host must pass")
+	}
 	code, _ = do(t, srv, "POST", "/api/alerts/1/ack", "", map[string]string{"Origin": "http://evil.example"})
 	if code != 403 {
 		t.Fatalf("csrf: %d", code)
@@ -143,7 +155,7 @@ func TestHostAllowList(t *testing.T) {
 	if code, _ := do(t, s, "GET", "/api/state", "", nil); code != 200 {
 		t.Fatalf("no allow-list: %d", code)
 	}
-	s.SetAllowedHosts([]string{"localhost", "127.0.0.1", "Dash.Local"})
+	s.SetAllowedHosts([]string{"localhost", "127.0.0.1", "Dash.Local"}, false)
 	cases := map[string]int{"dash.local:8080": 200, "localhost": 200, "127.0.0.1:9": 200, "attacker.example:8080": 421, "": 421}
 	for host, want := range cases {
 		req := httptest.NewRequest("GET", "/api/state", nil)
@@ -164,6 +176,50 @@ func TestHostAllowList(t *testing.T) {
 	}
 	if rr.Header().Get("Content-Security-Policy") != "" {
 		t.Fatal("rejected request should not carry app headers")
+	}
+	// A specific bind lists its hosts, so an IP literal not among them is refused.
+	req = httptest.NewRequest("GET", "/api/state", nil)
+	req.Host = "192.168.1.5:8080"
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != 421 {
+		t.Fatalf("unlisted IP without a wildcard bind: %d", rr.Code)
+	}
+}
+
+// A wildcard bind cannot list its addresses: IP literals and the loopback
+// names are served, any other hostname only when -allowed-hosts names it.
+func TestHostAllowListWildcard(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.SetAllowedHosts([]string{"localhost", "127.0.0.1", "::1"}, true)
+	served := []string{"192.168.1.5:8080", "192.168.1.5", "[fd00::1]:8080", "localhost:8080"}
+	refused := []string{"evil.example:8080", "dash.local:8080", ""}
+	for _, host := range append(served, refused...) {
+		want := 200
+		if !slices.Contains(served, host) {
+			want = 421
+		}
+		req := httptest.NewRequest("GET", "/api/state", nil)
+		req.Host = host
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Errorf("wildcard, host %q: got %d want %d", host, rr.Code, want)
+		}
+		if rr.Code == 421 && !strings.Contains(rr.Body.String(), "-allowed-hosts") {
+			t.Errorf("wildcard, host %q: refusal should name -allowed-hosts: %s", host, rr.Body.String())
+		}
+	}
+	// An -allowed-hosts entry is served alongside the IP literals.
+	s.SetAllowedHosts([]string{"localhost", "127.0.0.1", "::1", "dash.local"}, true)
+	for host, want := range map[string]int{"dash.local:8080": 200, "10.0.0.2:8080": 200, "evil.example:8080": 421} {
+		req := httptest.NewRequest("GET", "/api/state", nil)
+		req.Host = host
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Errorf("wildcard with extra name, host %q: got %d want %d", host, rr.Code, want)
+		}
 	}
 }
 

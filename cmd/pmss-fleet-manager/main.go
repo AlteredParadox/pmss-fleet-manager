@@ -64,9 +64,13 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 
-	if *auth != "" && !strings.Contains(*auth, ":") {
-		fmt.Fprintln(os.Stderr, "-auth must be user:password")
-		os.Exit(2)
+	if *auth != "" {
+		// Both halves are required: "user:" or ":" would pass a colon check
+		// and silence the no-auth warning while guarding with an empty secret.
+		if u, p, ok := strings.Cut(*auth, ":"); !ok || u == "" || p == "" {
+			fmt.Fprintln(os.Stderr, "-auth must be user:password, with a non-empty user and password")
+			os.Exit(2)
+		}
 	}
 	var addrs []string
 	for _, a := range strings.Split(*listen, ",") {
@@ -123,10 +127,9 @@ func main() {
 	handler.SetLegal(legal.License, legal.ThirdPartyLicenses)
 	handler.SetVersion(version)
 	hosts, wildcard := allowedHostList(addrs, *allowedHosts)
+	handler.SetAllowedHosts(hosts, wildcard)
 	if wildcard && *allowedHosts == "" {
-		log.Warn("listening on a wildcard address without -allowed-hosts: Host header validation is off, so a DNS-rebinding page could reach the API; set -allowed-hosts")
-	} else {
-		handler.SetAllowedHosts(hosts)
+		log.Warn("listening on a wildcard address without -allowed-hosts: requests by IP address or localhost are served, any other hostname is refused until it is listed in -allowed-hosts")
 	}
 	var servers []*http.Server
 	var listenFailed atomic.Bool
@@ -169,7 +172,7 @@ func main() {
 // allowedHostList derives the Host header allow-list: every listen address's
 // host part plus loopback names, plus the -allowed-hosts extras. wildcard
 // reports a listen address with no specific host (0.0.0.0, ::, empty), which
-// cannot be enumerated.
+// cannot be enumerated; the handler then also serves IP-literal Host headers.
 func allowedHostList(addrs []string, extra string) (hosts []string, wildcard bool) {
 	hosts = []string{"localhost", "127.0.0.1", "::1"}
 	for _, a := range addrs {

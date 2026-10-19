@@ -74,12 +74,22 @@ type Server struct {
 	// passes the Origin check with full API access on a no-auth loopback
 	// install. Hostnames only, lower-case, no port.
 	allowedHosts map[string]bool
+	// allowIPHosts additionally serves any Host header that is an IP
+	// literal. It is set for a wildcard bind, whose addresses cannot be
+	// listed; a rebinding page always arrives with its own hostname, never
+	// with an IP literal.
+	allowIPHosts bool
 }
 
 // SetAllowedHosts restricts served Host headers to the given hostnames
-// (ports are ignored). An empty list disables the check.
-func (s *Server) SetAllowedHosts(hosts []string) {
+// (ports are ignored), plus any IP literal when anyIP is set. An empty list
+// without anyIP disables the check.
+func (s *Server) SetAllowedHosts(hosts []string, anyIP bool) {
 	s.allowedHosts = nil
+	s.allowIPHosts = anyIP
+	if anyIP {
+		s.allowedHosts = map[string]bool{}
+	}
 	for _, h := range hosts {
 		h = strings.ToLower(strings.TrimSpace(h))
 		if h == "" {
@@ -102,14 +112,14 @@ func (s *Server) hostAllowed(hostport string) bool {
 		h = strings.ToLower(hp)
 	}
 	h = strings.Trim(h, "[]")
-	return s.allowedHosts[h]
+	return s.allowedHosts[h] || (s.allowIPHosts && net.ParseIP(h) != nil)
 }
 
 // csp is the Content-Security-Policy for the embedded UI: own origin only,
 // plus Google Fonts for the stylesheet and font files. Inline styles are
 // used for widths and the like, hence 'unsafe-inline' on styles only.
-const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-	"font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 // New builds the handler tree. basePath is validated with NormalizeBasePath;
 // an invalid value is a programming error (main validates user input first).
@@ -195,7 +205,15 @@ func (s *Server) routes() {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set(hdrCacheControl, "no-cache")
+		if strings.HasSuffix(r.URL.Path, ".woff2") {
+			// Not in Go's built-in MIME table, and the embedded files carry no
+			// modification time to revalidate against, so a day's caching
+			// instead of a 90 KB re-download per page view.
+			w.Header().Set(hdrContentType, "font/woff2")
+			w.Header().Set(hdrCacheControl, "public, max-age=86400")
+		} else {
+			w.Header().Set(hdrCacheControl, "no-cache")
+		}
 		fileServer.ServeHTTP(w, r)
 	})))
 	// The page lives only at <base-path>/ (ServeMux redirects <base-path> to
@@ -250,9 +268,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
+// sameOrigin accepts an Origin of this host over http or https. The
+// dashboard never terminates TLS itself, so the scheme the browser saw is
+// not knowable here and both are allowed; any other scheme, or an opaque
+// "null" origin, is not this page.
 func sameOrigin(origin, host string) bool {
-	origin = strings.TrimPrefix(strings.TrimPrefix(origin, schemeHTTP), schemeHTTPS)
-	return strings.EqualFold(origin, host)
+	scheme, rest, ok := strings.Cut(origin, "://")
+	if !ok || (scheme != "http" && scheme != "https") {
+		return false
+	}
+	return strings.EqualFold(rest, host)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

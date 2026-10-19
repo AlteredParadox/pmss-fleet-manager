@@ -67,14 +67,14 @@ type Access struct {
 
 // Usage is Pulsed Media's own accounting of the service.
 type Usage struct {
-	TrackedSince   string `json:"tracked_since"`
-	SentBytes      int64  `json:"sent_bytes"`
-	ReceivedBytes  int64  `json:"received_bytes"`
-	CPUHours       int64  `json:"cpu_hours"`
-	CPUSince       string `json:"cpu_since"`
-	DiskUsedBytes  int64  `json:"disk_used_bytes"`
-	DiskQuotaBytes int64  `json:"disk_quota_bytes"`
-	Torrents       int    `json:"torrents"`
+	TrackedSince   string   `json:"tracked_since"`
+	SentBytes      int64    `json:"sent_bytes"`
+	ReceivedBytes  int64    `json:"received_bytes"`
+	CPUHours       *float64 `json:"cpu_hours"` // sent rounded to one decimal, or null
+	CPUSince       string   `json:"cpu_since"`
+	DiskUsedBytes  int64    `json:"disk_used_bytes"`
+	DiskQuotaBytes int64    `json:"disk_quota_bytes"`
+	Torrents       int      `json:"torrents"`
 }
 
 // Amount decodes a money value sent as a string ("11.94", "€11.94",

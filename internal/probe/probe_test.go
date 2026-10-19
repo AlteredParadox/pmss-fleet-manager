@@ -83,6 +83,10 @@ WebUI\LocalHostAuth=false
 4242
 @@qbt_bin
 /home/ragnar/bin/qbittorrent-nox
+@@qbt_cron
+2
+@@qbt_pmss
+1
 @@docker_sock
 1
 @@end
@@ -119,7 +123,7 @@ func TestParse(t *testing.T) {
 	if !snap.Account.OK || snap.Account.QuotaGiB != 2000 || !snap.Account.DockerEnabled {
 		t.Fatalf("account: %+v", snap.Account)
 	}
-	if !snap.Qbt.Running || snap.Qbt.ConfPort != 8089 || !snap.Qbt.LocalHostAuth || !snap.Qbt.BinaryPresent {
+	if !snap.Qbt.Running || snap.Qbt.ConfPort != 8089 || !snap.Qbt.LocalHostAuth || !snap.Qbt.BinaryPresent || snap.Qbt.CronEntries != 2 || !snap.Qbt.PMSSManaged {
 		t.Fatalf("qbt: %+v", snap.Qbt)
 	}
 	if !snap.Docker.SocketPresent {
@@ -471,5 +475,18 @@ func TestHostnameField(t *testing.T) {
 		if got := hostnameField(in); got != want {
 			t.Errorf("hostnameField(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// ~/.qbittorrentEnable is PMSS's marker for a panel-managed qBittorrent; a
+// missing section (an older probe) reads as not managed.
+func TestParseQbtPMSSManaged(t *testing.T) {
+	for in, want := range map[string]bool{"1": true, "1\n": true, "0": false, "": false} {
+		if got := parseQbt(map[string]string{"qbt_pmss": in}).PMSSManaged; got != want {
+			t.Errorf("qbt_pmss %q: PMSSManaged = %v, want %v", in, got, want)
+		}
+	}
+	if parseQbt(map[string]string{}).PMSSManaged {
+		t.Error("no qbt_pmss section must not read as managed")
 	}
 }

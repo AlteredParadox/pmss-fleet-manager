@@ -147,6 +147,54 @@ func TestOneActiveAlertPerKey(t *testing.T) {
 	}
 }
 
+func TestEscalatedAlertIsUnacked(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "d", "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	b := &Box{Name: "x", Host: "h", User: "u", Port: 22, Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	unacked := func() int {
+		t.Helper()
+		n, err := s.CountUnacked(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if _, err := s.RaiseAlert(ctx, b.ID, "disk", "warn", "disk at 92%"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AckAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RaiseAlert(ctx, b.ID, "disk", "warn", "disk at 94%"); err != nil {
+		t.Fatal(err)
+	}
+	if n := unacked(); n != 0 {
+		t.Fatalf("same severity must keep the ack, unacked = %d", n)
+	}
+	if _, err := s.RaiseAlert(ctx, b.ID, "disk", "bad", "disk over quota"); err != nil {
+		t.Fatal(err)
+	}
+	if n := unacked(); n != 1 {
+		t.Fatalf("warn escalated to bad must be unacked, unacked = %d", n)
+	}
+	if err := s.AckAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RaiseAlert(ctx, b.ID, "disk", "warn", "disk at 96%"); err != nil {
+		t.Fatal(err)
+	}
+	if n := unacked(); n != 0 {
+		t.Fatalf("a lower severity must keep the ack, unacked = %d", n)
+	}
+}
+
 func TestSetHostKeyOnlyForUnchangedEndpoint(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "d", "test.db"))
 	if err != nil {

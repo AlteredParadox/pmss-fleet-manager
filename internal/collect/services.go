@@ -130,8 +130,12 @@ func keyFingerprint(key string) string {
 }
 
 // serviceActive reports whether a service is current: only those count
-// towards costs and API-derived renewal dates. Inactive ones stay visible.
-func serviceActive(status string) bool { return strings.EqualFold(status, "active") }
+// towards costs and API-derived renewal dates. Suspended counts, since that
+// is usually an overdue service, exactly when its renewal matters; Cancelled,
+// Terminated, Pending, Fraud and the rest stay visible but do not count.
+func serviceActive(status string) bool {
+	return strings.EqualFold(status, "active") || strings.EqualFold(status, "suspended")
+}
 
 // ServiceActive is serviceActive for other packages (the API totals).
 func ServiceActive(status string) bool { return serviceActive(status) }
@@ -145,9 +149,13 @@ func (m *Manager) decorate(s *BoxState) {
 	if feed == nil {
 		return
 	}
-	// An active service wins over a cancelled one on the same host (a
-	// cancel-and-reorder); an inactive match is still shown, for history.
-	svc, how := matchService(activeServices(feed.Services), s.Host, s.User)
+	// An active service wins over a suspended one, and either over a
+	// cancelled one on the same host (a cancel-and-reorder); an inactive
+	// match is still shown, for history.
+	svc, how := matchService(servicesWith(feed.Services, isActiveStatus), s.Host, s.User)
+	if svc == nil {
+		svc, how = matchService(servicesWith(feed.Services, serviceActive), s.Host, s.User)
+	}
 	if svc == nil {
 		svc, how = matchService(feed.Services, s.Host, s.User)
 	}
@@ -158,10 +166,12 @@ func (m *Manager) decorate(s *BoxState) {
 	}
 }
 
-func activeServices(all []pmapi.Service) []pmapi.Service {
+func isActiveStatus(status string) bool { return strings.EqualFold(status, "active") }
+
+func servicesWith(all []pmapi.Service, keep func(status string) bool) []pmapi.Service {
 	out := make([]pmapi.Service, 0, len(all))
 	for _, s := range all {
-		if serviceActive(s.Status) {
+		if keep(s.Status) {
 			out = append(out, s)
 		}
 	}
@@ -316,7 +326,7 @@ func (m *Manager) Services() ServicesView {
 				break
 			}
 		}
-		if strings.EqualFold(s.Status, "active") {
+		if serviceActive(s.Status) {
 			v.MonthlyCost += si.Monthly
 		}
 		v.Services = append(v.Services, si)
