@@ -238,7 +238,7 @@ func detectQbt(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *s
 		b.QbtEnabled = true
 		b.QbtPort = port
 	case qbtNeedsCreds(snap, b) != "":
-		add("warn", "qBittorrent on port %d requires a WebUI login (localhost bypass is off) — enter the WebUI user/password, or enable 'Bypass authentication for clients on localhost'; not attempting a login to avoid an IP ban", port)
+		add("warn", "qBittorrent on port %d requires a WebUI login (localhost bypass is off) — enter the WebUI user/password; not attempting a login to avoid an IP ban", port)
 		b.QbtEnabled = true
 		b.QbtPort = port
 	default:

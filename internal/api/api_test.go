@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -143,7 +144,7 @@ func TestHostAllowList(t *testing.T) {
 	if code, _ := do(t, s, "GET", "/api/state", "", nil); code != 200 {
 		t.Fatalf("no allow-list: %d", code)
 	}
-	s.SetAllowedHosts([]string{"localhost", "127.0.0.1", "Dash.Local"})
+	s.SetAllowedHosts([]string{"localhost", "127.0.0.1", "Dash.Local"}, false)
 	cases := map[string]int{"dash.local:8080": 200, "localhost": 200, "127.0.0.1:9": 200, "attacker.example:8080": 421, "": 421}
 	for host, want := range cases {
 		req := httptest.NewRequest("GET", "/api/state", nil)
@@ -164,6 +165,50 @@ func TestHostAllowList(t *testing.T) {
 	}
 	if rr.Header().Get("Content-Security-Policy") != "" {
 		t.Fatal("rejected request should not carry app headers")
+	}
+	// A specific bind lists its hosts, so an IP literal not among them is refused.
+	req = httptest.NewRequest("GET", "/api/state", nil)
+	req.Host = "192.168.1.5:8080"
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != 421 {
+		t.Fatalf("unlisted IP without a wildcard bind: %d", rr.Code)
+	}
+}
+
+// A wildcard bind cannot list its addresses: IP literals and the loopback
+// names are served, any other hostname only when -allowed-hosts names it.
+func TestHostAllowListWildcard(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.SetAllowedHosts([]string{"localhost", "127.0.0.1", "::1"}, true)
+	served := []string{"192.168.1.5:8080", "192.168.1.5", "[fd00::1]:8080", "localhost:8080"}
+	refused := []string{"evil.example:8080", "dash.local:8080", ""}
+	for _, host := range append(served, refused...) {
+		want := 200
+		if !slices.Contains(served, host) {
+			want = 421
+		}
+		req := httptest.NewRequest("GET", "/api/state", nil)
+		req.Host = host
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Errorf("wildcard, host %q: got %d want %d", host, rr.Code, want)
+		}
+		if rr.Code == 421 && !strings.Contains(rr.Body.String(), "-allowed-hosts") {
+			t.Errorf("wildcard, host %q: refusal should name -allowed-hosts: %s", host, rr.Body.String())
+		}
+	}
+	// An -allowed-hosts entry is served alongside the IP literals.
+	s.SetAllowedHosts([]string{"localhost", "127.0.0.1", "::1", "dash.local"}, true)
+	for host, want := range map[string]int{"dash.local:8080": 200, "10.0.0.2:8080": 200, "evil.example:8080": 421} {
+		req := httptest.NewRequest("GET", "/api/state", nil)
+		req.Host = host
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Errorf("wildcard with extra name, host %q: got %d want %d", host, rr.Code, want)
+		}
 	}
 }
 
@@ -237,6 +282,17 @@ func TestDetectOnEditKeepsSecretsForSavedEndpointOnly(t *testing.T) {
 	if code != 400 || !strings.Contains(body, "re-enter") {
 		t.Fatalf("different host: %d %s", code, body)
 	}
+	// Same endpoint but forgetting the pin, SSH password left blank: refused,
+	// since the test would send the saved secret to whatever key answers.
+	code, body = do(t, s, "POST", "/api/detect", fmt.Sprintf(`{"id":%d,"host":"127.0.0.1","port":1,"user":"u","auth_method":"password","forget_host_key":true}`, id), hdr)
+	if code != 400 || !strings.Contains(body, "pinned host key") {
+		t.Fatalf("forget on test with the password blank = %d %s", code, body)
+	}
+	// Key auth never sends the saved secret, so forgetting is fine there.
+	code, body = do(t, s, "POST", "/api/detect", fmt.Sprintf(`{"id":%d,"host":"127.0.0.1","port":1,"user":"u","auth_method":"key","forget_host_key":true}`, id), hdr)
+	if code != 200 || strings.Contains(body, "S3cret") {
+		t.Fatalf("forget on test with key auth = %d %.200s", code, body)
+	}
 }
 
 func TestEditClearsSecrets(t *testing.T) {
@@ -273,8 +329,19 @@ func TestUpdateRulesForPinsAndSecrets(t *testing.T) {
 	if b := get(); b.HostKey != "ssh-ed25519 PIN" || b.Name != "b2" || b.Password != "pw" {
 		t.Fatalf("unchanged endpoint must keep pin and password: %+v", b)
 	}
-	// Forget wins over a supplied key.
-	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","auth_method":"password","host_key":"ssh-ed25519 OTHER","forget_host_key":true}`, hdr)
+	// A forget with the SSH password left blank gets refused and the pin
+	// stays, since the next connect would trust any key and must not be
+	// sent the saved secret.
+	code, body = do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","auth_method":"password","forget_host_key":true}`, hdr)
+	if code != 400 || !strings.Contains(body, "re-enter") || get().HostKey != "ssh-ed25519 PIN" {
+		t.Fatalf("forget with the password blank = %d %s, pin %q", code, body, get().HostKey)
+	}
+	// Auto auth falls back to the saved secret too, so the same refusal.
+	if code, _ = do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","forget_host_key":true}`, hdr); code != 400 {
+		t.Fatalf("forget with auto auth and the password blank = %d", code)
+	}
+	// Forget wins over a supplied key (key auth never sends the saved secret).
+	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","auth_method":"key","host_key":"ssh-ed25519 OTHER","forget_host_key":true}`, hdr)
 	if get().HostKey != "" {
 		t.Fatal("forget_host_key must clear the pin even when a key is supplied")
 	}

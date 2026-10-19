@@ -1083,7 +1083,7 @@ function addDockerDuFields(f) {
 // Checkboxes that only make sense for an existing box (each renders empty in add mode).
 function addEditExtras(A, f, edit) {
   return `${edit ? `<label class="check"><input type="checkbox" data-f="enabled" ${f.enabled ? 'checked' : ''}> polling enabled</label>` : ''}
-        ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins the new key)</span></label>` : ''}
+        ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins the new key, so with password auth re-enter the SSH password, as the saved one is not sent to an unpinned host)</span></label>` : ''}
         ${edit && f.has_qbt_pass ? `<label class="check"><input type="checkbox" data-f="clear_qbt_pass" ${f.clear_qbt_pass ? 'checked' : ''}> remove the saved WebUI password <span class="hint">(the SSH password is removed automatically when auth is switched to key or agent)</span></label>` : ''}`;
 }
 function addStep1(A, f, E, edit, back) {

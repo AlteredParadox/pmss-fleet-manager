@@ -74,12 +74,22 @@ type Server struct {
 	// passes the Origin check with full API access on a no-auth loopback
 	// install. Hostnames only, lower-case, no port.
 	allowedHosts map[string]bool
+	// allowIPHosts additionally serves any Host header that is an IP
+	// literal. It is set for a wildcard bind, whose addresses cannot be
+	// listed; a rebinding page always arrives with its own hostname, never
+	// with an IP literal.
+	allowIPHosts bool
 }
 
 // SetAllowedHosts restricts served Host headers to the given hostnames
-// (ports are ignored). An empty list disables the check.
-func (s *Server) SetAllowedHosts(hosts []string) {
+// (ports are ignored), plus any IP literal when anyIP is set. An empty list
+// without anyIP disables the check.
+func (s *Server) SetAllowedHosts(hosts []string, anyIP bool) {
 	s.allowedHosts = nil
+	s.allowIPHosts = anyIP
+	if anyIP {
+		s.allowedHosts = map[string]bool{}
+	}
 	for _, h := range hosts {
 		h = strings.ToLower(strings.TrimSpace(h))
 		if h == "" {
@@ -102,7 +112,7 @@ func (s *Server) hostAllowed(hostport string) bool {
 		h = strings.ToLower(hp)
 	}
 	h = strings.Trim(h, "[]")
-	return s.allowedHosts[h]
+	return s.allowedHosts[h] || (s.allowIPHosts && net.ParseIP(h) != nil)
 }
 
 // csp is the Content-Security-Policy for the embedded UI: own origin only,
@@ -512,6 +522,17 @@ func endpointChanged(stored, edited *store.Box) (hostChanged, userChanged bool) 
 	return
 }
 
+var errForgetPin = errors.New("re-enter the SSH password to forget the pinned host key; the saved one is only used while the pin is kept")
+
+// forgetNeedsPassword reports an edit or test that drops an existing pin
+// while it would log in with the saved SSH secret: the first connect after
+// a forget trusts any key, so it has to be typed again. Key and agent auth
+// are unaffected.
+func forgetNeedsPassword(in boxInput, stored, edited *store.Box) bool {
+	return in.ForgetHostKey && stored.HostKey != "" && edited.Password == "" && stored.Password != "" &&
+		(edited.AuthMethod == "password" || edited.AuthMethod == "")
+}
+
 func decode(r *http.Request, v any) error {
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
 	return dec.Decode(v)
@@ -633,6 +654,12 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, errors.New("re-enter the WebUI password (or tick remove) to move this box to a different host, port or user; the saved one is only used for the saved endpoint"))
 			return
 		}
+	}
+	// Forgetting the pin makes the next connect trust whatever answers, so
+	// the saved SSH password must not be the one sent to it.
+	if forgetNeedsPassword(in, &stored, b) {
+		writeErr(w, 400, errForgetPin)
+		return
 	}
 	switch {
 	case in.ForgetHostKey:
@@ -1018,6 +1045,10 @@ func (s *Server) handleDetect(w http.ResponseWriter, r *http.Request) {
 		// not be a way around it).
 		if stored, err := s.st.GetBox(r.Context(), in.ID); err == nil {
 			hostChanged, userChanged := endpointChanged(stored, &b)
+			if forgetNeedsPassword(in, stored, &b) {
+				writeErr(w, 400, errForgetPin)
+				return
+			}
 			if !hostChanged && !in.ForgetHostKey {
 				b.HostKey = stored.HostKey
 			}

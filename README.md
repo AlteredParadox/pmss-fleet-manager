@@ -98,7 +98,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-data` | `./data` | directory for the SQLite database (created 0700) |
 | `-auth` | none | HTTP basic auth as `user:password`; set it if you bind to a non-loopback address |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
-| `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed |
+| `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
 | `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
 
 ### Running in a container
@@ -133,9 +133,11 @@ docker run -d --name pmss-fleet-manager \
   mount it read-only, for example `-v ~/.ssh/id_ed25519:/home/nonroot/.ssh/id_ed25519:ro`,
   or point the box's key path at wherever you mount it. For an agent, mount
   the socket and pass `SSH_AUTH_SOCK`. Password auth needs nothing extra.
-- Because it listens on all interfaces, the Host-header check is off unless
-  you set `PMSS_ALLOWED_HOSTS`; publishing the port on `127.0.0.1` as above
-  and fronting it with a TLS reverse proxy is the intended setup.
+- Because it listens on all interfaces, the Host-header check serves
+  `localhost` and any IP address; any other name, such as the one a reverse
+  proxy uses, has to be listed in `PMSS_ALLOWED_HOSTS`. Publishing the port on
+  `127.0.0.1` as above and fronting it with a TLS reverse proxy is the
+  intended setup.
 
 ### Adding a box
 
@@ -156,7 +158,10 @@ confirm the port is still bound by your account. Switching SSH auth to a key or 
 removes the saved SSH password; a checkbox removes the saved WebUI password.
 The pinned host key belongs to the host and port: it is kept while they are
 unchanged, cleared when they change or when you tick "forget the pinned SSH
-host key", and a key the wizard saw never replaces an existing pin.
+host key", and a key the wizard saw never replaces an existing pin. Because
+the first connect after forgetting trusts whatever key answers, a box that
+logs in with an SSH password needs it re-entered to forget the pin, on save
+and on "test connection"; key and agent auth are unaffected.
 
 ### qBittorrent access
 
@@ -239,9 +244,13 @@ These are the design decisions that came out of it.
 - **Web surface.** No authentication by default and bound to loopback: use
   `-auth`, and put it behind a reverse proxy with TLS before exposing it
   further. Requests whose Host header is not a listen address, localhost or an
-  `-allowed-hosts` entry are refused (binding to a wildcard address disables
-  that check unless `-allowed-hosts` is set); every mutating request must be
-  same-origin; CSP is set; bodies are capped at 1 MiB; there are no
+  `-allowed-hosts` entry are refused (on a wildcard bind, whose addresses
+  cannot be listed, any IP address is served as well); every mutating request
+  must be same-origin. A reverse proxy must pass the client's Host header
+  through, port included (nginx: `proxy_set_header Host $http_host;`), and
+  that name must be listed in `-allowed-hosts`; otherwise mutating requests
+  fail the same-origin check or every request is refused. CSP is set; request
+  bodies are capped at 1 MiB, torrent uploads at 40 MiB; there are no
   state-changing GETs; every API string is HTML-escaped. Settings saves are
   serialised and the fleet-view shortcuts write only their own field, and
   other tabs are told to refresh, so one tab never reverts another.
