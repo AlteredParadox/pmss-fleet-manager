@@ -149,9 +149,13 @@ func (m *Manager) decorate(s *BoxState) {
 	if feed == nil {
 		return
 	}
-	// An active service wins over a cancelled one on the same host (a
-	// cancel-and-reorder); an inactive match is still shown, for history.
-	svc, how := matchService(activeServices(feed.Services), s.Host, s.User)
+	// An active service wins over a suspended one, and either over a
+	// cancelled one on the same host (a cancel-and-reorder); an inactive
+	// match is still shown, for history.
+	svc, how := matchService(servicesWith(feed.Services, isActiveStatus), s.Host, s.User)
+	if svc == nil {
+		svc, how = matchService(servicesWith(feed.Services, serviceActive), s.Host, s.User)
+	}
 	if svc == nil {
 		svc, how = matchService(feed.Services, s.Host, s.User)
 	}
@@ -162,10 +166,12 @@ func (m *Manager) decorate(s *BoxState) {
 	}
 }
 
-func activeServices(all []pmapi.Service) []pmapi.Service {
+func isActiveStatus(status string) bool { return strings.EqualFold(status, "active") }
+
+func servicesWith(all []pmapi.Service, keep func(status string) bool) []pmapi.Service {
 	out := make([]pmapi.Service, 0, len(all))
 	for _, s := range all {
-		if serviceActive(s.Status) {
+		if keep(s.Status) {
 			out = append(out, s)
 		}
 	}

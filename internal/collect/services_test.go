@@ -475,4 +475,15 @@ func TestServiceActiveStatuses(t *testing.T) {
 	if s.EffectiveRenewal() != "2026-01-01" {
 		t.Fatalf("a suspended service's due date is its renewal, got %q", s.EffectiveRenewal())
 	}
+	// An active service still wins over a suspended one on the same host, so
+	// a host-only match stays unambiguous.
+	m.svc = servicesCache{feed: &pmapi.Feed{Currency: "EUR", Services: []pmapi.Service{
+		{ID: 1, Domain: "typhon.pulsedmedia.com", Status: "Suspended", NextDue: "2026-01-01", Seedbox: &pmapi.Access{Username: "rc3"}},
+		{ID: 2, Domain: "typhon.pulsedmedia.com", Status: "Active", NextDue: "2027-01-01", Seedbox: &pmapi.Access{Username: "rc2"}},
+	}}}
+	s = &BoxState{Host: "typhon.pulsedmedia.com"}
+	m.decorate(s)
+	if s.Service == nil || s.Service.ID != 2 {
+		t.Fatalf("want the active service 2 on a host-only match, got %+v", s.Service)
+	}
 }
