@@ -17,6 +17,9 @@
 package probe
 
 import (
+	"fmt"
+	"net"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -332,6 +335,85 @@ func TestNonFiniteEverywhere(t *testing.T) {
 	}
 }
 
+func TestListenersViaSS(t *testing.T) {
+	// The ss fallback: our socket carries our uid, anything ss could not
+	// attribute to us is "x" and must be refused, and a port with both is
+	// contested. Textual addresses decide reachability like the hex ones.
+	raw := "@@uid\n1001\n@@listen\nvia ss\nd 8080 1001 0.0.0.0\nd 22 x 0.0.0.0\nd 22 x [::]\nd 8081 x 127.0.0.1\nd 8082 1001 [::]\nd 8082 x 127.0.0.2\nd 8083 1001 127.0.0.1\nd 8083 x [::]\nd 8084 1001 10.0.0.5\nd 8085 1001 [::1]\n@@end\n"
+	snap, err := Parse([]byte(raw), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.ListenersKnown {
+		t.Fatal("ss lines must count as a readable table")
+	}
+	if ok, reason := snap.PortOwner(8080); !ok {
+		t.Fatalf("own port via ss: %q", reason)
+	}
+	if ok, reason := snap.PortOwner(22); ok || !strings.Contains(reason, "not this account") {
+		t.Fatalf("unattributed listener must be refused: %v %q", ok, reason)
+	}
+	if ok, reason := snap.PortOwner(8081); ok || !strings.Contains(reason, "not this account") {
+		t.Fatalf("foreign loopback listener must be refused: %v %q", ok, reason)
+	}
+	if ok, reason := snap.PortOwner(8082); !ok {
+		t.Fatalf("a co-tenant on 127.0.0.2 is not reachable and must not contest: %q", reason)
+	}
+	if ok, reason := snap.PortOwner(8083); ok || !strings.Contains(reason, "more than one") {
+		t.Fatalf("ours on 127.0.0.1 plus a foreign v6-any listener is contested: %v %q", ok, reason)
+	}
+	for _, port := range []int{8084, 8085} {
+		if ok, reason := snap.PortOwner(port); ok || !strings.Contains(reason, "nothing is listening") {
+			t.Fatalf("port %d is not reachable from 127.0.0.1: %v %q", port, ok, reason)
+		}
+	}
+	// A negative or non-numeric uid token other than x is not a listener.
+	if ls, known := parseListeners("d 8080 -5\nd 8081 abc\n"); known || len(ls) != 0 {
+		t.Fatalf("bad uid tokens must be ignored: %v %v", ls, known)
+	}
+}
+
+// TestListenViaSSLocal runs the real ss branch of the listen shell against
+// this machine: a socket this test opens must come back as ours on
+// 127.0.0.1, and the columns must split as the awk expects.
+func TestListenViaSSLocal(t *testing.T) {
+	if _, err := exec.LookPath("ss"); err != nil {
+		t.Skip("no ss on this machine")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh on this machine")
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("cannot listen:", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	cmd := exec.Command("sh", "-c", "uid=$(id -u); "+listenViaSS)
+	raw, err := cmd.Output()
+	if err != nil {
+		t.Skip("ss branch did not run here:", err)
+	}
+	want := fmt.Sprintf("d %d %d 127.0.0.1", port, os.Getuid())
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	found := false
+	for _, l := range lines {
+		f := strings.Fields(l)
+		if len(f) != 4 || f[0] != "d" {
+			t.Fatalf("unexpected ss line %q", l)
+		}
+		if _, _, ok := listenerPortUID(f); !ok {
+			t.Fatalf("unparsable ss line %q", l)
+		}
+		if l == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("own listener %q not in ss output:\n%s", want, raw)
+	}
+}
+
 func TestPortOwnerNow(t *testing.T) {
 	out := []byte("uid 1001\nh 1F90 1001 0100007F\nh 0016 0 00000000\nend\n")
 	if ok, reason := PortOwnerNow(out, 8080); !ok {
@@ -345,6 +427,15 @@ func TestPortOwnerNow(t *testing.T) {
 	}
 	if ok, _ := PortOwnerNow([]byte("uid 1001\nend\n"), 8080); ok {
 		t.Fatal("empty table must refuse")
+	}
+	if ok, _ := PortOwnerNow([]byte("uid 1001\nvia ss\nend\n"), 8080); ok {
+		t.Fatal("ss that listed nothing must refuse")
+	}
+	if ok, reason := PortOwnerNow([]byte("uid 1001\nvia ss\nd 8080 1001 0.0.0.0\nd 22 x 0.0.0.0\nend\n"), 8080); !ok {
+		t.Fatalf("own port via ss: %q", reason)
+	}
+	if ok, _ := PortOwnerNow([]byte("uid 1001\nvia ss\nd 8080 1001 0.0.0.0\nd 22 x 0.0.0.0\nend\n"), 22); ok {
+		t.Fatal("unattributed port via ss must refuse")
 	}
 	// Cut off before the marker: the co-tenant's line may be the missing one.
 	if ok, reason := PortOwnerNow([]byte("uid 1001\nh 1F90 1001 0100007F\n"), 8080); ok || !strings.Contains(reason, "incomplete") {

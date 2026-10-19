@@ -49,10 +49,12 @@ type Snapshot struct {
 	Docker  DockerInfo
 
 	// Listeners maps a listening TCP port to the uid that owns the socket,
-	// from /proc/net/tcp{,6}. On a shared host any tenant can bind a free
-	// loopback port, so before sending WebUI credentials the poller checks
-	// the port is ours. ListenersKnown is false when /proc/net/tcp could not
-	// be read, in which case nothing can be verified.
+	// from /proc/net/tcp{,6} or, where PMSS has made those root-only, from
+	// ss -tlnp (unknownOwner for a socket ss cannot attribute to us). On a
+	// shared host any tenant can bind a free loopback port, so before
+	// sending WebUI credentials the poller checks the port is ours.
+	// ListenersKnown is false when neither source listed anything, in
+	// which case nothing can be verified.
 	Listeners      map[int]int
 	ListenersKnown bool
 
@@ -70,7 +72,7 @@ func (s *Snapshot) PortOwner(port int) (ok bool, reason string) {
 	if !s.ListenersKnown {
 		// sshd's own listener is always in the table, so an empty section
 		// means the probe could not read it; do not send credentials blind.
-		return false, "could not read the listening sockets on the box; not sending credentials unverified"
+		return false, "could not read the listening sockets on the box (neither /proc/net/tcp nor ss -tlnp listed any); not sending credentials unverified"
 	}
 	if s.UID <= 0 {
 		return false, "own uid unknown; cannot verify who owns the port"
@@ -81,16 +83,25 @@ func (s *Snapshot) PortOwner(port int) (ok bool, reason string) {
 		return false, fmt.Sprintf("nothing is listening on port %d", port)
 	case uid == contestedPort:
 		return false, fmt.Sprintf("port %d has listeners owned by more than one account; refusing to connect or send credentials to it", port)
+	case uid == unknownOwner:
+		return false, fmt.Sprintf("port %d is bound by a process that is not this account's (its owner is not visible from here); refusing to connect or send credentials to it", port)
 	case uid != s.UID:
 		return false, fmt.Sprintf("port %d is owned by uid %d, not by this account; refusing to connect or send credentials to it", port, uid)
 	}
 	return true, ""
 }
 
-// loopbackReachable reports whether a /proc/net/tcp{,6} local address (hex,
-// little-endian words) is one that a connection to 127.0.0.1 reaches.
-func loopbackReachable(hexaddr string) bool {
-	switch strings.ToUpper(hexaddr) {
+// loopbackReachable reports whether a listener's local address is one that
+// a connection to 127.0.0.1 reaches: either a /proc/net/tcp{,6} address
+// (hex, little-endian words) or the textual form ss prints.
+func loopbackReachable(addr string) bool {
+	switch addr {
+	case "0.0.0.0", "127.0.0.1", "*", // ss: v4 any, v4 loopback, any
+		"[::]", "::", // ss: v6 any (dual-stack reaches 127.0.0.1 too)
+		"[::ffff:127.0.0.1]", "::ffff:127.0.0.1":
+		return true
+	}
+	switch strings.ToUpper(addr) {
 	case "00000000", "0100007F", // v4 any, v4 loopback
 		"00000000000000000000000000000000", // v6 any (dual-stack reaches 127.0.0.1 too)
 		"0000000000000000FFFF00000100007F": // ::ffff:127.0.0.1
@@ -105,6 +116,11 @@ func loopbackReachable(hexaddr string) bool {
 // addresses) owned by different uids: whichever one we would reach, it is
 // not safely ours.
 const contestedPort = -1
+
+// unknownOwner is the uid recorded for a listener that ss could not
+// attribute to one of our own processes (the listen section's "x"): some
+// other account's or a system service's, never ours.
+const unknownOwner = -2
 
 // AccountSummary renders the parsed fields of ~/.config/pmss-user.json for
 // diagnostics, so the raw file (which may grow fields we do not use) is
@@ -197,7 +213,8 @@ func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
 }
 
 // parseListeners reads the probe's listen section: one listening socket per
-// line as "h <hexport> <uid> [<hexaddr>]" from /proc/net/tcp{,6}. Only
+// line as "h <hexport> <uid> [<hexaddr>]" from /proc/net/tcp{,6}, or as
+// "d <port> <uid|x> [<addr>]" from ss (see listenShell). Only
 // sockets a 127.0.0.1 dial can reach count (v4 any/loopback, v6 any,
 // v4-mapped loopback; not ::1): a socket bound to a LAN address is neither
 // ours to use nor a threat, and a co-tenant on 127.0.0.2 or ::1 must not
@@ -226,8 +243,8 @@ func parseListeners(text string) (map[int]int, bool) {
 }
 
 // listenerPortUID parses the port (hex after "h", decimal after "d") and
-// the owning uid of one listener line; ok is false for any other prefix, a
-// port outside 1..65535 or a non-numeric uid.
+// the owning uid of one listener line ("x" is unknownOwner); ok is false
+// for any other prefix, a port outside 1..65535 or any other uid token.
 func listenerPortUID(f []string) (port, uid int, ok bool) {
 	base := 10
 	if f[0] == "h" {
@@ -239,8 +256,11 @@ func listenerPortUID(f []string) (port, uid int, ok bool) {
 	if err != nil || p <= 0 || p > 65535 {
 		return 0, 0, false
 	}
+	if f[2] == "x" {
+		return int(p), unknownOwner, true
+	}
 	uid, err = strconv.Atoi(f[2])
-	if err != nil {
+	if err != nil || uid < 0 {
 		return 0, 0, false
 	}
 	return int(p), uid, true

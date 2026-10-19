@@ -129,14 +129,7 @@ elif [ -f "/sys/fs/cgroup/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/cgro
 sec qbt_conf; grep -E '^WebUI\\(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=' "$home/.config/qBittorrent/qBittorrent.conf" 2>/dev/null
 sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
 sec listen
-# Listening sockets only, as "h <hexport> <uid> <hexaddr>", filtered on the box so the
-# output stays small (the whole table is every tenant's torrent connection).
-# Deliberately NOT ss -e: it appends the socket's cgroup path verbatim, a
-# directory name the socket's owner chooses, which can contain "uid:<ours>"
-# or even a newline and a fabricated row. /proc/net/tcp is kernel-formatted
-# with no attacker-controlled text.
-awk '$4=="0A"{x=$2; a=x; sub(/.*:/,"",x); sub(/:.*/,"",a); print "h", x, $8, a}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
-sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
+` + listenShell + `sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version; [ -x "$home/bin/qbittorrent-nox" ] && timeout 10 "$home/bin/qbittorrent-nox" --version </dev/null 2>/dev/null | head -n 1
 sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec "^[[:space:]]*[^#[:space:]].*bin/qbt-start([[:space:]\"')>;&|]|\$)" 
@@ -149,10 +142,39 @@ sec end
 // right before an action that sends credentials.
 const ListenScript = `#!/bin/sh
 LC_ALL=C; export LC_ALL
-echo "uid $(id -u)"
-awk '$4=="0A"{x=$2; a=x; sub(/.*:/,"",x); sub(/:.*/,"",a); print "h", x, $8, a}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
-echo end
+uid=$(id -u)
+echo "uid $uid"
+` + listenShell + `echo end
 `
+
+// listenShell lists the listening TCP sockets a 127.0.0.1 dial could reach,
+// one per line, for parseListeners. It needs $uid set.
+//
+// Preferred source: /proc/net/tcp{,6}, as "h <hexport> <uid> <hexaddr>",
+// filtered on the box so the output stays small (the whole table is every
+// tenant's torrent connection). Kernel-formatted, no attacker-controlled
+// text, and it names the owning uid of every socket.
+//
+// Fallback: PMSS's opt-in socket-table privacy (its ADR 0068) makes those
+// tables root-only. Its documented tenant workflow, ss -tlnp, keeps working
+// (the stage-2 netlink filter lets LISTEN dumps through), so the listing
+// comes from ss as "d <port> <uid|x> <addr>": our uid when the socket
+// belongs to one of our processes (ss -p can only resolve those; another
+// account's /proc/<pid>/fd is unreadable), x when its owner cannot be seen.
+// The parser treats x as a foreign owner, so the check still fails closed.
+// Deliberately NOT ss -e, which would name the uid: it appends the socket's
+// cgroup path verbatim, a directory name the socket's owner chooses, which
+// can contain "uid:<ours>" or even a newline and a fabricated row.
+const listenShell = `l=$(awk '$4=="0A"{x=$2; a=x; sub(/.*:/,"",x); sub(/:.*/,"",a); print "h", x, $8, a}' /proc/net/tcp /proc/net/tcp6 2>/dev/null)
+if [ -n "$l" ]; then printf '%s\n' "$l"; else echo "via ss"; ` + listenViaSS + `; fi
+`
+
+// listenViaSS is the ss branch of listenShell on its own, so a test can run
+// it against the real ss: with -H there is no header, and the columns are
+// State Recv-Q Send-Q Local Peer Process. The address is everything before
+// the last colon of Local (a %interface suffix dropped); a Process column
+// that starts with users:(( is one of our own sockets.
+const listenViaSS = `timeout 10 ss -Hltnp 2>/dev/null | awk -v uid="$uid" '$1=="LISTEN"{n=split($4,a,":"); p=a[n]; ad=substr($4,1,length($4)-length(p)-1); sub(/%.*/,"",ad); o="x"; if ($6 ~ /^users:\(\(/) o=uid; print "d", p, o, ad}'`
 
 // ScriptWithTag returns Script with the section tag set on its first line.
 // The tag must be [A-Za-z0-9]+ (NewTag guarantees that); it is quoted anyway.

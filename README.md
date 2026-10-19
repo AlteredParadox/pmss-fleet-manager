@@ -173,7 +173,10 @@ both. A rejected username/password is held until you change it, re-enter it
 under edit, or restart the client from the dashboard (a fresh process has a
 fresh counter). A detected ban is held for 65 minutes. Before any login the
 probe also checks that the WebUI port is bound by your own uid, since on a
-shared host another tenant could bind it while your client is down.
+shared host another tenant could bind it while your client is down. It reads
+`/proc/net/tcp`; on hosts where Pulsed Media's socket-table privacy option
+has made that root-only it falls back to `ss -tlnp`, which still lists every
+listener and can attribute your own to you.
 
 "Start client" runs the per-box start command; when none is set it uses
 `~/bin/qbt-start` if present, else `"$HOME/bin/qbittorrent-nox" -d`.
@@ -204,7 +207,8 @@ These are the design decisions that came out of it.
   remote string is length-bounded before it reaches state, the cache or the
   browser.
 - **WebUI credentials never go to a port you do not own.** The qBittorrent
-  password is sent only when the socket table shows the port bound by your uid
+  password is sent only when the socket table (`/proc/net/tcp`, or `ss -tlnp`
+  where that is root-only) shows the port bound by your uid
   alone, re-read live over the same SSH connection immediately before any
   stop, pause or resume. One login attempt runs at a time per box and its
   outcome is shared with every request that was waiting on it, so a burst of
