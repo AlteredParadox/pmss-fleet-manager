@@ -218,6 +218,7 @@ type QbtState struct {
 	RestartNeeded bool          `json:"restart_needed"`           // running version differs from binary on disk
 	StartHelper   bool          `json:"start_helper"`             // ~/bin/qbt-start present
 	CronInstalled bool          `json:"cron_installed"`
+	PMSSManaged   bool          `json:"pmss_managed"` // enabled in the PMSS panel, which runs and configures it
 	Total         int           `json:"total"`
 	Seeding       int           `json:"seeding"`
 	Leeching      int           `json:"leeching"`

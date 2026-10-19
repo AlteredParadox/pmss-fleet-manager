@@ -60,7 +60,11 @@ swapped in atomically. The dashboard checks the latest GitHub release every
 six hours and flags boxes that are behind or that need a restart to pick up a
 new binary. "Set up autostart" writes a `~/bin/qbt-start` screen launcher and
 the `@reboot` and `*/5 * * * *` crontab entries without touching other
-crontab lines.
+crontab lines (a line that runs the helper along with something else is
+kept), after saving the previous crontab to
+`~/.config/pmss-fleet-manager/crontab.bak`. Where qBittorrent is enabled in
+the Pulsed Media panel, PMSS runs and configures it itself: the dashboard
+still monitors it, but refuses to install or autostart a build of its own.
 
 **Alerts.** Unreachable box, suspended account, disk at threshold or over
 quota, traffic at threshold, throttled, qBittorrent or Docker down, container
@@ -258,8 +262,11 @@ These are the design decisions that came out of it.
   (documented in `internal/collect/qbtinstall.go`). Install verifies the ELF
   magic and `--version` output before swapping the binary in atomically;
   restart only signals processes of your uid; autostart distinguishes "no
-  crontab" from a failed read before it ever pipes into `crontab -`, replaces
-  only live lines that run the helper, and prints what it replaced.
+  crontab" from a failed read before it ever pipes into `crontab -`, saves
+  the previous crontab first, replaces only lines that run nothing but the
+  helper, and prints what it replaced. Downloads use curl, which refuses a
+  redirect to plain HTTP; the wget fallback relies on the source not
+  redirecting to http.
 
 ## Development
 
@@ -339,7 +346,7 @@ login can never be repeated into a ban; the Pulsed Media feed cache is tied
 to the API key that fetched it and dropped the moment the key changes;
 cancelled services no longer count towards costs or renewal alerts; box edits
 clear and save secrets in one write; the API key is never forwarded on a
-redirect; the installer downloads HTTPS-only under a size limit; renewal
+redirect; the installer downloads over HTTPS under a size limit; renewal
 days are calendar days in the dashboard host's zone; and the browser
 recovers from a failed first load and coalesces torrent-view refreshes.
 1.2.2 adds `-base-path` for running under a reverse-proxy sub-path, the

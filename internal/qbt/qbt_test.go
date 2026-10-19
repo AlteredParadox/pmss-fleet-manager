@@ -122,6 +122,29 @@ func TestLogin204(t *testing.T) {
 	}
 }
 
+// A response over maxBody is an explicit error, not a truncated body that
+// then fails to decode; one of exactly maxBody still reads.
+func TestOversizeResponse(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("v5.1.2" + strings.Repeat(" ", maxBody-len("v5.1.2"))))
+	})
+	mux.HandleFunc("/api/v2/sync/maindata", func(w http.ResponseWriter, r *http.Request) {
+		// maxBody+1 bytes of valid JSON: cut at maxBody it would no longer parse.
+		w.Write([]byte(`{"torrents":{` + strings.Repeat(" ", maxBody-len(`{"torrents":{`)-1) + "}}"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:1", "", "")
+	if v, err := c.Version(context.Background()); err != nil || v != "v5.1.2" {
+		t.Fatalf("body of exactly maxBody: %q %v", v, err)
+	}
+	if _, err := c.MainData(context.Background()); err == nil || !strings.Contains(err.Error(), "larger than 16 MiB") {
+		t.Fatalf("want a size error, got %v", err)
+	}
+}
+
 func TestAuthHoldAndBan(t *testing.T) {
 	logins := 0
 	mux := http.NewServeMux()

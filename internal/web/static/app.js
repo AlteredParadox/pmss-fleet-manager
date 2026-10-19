@@ -1068,9 +1068,11 @@ function addKeyPasswordFields(f, E, edit) {
       </div>`;
 }
 function addQbtFields(f, edit) {
+  // The detected port is only a hint: a saved 0 keeps following qBittorrent.conf.
+  const D = S.add.detect, dp = !Number(f.qbt_port) && D && D.box ? Number(D.box.qbt_port) || 0 : 0;
   return `<label class="check"><input type="checkbox" data-f="qbt_enabled" ${f.qbt_enabled ? 'checked' : ''}> monitor qbittorrent-nox via its Web API (tunnelled over SSH)</label>
         <div class="f3">
-          <label class="f">WebUI port <span class="hint">(0 = detect from config)</span><input data-f="qbt_port" type="number" min="0" max="65535" value="${f.qbt_port || 0}"></label>
+          <label class="f">WebUI port <span class="hint">(0 = detect from config${dp ? `; detected ${dp}` : ''})</span><input data-f="qbt_port" type="number" min="0" max="65535" value="${f.qbt_port || 0}"></label>
           <label class="f">WebUI user<input data-f="qbt_user" value="${esc(f.qbt_user)}" autocomplete="off"></label>
           <label class="f">WebUI password${edit ? ` <span class="hint">${f.has_qbt_pass ? '(blank keeps saved)' : '(none saved)'}</span>` : ''}<input data-f="qbt_pass" type="password" value="${esc(f.qbt_pass)}" autocomplete="new-password"></label>
         </div>
@@ -1180,7 +1182,8 @@ async function runDetect() {
       const b = res.box;
       A.form.host_key = b.host_key || '';
       if (!A.form.name) A.form.name = b.name;
-      if (!A.form.qbt_port) A.form.qbt_port = b.qbt_port || 0;
+      // qbt_port stays as typed: 0 follows qBittorrent.conf on every poll, so
+      // the detected port is shown as a hint instead of being pinned.
       A.form.qbt_enabled = b.qbt_enabled;
       A.form.docker_enabled = b.docker_enabled;
     }

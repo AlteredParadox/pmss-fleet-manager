@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"pmss-fleet-manager/internal/probe"
 )
 
 // installScript downloads a static qbittorrent-nox build to ~/bin, checks it
@@ -36,17 +38,21 @@ import (
 // through the environment prefix.
 const installScript = `#!/bin/sh
 set -u
+LC_ALL=C; export LC_ALL
 url="$QBT_URL"
 mkdir -p "$HOME/bin" || exit 1
 # A download interrupted by a lost session leaves its temp file; sweep old ones.
 find "$HOME/bin" -maxdepth 1 -type f -name '.qbittorrent-nox.new.*' -mmin +30 -delete 2>/dev/null
 tmp="$HOME/bin/.qbittorrent-nox.new.$$"
-# --https-only / --proto: a redirect must not downgrade the download to plain HTTP.
-# wget has no size option: the subshell's file-size limit (ulimit -f, 512-byte
-# blocks under dash = 200 MiB) stops a runaway download as it is written.
-if command -v wget >/dev/null 2>&1; then (ulimit -f 409600; exec wget -q --https-only -O "$tmp" "$url"); rc=$?
-elif command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp" "$url"; rc=$?
-else echo "neither wget nor curl available"; exit 1; fi
+# curl first: --proto / --proto-redir stop a redirect from downgrading the
+# download to plain HTTP. wget is only the fallback: its --https-only applies
+# to recursive downloads alone, so that path relies on the source not
+# redirecting to http. wget has no size option either: the subshell's
+# file-size limit (ulimit -f, 512-byte blocks under dash = 200 MiB) stops a
+# runaway download as it is written.
+if command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp" "$url"; rc=$?
+elif command -v wget >/dev/null 2>&1; then (ulimit -f 409600; exec wget -q -O "$tmp" "$url"); rc=$?
+else echo "neither curl nor wget available"; exit 1; fi
 [ "$rc" -eq 0 ] && [ -s "$tmp" ] || { echo "download failed (exit $rc)"; rm -f "$tmp"; exit 1; }
 # The static build is ~30 MB; anything far above that is not it.
 size=$(wc -c < "$tmp")
@@ -73,9 +79,13 @@ fi
 `
 
 // autostartScript installs the helper (if missing) and the two crontab lines,
-// idempotently: existing qbt-start lines are replaced, everything else kept.
+// idempotently: existing lines that run only the helper are replaced,
+// everything else kept, and the previous crontab is saved first.
 const autostartScript = `#!/bin/sh
 set -u
+# Byte-wise: under a UTF-8 locale grep silently drops lines with invalid
+# UTF-8, and they would then be missing from what is piped into crontab -.
+LC_ALL=C; export LC_ALL
 mkdir -p "$HOME/bin" || exit 1
 if [ -e "$HOME/bin/qbt-start" ]; then echo "helper: ~/bin/qbt-start already exists, left as is"
 else
@@ -90,13 +100,17 @@ if ! cur=$(crontab -l 2>/dev/null); then
   msg=$(crontab -l 2>&1 >/dev/null)
   case "$msg" in *"no crontab"*) cur="" ;; *) echo "crontab -l failed: ${msg:-no details (try again)}"; exit 1 ;; esac
 fi
-# Replace live (non-comment) lines that run the helper (either spelling of its
-# path, optionally quoted, followed by a separator), not merely ones that
-# mention a similarly named file; say which. The probe counts cron entries
-# with the same pattern.
-pat="^[[:space:]]*[^#[:space:]].*bin/qbt-start([[:space:]\"')>;&|]|\$)"
+# Replace only lines whose whole command is the helper (the shapes written
+# below); a line that runs it together with something else is the user's and
+# stays. Say which lines go. The probe counts cron entries with the same
+# pattern (probe.QbtCronPattern).
+pat=` + probe.QbtCronPattern + `
 old=$(printf '%s\n' "$cur" | grep -E "$pat" || true)
 [ -n "$old" ] && printf 'cron: replacing existing qbt-start line(s):\n%s\n' "$old"
+# Keep a copy of the crontab as it was, overwritten on every run.
+bak="$HOME/.config/pmss-fleet-manager/crontab.bak"
+( umask 077; mkdir -p "$HOME/.config/pmss-fleet-manager" && rm -f "$bak" && printf '%s\n' "$cur" > "$bak" ) || { echo "could not save the current crontab to $bak; not changing it"; exit 1; }
+echo "cron: previous crontab saved to ~/.config/pmss-fleet-manager/crontab.bak"
 ( printf '%s\n' "$cur" | grep -vE "$pat" | grep -v '^$'
   echo "@reboot     sleep 30; $HOME/bin/qbt-start"
   echo "*/5 * * * * $HOME/bin/qbt-start" ) | crontab - || { echo "crontab update failed"; exit 1; }
@@ -127,7 +141,23 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// errPMSSManagedQbt refuses install and autostart on an account where the
+// PMSS panel has qBittorrent enabled: its watchdog starts the system
+// qbittorrent-nox and enforces its own config, so a second, self-managed
+// build would fight it.
+var errPMSSManagedQbt = errors.New("qBittorrent on this account is managed by Pulsed Media's panel; disable it there before installing or autostarting your own build")
+
+// pmssManagedQbt reports whether the last snapshot saw the PMSS panel's
+// qBittorrent marker on this account.
+func (p *poller) pmssManagedQbt() bool {
+	st, ok := p.m.State(p.box.ID)
+	return ok && st.Qbt.PMSSManaged
+}
+
 func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, error) {
+	if p.pmssManagedQbt() {
+		return "", errPMSSManagedQbt
+	}
 	if !safeURL.MatchString(downloadURL) {
 		return "", errors.New("download URL must be https and contain only URL characters")
 	}
@@ -146,6 +176,9 @@ func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, er
 }
 
 func (p *poller) qbtAutostart(ctx context.Context) (string, error) {
+	if p.pmssManagedQbt() {
+		return "", errPMSSManagedQbt
+	}
 	cli, err := p.conn(ctx)
 	if err != nil {
 		return "", err

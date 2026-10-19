@@ -380,7 +380,8 @@ type QbtInfo struct {
 	Username      string
 	BinaryVersion string // "v5.2.3" from ~/bin/qbittorrent-nox --version
 	StartHelper   bool   // ~/bin/qbt-start exists
-	CronEntries   int    // live crontab lines that run bin/qbt-start (comments and look-alike names excluded)
+	CronEntries   int    // crontab lines that run only bin/qbt-start (QbtCronPattern)
+	PMSSManaged   bool   // ~/.qbittorrentEnable: the PMSS panel runs and configures qBittorrent
 }
 
 // DockerInfo reports the rootless daemon's presence.
@@ -806,6 +807,7 @@ func parseQbt(s map[string]string) QbtInfo {
 	q.BinaryVersion = qbtVersionString(s["qbt_bin_version"])
 	q.StartHelper = strings.TrimSpace(s["qbt_start_helper"]) == "1"
 	q.CronEntries, _ = strconv.Atoi(strings.TrimSpace(s["qbt_cron"]))
+	q.PMSSManaged = strings.TrimSpace(s["qbt_pmss"]) == "1"
 	for _, line := range strings.Split(s["qbt_conf"], "\n") {
 		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
 		if !ok {
