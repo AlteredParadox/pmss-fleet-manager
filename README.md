@@ -101,6 +101,36 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed |
 | `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
 
+### Running in a container
+
+Each release also publishes a multi-arch image (linux amd64 and arm64) built
+from the `Dockerfile`: a distroless base with nothing but the binary, CA
+roots and time-zone data, running as an unprivileged user.
+
+```sh
+docker run -d --name pmss-fleet-manager \
+  -p 127.0.0.1:8080:8080 \
+  -v pmss-data:/data \
+  -e TZ=America/Chicago \
+  ghcr.io/alteredparadox/pmss-fleet-manager:latest
+```
+
+- The image listens on `0.0.0.0:8080` and keeps its database in `/data`.
+  Every flag is available as the matching environment variable, so `-e
+  PMSS_AUTH=me:secret` or `-e PMSS_BASE_PATH=/fleet` configure it.
+- The process runs as uid 65532. A named volume as above works out of the
+  box; a bind-mounted directory has to be writable by that uid (`chown
+  65532:65532 ./data`), or run the container with `--user "$(id -u)"`.
+- Set `TZ` to the zone you want renewal days counted in; without it the
+  container is UTC.
+- Boxes that authenticate with an SSH key need the key inside the container:
+  mount it read-only, for example `-v ~/.ssh/id_ed25519:/home/nonroot/.ssh/id_ed25519:ro`,
+  or point the box's key path at wherever you mount it. For an agent, mount
+  the socket and pass `SSH_AUTH_SOCK`. Password auth needs nothing extra.
+- Because it listens on all interfaces, the Host-header check is off unless
+  you set `PMSS_ALLOWED_HOSTS`; publishing the port on `127.0.0.1` as above
+  and fronting it with a TLS reverse proxy is the intended setup.
+
 ### Adding a box
 
 Open the UI and use **add box**. The wizard connects, pins the host key, runs
@@ -297,4 +327,4 @@ recovers from a failed first load and coalesces torrent-view refreshes.
 first outside contribution (thanks, doomio).
 Other setups should work but have not been
 tried. Issues and pull requests welcome. Releases on GitHub carry linux amd64
-and arm64 binaries with checksums.
+and arm64 binaries with checksums, and a matching container image on GHCR.

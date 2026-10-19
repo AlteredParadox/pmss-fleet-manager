@@ -44,3 +44,17 @@ updates:
       github-actions-security:
         applies-to: security-updates
         patterns: ['*']
+
+  # The Dockerfile pins both base images by digest; this refreshes them the
+  # same way the actions pins are refreshed.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        applies-to: version-updates
+        patterns: ['*']
+      docker-security:
+        applies-to: security-updates
+        patterns: ['*']
