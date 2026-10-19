@@ -14,7 +14,7 @@
 #   docker build --build-arg VERSION=$(git describe --tags) -t pmss-fleet-manager .
 #   docker run -d -p 127.0.0.1:8080:8080 -v pmss-data:/data pmss-fleet-manager
 
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build
 WORKDIR /src
 # Module download is its own layer so source edits do not refetch it.
 COPY go.mod go.sum ./
