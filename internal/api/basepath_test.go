@@ -17,6 +17,7 @@
 package api
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -104,4 +105,25 @@ func TestNewPanicsOnInvalidBasePath(t *testing.T) {
 		}
 	}()
 	New(nil, nil, "", "/x{y}")
+}
+
+// The web font is served from the binary with a font MIME type, and neither
+// the page nor the CSP refers to a third-party host any more.
+func TestEmbeddedFont(t *testing.T) {
+	srv, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/static/fonts/JetBrainsMono-Regular.woff2", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != 200 || rr.Header().Get("Content-Type") != "font/woff2" || !strings.HasPrefix(rr.Body.String(), "wOF2") {
+		t.Fatalf("font: %d %q %.4q", rr.Code, rr.Header().Get("Content-Type"), rr.Body.String())
+	}
+	if !strings.Contains(rr.Header().Get("Cache-Control"), "max-age") {
+		t.Fatalf("font cache-control: %q", rr.Header().Get("Cache-Control"))
+	}
+	req = httptest.NewRequest("GET", "/", nil)
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if strings.Contains(rr.Body.String(), "googleapis") || strings.Contains(rr.Header().Get("Content-Security-Policy"), "google") {
+		t.Fatal("page or CSP still refers to Google Fonts")
+	}
 }

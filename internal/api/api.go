@@ -118,8 +118,8 @@ func (s *Server) hostAllowed(hostport string) bool {
 // csp is the Content-Security-Policy for the embedded UI: own origin only,
 // plus Google Fonts for the stylesheet and font files. Inline styles are
 // used for widths and the like, hence 'unsafe-inline' on styles only.
-const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-	"font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
 // New builds the handler tree. basePath is validated with NormalizeBasePath;
 // an invalid value is a programming error (main validates user input first).
@@ -205,7 +205,15 @@ func (s *Server) routes() {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set(hdrCacheControl, "no-cache")
+		if strings.HasSuffix(r.URL.Path, ".woff2") {
+			// Not in Go's built-in MIME table, and the embedded files carry no
+			// modification time to revalidate against, so a day's caching
+			// instead of a 90 KB re-download per page view.
+			w.Header().Set(hdrContentType, "font/woff2")
+			w.Header().Set(hdrCacheControl, "public, max-age=86400")
+		} else {
+			w.Header().Set(hdrCacheControl, "no-cache")
+		}
 		fileServer.ServeHTTP(w, r)
 	})))
 	// The page lives only at <base-path>/ (ServeMux redirects <base-path> to

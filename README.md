@@ -261,7 +261,10 @@ These are the design decisions that came out of it.
   that name must be listed in `-allowed-hosts`; otherwise mutating requests
   fail the same-origin check or every request is refused. CSP is set; request
   bodies are capped at 1 MiB, torrent uploads at 40 MiB; there are no
-  state-changing GETs; every API string is HTML-escaped. Settings saves are
+  state-changing GETs; every API string is HTML-escaped. The page makes no
+  request to any third party: its JetBrains Mono web font is embedded
+  (SIL Open Font License, see `THIRD_PARTY_LICENSES.md`), so viewers' addresses
+  stay with your dashboard and it works offline. Settings saves are
   serialised and the fleet-view shortcuts write only their own field, and
   other tabs are told to refresh, so one tab never reverts another.
 - **Scripts on the box** run as your user and are embedded in the binary
