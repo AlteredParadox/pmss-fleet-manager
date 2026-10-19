@@ -19,8 +19,12 @@ package collect
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,5 +123,97 @@ func TestDetectQbtPMSSManaged(t *testing.T) {
 		if b.QbtEnabled != managed || strings.Contains(steps[0].Text, "Pulsed Media panel") != managed {
 			t.Errorf("managed=%v: enabled=%v, step %q", managed, b.QbtEnabled, steps[0].Text)
 		}
+	}
+}
+
+// Only GitHub release asset URLs map to an API endpoint; the default
+// download URL is one of them.
+func TestReleaseAssetAPI(t *testing.T) {
+	cases := map[string][2]string{
+		store.DefaultQbtDownloadURL: {githubAPI + "/repos/userdocs/qbittorrent-nox-static/releases/latest", "x86_64-qbittorrent-nox"},
+		"https://github.com/o/r/releases/download/release-5.2.4_v2.0.15/aarch64-qbittorrent-nox": {githubAPI + "/repos/o/r/releases/tags/release-5.2.4_v2.0.15", "aarch64-qbittorrent-nox"},
+		"https://GitHub.com/o/r/releases/latest/download/n":                                      {githubAPI + "/repos/o/r/releases/latest", "n"},
+	}
+	for in, want := range cases {
+		api, asset, ok := releaseAssetAPI(in)
+		if !ok || api != want[0] || asset != want[1] {
+			t.Errorf("%s: %q %q %v", in, api, asset, ok)
+		}
+	}
+	for _, in := range []string{
+		"https://example.com/o/r/releases/latest/download/n",
+		"https://github.com/o/r/raw/main/n",
+		"https://github.com/o/r/releases/latest/download/",
+		"https://github.com/o/r/releases/download/tag",
+		"http://github.com/o/r/releases/latest/download/n",
+		"https://raw.githubusercontent.com/o/r/main/n",
+	} {
+		if _, _, ok := releaseAssetAPI(in); ok {
+			t.Errorf("%s must not map to a release", in)
+		}
+	}
+}
+
+// The digest comes from the asset of that name; a missing asset, a missing
+// digest or an API failure yield no digest and a reason.
+func TestReleaseDigest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r/releases/latest":
+			w.Write([]byte(`{"tag_name":"release-5.2.4_v2.0.15","assets":[{"name":"other","digest":"sha256:` + strings.Repeat("a", 64) + `"},{"name":"x86_64-qbittorrent-nox","digest":"sha256:` + strings.Repeat("AB", 32) + `"},{"name":"nodigest"}]}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	old := githubAPI
+	githubAPI = srv.URL
+	defer func() { githubAPI = old }()
+	ctx := context.Background()
+	if d, why := releaseDigest(ctx, "https://github.com/o/r/releases/latest/download/x86_64-qbittorrent-nox"); d != strings.Repeat("ab", 32) || why != "" {
+		t.Fatalf("digest %q %q", d, why)
+	}
+	for url, want := range map[string]string{
+		"https://github.com/o/r/releases/latest/download/nodigest":           "no sha256 digest",
+		"https://github.com/o/r/releases/latest/download/missing":            "no asset named",
+		"https://github.com/o/r/releases/download/v9/x86_64-qbittorrent-nox": "HTTP 404",
+		"https://example.com/x86_64-qbittorrent-nox":                         "not a GitHub release",
+	} {
+		if d, why := releaseDigest(ctx, url); d != "" || !strings.Contains(why, want) {
+			t.Errorf("%s: digest %q reason %q, want reason with %q", url, d, why, want)
+		}
+	}
+}
+
+// The install script's checksum step: a matching digest passes and says so,
+// a mismatch deletes the download and fails, no digest passes with a note.
+func TestVerifyChecksumShell(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	if _, err := exec.LookPath("sha256sum"); err != nil {
+		t.Skip("no sha256sum")
+	}
+	dir := t.TempDir()
+	run := func(want string) (string, error, bool) {
+		tmp := filepath.Join(dir, "dl")
+		if err := os.WriteFile(tmp, []byte("not really qbittorrent"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", "-c", "tmp=$1; want=$2; "+verifyChecksumShell, "sh", tmp, want)
+		out, err := cmd.CombinedOutput()
+		_, statErr := os.Stat(tmp)
+		return string(out), err, statErr == nil
+	}
+	sum := sha256.Sum256([]byte("not really qbittorrent"))
+	good := hex.EncodeToString(sum[:])
+	if out, err, kept := run(good); err != nil || !kept || !strings.Contains(out, "matches the GitHub release digest") {
+		t.Fatalf("good digest: %v kept=%v %s", err, kept, out)
+	}
+	if out, err, kept := run(strings.Repeat("0", 64)); err == nil || kept || !strings.Contains(out, "checksum mismatch") || !strings.Contains(out, good) {
+		t.Fatalf("bad digest: %v kept=%v %s", err, kept, out)
+	}
+	if out, err, kept := run(""); err != nil || !kept || !strings.Contains(out, "not verified") {
+		t.Fatalf("no digest: %v kept=%v %s", err, kept, out)
 	}
 }

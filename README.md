@@ -55,8 +55,10 @@ per-box tab.
 
 **qBittorrent lifecycle.** Install or update `~/bin/qbittorrent-nox` from the
 [userdocs static build](https://github.com/userdocs/qbittorrent-nox-static)
-(URL configurable), with an ELF and `--version` check before the binary is
-swapped in atomically. The dashboard checks the latest GitHub release every
+(URL configurable). The download's sha256 is checked against the digest
+GitHub publishes for the release asset (any GitHub release URL; other
+sources install unverified and say so), then an ELF and `--version` check
+runs before the binary is swapped in atomically. The dashboard checks the latest GitHub release every
 six hours and flags boxes that are behind or that need a restart to pick up a
 new binary. "Set up autostart" writes a `~/bin/qbt-start` screen launcher and
 the `@reboot` and `*/5 * * * *` crontab entries without touching other
@@ -268,8 +270,11 @@ These are the design decisions that came out of it.
   serialised and the fleet-view shortcuts write only their own field, and
   other tabs are told to refresh, so one tab never reverts another.
 - **Scripts on the box** run as your user and are embedded in the binary
-  (documented in `internal/collect/qbtinstall.go`). Install verifies the ELF
-  magic and `--version` output before swapping the binary in atomically;
+  (documented in `internal/collect/qbtinstall.go`). Install verifies the
+  download's sha256 against the GitHub release digest (fetched by the
+  dashboard host, compared on the box, so a swapped file on either path
+  fails), then the ELF magic and `--version` output, before swapping the
+  binary in atomically;
   restart only signals processes of your uid; autostart distinguishes "no
   crontab" from a failed read before it ever pipes into `crontab -`, saves
   the previous crontab first, replaces only lines that run nothing but the
