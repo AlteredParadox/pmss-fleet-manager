@@ -156,12 +156,14 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 	useAgent := cfg.AuthMethod == "agent" || cfg.AuthMethod == ""
 	usePass := cfg.AuthMethod == "password" || (cfg.AuthMethod == "" && cfg.Password != "")
 
+	var unreadable []string
 	if useKey {
-		m, err := keyMethods(cfg)
+		m, denied, err := keyMethods(cfg)
 		if err != nil {
 			return nil, cleanup, err
 		}
 		methods = append(methods, m...)
+		unreadable = denied
 	}
 	if useAgent {
 		m, release, err := agentMethod(cfg)
@@ -179,9 +181,21 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 		methods = append(methods, m...)
 	}
 	if len(methods) == 0 {
-		return nil, cleanup, errors.New("ssh: no authentication method available (set a key, agent or password)")
+		return nil, cleanup, errors.New("ssh: no authentication method available (set a key, agent or password)" + unreadableHint(unreadable))
 	}
 	return methods, cleanup, nil
+}
+
+// unreadableHint names default keys that exist but could not be read, the
+// usual sign of a key mounted into a container that its uid cannot read.
+func unreadableHint(paths []string) string {
+	switch len(paths) {
+	case 0:
+		return ""
+	case 1:
+		return "; found " + paths[0] + " but cannot read it (permission denied)"
+	}
+	return "; found " + strings.Join(paths, ", ") + " but cannot read them (permission denied)"
 }
 
 // keyPaths lists the private key files to try: the configured path, or the
@@ -201,42 +215,49 @@ func keyPaths(cfg Config) []string {
 
 // keySigners loads the usable private keys. An unreadable or unparsable
 // file is an error only for an explicitly configured key path; the default
-// names are skipped silently.
-func keySigners(cfg Config) ([]ssh.Signer, error) {
+// names are skipped, missing ones silently, and the ones that exist but
+// cannot be read for lack of permission are returned so the final error can
+// name them.
+func keySigners(cfg Config) ([]ssh.Signer, []string, error) {
 	var signers []ssh.Signer
+	var unreadable []string
 	for _, p := range keyPaths(cfg) {
 		pem, err := os.ReadFile(p)
 		if err != nil {
 			if cfg.KeyPath != "" {
-				return nil, fmt.Errorf("read key %s: %w", p, err)
+				return nil, nil, fmt.Errorf("read key %s: %w", p, err)
+			}
+			if errors.Is(err, os.ErrPermission) {
+				unreadable = append(unreadable, p)
 			}
 			continue
 		}
 		s, err := ssh.ParsePrivateKey(pem)
 		if err != nil {
 			if cfg.KeyPath != "" {
-				return nil, fmt.Errorf("parse key %s: %w", p, err)
+				return nil, nil, fmt.Errorf("parse key %s: %w", p, err)
 			}
 			continue
 		}
 		signers = append(signers, s)
 	}
-	return signers, nil
+	return signers, unreadable, nil
 }
 
-// keyMethods returns public-key auth from the loaded signers; none is an
-// error only when key auth was selected explicitly.
-func keyMethods(cfg Config) ([]ssh.AuthMethod, error) {
-	signers, err := keySigners(cfg)
+// keyMethods returns public-key auth from the loaded signers, plus the
+// default keys that could not be read; none is an error only when key auth
+// was selected explicitly.
+func keyMethods(cfg Config) ([]ssh.AuthMethod, []string, error) {
+	signers, unreadable, err := keySigners(cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(signers) > 0 {
-		return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, nil
+		return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, unreadable, nil
 	} else if cfg.AuthMethod == "key" {
-		return nil, errors.New("ssh: no usable private key in ~/.ssh (set a key path, or the key needs a passphrase)")
+		return nil, nil, errors.New("ssh: no usable private key in ~/.ssh (set a key path, or the key needs a passphrase)" + unreadableHint(unreadable))
 	}
-	return nil, nil
+	return nil, unreadable, nil
 }
 
 // agentMethod returns public-key auth through the agent at SSH_AUTH_SOCK

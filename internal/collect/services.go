@@ -130,8 +130,12 @@ func keyFingerprint(key string) string {
 }
 
 // serviceActive reports whether a service is current: only those count
-// towards costs and API-derived renewal dates. Inactive ones stay visible.
-func serviceActive(status string) bool { return strings.EqualFold(status, "active") }
+// towards costs and API-derived renewal dates. Suspended counts, since that
+// is usually an overdue service, exactly when its renewal matters; Cancelled,
+// Terminated, Pending, Fraud and the rest stay visible but do not count.
+func serviceActive(status string) bool {
+	return strings.EqualFold(status, "active") || strings.EqualFold(status, "suspended")
+}
 
 // ServiceActive is serviceActive for other packages (the API totals).
 func ServiceActive(status string) bool { return serviceActive(status) }
@@ -316,7 +320,7 @@ func (m *Manager) Services() ServicesView {
 				break
 			}
 		}
-		if strings.EqualFold(s.Status, "active") {
+		if serviceActive(s.Status) {
 			v.MonthlyCost += si.Monthly
 		}
 		v.Services = append(v.Services, si)

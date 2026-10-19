@@ -82,6 +82,25 @@ func TestParseAmount(t *testing.T) {
 	}
 }
 
+// The feed sends cpu_hours with one decimal, and any usage counter may be
+// null; neither may reject the feed and with it every service on the account.
+func TestParseUsage(t *testing.T) {
+	f, err := Parse([]byte(`{"services":[{"id":1,"seedbox":{"username":"a","usage":{"cpu_hours":3.4,"torrents":2}}}]}`))
+	if err != nil {
+		t.Fatalf("fractional cpu_hours must decode: %v", err)
+	}
+	if u := f.Services[0].Seedbox.Usage; u.CPUHours == nil || *u.CPUHours != 3.4 || u.Torrents != 2 {
+		t.Fatalf("bad usage: %+v", u)
+	}
+	f, err = Parse([]byte(`{"services":[{"id":1,"seedbox":{"username":"a","usage":{"cpu_hours":null,"received_bytes":null,"disk_quota_bytes":null,"torrents":null}}}]}`))
+	if err != nil {
+		t.Fatalf("null usage counters must decode: %v", err)
+	}
+	if u := f.Services[0].Seedbox.Usage; u.CPUHours != nil || u.ReceivedBytes != 0 || u.DiskQuotaBytes != 0 || u.Torrents != 0 {
+		t.Fatalf("bad usage: %+v", u)
+	}
+}
+
 // The key is a custom header, which Go forwards across redirects to any
 // host; the client must refuse to follow one instead.
 func TestFetchRefusesRedirect(t *testing.T) {

@@ -567,10 +567,13 @@ function ovUploadPanel(b, tt) {
 function ovBandwidthPanel(b) {
   const tr = b.traffic;
   const rateNote = b.rates.source === 'qbt' ? 'live from qBittorrent' : b.rates.source === 'pmss-15min' ? 'PMSS 15-min average (refreshed twice an hour)' : 'no rate source';
+  // PMSS's cap_mbit is the upload rate the account is held to while it is
+  // over its traffic limit, not a standing cap: only meter against it then.
+  const cap = tr.throttled && tr.cap_mbit ? tr.cap_mbit : 0;
   return `<div class="panel"><div class="tile-label">bandwidth now</div>
       <div class="tile-value"><span class="nw"><span class="up">↑</span> ${fmtBits(b.rates.up_bps)}</span> <small class="nw"><span class="down">↓</span> ${fmtBits(b.rates.down_bps)}</small></div>
-      ${tr.cap_mbit ? `<div class="meter thick" title="upload vs. the account's ${tr.cap_mbit} Mbit/s cap"><i style="width:${Math.min(100, (b.rates.up_bps / (tr.cap_mbit * 1e6)) * 100)}%"></i></div>` : ''}
-      <div class="note">${rateNote}${tr.cap_mbit ? ` · cap ${tr.cap_mbit} Mbit/s` : ''}</div></div>`;
+      ${cap ? `<div class="meter thick" title="upload vs. the ${cap} Mbit/s it is throttled to"><i style="width:${Math.min(100, (b.rates.up_bps / (cap * 1e6)) * 100)}%"></i></div>` : ''}
+      <div class="note">${rateNote}${cap ? ` · throttled to ${cap} Mbit/s` : ''}</div></div>`;
 }
 function ovCpuRamPanel(b) {
   return `<div class="panel"><div class="tile-label">cpu / ram</div>
@@ -649,7 +652,7 @@ function billingRows(sv) {
       <div><span>billing</span><span>${fmtMoney(sv.recurring_amount, sv.currency)} / ${esc(cycleShort(sv.billing_cycle))}${sv.monthly && cycleShort(sv.billing_cycle) !== 'mo' ? ` <span class="muted">· ${fmtMoney(sv.monthly, sv.currency)}/mo</span>` : ''}${sv.status && sv.status !== 'Active' ? ` · <span class="warn">${esc(sv.status)}</span>` : ''}</span></div>
       <div><span>service</span><span><span class="muted">#${sv.id}${sv.registered ? ` · since ${esc(sv.registered)}` : ''}</span></span></div>
       ${u ? `<div><span>pm traffic</span><span class="muted" title="as tracked by Pulsed Media since ${esc(u.tracked_since || '?')}">↑ ${fmtBytes(u.sent_bytes, 1)} · ↓ ${fmtBytes(u.received_bytes, 1)}</span></div>
-      <div><span>pm usage</span><span class="muted">${fmtBytes(u.disk_used_bytes, 1)} disk · ${u.cpu_hours} cpu h · ${u.torrents} torrents</span></div>` : ''}`;
+      <div><span>pm usage</span><span class="muted">${fmtBytes(u.disk_used_bytes, 1)} disk · ${u.cpu_hours == null ? '—' : Number(u.cpu_hours).toFixed(1)} cpu h · ${u.torrents} torrents</span></div>` : ''}`;
 }
 function tabTraffic(b) {
   const tr = b.traffic;

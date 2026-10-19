@@ -454,3 +454,25 @@ func TestDecoratePrefersActiveService(t *testing.T) {
 		t.Fatal("manual renewal must still win")
 	}
 }
+
+// A suspended service is usually an overdue one: it still counts towards
+// costs and renewal alerts. Every other non-active status does not.
+func TestServiceActiveStatuses(t *testing.T) {
+	for status, want := range map[string]bool{
+		"Active": true, "active": true, "Suspended": true,
+		"Cancelled": false, "Terminated": false, "Pending": false, "Fraud": false, "Completed": false, "": false,
+	} {
+		if got := serviceActive(status); got != want {
+			t.Errorf("%q: got %v want %v", status, got, want)
+		}
+	}
+	m := &Manager{}
+	m.svc = servicesCache{feed: &pmapi.Feed{Currency: "EUR", Services: []pmapi.Service{
+		{ID: 1, Domain: "typhon.pulsedmedia.com", Status: "Suspended", NextDue: "2026-01-01", Seedbox: &pmapi.Access{Username: "rc2"}},
+	}}}
+	s := &BoxState{Host: "typhon.pulsedmedia.com", User: "rc2"}
+	m.decorate(s)
+	if s.EffectiveRenewal() != "2026-01-01" {
+		t.Fatalf("a suspended service's due date is its renewal, got %q", s.EffectiveRenewal())
+	}
+}

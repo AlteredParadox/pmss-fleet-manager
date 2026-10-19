@@ -834,7 +834,7 @@ func qbtNeedsCreds(snap *probe.Snapshot, b *store.Box) string {
 	if !snap.Qbt.ConfFound || snap.Qbt.LocalHostAuth || snap.Qbt.SubnetBypass {
 		return ""
 	}
-	return "qBittorrent requires a WebUI login (localhost bypass is off in qBittorrent.conf) and no credentials are set for this box; add them under edit, or enable 'Bypass authentication for clients on localhost'"
+	return "qBittorrent requires a WebUI login (localhost bypass is off in qBittorrent.conf) and no credentials are set for this box; add them under edit"
 }
 
 func (p *poller) dockerClient(uid int) *dockerx.Client {

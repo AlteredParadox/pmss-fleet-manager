@@ -48,8 +48,12 @@ COPY --from=build --chown=nonroot:nonroot /out/data /data
 # Inside a container the dashboard must listen on all interfaces to be
 # reachable through the published port; the Host-header check is therefore
 # off unless PMSS_ALLOWED_HOSTS is set (see README, "Security and hardening").
+# HOME is fixed so SSH keys are looked up in /home/nonroot/.ssh even under a
+# `--user` uid that has no passwd entry here (Unraid's 99:100), where HOME
+# would otherwise be /.
 ENV PMSS_LISTEN=0.0.0.0:8080 \
-    PMSS_DATA=/data
+    PMSS_DATA=/data \
+    HOME=/home/nonroot
 VOLUME /data
 EXPOSE 8080
 USER nonroot:nonroot

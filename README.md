@@ -80,8 +80,10 @@ are matched to boxes by hostname and username, which fills in plan name, price
 per cycle and per month, next due date, web UI and permanent-address links, and
 Pulsed Media's own usage accounting. Services you have not added yet get an
 "add box" shortcut. The feed is synced every six hours and on demand. Manual
-plan and renewal values on a box take precedence. Cancelled services stay
-listed but count towards neither costs nor renewal alerts.
+plan and renewal values on a box take precedence. Only Active and Suspended
+services count towards costs and renewal alerts; any other status (Cancelled,
+Terminated, Pending, Fraud, Completed) stays listed but counts towards
+neither.
 
 ## Run
 
@@ -130,13 +132,17 @@ docker run -d --name pmss-fleet-manager \
 - **Unraid:** appdata folders belong to `nobody:users`, so either put
   `--user 99:100` in the template's *Extra Parameters* or `chown -R
   65532:65532 /mnt/user/appdata/pmss-fleet-manager`. The image does not read
-  `PUID`/`PGID`; `--user` is the equivalent.
+  `PUID`/`PGID`; `--user` is the equivalent. SSH keys are looked up in
+  `/home/nonroot/.ssh` whatever `--user` says, since the image sets `HOME`.
 - Set `TZ` to the zone you want renewal days counted in; without it the
   container is UTC.
 - Boxes that authenticate with an SSH key need the key inside the container:
   mount it read-only, for example `-v ~/.ssh/id_ed25519:/home/nonroot/.ssh/id_ed25519:ro`,
-  or point the box's key path at wherever you mount it. For an agent, mount
-  the socket and pass `SSH_AUTH_SOCK`. Password auth needs nothing extra.
+  or point the box's key path at wherever you mount it. The mounted key must
+  be readable by the uid the container runs as: copy it, `chown 65532` and
+  `chmod 600` the copy, or run with `--user` matching the file's owner. An
+  unreadable default key is named in the connection error. For an agent,
+  mount the socket and pass `SSH_AUTH_SOCK`. Password auth needs nothing extra.
 - Because it listens on all interfaces, the Host-header check serves
   `localhost` and any IP address; any other name, such as the one a reverse
   proxy uses, has to be listed in `PMSS_ALLOWED_HOSTS`. Publishing the port on

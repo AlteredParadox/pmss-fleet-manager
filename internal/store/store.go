@@ -432,11 +432,16 @@ func (s *Store) SetValue(ctx context.Context, key, value string) error {
 	return err
 }
 
-// RaiseAlert creates an active alert for (box, key) or refreshes its title. It
-// returns true when a new alert row was created.
+// RaiseAlert creates an active alert for (box, key) or refreshes its title and
+// severity. An acknowledged alert that escalates (warn to bad) is unacked
+// again, so the badge comes back; the same or a lower severity keeps the ack.
+// It returns true when a new alert row was created.
 func (s *Store) RaiseAlert(ctx context.Context, boxID int64, key, severity, title string) (bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.ExecContext(ctx, `UPDATE alerts SET title=?, severity=?, updated_at=? WHERE box_id=? AND key=? AND active=1`, title, severity, now, boxID, key)
+	// The CASE reads the stored severity: SET expressions see the old row.
+	res, err := s.db.ExecContext(ctx, `UPDATE alerts SET title=?, severity=?,
+		acked=CASE WHEN ? > (CASE severity WHEN 'bad' THEN 2 WHEN 'warn' THEN 1 ELSE 0 END) THEN 0 ELSE acked END,
+		updated_at=? WHERE box_id=? AND key=? AND active=1`, title, severity, severityRank(severity), now, boxID, key)
 	if err != nil {
 		return false, err
 	}
@@ -449,6 +454,17 @@ func (s *Store) RaiseAlert(ctx context.Context, boxID int64, key, severity, titl
 		return false, nil // raised concurrently by another evaluation
 	}
 	return err == nil, err
+}
+
+// severityRank orders alert severities; it must match the CASE in RaiseAlert.
+func severityRank(severity string) int {
+	switch severity {
+	case "bad":
+		return 2
+	case "warn":
+		return 1
+	}
+	return 0
 }
 
 // ResolveAlert marks the active alert for (box, key) resolved.
