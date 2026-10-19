@@ -282,17 +282,6 @@ func TestDetectOnEditKeepsSecretsForSavedEndpointOnly(t *testing.T) {
 	if code != 400 || !strings.Contains(body, "re-enter") {
 		t.Fatalf("different host: %d %s", code, body)
 	}
-	// Same endpoint but forgetting the pin, SSH password left blank: refused,
-	// since the test would send the saved secret to whatever key answers.
-	code, body = do(t, s, "POST", "/api/detect", fmt.Sprintf(`{"id":%d,"host":"127.0.0.1","port":1,"user":"u","auth_method":"password","forget_host_key":true}`, id), hdr)
-	if code != 400 || !strings.Contains(body, "pinned host key") {
-		t.Fatalf("forget on test with the password blank = %d %s", code, body)
-	}
-	// Key auth never sends the saved secret, so forgetting is fine there.
-	code, body = do(t, s, "POST", "/api/detect", fmt.Sprintf(`{"id":%d,"host":"127.0.0.1","port":1,"user":"u","auth_method":"key","forget_host_key":true}`, id), hdr)
-	if code != 200 || strings.Contains(body, "S3cret") {
-		t.Fatalf("forget on test with key auth = %d %.200s", code, body)
-	}
 }
 
 func TestEditClearsSecrets(t *testing.T) {
@@ -329,19 +318,8 @@ func TestUpdateRulesForPinsAndSecrets(t *testing.T) {
 	if b := get(); b.HostKey != "ssh-ed25519 PIN" || b.Name != "b2" || b.Password != "pw" {
 		t.Fatalf("unchanged endpoint must keep pin and password: %+v", b)
 	}
-	// A forget with the SSH password left blank gets refused and the pin
-	// stays, since the next connect would trust any key and must not be
-	// sent the saved secret.
-	code, body = do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","auth_method":"password","forget_host_key":true}`, hdr)
-	if code != 400 || !strings.Contains(body, "re-enter") || get().HostKey != "ssh-ed25519 PIN" {
-		t.Fatalf("forget with the password blank = %d %s, pin %q", code, body, get().HostKey)
-	}
-	// Auto auth falls back to the saved secret too, so the same refusal.
-	if code, _ = do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","forget_host_key":true}`, hdr); code != 400 {
-		t.Fatalf("forget with auto auth and the password blank = %d", code)
-	}
-	// Forget wins over a supplied key (key auth never sends the saved secret).
-	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","auth_method":"key","host_key":"ssh-ed25519 OTHER","forget_host_key":true}`, hdr)
+	// Forget wins over a supplied key.
+	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","auth_method":"password","host_key":"ssh-ed25519 OTHER","forget_host_key":true}`, hdr)
 	if get().HostKey != "" {
 		t.Fatal("forget_host_key must clear the pin even when a key is supplied")
 	}

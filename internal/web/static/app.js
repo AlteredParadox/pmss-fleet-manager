@@ -1088,7 +1088,7 @@ function addDockerDuFields(f) {
 // Checkboxes that only make sense for an existing box (each renders empty in add mode).
 function addEditExtras(A, f, edit) {
   return `${edit ? `<label class="check"><input type="checkbox" data-f="enabled" ${f.enabled ? 'checked' : ''}> polling enabled</label>` : ''}
-        ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins the new key, so with password auth re-enter the SSH password, as the saved one is not sent to an unpinned host)</span></label>` : ''}
+        ${edit && A.pinned ? `<label class="check"><input type="checkbox" data-f="forget_host_key" ${f.forget_host_key ? 'checked' : ''}> forget the pinned SSH host key <span class="hint">(after a reinstall or migration; the next connect trusts and pins whatever key answers)</span></label>` : ''}
         ${edit && f.has_qbt_pass ? `<label class="check"><input type="checkbox" data-f="clear_qbt_pass" ${f.clear_qbt_pass ? 'checked' : ''}> remove the saved WebUI password <span class="hint">(the SSH password is removed automatically when auth is switched to key or agent)</span></label>` : ''}`;
 }
 function addStep1(A, f, E, edit, back) {
@@ -1471,6 +1471,15 @@ document.addEventListener('input', (e) => {
   if (f && S.add.form) {
     const k = f.dataset.f;
     S.add.form[k] = f.type === 'checkbox' ? f.checked : f.value;
+    // Forgetting the pin makes the next connect trust whatever key answers,
+    // and with password auth the saved SSH password goes to it: say so
+    // once, at the moment of ticking, rather than refusing.
+    if (k === 'forget_host_key' && f.checked) {
+      const fm = S.add.form, pw = fm.auth_method === 'password' || (!fm.auth_method && (fm.has_password || fm.password));
+      if (pw && !confirm('The next connect will trust and pin whatever host key answers, and the SSH password will be sent to it. Only do this after a reinstall or migration you expect. Forget the pinned key?')) {
+        f.checked = false; fm.forget_host_key = false;
+      }
+    }
     // A host key belongs to host:port; anything detect saw for a previous
     // endpoint must not be carried to a new one (or saved as its pin).
     if (k === 'host' || k === 'port' || k === 'user') { S.add.form.host_key = ''; if (k !== 'user') S.add.pinned = false; }

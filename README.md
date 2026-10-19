@@ -169,9 +169,9 @@ removes the saved SSH password; a checkbox removes the saved WebUI password.
 The pinned host key belongs to the host and port: it is kept while they are
 unchanged, cleared when they change or when you tick "forget the pinned SSH
 host key", and a key the wizard saw never replaces an existing pin. Because
-the first connect after forgetting trusts whatever key answers, a box that
-logs in with an SSH password needs it re-entered to forget the pin, on save
-and on "test connection"; key and agent auth are unaffected.
+the first connect after forgetting trusts whatever key answers, and with
+password auth sends the SSH password to it, ticking "forget" asks you to
+confirm.
 
 ### qBittorrent access
 
