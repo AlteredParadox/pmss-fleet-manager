@@ -346,7 +346,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.2.4 is the current release. The code was written against five real Pulsed
+1.3.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and reviewed as described under *Security and hardening*.
 1.2.0 added torrent management: per-torrent stop, start and remove (with or
@@ -369,7 +369,17 @@ on GHCR, built by the same release pipeline as the binaries. 1.2.4 keeps the
 WebUI port-ownership check working on hosts where Pulsed Media's
 socket-table privacy option has made `/proc/net/tcp` root-only (the probe
 falls back to `ss -tlnp`), and names the fix when a container cannot write
-its data directory (Unraid: `--user 99:100`).
+its data directory (Unraid: `--user 99:100`). 1.3.0 takes in a full
+read-through by the PMSS maintainers (thanks, MagnaCapax): the Host-header
+check stays on for wildcard binds (IP addresses and localhost are served,
+other names need `-allowed-hosts`, which is why this is 1.3 and not 1.2.5),
+autostart no longer removes crontab lines that merely mention the helper and
+saves the previous crontab first, qBittorrent enabled in the Pulsed Media
+panel is detected and left to PMSS, fractional `cpu_hours` no longer drop
+the billing feed, suspended services count towards renewals, acknowledged
+alerts come back when they escalate, and more. On top of that the installer
+verifies downloads against GitHub's release digest and the web font is
+embedded, so the page makes no third-party requests.
 Other setups should work but have not been
 tried. Issues and pull requests welcome. Releases on GitHub carry linux amd64
 and arm64 binaries with checksums, and a matching container image on GHCR.
