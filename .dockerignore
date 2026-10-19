@@ -1,0 +1,17 @@
+# Only what the Go build needs reaches the builder: sources, go.mod/go.sum,
+# the embedded front-end, LICENSE and THIRD_PARTY_LICENSES.md (legal.go).
+.git
+.github
+.claude
+data
+dist
+bin
+design
+docs
+pmss-fleet-manager
+*.db
+*.db-*
+*.test
+coverage.out
+gpt_review_*.md
+sonar-project.properties
