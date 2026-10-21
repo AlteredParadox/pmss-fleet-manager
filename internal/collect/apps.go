@@ -250,8 +250,19 @@ func ValidAppKey(k string) bool {
 // procSample is one pid's cumulative CPU reading, for the rate.
 type procSample struct {
 	cpuSec  float64
+	start   int64 // start tick, 0 when the box did not report it
 	elapsed int64
 	at      time.Time
+}
+
+// sameProcess reports whether a pid's new reading is of the process the
+// previous sample measured: the same start tick when known, else an age
+// that grew by about the wall time since the last sample.
+func sameProcess(s procSample, p probe.ProcInfo, wall float64) bool {
+	if s.start != 0 || p.StartTick != 0 {
+		return s.start == p.StartTick
+	}
+	return p.ElapsedSec >= s.elapsed && float64(p.ElapsedSec-s.elapsed) <= wall+5
 }
 
 // appsFromSnapshot groups the probe's processes into AppViews. prev holds
@@ -275,14 +286,12 @@ func appsFromSnapshot(snap *probe.Snapshot, user string, prev map[int]procSample
 		pv := ProcView{PID: p.PID, Name: clip(p.Comm, 64), Args: clip(p.Args, 400), RSS: p.RSS, ElapsedSec: p.ElapsedSec}
 		if s, ok := prev[p.PID]; ok && snap.At.After(s.at) {
 			wall := snap.At.Sub(s.at).Seconds()
-			// Same process only: its age must have grown by about the
-			// wall time since the last sample, or the pid was reused.
-			if wall > 0 && p.ElapsedSec >= s.elapsed && float64(p.ElapsedSec-s.elapsed) <= wall+5 && p.CPUSec >= s.cpuSec {
+			if wall > 0 && sameProcess(s, p, wall) && p.CPUSec >= s.cpuSec {
 				pv.CPUPct = (p.CPUSec - s.cpuSec) / wall * 100
 				pv.CPUKnown = true
 			}
 		}
-		next[p.PID] = procSample{cpuSec: p.CPUSec, elapsed: p.ElapsedSec, at: snap.At}
+		next[p.PID] = procSample{cpuSec: p.CPUSec, start: p.StartTick, elapsed: p.ElapsedSec, at: snap.At}
 		if r := classifyProc(p.Comm, p.Args); r != nil {
 			pv.App = r.key
 		} else {

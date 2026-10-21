@@ -142,6 +142,12 @@ sec probe_pid; echo $$
 # command lines come separately and clipped: argv is the process's own text.
 sec procs; ps -ww -u "$uid" -o pid=,ppid=,rss=,times=,etimes=,comm= 2>/dev/null
 sec proc_args; ps -ww -u "$uid" -o pid=,args= 2>/dev/null | cut -c1-400
+# CPU in clock ticks (10 ms) and the start tick from /proc/<pid>/stat: ps
+# rounds CPU to whole seconds, useless over a 30 s poll, and the start tick
+# tells a reused pid from the same process. comm sits in parentheses and
+# may hold spaces or parentheses, so the fields are counted from the last ')'.
+sec proc_stat; getconf CLK_TCK 2>/dev/null
+ps -u "$uid" -o pid= 2>/dev/null | awk '{print "/proc/"$1"/stat"}' | xargs cat 2>/dev/null | awk '{i=match($0,/\)[^)]*$/); if (i==0) next; n=split(substr($0,i+2),f," "); if (n<20) next; print $1, f[12], f[13], f[20]}'
 sec listen_pids
 # Which of our own processes hold which listening port: ss resolves pids
 # only for sockets whose /proc/<pid>/fd it can read, i.e. our own, so a

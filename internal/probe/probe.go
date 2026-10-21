@@ -405,7 +405,8 @@ type ProcInfo struct {
 	PID        int
 	PPID       int
 	RSS        int64   // bytes
-	CPUSec     float64 // cumulative CPU time
+	CPUSec     float64 // cumulative CPU time (10 ms resolution from /proc/<pid>/stat, else ps's whole seconds)
+	StartTick  int64   // start time in clock ticks since boot (0 = unknown); identifies the process across polls
 	ElapsedSec int64   // since the process started
 	Comm       string  // the kernel's 15-byte name
 	Args       string  // command line, clipped on the box
@@ -415,10 +416,47 @@ type ProcInfo struct {
 // at 4096 tasks, and a fork bomb's worth of rows must not bloat the state.
 const maxProcs = 2000
 
+// procStat is one process's /proc/<pid>/stat reading: CPU seconds and start tick.
+type procStat struct {
+	cpuSec float64
+	start  int64
+}
+
+// parseProcStat reads the proc_stat section: CLK_TCK on the first line,
+// then "pid utime stime starttime" in ticks per process.
+func parseProcStat(raw string) map[int]procStat {
+	out := map[int]procStat{}
+	lines := strings.Split(raw, "\n")
+	if len(lines) == 0 {
+		return out
+	}
+	hz, err := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
+	if err != nil || hz <= 0 || hz > 1e6 {
+		return out // without the tick rate the numbers mean nothing
+	}
+	for _, line := range lines[1:] {
+		f := strings.Fields(line)
+		if len(f) != 4 {
+			continue
+		}
+		pid, e1 := strconv.Atoi(f[0])
+		ut, e2 := strconv.ParseInt(f[1], 10, 64)
+		st, e3 := strconv.ParseInt(f[2], 10, 64)
+		start, e4 := strconv.ParseInt(f[3], 10, 64)
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || pid <= 0 || ut < 0 || st < 0 || start <= 0 || ut > 1<<50 || st > 1<<50 {
+			continue
+		}
+		out[pid] = procStat{cpuSec: float64(ut+st) / hz, start: start}
+	}
+	return out
+}
+
 // parseProcs reads the procs section ("pid ppid rss times etimes comm",
-// comm possibly containing spaces) and the proc_args section ("pid args"),
-// dropping the probe's own shell and its children (ps, cut, awk).
-func parseProcs(procs, args string, probePID int) ([]ProcInfo, bool) {
+// comm possibly containing spaces), the proc_args section ("pid args") and
+// the proc_stat section, dropping the probe's own shell and its children
+// (ps, cut, awk).
+func parseProcs(procs, args, stat string, probePID int) ([]ProcInfo, bool) {
+	stats := parseProcStat(stat)
 	argv := map[int]string{}
 	for _, line := range strings.Split(args, "\n") {
 		f := strings.Fields(line)
@@ -457,8 +495,12 @@ func parseProcs(procs, args string, probePID int) ([]ProcInfo, bool) {
 		if el < 0 || el > 1e10 {
 			el = 0
 		}
-		out = append(out, ProcInfo{PID: pid, PPID: ppid, RSS: rss * 1024, CPUSec: cpu, ElapsedSec: el,
-			Comm: strings.Join(f[5:], " "), Args: argv[pid]})
+		pi := ProcInfo{PID: pid, PPID: ppid, RSS: rss * 1024, CPUSec: cpu, ElapsedSec: el,
+			Comm: strings.Join(f[5:], " "), Args: argv[pid]}
+		if ps, ok := stats[pid]; ok {
+			pi.CPUSec, pi.StartTick = ps.cpuSec, ps.start
+		}
+		out = append(out, pi)
 		if len(out) >= maxProcs {
 			break
 		}
@@ -568,7 +610,7 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 		SocketPresent: strings.TrimSpace(s["docker_sock"]) == "1",
 	}
 	probePID, _ := strconv.Atoi(strings.TrimSpace(s["probe_pid"]))
-	snap.Procs, snap.ProcsKnown = parseProcs(s["procs"], s["proc_args"], probePID)
+	snap.Procs, snap.ProcsKnown = parseProcs(s["procs"], s["proc_args"], s["proc_stat"], probePID)
 	snap.ListenPIDs = parseListenPIDs(s["listen_pids"])
 	return snap, nil
 }

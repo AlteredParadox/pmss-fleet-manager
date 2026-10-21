@@ -94,8 +94,8 @@ func TestAppsFromSnapshot(t *testing.T) {
 	t0 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	snap := &probe.Snapshot{At: t0, ProcsKnown: true,
 		Procs: []probe.ProcInfo{
-			{PID: 10, PPID: 1, RSS: 800 << 20, CPUSec: 100, ElapsedSec: 5000, Comm: "qbittorrent-nox", Args: "/home/u/bin/qbittorrent-nox -d"},
-			{PID: 20, PPID: 1, RSS: 200 << 20, CPUSec: 50, ElapsedSec: 400, Comm: "Radarr", Args: "/home/u/.bin/Radarr/Radarr"},
+			{PID: 10, PPID: 1, RSS: 800 << 20, CPUSec: 100, StartTick: 1000, ElapsedSec: 5000, Comm: "qbittorrent-nox", Args: "/home/u/bin/qbittorrent-nox -d"},
+			{PID: 20, PPID: 1, RSS: 200 << 20, CPUSec: 50, StartTick: 2000, ElapsedSec: 400, Comm: "Radarr", Args: "/home/u/.bin/Radarr/Radarr"},
 			{PID: 21, PPID: 20, RSS: 1 << 20, CPUSec: 0, ElapsedSec: 10, Comm: "sleep", Args: "sleep 5"},
 			{PID: 30, PPID: 1, RSS: 5 << 20, CPUSec: 1, ElapsedSec: 99999, Comm: "sshd", Args: "sshd: u@notty"},
 		},
@@ -129,18 +129,19 @@ func TestAppsFromSnapshot(t *testing.T) {
 		t.Fatalf("samples: %v", prev)
 	}
 	// Second poll 60 s later: qbt used 30 CPU seconds (50%), Radarr's pid was
-	// reused by a process that started 5 s ago (no rate), sleep is gone.
+	// reused by a process with another start tick (no rate), sshd has no
+	// start tick and is matched by its age, sleep is gone.
 	snap2 := &probe.Snapshot{At: t0.Add(60 * time.Second), ProcsKnown: true,
 		Procs: []probe.ProcInfo{
-			{PID: 10, PPID: 1, RSS: 800 << 20, CPUSec: 130, ElapsedSec: 5060, Comm: "qbittorrent-nox"},
-			{PID: 20, PPID: 1, RSS: 200 << 20, CPUSec: 1, ElapsedSec: 5, Comm: "Radarr"},
+			{PID: 10, PPID: 1, RSS: 800 << 20, CPUSec: 130.5, StartTick: 1000, ElapsedSec: 5060, Comm: "qbittorrent-nox"},
+			{PID: 20, PPID: 1, RSS: 200 << 20, CPUSec: 60, StartTick: 7777, ElapsedSec: 460, Comm: "Radarr"},
 			{PID: 30, PPID: 1, RSS: 5 << 20, CPUSec: 1, ElapsedSec: 100059, Comm: "sshd"},
 		}}
 	st2, _ := appsFromSnapshot(snap2, "ragnar", prev, nil)
 	for _, a := range st2.Apps {
 		switch a.Key {
 		case "qbittorrent":
-			if !a.CPUKnown || a.CPUPct < 49.9 || a.CPUPct > 50.1 {
+			if !a.CPUKnown || a.CPUPct < 50.8 || a.CPUPct > 50.9 {
 				t.Fatalf("qbt cpu: %+v", a)
 			}
 		case "radarr":
