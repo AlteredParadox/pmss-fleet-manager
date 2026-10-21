@@ -468,13 +468,63 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 
 // mutateState applies fn to a copy of the stored state and stores the copy.
 func (m *Manager) mutateState(id int64, fn func(*BoxState)) {
+	m.mutateStateGet(id, fn)
+}
+
+// mutateStateGet is mutateState returning the stored copy (ok false when
+// the box is gone).
+func (m *Manager) mutateStateGet(id int64, fn func(*BoxState)) (BoxState, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if cur, ok := m.states[id]; ok {
-		cp := *cur
-		fn(&cp)
-		m.states[id] = &cp
+	cur, ok := m.states[id]
+	if !ok {
+		return BoxState{}, false
 	}
+	cp := *cur
+	fn(&cp)
+	m.states[id] = &cp
+	return cp, true
+}
+
+// SetAppWatch adds or removes one detected application from the box's
+// watch list, persists it, and re-evaluates the alert rules at once so an
+// "app not running" alert appears or resolves without waiting for a poll.
+func (m *Manager) SetAppWatch(ctx context.Context, id int64, key string, on bool) error {
+	if !ValidAppKey(key) {
+		return fmt.Errorf("invalid app key %q", key)
+	}
+	p := m.poller(id)
+	if p == nil {
+		return store.ErrNotFound
+	}
+	st, ok := m.State(id)
+	if !ok {
+		return store.ErrNotFound
+	}
+	keys := make([]string, 0, len(st.Apps.Watched)+1)
+	for _, k := range st.Apps.Watched {
+		if k != key {
+			keys = append(keys, k)
+		}
+	}
+	if on {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if err := m.st.SetAppsWatch(ctx, id, keys); err != nil {
+		return err
+	}
+	cp, ok := m.mutateStateGet(id, func(s *BoxState) {
+		s.Apps.Watched = keys
+		s.Apps.markWatched()
+	})
+	if !ok {
+		return store.ErrNotFound
+	}
+	m.runHooks(cp)
+	sum := cp.Summary()
+	m.Publish(Event{Type: "state", BoxID: id, State: &sum})
+	return nil
 }
 
 // ContainerAction performs start|stop|restart on a container.

@@ -44,6 +44,15 @@ per-box tab.
   resume all; and start / stop / restart of the client.
 - Containers: rootless Docker containers with CPU and memory, start / stop /
   restart.
+- Services: every process the account runs on the shared host (PMSS hides
+  the other tenants'), grouped into the applications the PMSS stack ships or
+  that customers commonly install: qBittorrent, rTorrent, Deluge, Radarr /
+  Sonarr / Prowlarr and friends, Jellyfin, Plex, SABnzbd, pyLoad, FlexGet,
+  Cloudplow, rclone, Syncthing, Resilio, lighttpd, Docker, FFmpeg, shell
+  sessions. Per application: process count, resident memory, CPU share since
+  the previous poll, uptime, listening ports and a link to where PMSS serves
+  it. "Watch" an application to get an alert when it is not running. The
+  full process list sits below, filterable.
 - Storage: usage by top-level directory from a low-priority `du`, every few
   hours or on demand.
 - Host: uptime, load, memory and CPU of the shared host, GPU/render node
@@ -70,7 +79,8 @@ still monitors it, but refuses to install or autostart a build of its own.
 
 **Alerts.** Unreachable box, suspended account, disk at threshold or over
 quota, traffic at threshold, throttled, qBittorrent or Docker down, container
-exited non-zero, process memory near the slice limit, a kernel OOM kill in
+exited non-zero, a watched application not running, process memory near the
+slice limit, a kernel OOM kill in
 the slice, renewal within N days or overdue (counted in calendar days of the
 dashboard host's time zone; keep it the same as yours). Alerts
 auto-resolve, can be acknowledged or dismissed, and the count shows in the

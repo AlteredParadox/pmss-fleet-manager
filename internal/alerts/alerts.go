@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -65,6 +66,9 @@ func recheckable(s *collect.BoxState, k string) bool {
 		// Monitoring switched off for the box is a deliberate "nothing to
 		// check", like a disabled box: the alert must not be stranded.
 		return s.Docker.Reachable || !s.Docker.Enabled
+	case strings.HasPrefix(k, "app:"):
+		// Unwatching is a deliberate "nothing to check" too.
+		return s.Apps.OK || !slices.Contains(s.Apps.Watched, strings.TrimPrefix(k, "app:"))
 	}
 	return true
 }
@@ -125,7 +129,23 @@ func wantProbeRules(s *collect.BoxState, set store.Settings) []want {
 	active = append(active, wantTraffic(s, set)...)
 	active = append(active, wantQbt(s)...)
 	active = append(active, wantDocker(s)...)
+	active = append(active, wantApps(s)...)
 	active = append(active, wantRAM(s)...)
+	return active
+}
+
+// wantApps raises an alert for every watched application that is not
+// running, when the process list could be read this poll.
+func wantApps(s *collect.BoxState) []want {
+	var active []want
+	if !s.Apps.OK {
+		return nil
+	}
+	for _, a := range s.Apps.Apps {
+		if a.Watched && !a.Running {
+			active = append(active, want{"app:" + a.Key, "warn", fmt.Sprintf("%s — %s is not running", s.Name, a.Name)})
+		}
+	}
 	return active
 }
 
