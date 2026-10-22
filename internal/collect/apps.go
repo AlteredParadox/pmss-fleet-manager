@@ -17,6 +17,7 @@
 package collect
 
 import (
+	"math"
 	"path"
 	"slices"
 	"sort"
@@ -63,12 +64,16 @@ type AppView struct {
 // AppsState is the services view of one box: the account's own processes
 // grouped into applications.
 type AppsState struct {
-	OK      bool      `json:"ok"` // ps listed the account's processes this poll
-	At      time.Time `json:"at"`
-	Procs   int       `json:"procs"` // process count
-	RSS     int64     `json:"rss"`   // summed resident memory
-	Watched []string  `json:"watched"`
-	Apps    []AppView `json:"apps,omitempty"`
+	OK bool `json:"ok"` // ps listed the account's processes this poll
+	// ArgsKnown is false when the command lines were not read although the
+	// processes were: interpreter-run apps are then unclassifiable, so no
+	// app alert is raised or resolved on this poll (see Reliable).
+	ArgsKnown bool      `json:"args_known"`
+	At        time.Time `json:"at"`
+	Procs     int       `json:"procs"` // process count
+	RSS       int64     `json:"rss"`   // summed resident memory
+	Watched   []string  `json:"watched"`
+	Apps      []AppView `json:"apps,omitempty"`
 	// Processes is the full list, largest first, for the per-box tab; the
 	// fleet summary drops it.
 	Processes []ProcView `json:"processes,omitempty"`
@@ -142,15 +147,23 @@ func inheritApps(procs []ProcView, ppid map[int]int) {
 		r, ok := ruleByKey[key]
 		return ok && r.category != "shell"
 	}
-	for pass := 0; pass < 3; pass++ { // parents usually precede children, but not always
+	// Parents usually precede children, but after a pid wrap a helper can
+	// be listed before its ancestor: repeat until a pass changes nothing,
+	// bounded by the longest possible chain.
+	for pass := 0; pass <= len(procs); pass++ {
+		changed := false
 		for i := range procs {
 			p := &procs[i]
 			if !helpers[p.Name] && !strings.HasPrefix(p.App, otherPrefix) {
 				continue
 			}
-			if j, ok := idx[ppid[p.PID]]; ok && inheritable(procs[j].App) {
+			if j, ok := idx[ppid[p.PID]]; ok && inheritable(procs[j].App) && p.App != procs[j].App {
 				p.App = procs[j].App
+				changed = true
 			}
+		}
+		if !changed {
+			return
 		}
 	}
 }
@@ -199,7 +212,9 @@ func matchArgs(largs string) *appRule {
 const otherPrefix = "other:"
 
 // otherKey names an unclassified process by its comm, or for an
-// interpreter by its script: "other:python3 myscript.py".
+// interpreter by its script: "other:python3 myscript.py". Control
+// characters (a name set with prctl can carry them) become '?' so the key
+// always passes ValidAppKey.
 func otherKey(comm, args string) (key, name string) {
 	name = comm
 	if interpreters[comm] {
@@ -207,6 +222,12 @@ func otherKey(comm, args string) (key, name string) {
 			name = comm + " " + script
 		}
 	}
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, name)
 	return otherPrefix + strings.ToLower(clip(name, 48)), clip(name, 48)
 }
 
@@ -240,8 +261,9 @@ func AppName(key string) string {
 }
 
 // ValidAppKey accepts the keys the classifier produces: a rule key, or
-// "other:" plus a clipped process name (any printable text, up to 48 runes,
-// so the bound is in runes: a non-ASCII name is longer in bytes).
+// "other:" plus a clipped process name (any printable text, up to 48 runes
+// plus the clip's ellipsis, so the bound is in runes: a non-ASCII name is
+// longer in bytes).
 func ValidAppKey(k string) bool {
 	if k == "" || utf8.RuneCountInString(k) > 64 {
 		return false
@@ -280,12 +302,12 @@ func sameProcess(s procSample, p probe.ProcInfo, wall float64) bool {
 }
 
 // appsFromSnapshot groups the probe's processes into AppViews. prev holds
-// the previous poll's per-pid CPU readings and is replaced with this
-// poll's; a pid that was seen last time with a consistent start gets a
+// the previous poll's per-pid CPU readings; this poll's are returned for
+// the caller to keep; a pid that was seen last time with a consistent start gets a
 // rate, anything else is reported with CPUKnown false. watched is the
 // box's watch list; a watched app that is not running is listed as such.
 func appsFromSnapshot(snap *probe.Snapshot, user string, prev map[int]procSample, watched []string) (AppsState, map[int]procSample) {
-	st := AppsState{OK: snap.ProcsKnown, At: snap.At, Watched: append([]string{}, watched...)}
+	st := AppsState{OK: snap.ProcsKnown, ArgsKnown: snap.ArgsKnown, At: snap.At, Watched: append([]string{}, watched...)}
 	next := make(map[int]procSample, len(snap.Procs))
 	if !snap.ProcsKnown {
 		return st, next
@@ -321,7 +343,10 @@ func procView(p probe.ProcInfo, prev map[int]procSample, at time.Time) ProcView 
 		wall := at.Sub(s.at).Seconds()
 		if wall > 0 && sameProcess(s, p, wall) && p.CPUSec >= s.cpuSec {
 			pv.CPUPct = (p.CPUSec - s.cpuSec) / wall * 100
-			pv.CPUKnown = true
+			pv.CPUKnown = !math.IsInf(pv.CPUPct, 0) && !math.IsNaN(pv.CPUPct) // a hostile tick rate must not reach the sums
+			if !pv.CPUKnown {
+				pv.CPUPct = 0
+			}
 		}
 	}
 	if r := classifyProc(p.Comm, p.Args); r != nil {
@@ -442,6 +467,11 @@ func categoryRank(c string) int {
 	return 7 // shell last: the sessions are the dashboard's own
 }
 
+// Reliable reports whether this poll's classification can be trusted for
+// an "app not running" verdict: the process list AND the command lines
+// were read.
+func (a AppsState) Reliable() bool { return a.OK && a.ArgsKnown }
+
 // markWatched recomputes the Watched flags of a state's apps from its watch
 // list and adds rows for watched apps that are not running. It builds new
 // slices: a state is copied shallowly when it is stored or served, so the
@@ -462,6 +492,7 @@ func (a *AppsState) markWatched() {
 	}
 	for _, k := range a.Watched {
 		if !seen[k] {
+			seen[k] = true // a hand-edited list may repeat a key
 			out = append(out, AppView{Key: k, Name: AppName(k), Category: categoryOf(k), Watched: true})
 		}
 	}

@@ -19,13 +19,19 @@ package dockerx
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
 
 func TestContainersAndStats(t *testing.T) {
 	mux := http.NewServeMux()
@@ -77,6 +83,15 @@ func TestContainersAndStats(t *testing.T) {
 	}
 	if got, _ := demuxTail(strings.NewReader("raw tty output that is longer than the cap\n"), 10); string(got) != "n the cap\n" {
 		t.Fatalf("raw tail cap: %q", got)
+	}
+	// A connection cut mid-stream is reported, not shown as a silently
+	// truncated log; a frame the daemon itself cut short is not an error.
+	cut := io.MultiReader(bytes.NewReader([]byte("\x01\x00\x00\x00\x00\x00\x00\x03abc")), errReader{})
+	if got, err := demuxTail(cut, 100); err == nil || string(got) != "abc" {
+		t.Fatalf("cut stream: %q %v", got, err)
+	}
+	if got, err := demuxTail(bytes.NewReader([]byte("\x01\x00\x00\x00\x00\x00\x00\x09abc")), 100); err != nil || string(got) != "abc" {
+		t.Fatalf("short frame: %q %v", got, err)
 	}
 	cs, err := c.Containers(ctx)
 	if err != nil || len(cs) != 1 || cs[0].Name() != "jellyfin" || cs[0].Ports[0].PublicPort != 8096 {

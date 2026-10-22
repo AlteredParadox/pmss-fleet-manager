@@ -165,7 +165,7 @@ func TestParse(t *testing.T) {
 	}
 	// The probe's own shell (777) and its child ps (778) are dropped; the
 	// rest keep their args, and a comm with a space survives.
-	if !snap.ProcsKnown || len(snap.Procs) != 4 {
+	if !snap.ProcsKnown || !snap.ArgsKnown || len(snap.Procs) != 4 {
 		t.Fatalf("procs: %+v", snap.Procs)
 	}
 	// CPU comes from /proc stat ticks where present (6172.5 s), ps's whole
@@ -206,8 +206,11 @@ func TestParseLogs(t *testing.T) {
 			t.Errorf("%q should be valid", p)
 		}
 	}
-	if _, known := parseLogs(""); known {
-		t.Error("empty section is not a listing")
+	if files := parseLogs("NaN\t10\tnan.log\n1e12\t1\tbig.log\n1760572000\t5\tok.log"); len(files) != 1 || files[0].Path != "ok.log" {
+		t.Fatalf("NaN / out-of-range mtimes must be dropped: %+v", files)
+	}
+	if ValidLogPath(".logs/caf\xe9.log") {
+		t.Error("a non-UTF-8 name would be listed as U+FFFD and never match on the way back")
 	}
 	// The listing shell keeps the newest files when a directory holds more
 	// than the cap: 45 rotated copies older than the live log must not push
@@ -227,8 +230,8 @@ func TestParseLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, known := parseLogs(string(lsOut))
-	if !known || len(files) != 40 || files[0].Path != ".logs/live.log" || files[0].Size != 4 {
+	files := parseLogs(string(lsOut))
+	if len(files) != 40 || files[0].Path != ".logs/live.log" || files[0].Size != 4 {
 		t.Fatalf("newest-first cap: %d files, first %+v", len(files), files[:min(2, len(files))])
 	}
 	// LogTailScript refuses on the box what ValidLogPath refuses here, even
@@ -248,6 +251,21 @@ func TestParseLogs(t *testing.T) {
 	}
 	if _, stderr, code := runSh(t, LogTailScript("missing.log", 3)); code != 5 || !strings.Contains(stderr, "not a regular file") {
 		t.Fatalf("missing: code %d err %q", code, stderr)
+	}
+	// A newline-free blob (a gzip bomb, a rotated binary) must not make tail
+	// buffer it whole: the byte cap sits before the line count, so only the
+	// last 256 KiB come back and memory stays bounded.
+	var blob bytes.Buffer
+	bw := gzip.NewWriter(&blob)
+	bw.Write(bytes.Repeat([]byte{'x'}, 3<<20))
+	bw.Close()
+	os.WriteFile(dir+"/blob.log.gz", blob.Bytes(), 0o600)
+	if out, _, code := runSh(t, LogTailScript("blob.log.gz", 300)); code != 0 || len(out) != 262144 {
+		t.Fatalf("blob tail: code %d len %d", code, len(out))
+	}
+	os.WriteFile(dir+"/blob.log", bytes.Repeat([]byte{'y'}, 5<<20), 0o600)
+	if out, _, code := runSh(t, LogTailScript("blob.log", 300)); code != 0 || len(out) != 262144 {
+		t.Fatalf("plain blob tail: code %d len %d", code, len(out))
 	}
 	// A gzip-rotated copy is decompressed on the box, never served as bytes.
 	var gz bytes.Buffer
@@ -279,14 +297,19 @@ func runSh(t *testing.T, script string) (string, string, int) {
 }
 
 func TestParseProcsHostileAndMissing(t *testing.T) {
-	procs, known := parseProcs("", "", "", 0)
-	if known || len(procs) != 0 {
+	procs, known, argsKnown := parseProcs("", "", "", 0)
+	if known || argsKnown || len(procs) != 0 {
 		t.Fatalf("empty ps must be unknown, got %v %v", known, procs)
 	}
 	raw := "1 0 -5 nan -1 bad\n2 0 99999999999999 1e99 5 huge\nx y z\n3 0 10 1 1 ok"
-	procs, known = parseProcs(raw, "3 cmd with args\nnotanumber args", "0\n3 100 100 5", 0) // CLK_TCK 0: stat ignored
-	if !known || len(procs) != 3 {
+	procs, known, argsKnown = parseProcs(raw, "3 cmd with args\nnotanumber args", "0\n3 100 100 5", 0) // CLK_TCK 0: stat ignored
+	if !known || !argsKnown || len(procs) != 3 {
 		t.Fatalf("procs: %+v", procs)
+	}
+	// A readable process list with a cut (empty) args listing: the
+	// processes are known, their command lines are not.
+	if _, known, argsKnown := parseProcs("3 0 10 1 1 python3", "", "", 0); !known || argsKnown {
+		t.Fatalf("args cut: known %v argsKnown %v", known, argsKnown)
 	}
 	if procs[0].RSS != 0 || procs[0].CPUSec != 0 || procs[0].ElapsedSec != 0 {
 		t.Fatalf("negative/nan values must clamp to 0: %+v", procs[0])
@@ -299,6 +322,16 @@ func TestParseProcsHostileAndMissing(t *testing.T) {
 	}
 	if st := parseProcStat("100\n3 100 50 7\n4 -1 0 7\n5 1 1\nx"); len(st) != 1 || st[3].cpuSec != 1.5 || st[3].start != 7 {
 		t.Fatalf("proc stat: %+v", st)
+	}
+	for _, hz := range []string{"0.5", "1e-300", "NaN", "0", "-1", "1e9"} {
+		if st := parseProcStat(hz + "\n3 100 50 7"); len(st) != 0 {
+			t.Errorf("CLK_TCK %s must be rejected: %+v", hz, st)
+		}
+	}
+	// The probe's whole tree is dropped: timeout wraps ps, so ps is a grandchild.
+	tree := "777 1 100 0 1 sh\n778 777 100 0 1 timeout\n779 778 100 0 1 ps\n780 779 100 0 1 cat\n900 1 100 0 1 radarr"
+	if procs, _, _ := parseProcs(tree, "", "", 777); len(procs) != 1 || procs[0].Comm != "radarr" {
+		t.Fatalf("probe tree exclusion: %+v", procs)
 	}
 	if got := parseListenPIDs("80 1\n70000 2\nabc 3\n80 1\n81"); len(got) != 1 || len(got[80]) != 1 {
 		t.Fatalf("listen pids: %v", got)
@@ -721,6 +754,57 @@ func TestHostnameField(t *testing.T) {
 
 // ~/.qbittorrentEnable is PMSS's marker for a panel-managed qBittorrent; a
 // missing section (an older probe) reads as not managed.
+// A ps cut by its timeout prints nothing, so the parser reports the list
+// as unknown rather than as a complete listing missing its tail.
+func TestProcsShellDropsTimedOutListing(t *testing.T) {
+	bin := t.TempDir()
+	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 0 1 0 1 partial'\nexit 124\n"), 0o700)
+	os.WriteFile(bin+"/timeout", []byte("#!/bin/sh\nshift\nexec \"$@\"\n"), 0o700)
+	run := func() string {
+		cmd := exec.Command("sh")
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+		cmd.Stdin = strings.NewReader("uid=1\n" + procsShell)
+		out, _ := cmd.Output()
+		return string(out)
+	}
+	if out := run(); out != "" {
+		t.Fatalf("timed-out ps must print nothing, got %q", out)
+	}
+	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 0 1 0 1 whole'\n"), 0o700)
+	if out := run(); out != "1 0 1 0 1 whole\n" {
+		t.Fatalf("completed ps: %q", out)
+	}
+	// Same for the command lines.
+	runArgs := func() string {
+		cmd := exec.Command("sh")
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+		cmd.Stdin = strings.NewReader("uid=1\n" + procArgsShell)
+		out, _ := cmd.Output()
+		return string(out)
+	}
+	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 python3 bot.py'\nexit 124\n"), 0o700)
+	if out := runArgs(); out != "" {
+		t.Fatalf("timed-out args ps must print nothing, got %q", out)
+	}
+	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 python3 bot.py'\n"), 0o700)
+	if out := runArgs(); out != "1 python3 bot.py\n" {
+		t.Fatalf("completed args ps: %q", out)
+	}
+}
+
+// The cached binary stat is echoed back to the box every poll: only a
+// stat-shaped line is kept (round 20).
+func TestParseQbtBinaryStatShape(t *testing.T) {
+	for _, raw := range []string{strings.Repeat("1 ", 50), "1 2 3", "a b c d", "1 2 3 4 5", ""} {
+		if q := parseQbt(map[string]string{"qbt_bin_stat": raw}); q.BinaryStat != "" {
+			t.Errorf("%q accepted as %q", raw[:min(20, len(raw))], q.BinaryStat)
+		}
+	}
+	if q := parseQbt(map[string]string{"qbt_bin_stat": " 30515200 1760500000 1760500001 4242\n"}); q.BinaryStat != "30515200 1760500000 1760500001 4242" {
+		t.Fatalf("stat: %q", q.BinaryStat)
+	}
+}
+
 func TestParseQbtPMSSManaged(t *testing.T) {
 	for in, want := range map[string]bool{"1": true, "1\n": true, "0": false, "": false} {
 		if got := parseQbt(map[string]string{"qbt_pmss": in}).PMSSManaged; got != want {

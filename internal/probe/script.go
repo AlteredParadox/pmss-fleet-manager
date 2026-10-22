@@ -142,14 +142,17 @@ sec logs
 # fixed numeric columns first, then comm, which may hold spaces. times is
 # cumulative CPU seconds; the poller turns two samples into a rate. The
 # command lines come separately and clipped: argv is the process's own text.
-sec procs; ps -ww -u "$uid" -o pid=,ppid=,rss=,times=,etimes=,comm= 2>/dev/null
-sec proc_args; ps -ww -u "$uid" -o pid=,args= 2>/dev/null | cut -c1-400
+sec procs
+` + procsShell + `sec proc_args
+` + procArgsShell + `# The ps calls carry a timeout: reading a cmdline takes the target's mmap
+# lock, and a process stuck in D state on a dead mount would otherwise hold
+# the whole probe past its deadline (a cut section degrades to "unknown").
 # CPU in clock ticks (10 ms) and the start tick from /proc/<pid>/stat: ps
 # rounds CPU to whole seconds, useless over a 30 s poll, and the start tick
 # tells a reused pid from the same process. comm sits in parentheses and
 # may hold spaces or parentheses, so the fields are counted from the last ')'.
 sec proc_stat; getconf CLK_TCK 2>/dev/null
-ps -u "$uid" -o pid= 2>/dev/null | awk '{print "/proc/"$1"/stat"}' | xargs cat 2>/dev/null | awk '{i=match($0,/\)[^)]*$/); if (i==0) next; n=split(substr($0,i+2),f," "); if (n<20) next; print $1, f[12], f[13], f[20]}'
+timeout 10 ps -u "$uid" -o pid= 2>/dev/null | awk '{print "/proc/"$1"/stat"}' | timeout 10 xargs cat 2>/dev/null | awk '{i=match($0,/\)[^)]*$/); if (i==0) next; n=split(substr($0,i+2),f," "); if (n<20) next; print $1, f[12], f[13], f[20]}'
 sec listen_pids
 # Which of our own processes hold which listening port: ss resolves pids
 # only for sockets whose /proc/<pid>/fd it can read, i.e. our own, so a
@@ -237,10 +240,13 @@ done; :)
 // LogTailScript prints the last lines of one log file under the home. The
 // path (already ValidLogPath-checked) is embedded single-quoted, so it never
 // reaches a command line that /proc exposes, and is checked again on the
-// box: relative, no ".." component, a regular file. A gzip-rotated copy is
-// decompressed on the box into the same line and byte caps, so however
-// large it inflates, only the tail travels; the caps also bound a file of
-// enormous lines.
+// box: relative, no ".." component, a regular file. A byte cap comes
+// BEFORE the line count in both branches: `tail -n` on a pipe holds the
+// whole current line until a newline arrives, so a newline-free stream (a
+// gzip bomb, a binary that got rotated) would grow it without bound
+// (measured 2.9 GB on a 3 GB blob); `tail -c` keeps a fixed buffer. The
+// plain branch reads the last 4 MiB of the file, which bounds a multi-GB
+// newline-free "log" too; 300 lines of any real log fit in that.
 func LogTailScript(path string, lines int) string {
 	q := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 	n := strconv.Itoa(lines)
@@ -249,11 +255,24 @@ func LogTailScript(path string, lines int) string {
 case "$p" in ''|/*|..|../*|*/../*|*/..) echo "refused path" >&2; exit 4;; esac
 [ -f "$p" ] || { echo "not a regular file" >&2; exit 5; }
 case "$p" in
-  *.gz) gzip -dc -- "$p" 2>/dev/null | tail -n ` + n + ` | tail -c 262144;;
-  *) tail -n ` + n + ` -- "$p" 2>/dev/null | tail -c 262144;;
+  *.gz) gzip -dc -- "$p" 2>/dev/null | tail -c 1048576 | tail -n ` + n + ` | tail -c 262144;;
+  *) tail -c 4194304 -- "$p" 2>/dev/null | tail -n ` + n + ` | tail -c 262144;;
 esac
 `
 }
+
+// procsShell lists the account's processes, but only when ps finished:
+// a listing cut by the timeout would pass as complete (the parser calls
+// it known as soon as one row parses) and every watched app missing from
+// the cut tail would be reported as not running.
+const procsShell = `o=$(timeout 10 ps -ww -u "$uid" -o pid=,ppid=,rss=,times=,etimes=,comm= 2>/dev/null) && [ -n "$o" ] && printf '%s\n' "$o"
+`
+
+// procArgsShell is the same for the command lines: a cut listing would
+// leave the processes past the cut without args, and an interpreter is
+// classified by its script.
+const procArgsShell = `o=$(timeout 10 ps -ww -u "$uid" -o pid=,args= 2>/dev/null) && [ -n "$o" ] && printf '%s\n' "$o" | cut -c1-400
+`
 
 // listenPIDsShell prints "<port> <pid>" for every listening TCP socket ss
 // can attribute to one of our processes (its users:((...,pid=N,...)) column).

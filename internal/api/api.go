@@ -549,6 +549,17 @@ func decode(r *http.Request, v any) error {
 	return dec.Decode(v)
 }
 
+// decodeStrict reads a small JSON body (4 KiB) and refuses unknown fields:
+// for the action endpoints whose whole input is a few named fields.
+func decodeStrict(r *http.Request, v any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("bad body: %v", err)
+	}
+	return nil
+}
+
 func (s *Server) handleListBoxes(w http.ResponseWriter, r *http.Request) {
 	boxes, err := s.st.ListBoxes(r.Context())
 	if err != nil {
@@ -896,10 +907,8 @@ func (s *Server) handleSetDiscovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var want map[string]bool
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4096))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&want); err != nil {
-		writeErr(w, 400, fmt.Errorf("bad body: %v", err))
+	if err := decodeStrict(r, &want); err != nil {
+		writeErr(w, 400, err)
 		return
 	}
 	for k := range want {
@@ -1015,10 +1024,8 @@ func (s *Server) handleReadLog(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Path string `json:"path"`
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4096))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&in); err != nil {
-		writeErr(w, 400, fmt.Errorf("bad body: %v", err))
+	if err := decodeStrict(r, &in); err != nil {
+		writeErr(w, 400, err)
 		return
 	}
 	if !probe.ValidLogPath(in.Path) {
@@ -1099,10 +1106,8 @@ func (s *Server) handleAppWatch(w http.ResponseWriter, r *http.Request) {
 		Key string `json:"key"`
 		On  bool   `json:"on"`
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4096))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&in); err != nil {
-		writeErr(w, 400, fmt.Errorf("bad body: %v", err))
+	if err := decodeStrict(r, &in); err != nil {
+		writeErr(w, 400, err)
 		return
 	}
 	if !collect.ValidAppKey(in.Key) {

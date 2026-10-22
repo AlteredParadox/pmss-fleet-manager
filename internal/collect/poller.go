@@ -62,6 +62,16 @@ type poller struct {
 	// version it answered, so the probe can skip --version (which writes to
 	// the user's qBittorrent log) while the binary is unchanged.
 	qbtBinStat, qbtBinVersion string
+	// qbtProcKey identifies the running qbittorrent-nox process(es) by pid
+	// and start tick, so a restart between two polls that both saw the
+	// client up is noticed (see carriedFirewalledSince).
+	qbtProcKey   string
+	qbtRestarted bool
+	pollStart    time.Time // when the current poll began (dashboard clock), for takeRestartBefore
+	// dialTCP builds the dialer the WebUI client uses; nil means the SSH
+	// tunnel (sshDialTCP). Tests point it at a fake WebUI so the real
+	// pollQbt orchestration runs without a box.
+	dialTCP func(addr string) qbt.Dialer
 
 	duMu      sync.Mutex
 	duRunning bool
@@ -79,8 +89,14 @@ type poller struct {
 	cancel context.CancelFunc
 
 	actionMu sync.Mutex
-	actionAt time.Time            // last stop/restart, see QbtAction
-	discWant map[string]discWrite // per-key SetDiscovery writes, see noteDiscovery
+	actionAt time.Time // last stop/restart, see QbtAction
+	// restartAt is when a stop/restart action last SUCCEEDED and has not
+	// yet been seen by a poll: the first readable process poll started
+	// after it treats whatever client is up as a new process, which
+	// matters when the poller has no identity baseline yet (a fresh
+	// poller after a dashboard start or a box edit).
+	restartAt time.Time
+	discWant  map[string]discWrite // per-key SetDiscovery writes, see noteDiscovery
 }
 
 // discWrite is one value SetDiscovery wrote and when.
@@ -93,6 +109,26 @@ func (p *poller) noteAction() {
 	p.actionMu.Lock()
 	p.actionAt = time.Now()
 	p.actionMu.Unlock()
+}
+
+// noteRestartDone records a stop/restart that succeeded (see restartAt).
+func (p *poller) noteRestartDone() {
+	p.actionMu.Lock()
+	p.restartAt = time.Now()
+	p.actionMu.Unlock()
+}
+
+// takeRestartBefore consumes a recorded successful restart if it happened
+// before pollStart, i.e. the poll that started then observed the box
+// after it. A later restart stays recorded for the next poll.
+func (p *poller) takeRestartBefore(pollStart time.Time) bool {
+	p.actionMu.Lock()
+	defer p.actionMu.Unlock()
+	if p.restartAt.IsZero() || !p.restartAt.Before(pollStart) {
+		return false
+	}
+	p.restartAt = time.Time{}
+	return true
 }
 
 // actionSince reports whether a stop/restart happened after t.
@@ -387,6 +423,7 @@ func (p *poller) safePoll(ctx context.Context) {
 
 func (p *poller) poll(ctx context.Context) {
 	start := time.Now()
+	p.pollStart = start
 	st, _ := p.m.State(p.box.ID)
 	st.LastPoll = start
 
@@ -626,6 +663,14 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	st.Account = AccountState{OK: a.OK, QuotaGiB: a.QuotaGiB, RAMMiB: a.RAMMiB, DockerEnabled: a.DockerEnabled, Suspended: a.Suspended}
 
 	st.Apps, p.procPrev = appsFromSnapshot(snap, p.box.User, p.procPrev, st.Apps.Watched)
+	p.qbtRestarted, p.qbtProcKey = trackQbtProcess(p.qbtProcKey, snap)
+	// A stop/restart the dashboard completed before this poll started:
+	// whatever client this poll found is a new process, baseline or not.
+	// Consumed only by a readable list that shows a client, so an
+	// unreadable or client-less poll leaves it for the next one.
+	if snap.ProcsKnown && p.qbtProcKey != "" && p.takeRestartBefore(p.pollStart) {
+		p.qbtRestarted = true
+	}
 
 	st.Logs = LogsState{OK: snap.LogsKnown}
 	for _, f := range snap.Logs {
@@ -754,7 +799,11 @@ func (p *poller) qbtClient(port int) *qbt.Client {
 		p.qbt.Close()
 	}
 	hp := fmt.Sprintf("127.0.0.1:%d", port)
-	p.qbt = qbt.NewWithGuard(p.sshDialTCP(hp), hp, p.box.QbtUser, p.box.QbtPass, p.guard)
+	dial := p.sshDialTCP
+	if p.dialTCP != nil {
+		dial = p.dialTCP
+	}
+	p.qbt = qbt.NewWithGuard(dial(hp), hp, p.box.QbtUser, p.box.QbtPass, p.guard)
 	p.qbtP = port
 	return p.qbt
 }
@@ -781,7 +830,7 @@ func qbtPortFor(b *store.Box, confPort int) int {
 func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot) {
 	port := p.qbtPort(snap)
 	qs := QbtState{Enabled: true, Installed: snap.Qbt.BinaryPresent, ProcessUp: snap.Qbt.Running, Port: port, Version: st.Qbt.Version,
-		FirewalledSince: carriedFirewalledSince(st.Qbt, snap.Qbt.Running), ListenPort: st.Qbt.ListenPort,
+		FirewalledSince: carriedFirewalledSince(st.Qbt, snap.Qbt.Running, p.qbtRestarted), ListenPort: st.Qbt.ListenPort,
 		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: clip(snap.Qbt.SubnetList, 1024), ConfUser: clip(snap.Qbt.Username, 64),
 		HasCreds:      p.box.QbtUser != "" || p.box.QbtPass != "",
 		BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0, PMSSManaged: snap.Qbt.PMSSManaged}
@@ -848,7 +897,9 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	qs.Reachable = true
 	ss := md.ServerState
 	qs.Connection = connectionStatus(ss.ConnectionStatus)
-	qs.FirewalledSince = firewalledSince(st.Qbt.FirewalledSince, qs.Connection, time.Now())
+	// From qs's own carried value, not st.Qbt's: the carry already dropped
+	// it when the process was gone or restarted (fred review on PR 87).
+	qs.FirewalledSince = firewalledSince(qs.FirewalledSince, qs.Connection, time.Now())
 	if f, err := strconv.ParseFloat(strings.TrimSpace(ss.GlobalRatio), 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) && f >= 0 && f < 1e9 {
 		qs.GlobalRatio = f // qBittorrent sends "∞" for undefined, which parses as 0 here
 	}
@@ -901,16 +952,57 @@ func connectionStatus(s string) string {
 }
 
 // carriedFirewalledSince is the FirewalledSince a poll starts from: the
-// previous value while the client process is still up, so a Web API
+// previous value while the same client process is still up, so a Web API
 // failure (a login hold, a timeout, a port check that refused) does not
 // restart the ten-minute clock and clear an alert the moment the API
-// answers again; nothing once the process is gone, since a fresh process
-// starts its own clock.
-func carriedFirewalledSince(prev QbtState, processUp bool) string {
-	if !processUp {
+// answers again; nothing once the process is gone or was replaced between
+// two polls (restarted), since a fresh process starts its own clock.
+func carriedFirewalledSince(prev QbtState, processUp, restarted bool) string {
+	if !processUp || restarted {
 		return ""
 	}
 	return prev.FirewalledSince
+}
+
+// trackQbtProcess compares the running qbittorrent-nox process identity
+// with the one from the previous readable poll: restarted is true when
+// both are known and differ. An unreadable process list keeps the last
+// identity rather than forgetting it, so a restart that happens before the
+// next readable poll is still noticed.
+func trackQbtProcess(prevKey string, snap *probe.Snapshot) (restarted bool, key string) {
+	if !snap.ProcsKnown {
+		return false, prevKey
+	}
+	key, known := qbtProcKey(snap.Procs)
+	if !known {
+		return false, prevKey // a client without a start tick this poll is not evidence of a replacement
+	}
+	if key == "" && snap.Qbt.Running {
+		// The pid section (taken earlier in the probe) saw a client that the
+		// process listing no longer shows: an inconsistent snapshot, not an
+		// absence. Keep the baseline so the replacement is still noticed.
+		return false, prevKey
+	}
+	return key != "" && prevKey != "" && key != prevKey, key
+}
+
+// qbtProcKey names the qbittorrent-nox processes in a process list by pid
+// and start tick ("pid:tick,…", sorted): "" when there are none. known is
+// false when one of them has no start tick (its /proc stat line was not
+// read this poll), since "pid:0" would read as a different process.
+func qbtProcKey(procs []probe.ProcInfo) (key string, known bool) {
+	var parts []string
+	for _, p := range procs {
+		if p.Comm != "qbittorrent-nox" {
+			continue
+		}
+		if p.StartTick == 0 {
+			return "", false
+		}
+		parts = append(parts, fmt.Sprintf("%d:%d", p.PID, p.StartTick))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ","), true
 }
 
 // firewalledSince carries the time the client was first seen not
@@ -934,10 +1026,10 @@ func firewalledSince(prev, conn string, now time.Time) string {
 // next probe asks again.
 func resolveQbtVersion(seenStat, seenVersion string, q probe.QbtInfo) (stat, version, current string) {
 	switch {
+	case q.BinaryVersion != "": // a fresh answer always wins, whatever the stat said
+		return q.BinaryStat, q.BinaryVersion, q.BinaryVersion
 	case !q.BinaryPresent || q.BinaryStat == "":
 		return "", "", ""
-	case q.BinaryVersion != "":
-		return q.BinaryStat, q.BinaryVersion, q.BinaryVersion
 	case q.BinaryStat == seenStat && seenVersion != "":
 		return seenStat, seenVersion, seenVersion
 	}

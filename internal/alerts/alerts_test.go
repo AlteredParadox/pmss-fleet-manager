@@ -134,6 +134,15 @@ func TestWantApps(t *testing.T) {
 		t.Fatalf("no alert without a readable process list: %+v", got)
 	}
 	s.Apps.OK = true
+	// Processes read but their command lines cut: Bazarr runs as python3
+	// and cannot be told from any other python3, so no verdict this poll.
+	if got := wantApps(&s); len(got) != 0 {
+		t.Fatalf("no alert without the command lines: %+v", got)
+	}
+	if recheckable(&s, "app:jellyfin") {
+		t.Error("command lines not read: must not resolve the alert either")
+	}
+	s.Apps.ArgsKnown = true
 	got := wantApps(&s)
 	if len(got) != 1 || got[0].key != "app:jellyfin" || got[0].sev != "warn" || got[0].title != "seed-01 — Jellyfin is not running" {
 		t.Fatalf("alerts: %+v", got)
@@ -149,6 +158,50 @@ func TestWantApps(t *testing.T) {
 	s.Apps.OK = true
 	if !recheckable(&s, "app:jellyfin") {
 		t.Error("read this poll: resolvable")
+	}
+}
+
+// A state restored from the cache or carried across an edit (Unpolled) has
+// its reachability flags reset: evaluating it must raise nothing (round 20
+// MEDIUM: a watch toggle before the first poll raised "not responding").
+func TestEvaluateSkipsUnpolled(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	b := &store.Box{Name: "x", Host: "h", User: "u", Port: 22, Enabled: true}
+	if err := st.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	e := New(st, store.DefaultSettings, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	s := &collect.BoxState{ID: b.ID, Name: "x", Status: "online", Unpolled: true}
+	s.Qbt.Enabled, s.Docker.Enabled = true, true // Reachable false, as resetVolatile leaves them
+	s.Apps.OK, s.Apps.ArgsKnown, s.Apps.Watched, s.Apps.Apps = true, true, []string{"radarr"}, []collect.AppView{{Key: "radarr", Name: "Radarr", Watched: true}}
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); len(keys) != 0 {
+		t.Fatalf("unpolled state raised %v", keys)
+	}
+	// An app unwatched in that window still resolves its restored alert.
+	st.RaiseAlert(ctx, b.ID, "app:sonarr", "warn", "x")
+	st.RaiseAlert(ctx, b.ID, "app:radarr", "warn", "x")
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); !slices.Equal(keys, []string{"app:radarr"}) {
+		t.Fatalf("unwatched app alert must resolve while unpolled, watched one stays: %v", keys)
+	}
+	s.Unpolled = false
+	e.Evaluate(ctx, s)
+	keys, _ := st.ActiveAlertKeys(ctx, b.ID)
+	slices.Sort(keys)
+	if want := []string{"app:radarr", "docker", "qbt"}; !slices.Equal(keys, want) {
+		t.Fatalf("polled state: %v, want %v", keys, want)
+	}
+	// A disabled box is still evaluated so its alerts resolve.
+	s.Unpolled, s.Status = true, "disabled"
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); len(keys) != 0 {
+		t.Fatalf("disabled unpolled state kept %v", keys)
 	}
 }
 

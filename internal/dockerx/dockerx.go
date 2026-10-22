@@ -282,14 +282,17 @@ func demuxTail(r io.Reader, keep int) ([]byte, error) {
 	var hdr [8]byte
 	for {
 		if _, err := io.ReadFull(br, hdr[:]); err != nil {
-			if err == io.EOF {
-				return out.bytes(), nil
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return out.bytes(), nil // the end, or a partial trailing header: nothing more to show
 			}
-			return out.bytes(), nil // a partial trailing header: nothing more to show
+			return out.bytes(), err // a cut connection: the caller must not present a silent truncation
 		}
 		n := int64(hdr[4])<<24 | int64(hdr[5])<<16 | int64(hdr[6])<<8 | int64(hdr[7])
 		if _, err := io.CopyN(out, br, n); err != nil {
-			return out.bytes(), nil // frame cut short: keep what came
+			if err == io.EOF {
+				return out.bytes(), nil // frame cut short by the daemon: keep what came
+			}
+			return out.bytes(), err
 		}
 	}
 }

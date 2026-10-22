@@ -70,7 +70,7 @@ func recheckable(s *collect.BoxState, k string) bool {
 		return s.Qbt.Reachable || !s.Qbt.Enabled
 	case strings.HasPrefix(k, "app:"):
 		// Unwatching is a deliberate "nothing to check" too.
-		return s.Apps.OK || unwatchedApp(s, k)
+		return s.Apps.Reliable() || unwatchedApp(s, k)
 	}
 	return true
 }
@@ -85,6 +85,16 @@ func unwatchedApp(s *collect.BoxState, k string) bool {
 // Evaluate is a collect.Hook.
 func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 	if s.Status == "pending" {
+		return
+	}
+	// A state restored from the cache or carried across an edit has had
+	// its reachability flags reset and nothing has verified them yet
+	// (BoxState.Unpolled): the rules would raise "not responding" for a
+	// client that is merely unverified. The first poll runs the rules; a
+	// disabled box still resolves its alerts, and an app the user
+	// unwatched meanwhile resolves at once (the watch list is ours).
+	if s.Unpolled && s.Status != "disabled" {
+		e.resolveUnwatched(ctx, s)
 		return
 	}
 	set := e.settings()
@@ -104,6 +114,26 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 	}
 	active = append(active, wantRenewal(s, set)...)
 	e.reconcile(ctx, s, active, probeOK)
+}
+
+// resolveUnwatched resolves the app alerts whose app is no longer watched,
+// without evaluating anything else.
+func (e *Evaluator) resolveUnwatched(ctx context.Context, s *collect.BoxState) {
+	keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
+	if err != nil {
+		return
+	}
+	changed := false
+	for _, k := range keys {
+		if unwatchedApp(s, k) {
+			if err := e.st.ResolveAlert(ctx, s.ID, k); err == nil {
+				changed = true
+			}
+		}
+	}
+	if changed && e.notify != nil {
+		e.notify()
+	}
 }
 
 // resolveDisabled handles a disabled box.
@@ -147,8 +177,8 @@ func wantProbeRules(s *collect.BoxState, set store.Settings) []want {
 // running, when the process list could be read this poll.
 func wantApps(s *collect.BoxState) []want {
 	var active []want
-	if !s.Apps.OK {
-		return nil
+	if !s.Apps.Reliable() {
+		return nil // process list or command lines not read: a watched interpreter app may merely be unclassified
 	}
 	for _, a := range s.Apps.Apps {
 		if a.Watched && !a.Running {

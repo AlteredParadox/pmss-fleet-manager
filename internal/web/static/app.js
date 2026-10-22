@@ -32,6 +32,7 @@ const S = {
   torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
   torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, status_reason, qbt}]
   logView: null, // open log on the logs tab: { kind: 'file'|'ctr', key, label, text, busy, err, at }
+  logOpen: new Set(), // directories whose "older / rotated" group the user expanded on the logs tab
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
 };
@@ -162,6 +163,7 @@ function route() {
   S.filter = '';
   S.torAdd = null;
   S.logView = null;
+  S.logOpen = new Set();
   render();
 }
 const go = (hash) => { location.hash = hash; };
@@ -365,10 +367,10 @@ function renderSide() {
 
 function renderMain() {
   const m = $('#main');
-  // The log viewer is rebuilt on every render (an SSE event, a keystroke in
-  // the filter): keep where the reader was.
-  const prevLog = $('#logview');
-  const logTop = prevLog ? prevLog.scrollTop : null;
+  // The log viewer and the log list are rebuilt on every render (an SSE
+  // event, a keystroke in the filter): keep where the reader was.
+  const prevLog = $('#logview'), prevList = $('.loglist');
+  const logTop = prevLog ? prevLog.scrollTop : null, listTop = prevList ? prevList.scrollTop : null;
   switch (S.view) {
     case 'box': m.innerHTML = viewBox(); break;
     case 'torrents': m.innerHTML = viewTorrents(); break;
@@ -377,6 +379,8 @@ function renderMain() {
     case 'settings': m.innerHTML = viewSettings(); break;
     default: m.innerHTML = viewFleet();
   }
+  const ll = $('.loglist');
+  if (ll && listTop !== null) ll.scrollTop = listTop;
   const lv = $('#logview');
   if (lv && S.logView && !S.logView.busy) {
     if (!S.logView.scrolled) { lv.scrollTop = lv.scrollHeight; S.logView.scrolled = true; } // a freshly read log opens at its end, like tail
@@ -971,7 +975,10 @@ function tabServices(b) {
   const apps = (A.apps || []).filter((a) => !f || a.name.toLowerCase().includes(f) || a.category.includes(f) || a.key.includes(f));
   const all = A.processes || [];
   const procs = all.filter((p) => !f || p.name.toLowerCase().includes(f) || (p.args || '').toLowerCase().includes(f) || appName(A, p.app).toLowerCase().includes(f)).slice(0, 200);
-  const note = A.ok ? `${A.procs} process${A.procs === 1 ? '' : 'es'} · ${fmtBytes(A.rss, 1)} resident` : `<span class="warn">process list not read${b.status === 'offline' ? ' (box unreachable)' : b.status === 'pending' ? ' yet' : ' (ps printed nothing on the box)'}</span>`;
+  const why = { offline: ' (box unreachable)', pending: ' yet', disabled: ' (polling is disabled)' }[b.status] || ' (ps printed nothing on the box)';
+  const reliable = A.ok && A.args_known;
+  const note = !A.ok ? `<span class="warn">process list not read${why}</span>`
+    : `${A.procs} process${A.procs === 1 ? '' : 'es'} · ${fmtBytes(A.rss, 1)} resident${A.args_known ? '' : ' · <span class="warn" title="the command-line listing was cut this poll: applications run by an interpreter (python, mono, dotnet, node, java, php) cannot be told apart, so no app alert is raised or resolved">command lines not read</span>'}`;
   return `<div class="table app-table" style="overflow:hidden">
     <div class="thead-tools">
       <div style="font-size:12px"><b>services</b> <span class="muted">· ${note}</span></div>
@@ -979,7 +986,7 @@ function tabServices(b) {
     </div>
     <div style="overflow:auto">
       <div class="trow head"><span>application</span><span>kind</span><span>state</span><span>cpu</span><span>memory</span><span>up for</span><span title="listening TCP ports held by its processes">ports</span><span>link</span><span title="raise an alert when this application is not running">watch</span></div>
-      ${apps.length === 0 ? `<div class="trow"><span class="muted">${A.ok ? 'nothing matches' : '—'}</span></div>` : apps.map((a) => appRow(b, a)).join('')}
+      ${apps.length === 0 ? `<div class="trow"><span class="muted">${A.ok ? 'nothing matches' : '—'}</span></div>` : apps.map((a) => appRow(b, a, reliable)).join('')}
     </div>
   </div>
   <div class="hint" style="margin-top:8px">Everything the account runs on the shared host, as its own uid sees it (other tenants' processes are hidden by PMSS). CPU is the share of one core since the previous poll. Watch an application to be alerted when it is not running; a watched application that is down stays listed.</div>
@@ -991,12 +998,16 @@ function tabServices(b) {
     </div>
   </div>`;
 }
-function appRow(b, a) {
+// known is false when the process list or the command lines could not be
+// read this poll: a watched app's row is then listed (the list is the
+// user's) but its state is unknown, not "not running".
+function appRow(b, a, known) {
   const url = appUrl(b, a);
+  const state = a.running ? `running · ${a.procs} proc${a.procs === 1 ? '' : 's'}` : known ? 'not running' : 'unknown';
   return `<div class="trow">
-    <div class="ellip" title="${esc(a.key)}"><span class="led ${a.running ? 'online' : 'offline'}" style="width:6px;height:6px;margin-right:8px"></span>${esc(a.name)}</div>
+    <div class="ellip" title="${esc(a.key)}"><span class="led ${a.running ? 'online' : known ? 'offline' : 'pending'}" style="width:6px;height:6px;margin-right:8px"></span>${esc(a.name)}</div>
     <span><span class="tag">${esc(a.category)}</span></span>
-    <span class="${a.running ? '' : 'bad'}">${a.running ? `running · ${a.procs} proc${a.procs === 1 ? '' : 's'}` : 'not running'}</span>
+    <span class="${a.running || !known ? '' : 'bad'}">${state}</span>
     <span class="num">${a.cpu_known ? a.cpu_pct.toFixed(1) + '%' : '—'}</span>
     <span class="num">${a.running ? fmtBytes(a.rss, 1) : '—'}</span>
     <span class="muted">${a.running ? fmtDur(a.uptime_sec) : '—'}</span>
@@ -1015,8 +1026,8 @@ function logItem(f, sel) {
 }
 function logGroup(d, fs, sel) {
   const cur = fs.filter((f) => !rotated(f.path)), old = fs.filter((f) => rotated(f.path));
-  const openOld = old.some((f) => sel('file', f.path));
-  return `<div class="loggroup"><div class="tile-label ellip" title="~/${esc(d)}">~/${esc(d)}</div>${cur.map((f) => logItem(f, sel)).join('')}${old.length ? `<details class="adv"${openOld ? ' open' : ''}><summary>${old.length} older / rotated</summary><div style="gap:2px;margin-top:4px">${old.map((f) => logItem(f, sel)).join('')}</div></details>` : ''}</div>`;
+  const openOld = S.logOpen.has(d) || old.some((f) => sel('file', f.path));
+  return `<div class="loggroup"><div class="tile-label ellip" title="~/${esc(d)}">~/${esc(d)}</div>${cur.map((f) => logItem(f, sel)).join('')}${old.length ? `<details class="adv" data-logdir="${esc(d)}"${openOld ? ' open' : ''}><summary>${old.length} older / rotated</summary><div style="gap:2px;margin-top:4px">${old.map((f) => logItem(f, sel)).join('')}</div></details>` : ''}</div>`;
 }
 function tabLogs(b) {
   const L = b.logs || {};
@@ -1040,7 +1051,7 @@ function logViewer(V) {
   if (V.err) return `${head}<div class="err-box">${esc(V.err)}</div>`;
   if (V.busy && V.text == null) return `${head}<div class="hint">reading…</div>`; // no #logview yet: the scroll-to-end waits for the content
   const f = S.filter.trim().toLowerCase();
-  let lines = (V.text || '').replace(/\n$/, '').split('\n');
+  let lines = V.text ? V.text.replace(/\n$/, '').split('\n') : []; // '' would split into one empty line and hide the placeholder
   if (f) lines = lines.filter((l) => l.toLowerCase().includes(f));
   const body = lines.length ? esc(lines.join('\n')) : `<span class="muted">${V.text ? 'nothing matches' : '(empty)'}</span>`;
   return `${head}<pre class="logview" id="logview">${body}</pre>`;
@@ -1476,7 +1487,7 @@ document.addEventListener('click', async (e) => {
   const fv = e.target.closest('[data-fleetview]');
   if (fv) { S.fleetView = fv.dataset.fleetview; S.fleetViewTouched = true; render(); return; }
   const tab = e.target.closest('[data-tab]');
-  if (tab) { S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; S.logView = null; history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); render(); return; }
+  if (tab) { S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; S.logView = null; S.logOpen = new Set(); history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); render(); return; }
   const seg = e.target.closest('[data-s-seg]');
   if (seg) {
     S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; S.settingsTouched[seg.dataset.sSeg] = true;
@@ -1633,6 +1644,10 @@ async function runAction(a, act) {
 document.addEventListener('submit', (e) => {
   if (e.target.closest('[data-tor-add]')) e.preventDefault(); // the submit button's click runs tor-add:submit
 });
+document.addEventListener('toggle', (e) => {
+  const d = e.target.closest?.('details[data-logdir]');
+  if (d) { if (d.open) S.logOpen.add(d.dataset.logdir); else S.logOpen.delete(d.dataset.logdir); }
+}, true);
 document.addEventListener('change', (e) => {
   const fi = e.target.closest('[data-ta-files]');
   if (fi && S.torAdd) { S.torAdd.files = [...fi.files]; render(); }
