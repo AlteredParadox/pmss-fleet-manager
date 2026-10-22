@@ -190,6 +190,9 @@ it (or remove it), both on save and on "test connection". Before any action
 that logs in to the WebUI the dashboard re-reads the box's socket table to
 confirm the port is still bound by your account. Switching SSH auth to a key or the agent
 removes the saved SSH password; a checkbox removes the saved WebUI password.
+Over the API, an edit (`PUT /api/boxes/{id}`) must carry the record's
+`revision` as `GET` returned it; a stale one is refused with 409 and the
+current record, which the edit form reloads into itself.
 The pinned host key belongs to the host and port: it is kept while they are
 unchanged, cleared when they change or when you tick "forget the pinned SSH
 host key", and a key the wizard saw never replaces an existing pin. Because
@@ -374,9 +377,9 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.4.0 is the current release. The code was written against five real Pulsed
+1.5.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
-qBittorrent 5.2.x and reviewed as described under *Security and hardening*.
+qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
 welcome. Releases on GitHub carry linux amd64 and arm64 binaries with
 checksums, and a matching container image on GHCR.
@@ -385,6 +388,52 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.5.0** closes the remaining findings of the external review of 1.4.0
+(twenty-three in all; the cheap ones shipped in 1.4.0) and clears Sonar's
+list. The minor bump is for one API change: an edit over the API
+(`PUT /api/boxes/{id}`) must carry the record's `revision` as `GET` returned
+it, and a stale one is refused with 409 and the current record, so two tabs
+or scripts can no longer overwrite each other's edit.
+
+- **Edits are compare-and-set.** The edit form carries the revision it
+  loaded and reloads on a 409; a stale save can no longer bind a saved
+  password to an endpoint another edit just moved the box to. (#92)
+- **The accepted socket is verified too.** After every new tunnel connection
+  to the WebUI, before a byte is written, the socket that accepted it is
+  checked to be yours; a co-tenant who grabs the port between the listener
+  check and the connect gets the connection closed. On hosts whose
+  socket-table privacy hides established sockets the listener check is what
+  applies. (#93)
+- **The live view is in one order.** Every change to a box's state goes
+  through one commit path with a fleet-wide revision; `/api/state` reports
+  the revision it was taken at, every event carries one, the page merges
+  snapshots and events by revision and resyncs on every stream open, and the
+  stream is subscribed before it is answered, so a box removed or updated
+  while the page was loading is never shown stale or brought back. The
+  services feed is matched inside the commit, so a feed swap never leaves a
+  box on the old feed. (#94)
+- **Incremental qBittorrent sync.** The first poll fetches everything; later
+  polls send the last response id and merge only what changed, decoded as a
+  stream capped at 20 000 torrents with bounded retained memory. The Docker
+  reader uses the same cap-plus-one pattern and a 2 000-container cap. (#95)
+- **Two probe cadences.** Every poll measures; host identity, the installed
+  client and its version gate, the crontab and the log catalogue are read on
+  the first poll, every 15 minutes and on demand (a refresh, an install or
+  autostart, or the logs tab finding its listing older than ten minutes,
+  which also has a rescan button). Process arguments stream through `cut`
+  with an end marker instead of being held whole in a shell variable. (#96)
+- The small batch (#91): a per-command lock on the bounded `df`/`quota`
+  helpers so a hung filesystem cannot pile up processes; the WebUI auth hold
+  is scoped to the box's SSH endpoint; ambiguous login failures have a
+  budget; a services sync that fetched but could not persist says so; the
+  installer's URL and the start command reach the box on stdin, off any
+  argv; release tags are validated and the image waits for the build; and
+  hardening: a per-address throttle on basic-auth failures (429), at most 32
+  event streams (503), a two-minute body deadline on mutating requests, and
+  the localhost auth bypass shown as unsafe.
+- Sonar's six open smells cleared; the page's revision merge has a Node
+  test, run by `make jscheck`. (#94, #97)
 
 **1.4.0** adds three features chosen from the gaps between the
 [PMSS stack](https://wiki.pulsedmedia.com/wiki/PM_Software_Stack) and this
