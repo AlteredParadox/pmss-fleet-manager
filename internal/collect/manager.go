@@ -478,7 +478,11 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		m.mutateState(id, func(s *BoxState) {
 			p.noteAction() // under the store lock: a poll's store is either before both or after both
 			s.Qbt.PortOK, s.Qbt.Reachable = false, false
-			s.Qbt.FirewalledSince = "" // the client that comes back starts its own ten-minute clock
+			// FirewalledSince is deliberately left alone: the action may have
+			// failed before touching the client, and a client that did stop
+			// or come back as a new process is noticed by the next poll
+			// (process gone, or a changed pid/start tick), which starts the
+			// new ten-minute clock then.
 		})
 	}
 	p.wake()
