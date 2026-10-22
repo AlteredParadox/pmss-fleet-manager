@@ -1361,7 +1361,19 @@ async function confirmAdd() {
   A.busy = true; render();
   try {
     if (A.mode === 'edit') {
-      await api('PUT', `${BASE}/api/boxes/${A.editId}`, payload(A.form));
+      try {
+        await api('PUT', `${BASE}/api/boxes/${A.editId}`, payload(A.form));
+      } catch (e) {
+        if (e.status === 409) {
+          // Another tab or a script changed the box since this form was
+          // loaded: nothing was written. Reload the record so the next
+          // save is based on it.
+          toast('this box was changed elsewhere since the form was loaded; nothing was saved — the form has been reloaded, apply your change again', 'warn');
+          await startEdit(A.editId);
+          return;
+        }
+        throw e;
+      }
       toast('box updated', 'ok');
       go(`/box/${A.editId}`);
     } else {
