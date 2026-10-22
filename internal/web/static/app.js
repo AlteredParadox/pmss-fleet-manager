@@ -28,6 +28,7 @@ const BASE = location.pathname.replace(/\/+$/, '');
 const S = {
   view: 'fleet', fleetView: 'cards', tab: 'overview', selId: null,
   boxes: [], totals: {}, unacked: 0, settings: {}, detail: null,
+  snapRev: 0, removed: new Map(), // revision bookkeeping, see static/revisions.js (pfmRevisions)
   alerts: [], filter: '', live: false,
   torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
   torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, status_reason, qbt}]
@@ -179,9 +180,14 @@ async function loadState() {
     const d = await api('GET', BASE + '/api/state');
     if (d.instance && S.instance && d.instance !== S.instance) { location.reload(); return; } // server was rebuilt: pick up new JS/CSS
     S.instance = d.instance || S.instance;
+    // Loads overlap (a resync, a settings event and a services event can
+    // all be in flight): one taken before a snapshot that already landed
+    // is superseded and must not put back a box removed between the two.
+    const r = pfmRevisions.acceptSnapshot(S, d.boxes || [], d.rev || 0);
+    if (!r.accepted) return true;
     S.version = d.version; S.sourceUrl = d.source_url;
-    S.boxes = d.boxes || [];
     S.totals = d.totals || {};
+    if (r.kept) recomputeTotals(); // the list is newer than the snapshot's totals
     S.unacked = d.alerts_unacked || 0;
     S.settings = d.settings || {};
     applyTheme(S.view === 'settings' && S.settingsDraft && S.settingsTouched.theme ? S.settingsDraft.theme : S.settings.theme); // keep an unsaved preview
@@ -195,6 +201,7 @@ async function loadDetail(id) {
   try {
     const d = await api('GET', `${BASE}/api/boxes/${id}`);
     if (S.selId !== id) return;
+    if (S.detail && S.detail.id === id && (S.detail.rev || 0) > (d.state.rev || 0)) return; // a newer detail already landed
     S.detail = d.state;
     render();
   } catch (e) {
@@ -253,7 +260,6 @@ function renderSoon() {
 }
 function connectEvents() {
   const es = new EventSource(BASE + '/api/events');
-  let wasDown = false;
   let resyncGen = 0;
   // Events missed while disconnected (a box removed during a server restart,
   // say) are only recovered by a full reload, and nothing later will repeat
@@ -272,18 +278,17 @@ function connectEvents() {
   };
   es.onopen = () => {
     S.live = true;
-    // Also when the boot-time snapshot failed: the stream alone never
-    // delivers settings, totals or boxes that have not polled since.
-    if (wasDown || !S.baseline) void resync(); else renderSide();
-    wasDown = false;
+    // Always: whatever changed between the last snapshot and this
+    // subscription was never sent, and the server subscribes before it
+    // answers, so a snapshot taken now plus the stream misses nothing
+    // (mergeSnapshot keeps whichever of the two is newer per box).
+    void resync();
   };
-  es.onerror = () => { S.live = false; wasDown = true; resyncGen++; renderSide(); };
+  es.onerror = () => { S.live = false; resyncGen++; renderSide(); };
   es.addEventListener('state', (ev) => {
     const e = JSON.parse(ev.data);
     if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
-    const i = S.boxes.findIndex((b) => b.id === e.box_id);
-    if (i >= 0) S.boxes[i] = e.state; else S.boxes.push(e.state);
-    S.boxes.sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
+    if (!pfmRevisions.applyState(S, e)) { renderSide(); return; } // stale: a snapshot or a later event already covered it
     recomputeTotals();
     if (S.view === 'box' && S.selId === e.box_id) void loadDetail(e.box_id);
     else if (S.view === 'torrents') loadTorrentsSoon();
@@ -291,9 +296,9 @@ function connectEvents() {
   });
   es.addEventListener('removed', (ev) => {
     const e = JSON.parse(ev.data);
-    S.boxes = S.boxes.filter((b) => b.id !== e.box_id);
-    if (S.detail && S.detail.id === e.box_id) S.detail = null;
     if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
+    if (!pfmRevisions.applyRemoved(S, e)) { renderSide(); return; }
+    if (S.detail && S.detail.id === e.box_id) S.detail = null;
     recomputeTotals();
     if ((S.view === 'box' || S.view === 'edit') && S.selId === e.box_id) {
       if (S.removingId !== e.box_id) { toast('that box was removed', 'bad'); }

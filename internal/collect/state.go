@@ -47,6 +47,11 @@ type BoxState struct {
 	// them yet, so alert rules must not run on it until a poll lands.
 	Unpolled bool `json:"-"`
 
+	// Rev is the fleet-wide revision this state was stored at (Manager
+	// .commit); a client drops a state event whose rev is not above the
+	// one it holds for the box.
+	Rev uint64 `json:"rev"`
+
 	Status       string    `json:"status"` // online | degraded | offline | disabled | pending
 	StatusReason string    `json:"status_reason,omitempty"`
 	LastPoll     time.Time `json:"last_poll"`

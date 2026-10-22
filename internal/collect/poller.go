@@ -1324,15 +1324,13 @@ func (p *poller) runDu(ctx context.Context) {
 	if err := p.m.st.SetCache(sctx, p.box.ID, "du", res); err != nil {
 		p.m.log.Warn("cache du", "box", p.box.Name, "err", err)
 	}
-	// Merge into the live state without waiting for the next poll.
-	p.m.mu.Lock()
-	if cur, ok := p.m.states[p.box.ID]; ok {
-		cp := *cur
-		res.Enabled = cp.Dirs.Enabled // an edit may have switched measurement off meanwhile
-		cp.Dirs = res
-		p.m.states[p.box.ID] = &cp
-	}
-	p.m.mu.Unlock()
+	// Merge into the live state without waiting for the next poll (which
+	// reports it to the UI).
+	p.m.commit(p.box.ID, func(cur *BoxState) *BoxState {
+		res.Enabled = cur.Dirs.Enabled // an edit may have switched measurement off meanwhile
+		cur.Dirs = res
+		return cur
+	}, commitOpts{})
 }
 
 func (p *poller) record(ctx context.Context, st *BoxState) {

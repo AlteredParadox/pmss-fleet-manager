@@ -141,7 +141,8 @@ func serviceActive(status string) bool {
 // ServiceActive is serviceActive for other packages (the API totals).
 func ServiceActive(status string) bool { return serviceActive(status) }
 
-// decorate attaches the matching service to a state. Caller must not hold m.mu.
+// decorate attaches the matching service to a state, from the feed as it is
+// now. Called by commit under m.mu (lock order: mu before svcMu).
 func (m *Manager) decorate(s *BoxState) {
 	m.svcMu.RLock()
 	feed := m.svc.feed
@@ -271,8 +272,12 @@ func (m *Manager) SyncServices(ctx context.Context) error {
 	return nil
 }
 
-// reattachServices re-runs matching for every box and re-evaluates alerts
-// (the renewal rule depends on the service's next due date).
+// reattachServices re-commits every box, which re-runs matching against the
+// feed as it is now, and re-evaluates alerts (the renewal rule depends on
+// the service's next due date). A box whose state is restored or
+// just-edited (Unpolled) is not evaluated: its reachability fields were
+// reset and no poll has verified them, so the rules would raise false "not
+// responding" alerts; the next poll runs the hooks.
 func (m *Manager) reattachServices() {
 	m.mu.RLock()
 	ids := make([]int64, 0, len(m.states))
@@ -281,32 +286,7 @@ func (m *Manager) reattachServices() {
 	}
 	m.mu.RUnlock()
 	for _, id := range ids {
-		m.mu.Lock()
-		s, ok := m.states[id]
-		if !ok {
-			m.mu.Unlock()
-			continue
-		}
-		cp := *s
-		m.mu.Unlock()
-		m.decorate(&cp)
-		m.mu.Lock()
-		if cur, ok := m.states[id]; ok {
-			// Replace the stored snapshot rather than writing into it: the
-			// object may be in a hook's hands on another goroutine.
-			ncp := *cur
-			ncp.Service = cp.Service
-			m.states[id] = &ncp
-			cp = ncp
-		}
-		m.mu.Unlock()
-		if cp.Unpolled && cp.Status != "disabled" {
-			// Restored or just-edited: its reachability fields were reset and
-			// no poll has verified them; evaluating now would raise false
-			// "not responding" alerts. The next poll runs the hooks.
-			continue
-		}
-		m.runHooks(cp)
+		m.commit(id, func(s *BoxState) *BoxState { return s }, commitOpts{hooks: true})
 	}
 	m.Publish(Event{Type: "services"})
 }

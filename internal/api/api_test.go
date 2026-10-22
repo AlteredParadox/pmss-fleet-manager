@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -714,4 +715,79 @@ func TestEditRacingAnotherEditIsRefused(t *testing.T) {
 	if got.Host != "b.example" || got.Password != "P_B" || got.Name != "b" || got.Revision != snap.Revision+1 {
 		t.Fatalf("the committed edit must stand untouched: %+v", got)
 	}
+}
+
+// flushWriter is a streaming ResponseWriter: it reports the first flush,
+// which is when a browser's EventSource fires onopen.
+type flushWriter struct {
+	mu     sync.Mutex
+	hdr    http.Header
+	code   int
+	body   strings.Builder
+	opened chan struct{}
+	once   sync.Once
+}
+
+func (f *flushWriter) Header() http.Header { return f.hdr }
+func (f *flushWriter) WriteHeader(c int)   { f.code = c }
+func (f *flushWriter) Write(b []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.body.Write(b)
+}
+func (f *flushWriter) Flush() { f.once.Do(func() { close(f.opened) }) }
+func (f *flushWriter) text() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.body.String()
+}
+
+// The event stream is subscribed before its headers go out: a change made
+// the moment the stream opens (when the page takes its snapshot) is
+// delivered, so snapshot plus stream miss nothing (external review 3,
+// finding 11). The snapshot carries the revision it was taken at.
+func TestEventsSubscribedBeforeOpen(t *testing.T) {
+	s, _ := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","auth_method":"key","key_path":"/k"}`, hdr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/events", nil).WithContext(ctx)
+	req.Host = "dash.local:8080"
+	w := &flushWriter{hdr: http.Header{}, opened: make(chan struct{})}
+	done := make(chan struct{})
+	go func() { s.ServeHTTP(w, req); close(done) }()
+	select {
+	case <-w.opened:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream never opened")
+	}
+	// Published right after the stream opened, as the page's snapshot is
+	// being taken: must arrive on this stream.
+	code, body := do(t, s, "GET", "/api/state", "", nil)
+	if code != 200 || !strings.Contains(body, `"rev":`) {
+		t.Fatalf("snapshot: %d %s", code, body)
+	}
+	var snap struct {
+		Rev   uint64 `json:"rev"`
+		Boxes []struct {
+			Rev uint64 `json:"rev"`
+		} `json:"boxes"`
+	}
+	if err := json.Unmarshal([]byte(body), &snap); err != nil || len(snap.Boxes) != 1 || snap.Boxes[0].Rev == 0 || snap.Boxes[0].Rev > snap.Rev {
+		t.Fatalf("snapshot revs: %+v %v", snap, err)
+	}
+	s.m.Publish(collect.Event{Type: "state", BoxID: 1, Rev: snap.Rev + 1, State: &collect.BoxState{ID: 1}})
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(w.text(), `event: state`) {
+		if time.Now().After(deadline) {
+			t.Fatalf("event published at open was not delivered: %q", w.text())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(w.text(), fmt.Sprintf(`"rev":%d`, snap.Rev+1)) {
+		t.Fatalf("event lacks its revision: %q", w.text())
+	}
+	cancel()
+	<-done
 }

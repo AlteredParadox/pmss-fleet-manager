@@ -29,7 +29,9 @@ vet:
 # duplicate keys. Needs node; skipped with a notice when npx is missing.
 jscheck:
 	node --check internal/web/static/app.js
-	@if command -v npx >/dev/null 2>&1; then npx --yes eslint@9 -c scripts/eslint.config.mjs internal/web/static/app.js; else echo "jscheck: npx not found, ESLint skipped"; fi
+	node --check internal/web/static/revisions.js
+	node --test internal/web/revisions_test.mjs
+	@if command -v npx >/dev/null 2>&1; then npx --yes eslint@9 -c scripts/eslint.config.mjs internal/web/static/app.js internal/web/static/revisions.js internal/web/revisions_test.mjs; else echo "jscheck: npx not found, ESLint skipped"; fi
 
 # Regenerate the third-party notices from the modules actually linked in.
 notices:
