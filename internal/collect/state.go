@@ -72,6 +72,32 @@ type BoxState struct {
 	Docker  DockerState  `json:"docker"`
 	Dirs    DirsState    `json:"dirs"`
 	Apps    AppsState    `json:"apps"`
+	Logs    LogsState    `json:"logs"`
+}
+
+// LogFileView is one log file found under the home.
+type LogFileView struct {
+	Path  string    `json:"path"` // relative to the home
+	Size  int64     `json:"size"`
+	MTime time.Time `json:"mtime"`
+}
+
+// LogsState lists the log files the probe found; the fleet summary drops
+// the list. Reading one is on demand (Manager.ReadLog).
+type LogsState struct {
+	OK    bool          `json:"ok"`
+	Files []LogFileView `json:"files,omitempty"`
+}
+
+// has reports whether path is one of the listed files, which is what
+// ReadLog allows: the box's own listing, not an arbitrary path.
+func (l LogsState) has(path string) bool {
+	for _, f := range l.Files {
+		if f.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 // DiskState is the user quota view.
@@ -382,6 +408,7 @@ func (s BoxState) Summary() BoxState {
 	c.Dirs.Entries = nil
 	c.Traffic.Daily = nil
 	c.Apps.Processes = nil
+	c.Logs.Files = nil
 	return c
 }
 

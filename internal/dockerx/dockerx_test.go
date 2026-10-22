@@ -37,11 +37,29 @@ func TestContainersAndStats(t *testing.T) {
 		w.WriteHeader(404)
 		w.Write([]byte(`{"message":"No such container: nope"}`))
 	})
+	mux.HandleFunc("/containers/abcdef123456789/logs", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("tail") != "50" {
+			w.WriteHeader(400)
+			return
+		}
+		// Two multiplexed frames (stdout, stderr) and a truncated third.
+		w.Write([]byte("\x01\x00\x00\x00\x00\x00\x00\x06hello\n\x02\x00\x00\x00\x00\x00\x00\x04oops\x01\x00\x00\x00\x00\x00\x00\x10cut"))
+	})
+	mux.HandleFunc("/containers/tty/logs", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("raw tty output\n")) })
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	addr := srv.Listener.Addr().String()
 	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) })
 	ctx := context.Background()
+	if out, err := c.Logs(ctx, "abcdef123456789", 50); err != nil || string(out) != "hello\noopscut" {
+		t.Fatalf("logs: %q %v", out, err)
+	}
+	if out, err := c.Logs(ctx, "tty", 50); err != nil || string(out) != "raw tty output\n" {
+		t.Fatalf("tty logs: %q %v", out, err)
+	}
+	if _, err := c.Logs(ctx, "nope", 50); err == nil {
+		t.Fatal("missing container: want error")
+	}
 	cs, err := c.Containers(ctx)
 	if err != nil || len(cs) != 1 || cs[0].Name() != "jellyfin" || cs[0].Ports[0].PublicPort != 8096 {
 		t.Fatalf("%+v %v", cs, err)

@@ -621,6 +621,54 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	st.Account = AccountState{OK: a.OK, QuotaGiB: a.QuotaGiB, RAMMiB: a.RAMMiB, DockerEnabled: a.DockerEnabled, Suspended: a.Suspended}
 
 	st.Apps, p.procPrev = appsFromSnapshot(snap, p.box.User, p.procPrev, st.Apps.Watched)
+
+	st.Logs = LogsState{OK: snap.LogsKnown}
+	for _, f := range snap.Logs {
+		st.Logs.Files = append(st.Logs.Files, LogFileView{Path: f.Path, Size: f.Size, MTime: f.MTime})
+	}
+}
+
+// LogTailLines is how many lines ReadLog fetches (the script also caps bytes).
+const LogTailLines = 300
+
+// readLog tails one of the log files the last probe listed.
+func (p *poller) readLog(ctx context.Context, path string) (string, error) {
+	st, _ := p.m.State(p.box.ID)
+	if !st.Logs.has(path) {
+		return "", fmt.Errorf("%q is not one of the log files found on the box", path)
+	}
+	actx, cancel := context.WithTimeout(ctx, apiTimeout)
+	defer cancel()
+	cli, err := p.conn(actx)
+	if err != nil {
+		return "", err
+	}
+	out, stderr, err := cli.Run(actx, "sh", strings.NewReader(probe.LogTailScript(path, LogTailLines)))
+	if err != nil {
+		return "", fmt.Errorf("read log: %v %s", err, strings.TrimSpace(string(stderr)))
+	}
+	return strings.ToValidUTF8(string(out), "\uFFFD"), nil
+}
+
+// containerLogs fetches the tail of a container's stdout/stderr.
+func (p *poller) containerLogs(ctx context.Context, cid string) (string, error) {
+	if !p.box.DockerEnabled {
+		return "", errors.New("docker is not enabled for this box")
+	}
+	actx, cancel := context.WithTimeout(ctx, apiTimeout)
+	defer cancel()
+	if _, err := p.conn(actx); err != nil {
+		return "", err
+	}
+	st, _ := p.m.State(p.box.ID)
+	if st.UID == 0 {
+		return "", ErrUnavailable
+	}
+	out, err := p.dockerClient(st.UID).Logs(actx, cid, LogTailLines)
+	if err != nil {
+		return "", err
+	}
+	return strings.ToValidUTF8(string(out), "\uFFFD"), nil
 }
 
 // hwEncodeLabel summarises hardware encoding availability for tags.

@@ -54,6 +54,12 @@ per-box tab.
   the previous poll, uptime, listening ports and a link to where PMSS serves
   it. "Watch" an application to get an alert when it is not running. The
   full process list sits below, filterable.
+- Logs: the log files found in the usual places under the home (PMSS's
+  `~/.logs` and tracker cleaner, qBittorrent, Radarr / Sonarr / Prowlarr and
+  friends, Jellyfin, SABnzbd, Deluge, rclone, FlexGet, pyLoad, Cloudplow,
+  lighttpd) and every container's output. Pick one and the last 300 lines
+  are read from the box on demand, with a line filter; nothing is streamed
+  or stored.
 - Storage: usage by top-level directory from a low-priority `du`, every few
   hours or on demand.
 - Host: uptime, load, memory and CPU of the shared host, GPU/render node

@@ -135,6 +135,17 @@ sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + `
 sec qbt_pmss; [ -e "$home/.qbittorrentEnable" ] && echo 1 || echo 0
 sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
+sec logs
+# Log files in the places the PMSS stack and the usual self-installed apps
+# write them, as "size<TAB>mtime<TAB>path" relative to the home. Only a
+# listing: the tab fetches one file on demand (see LogTailScript).
+(cd "$home" 2>/dev/null && for d in ` + logDirsShell + `; do
+  [ -d "$d" ] || continue
+  find "$d" -maxdepth 1 -type f \( -name '*.log' -o -name '*.log.*' -o -name '*.txt' \) -printf '%s\t%T@\t%p\n' 2>/dev/null | head -n 40
+done
+for f in ` + logFilesShell + `; do
+  [ -f "$f" ] && stat -c '%s'"$(printf '\t')"'%Y'"$(printf '\t')"'%n' "$f" 2>/dev/null
+done)
 sec probe_pid; echo $$
 # The account's own processes (hidepid=2 hides everyone else's anyway):
 # fixed numeric columns first, then comm, which may hold spaces. times is
@@ -205,6 +216,33 @@ if [ -n "$l" ]; then printf '%s\n' "$l"; else echo "via ss"; ` + listenViaSS + `
 // the last colon of Local (a %interface suffix dropped); a Process column
 // that starts with users:(( is one of our own sockets.
 const listenViaSS = `timeout 10 ss -Hltnp 2>/dev/null | awk -v uid="$uid" '$1=="LISTEN"{n=split($4,a,":"); p=a[n]; ad=substr($4,1,length($4)-length(p)-1); sub(/%.*/,"",ad); o="x"; if ($6 ~ /^users:\(\(/) o=uid; print "d", p, o, ad}'`
+
+// logDirsShell and logFilesShell are the places under the home where the
+// PMSS stack and the apps customers install on it keep their logs, as shell
+// words spliced into the probe: directories listed for *.log, *.log.* and
+// *.txt files, and single files.
+const (
+	logDirsShell = ".logs .local/share/qBittorrent/logs .local/share/data/qBittorrent/logs .lighttpd" +
+		" .config/Radarr/logs .config/Sonarr/logs .config/Lidarr/logs .config/Readarr/logs .config/Prowlarr/logs" +
+		" .config/Bazarr/log .config/jellyfin/log .config/sabnzbd/logs .sabnzbd/logs .config/deluge" +
+		" .config/rclone .flexget .pyload/logs .config/pyload/logs .config/cloudplow .config/Jackett/log logs"
+	logFilesShell = ".trackerCleaner.log .rtorrent.log rtorrent.log .rtorrent.session/rtorrent.log"
+)
+
+// LogTailScript prints the last lines of one log file under the home. The
+// path (already ValidLogPath-checked) is embedded single-quoted, so it never
+// reaches a command line that /proc exposes, and is checked again on the
+// box: relative, no ".." component, a regular file. The byte cap keeps a
+// file of enormous lines from flooding the response.
+func LogTailScript(path string, lines int) string {
+	q := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+	return "#!/bin/sh\nLC_ALL=C; export LC_ALL\np=" + q + "\n" +
+		`cd "${HOME:-~}" || exit 3
+case "$p" in ''|/*|..|../*|*/../*|*/..) echo "refused path" >&2; exit 4;; esac
+[ -f "$p" ] || { echo "not a regular file" >&2; exit 5; }
+tail -n ` + strconv.Itoa(lines) + ` -- "$p" 2>/dev/null | tail -c 262144
+`
+}
 
 // listenPIDsShell prints "<port> <pid>" for every listening TCP socket ss
 // can attribute to one of our processes (its users:((...,pid=N,...)) column).

@@ -622,6 +622,30 @@ func (m *Manager) AddTorrents(ctx context.Context, id int64, req qbt.AddRequest)
 	return res, err
 }
 
+// ReadLog returns the tail of one of the box's listed log files.
+func (m *Manager) ReadLog(ctx context.Context, id int64, path string) (string, error) {
+	p := m.poller(id)
+	if p == nil {
+		return "", store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return "", ErrDisabled
+	}
+	return p.readLog(ctx, path)
+}
+
+// ContainerLogs returns the tail of a container's output.
+func (m *Manager) ContainerLogs(ctx context.Context, id int64, cid string) (string, error) {
+	p := m.poller(id)
+	if p == nil {
+		return "", store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return "", ErrDisabled
+	}
+	return p.containerLogs(ctx, cid)
+}
+
 // RunDu forces a directory usage measurement.
 func (m *Manager) RunDu(id int64) error {
 	p := m.poller(id)

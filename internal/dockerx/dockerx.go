@@ -209,6 +209,66 @@ func (c *Client) StatsAll(ctx context.Context, ids []string, concurrency int) ma
 	return out
 }
 
+// maxLogBytes bounds one container log response.
+const maxLogBytes = 1 << 20
+
+// Logs returns the last tail lines of a container's stdout and stderr,
+// interleaved in the order the daemon kept them.
+func (c *Client) Logs(ctx context.Context, id string, tail int) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://docker%s%s/logs?stdout=1&stderr=1&tail=%d", containersPath, id, tail), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLogBytes))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var e struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(body, &e)
+		if e.Message == "" {
+			e.Message = strings.TrimSpace(string(body))
+		}
+		return nil, fmt.Errorf("docker: logs %s: http %d %s", id, resp.StatusCode, e.Message)
+	}
+	return demuxLogs(body), nil
+}
+
+// demuxLogs strips the stream framing the daemon uses for containers
+// without a TTY (an 8-byte header per frame: stream type, three zero bytes,
+// big-endian payload length). A TTY container's output has no framing and
+// is returned as is; so is anything that does not parse as frames.
+func demuxLogs(b []byte) []byte {
+	if !looksFramed(b) {
+		return b
+	}
+	out := make([]byte, 0, len(b))
+	for len(b) >= 8 {
+		n := int(b[4])<<24 | int(b[5])<<16 | int(b[6])<<8 | int(b[7])
+		if n < 0 || n > len(b)-8 {
+			// A truncated last frame (the 1 MiB cap cut it): keep what is there.
+			out = append(out, b[8:]...)
+			return out
+		}
+		out = append(out, b[8:8+n]...)
+		b = b[8+n:]
+	}
+	return out
+}
+
+// looksFramed checks the first header: stream type 0..2 and three zero
+// bytes, which printable log text never starts with.
+func looksFramed(b []byte) bool {
+	return len(b) >= 8 && b[0] <= 2 && b[1] == 0 && b[2] == 0 && b[3] == 0
+}
+
 // Start starts a container.
 func (c *Client) Start(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, containersPath+id+"/start", nil)

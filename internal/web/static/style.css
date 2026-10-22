@@ -152,6 +152,18 @@ button.disc:hover{color:var(--text)}
 .app-table .trow{grid-template-columns:minmax(170px,1.4fr) 90px 150px 70px 90px 90px minmax(110px,1fr) 70px 90px;min-width:1040px;padding:10px 16px}
 .app-table .trow.head,.proc-table .trow.head{padding:8px 16px;font-size:10.5px}
 .proc-table .trow{grid-template-columns:70px minmax(120px,1fr) minmax(120px,1fr) 70px 90px 90px minmax(260px,3fr);min-width:1040px;padding:8px 16px;font-size:11.5px}
+/* logs tab */
+.logs{display:grid;grid-template-columns:minmax(220px,300px) minmax(0,1fr);gap:14px;align-items:start}
+@media (max-width:900px){.logs{grid-template-columns:1fr}}
+.loglist{display:grid;gap:12px;padding:12px;max-height:75vh;overflow:auto}
+.loggroup{display:grid;gap:2px}
+.loggroup .tile-label{padding:2px 6px 4px}
+.logitem{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:baseline;text-align:left;border-color:transparent;background:none;padding:5px 6px;font-size:11.5px}
+.logitem:hover{background:var(--panel2);border-color:transparent}
+.logitem.on{background:var(--panel2);border-color:var(--accent)}
+.logitem .muted{font-size:10px;white-space:nowrap}
+.logpane{min-width:0}
+.logview{margin:0;max-height:70vh;overflow:auto;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:10px 12px}
 .svc-table .trow{grid-template-columns:minmax(200px,2fr) minmax(200px,1.6fr) 110px 90px 150px 70px 170px;min-width:1000px}
 .svc-table .trow>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .svc-table a{color:var(--accent)}

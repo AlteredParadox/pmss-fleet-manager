@@ -89,6 +89,12 @@ WebUI\LocalHostAuth=false
 1
 @@docker_sock
 1
+@@logs
+1234	1760572000.5	.logs/trackerCleaner.log
+99	1760572700	.local/share/qBittorrent/logs/qbittorrent.log
+5	1760570000	../etc/passwd
+x	1	.logs/bad.log
+7	1760571000	./.lighttpd/error.log
 @@probe_pid
 777
 @@procs
@@ -171,6 +177,69 @@ func TestParse(t *testing.T) {
 	if got := snap.ListenPIDs[7878]; len(got) != 1 || got[0] != 5001 {
 		t.Fatalf("listen pids: %v", snap.ListenPIDs)
 	}
+}
+
+func TestParseLogs(t *testing.T) {
+	snap, err := Parse([]byte(sample), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.LogsKnown || len(snap.Logs) != 3 {
+		t.Fatalf("logs: %+v", snap.Logs)
+	}
+	// Newest first, the "./" prefix stripped, the escape and the junk line dropped.
+	if snap.Logs[0].Path != ".local/share/qBittorrent/logs/qbittorrent.log" || snap.Logs[1].Path != ".logs/trackerCleaner.log" || snap.Logs[2].Path != ".lighttpd/error.log" || snap.Logs[1].Size != 1234 || snap.Logs[1].MTime.Unix() != 1760572000 {
+		t.Fatalf("logs: %+v", snap.Logs)
+	}
+	for _, p := range []string{"", "/etc/passwd", "../x", "a/../b", "a/..", "./a", "a//b", "a\nb", "ok/"} {
+		if ValidLogPath(p) {
+			t.Errorf("%q should be invalid", p)
+		}
+	}
+	for _, p := range []string{".logs/x.log", "logs/a b.txt", ".config/Radarr/logs/radarr.txt"} {
+		if !ValidLogPath(p) {
+			t.Errorf("%q should be valid", p)
+		}
+	}
+	if _, known := parseLogs(""); known {
+		t.Error("empty section is not a listing")
+	}
+	// LogTailScript refuses on the box what ValidLogPath refuses here, even
+	// for a path that slipped past (the function quotes whatever it is given).
+	for _, p := range []string{"/etc/passwd", "../x", "a/../b", "", "it's/../x"} {
+		out, stderr, code := runSh(t, LogTailScript(p, 5))
+		if code != 4 || len(out) != 0 || !strings.Contains(stderr, "refused") {
+			t.Errorf("%q: code %d out %q err %q", p, code, out, stderr)
+		}
+	}
+	dir := t.TempDir()
+	os.WriteFile(dir+"/it's a.log", []byte("1\n2\n3\n4\n5\n6\n7\n"), 0o600)
+	t.Setenv("HOME", dir)
+	out, _, code := runSh(t, LogTailScript("it's a.log", 3))
+	if code != 0 || out != "5\n6\n7\n" {
+		t.Fatalf("tail: code %d out %q", code, out)
+	}
+	if _, stderr, code := runSh(t, LogTailScript("missing.log", 3)); code != 5 || !strings.Contains(stderr, "not a regular file") {
+		t.Fatalf("missing: code %d err %q", code, stderr)
+	}
+}
+
+// runSh runs a probe-style script the way the SSH session does, on sh's
+// stdin, and returns stdout, stderr and the exit code.
+func runSh(t *testing.T, script string) (string, string, int) {
+	t.Helper()
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(script)
+	var out, errb strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	return out.String(), errb.String(), code
 }
 
 func TestParseProcsHostileAndMissing(t *testing.T) {
