@@ -38,8 +38,14 @@ jobs:
           go-version-file: go.mod
       - name: make vet
         run: make vet
+      # Same frontend gate as ci.yml: a tag can point at a commit that never
+      # went through a PR, so the release must not trust the branch run.
+      - name: make jscheck
+        run: make jscheck
       - name: make test
         run: make test
+      - name: Race tests
+        run: go test -race ./...
 
       - name: make license-check
         run: make license-check

@@ -3,7 +3,7 @@ BINARY := pmss-fleet-manager
 # this with the tag; local builds report the git description, or "dev".
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build run test vet notices notices-check license-headers license-check clean
+.PHONY: build run test vet jscheck notices notices-check license-headers license-check clean
 
 # `notices` runs FIRST: THIRD_PARTY_LICENSES.md is embedded into the binary
 # (legal.go), so regenerating it here means what ships always matches what
@@ -21,6 +21,15 @@ test:
 vet:
 	@test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)
 	go vet ./...
+
+# The frontend has no build step and no test runner, so the only thing
+# that catches a reference to an undefined name (a ReferenceError at
+# click time, invisible to `node --check`) is a linter. ESLint runs from
+# npx with the small committed config: no-undef, unreachable code,
+# duplicate keys. Needs node; skipped with a notice when npx is missing.
+jscheck:
+	node --check internal/web/static/app.js
+	@if command -v npx >/dev/null 2>&1; then npx --yes eslint@9 -c scripts/eslint.config.mjs internal/web/static/app.js; else echo "jscheck: npx not found, ESLint skipped"; fi
 
 # Regenerate the third-party notices from the modules actually linked in.
 notices:
