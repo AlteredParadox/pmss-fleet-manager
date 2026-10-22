@@ -403,7 +403,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.6.0 is the current release. The code was written against five real Pulsed
+1.7.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -414,6 +414,39 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.7.0** follows PMSS's new "Node load vs. your share" panel (its ADR
+0126) so the two dashboards agree about the host. The minor bump is for the
+new figures in the API: `host_sys.cpu_ok` / `cpu_busy_pct` / `cpu_iowait_pct`
+/ `cpu_steal_pct`, `cpu.host_pct`, and `live` on every box.
+
+- **Host cpu as PMSS counts it.** The probe reads `/proc/stat` every poll
+  and the poller turns two readings into host-wide busy, iowait and steal
+  over the interval (busy is all but idle and iowait, steal inside it). The
+  host tab's load tile became a cpu tile: busy with iowait stacked lighter,
+  steal when it reaches half a percent, the load averages as text. On the
+  fleet iowait runs 12-38 % of lifetime and one KVM host loses 12 % to
+  steal, neither of which a load meter could show. Your own usage gains a
+  share-of-the-whole-host figure beside the quota-relative one. (#107)
+- **Node vs. you over 24 hours.** The inventory sections read the two ring
+  files PMSS's panel draws from (the node's sums, world-readable; your
+  account's samples, readable by you) and the host tab shows the same
+  15 min / 1 h / 24 h averages and 24 h trend, computed server-side as that
+  panel computes them: cpu as a share of every host core, ram against the
+  host's memory, traffic in Mbit/s. Slots are validated and bounded; hosts
+  without the PMSS release that writes the rings get a notice. (#108)
+- **Credit where due.** That panel's arithmetic and drawing were ported from
+  PMSS's `statsLive.php`, which is GPL-3.0-only; the derived parts carry
+  MagnaCapax / PMSS Team's notice, the README's licence section explains
+  the GPLv3 §13 combination, and the embedded notices now reproduce the
+  full GPL-3.0 text (`licenses/GPL-3.0.txt`). (#109)
+- **Overview bars in the same style.** The overview's cpu and ram bars show
+  the host in grey with your slice inside in blue, on one scale, with a
+  thin meter under each keeping your usage against your own quota or
+  memory limit in the warn / bad colour. An unknown share or sample shows
+  as a dash, never as 0 %. The bars render in a DOM-free `view.js` with a
+  Node test under `make jscheck`. (#110)
+- ESLint 10 (Dependabot, #105).
 
 **1.6.0** closes the fourth external review (of 1.5.1; fourteen findings,
 two accepted as they stand, one deferred until Pulsed Media exposes a
