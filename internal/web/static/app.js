@@ -1211,7 +1211,36 @@ function tabHost(b) {
       <div class="tile-value">${h.cpu_ok ? fmtPct(h.cpu_busy_pct) : '—'} <small>busy${h.ncpu ? ` · ${h.ncpu} cores` : ''}${h.cpu_ok ? ` · iowait ${fmtPct(h.cpu_iowait_pct)}${h.cpu_steal_pct >= 0.5 ? ` · steal ${fmtPct(h.cpu_steal_pct)}` : ''}` : ''}</small></div>
       <div class="meter thick split" title="busy (every tenant's cpu time, steal included) and, lighter, iowait: cpus waiting on the disks"><i class="${levelClass(h.cpu_ok ? h.cpu_busy_pct : 0, 100)}" style="width:${h.cpu_ok ? Math.min(100, h.cpu_busy_pct) : 0}%"></i><i class="dim" style="width:${h.cpu_ok ? Math.min(100 - Math.min(100, h.cpu_busy_pct), h.cpu_iowait_pct) : 0}%"></i></div>
       <div class="note">${h.cpu_ok ? `you ${b.cpu.ok && b.cpu.host_cpus ? fmtPctFine(b.cpu.host_pct) : '—'} of it` : 'measured from the second poll on'} · load ${h.load1?.toFixed(2) ?? '—'} / ${h.load5?.toFixed(2) ?? '—'} / ${h.load15?.toFixed(2) ?? '—'} · a busy neighbour shows up here, not in your own cpu meter</div></div>
-  </div>`;
+  </div>${liveTrendPanel(b)}`;
+}
+
+/* "node vs. you": PMSS's own live-stats rings (five-minute samples, 24 h),
+   summarised server-side exactly as its panel does; this only draws them. */
+function liveCell(p, unit) {
+  const f = (v) => unit === '%' ? fmtPctFine(v) : `${(Number(v) || 0).toFixed(v < 10 ? 1 : 0)} Mbit/s`;
+  const nodeW = unit === '%' ? Math.min(100, p.node) : 100;
+  const youW = p.node > 0 ? Math.min(100, p.you / p.node * 100) : 0;
+  return `<td><div class="lvbar"><i style="width:${nodeW}%"><i style="width:${youW}%"></i></i></div><div class="note">node ${f(p.node)} · <span class="lvyou">you ${f(p.you)}</span></div></td>`;
+}
+function liveSvg(points, max) {
+  if (!points || points.length < 2) return '';
+  const n = points.length;
+  const line = (i, cls) => `<polyline class="${cls}" points="${points.map((p, x) => `${(x * 300 / (n - 1)).toFixed(1)},${(38 - Math.min(1, p[i] / max) * 36).toFixed(1)}`).join(' ')}"/>`;
+  return `<svg class="lvsvg" viewBox="0 0 300 40" preserveAspectRatio="none" role="img">${line(0, 'n')}${line(1, 'y')}</svg>`;
+}
+function liveTrendPanel(b) {
+  const L = b.live || {};
+  if (!L.ok) {
+    return `<div class="panel" style="margin-top:14px"><div class="tile-label">node vs. you · 24 h</div>
+      <div class="note">PMSS's live statistics are not readable on this host yet (its 2026-10 release writes them every five minutes; the first samples take about ten minutes)</div></div>`;
+  }
+  const metrics = [['cpu', 'CPU', '%'], ['ram', 'RAM', '%'], ['tx', 'network out', 'Mbit/s'], ['rx', 'network in', 'Mbit/s']];
+  const S = L.series || {};
+  return `<div class="panel" style="margin-top:14px"><div class="tile-label">node vs. you · 24 h <small class="muted">as PMSS counts it · five-minute samples · ${fmtAgo(L.at)}</small></div>
+    <table class="lvtable"><tr><th></th>${L.windows.map((w) => `<th>${esc(w.label)}</th>`).join('')}<th>24 h trend</th></tr>
+    ${metrics.map(([k, name, unit]) => `<tr><th>${name}</th>${L.windows.map((w) => w.samples ? liveCell(w[k], unit) : '<td class="muted">n/a</td>').join('')}<td>${liveSvg(S[k], unit === '%' ? 100 : Math.max(1, ...(S[k] || [[1, 0]]).map((p) => p[0])))}</td></tr>`).join('')}
+    </table>
+    <div class="note"><span class="lvnode">■ node</span> = the whole server · <span class="lvyou">■ you</span> = your account, cpu as a share of every host core; ram counts your page cache as yours but the node's reclaimable cache as free, so you can exceed the node there · you see the node's totals and your own numbers only</div></div>`;
 }
 
 /* ----- add / edit ----- */

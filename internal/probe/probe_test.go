@@ -1156,3 +1156,50 @@ func TestParseStat(t *testing.T) {
 		}
 	}
 }
+
+func TestParseLiveRings(t *testing.T) {
+	// Shapes as written on the fleet on 2026-10-22; cs arrives with a later
+	// PMSS release, so one node slot lacks it. The user ring lacks one slot.
+	node := `{"v":1,"samples":[{"t":1792696861,"dt":300,"cb":1300.5,"ct":2472,"mu":8e9,"mt":4.3e10,"tx":3.8e9,"rx":5.4e8},
+	 {"t":1792697161,"dt":299,"cb":1307.82,"ct":2472.48,"mu":8539582464,"mt":43358269440,"tx":3866847232,"rx":549797231,"cs":286.81},
+	 {"t":1792697161,"dt":299,"cb":1,"ct":2,"mu":1,"mt":1,"tx":1,"rx":1},
+	 {"t":-5,"dt":299,"cb":1,"ct":2,"mu":1,"mt":1,"tx":1,"rx":1},
+	 {"t":1792696561,"dt":300,"cb":"x","ct":2,"mu":1,"mt":1,"tx":1,"rx":1},
+	 {"t":1792696261,"dt":300,"cb":-1,"ct":2,"mu":1,"mt":1,"tx":1,"rx":1},
+	 {"t":1792695961,"dt":300,"cb":1,"ct":0,"mu":1,"mt":1,"tx":1,"rx":1}]}`
+	user := `{"v":1,"samples":[{"t":1792697161,"cpu":6.72,"mem":521621504,"tx":300469,"rx":333001},{"t":1792690000,"cpu":1e400,"mem":1,"tx":1,"rx":1}]}`
+	r, known := parseLiveRings(node, user)
+	if !known || len(r.Node) != 2 || len(r.User) != 1 {
+		t.Fatalf("known=%v node=%d user=%d", known, len(r.Node), len(r.User))
+	}
+	if n := r.Node[1]; n.T != 1792697161 || n.CB != 1307.82 || !n.HasCS || n.CS != 286.81 || r.Node[0].HasCS {
+		t.Fatalf("the first of two equal-time slots wins and keeps cs: %+v / %+v", r.Node[0], r.Node[1])
+	}
+	if u := r.User[0]; u.CPU != 6.72 || u.Mem != 521621504 {
+		t.Fatalf("user = %+v", u)
+	}
+	if r, known := parseLiveRings(node, ""); !known || len(r.User) != 0 {
+		t.Fatal("the node ring alone is enough; the user ring is optional")
+	}
+	for _, raw := range []string{"", "{", `{"samples":{}}`, `{"samples":[]}`, `[1,2]`} {
+		if _, known := parseLiveRings(raw, user); known {
+			t.Errorf("%q counted as known", raw)
+		}
+	}
+	// A forged ring longer than PMSS ever writes keeps only its newest slots.
+	var sb strings.Builder
+	sb.WriteString(`{"samples":[`)
+	for i := 0; i < 400; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, `{"t":%d,"dt":300,"cb":1,"ct":2,"mu":1,"mt":2,"tx":0,"rx":0}`, 1000+i*300)
+	}
+	sb.WriteString(`]}`)
+	if r, _ := parseLiveRings(sb.String(), ""); len(r.Node) != liveSlots || r.Node[0].T != 1000+112*300 {
+		t.Fatalf("trimmed to %d from %d", len(r.Node), 400)
+	}
+	if _, known := parseLiveRings(`{"pad":"`+strings.Repeat("x", liveMaxBytes)+`",`+node[1:], ""); known {
+		t.Fatal("an oversized ring must be refused")
+	}
+}
