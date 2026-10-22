@@ -41,6 +41,11 @@ type Hook func(ctx context.Context, s *BoxState)
 // ErrDisabled is returned by actions on a box whose polling is switched off.
 var ErrDisabled = errors.New("polling is disabled for this box; enable it before running actions")
 
+// ErrNotReady is returned by actions that would use facts read from the box
+// (its UID, container IDs, log list) before a complete probe of the box's
+// current generation has read them (BoxState.Ready).
+var ErrNotReady = errors.New("the box has not been probed since it was added, moved or the dashboard started; wait for the first poll")
+
 // Manager owns one poller per box.
 type Manager struct {
 	st       *store.Store
@@ -214,7 +219,10 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	// UI (an edit carries the live state instead and skips the read).
 	var cached BoxState
 	if prev == nil {
-		if _, err := m.st.GetCache(m.ctx, b.ID, "state", &cached); err == nil && cached.ID == b.ID {
+		// A cache from another generation (the record was moved and the
+		// process died before UpdateBox dropped the row) is not this
+		// machine's data: leave it to be overwritten by the first poll.
+		if _, err := m.st.GetCache(m.ctx, b.ID, "state", &cached); err == nil && cached.ID == b.ID && sameGeneration(cached.generation(), b) {
 			keep := st
 			st = cached
 			st.adoptIdentity(keep)
@@ -226,6 +234,9 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 		keep := *prev
 		keep.adoptIdentity(st)
 		keep.resetVolatile() // port/creds may have changed: re-verify before any action
+		// Same generation (UpdateBox starts a moved box from nothing): the
+		// facts a complete probe read are still this machine's.
+		keep.Ready = prev.Ready && b.Enabled && prev.Status != "disabled"
 		if keep.Status == "disabled" && b.Enabled {
 			keep.Status, keep.StatusReason, keep.LastError, keep.Failures = "pending", "", "", 0 // re-enabled: the first poll decides
 		}
@@ -327,7 +338,8 @@ type commitOpts struct {
 
 // commit is the only write path for a box's live state. fn runs under
 // hooksMu and mu with a copy of the stored state (nil when the box has
-// none) and returns the state to store; commit then attaches the service matched against the feed of that very moment,
+// none) and returns the state to store, or nil to store nothing (a worker
+// finding under the lock that its poller was retired); commit then attaches the service matched against the feed of that very moment,
 // assigns the next fleet-wide revision, stores, runs the hooks, and hands
 // the event to the bus in that same order (pubMu, taken before hooksMu is
 // released). Stores, alert evaluations and events therefore happen in one
@@ -349,6 +361,11 @@ func (m *Manager) commit(id int64, fn func(stored *BoxState) *BoxState, o commit
 		base = &cp
 	}
 	next := fn(base)
+	if next == nil {
+		m.mu.Unlock()
+		m.hooksMu.Unlock()
+		return BoxState{}, false
+	}
 	m.decorate(next)
 	m.rev++
 	next.Rev = m.rev
@@ -440,6 +457,25 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 		// record() cannot write it back; the wizard's memory of it goes too.
 		_ = m.st.SetCache(sctx, b.ID, authCacheKind, qbt.AuthState{})
 		detectGuard(fresh).Clear()
+	}
+	if p != nil && (AuthEndpoint(p.box) != AuthEndpoint(fresh) || clears.ForgetHostKey) {
+		// The record now names another machine (or may, once the forgotten
+		// pin is replaced): nothing measured on the old one carries over.
+		// The new poller starts from the record alone, its actions wait
+		// for the first complete probe (BoxState.Ready), and the cached
+		// state and du go, so a restart cannot bring them back either; a
+		// row that survives a failed delete is refused by its generation.
+		// The old machine's alerts resolve, except the renewal alert, which
+		// is the record's and would otherwise come back unacknowledged.
+		prev = nil
+		if err := m.st.DeleteCache(sctx, b.ID, "state", "du"); err != nil {
+			m.log.Warn("drop cache of moved box", "box", fresh.Name, "err", err)
+		}
+		if n, err := m.st.ResolveBoxAlerts(sctx, b.ID, "renewal"); err != nil {
+			m.log.Warn("resolve alerts of moved box", "box", fresh.Name, "err", err)
+		} else if n > 0 {
+			defer m.Publish(Event{Type: "alerts"}) // after the state event startPoller sends
+		}
 	}
 	// boxMu serialises edits and removals, so this only guards against a
 	// RemoveBox whose DB delete failed after the in-memory removal.

@@ -94,13 +94,22 @@ func TestAutostartKeepsOtherCronLines(t *testing.T) {
 // Install and autostart refuse before connecting when the last snapshot saw
 // the PMSS panel's qBittorrent marker.
 func TestQbtInstallRefusesPMSSManaged(t *testing.T) {
-	m := &Manager{states: map[int64]*BoxState{7: {Qbt: QbtState{PMSSManaged: true}}}}
+	m := &Manager{states: map[int64]*BoxState{7: {Ready: true, Qbt: QbtState{PMSSManaged: true}}}}
 	p := &poller{m: m, box: &store.Box{ID: 7}}
 	if _, err := p.qbtInstall(context.Background(), "https://example.com/qbittorrent-nox"); !errors.Is(err, errPMSSManagedQbt) {
 		t.Errorf("install: %v", err)
 	}
 	if _, err := p.qbtAutostart(context.Background()); !errors.Is(err, errPMSSManagedQbt) {
 		t.Errorf("autostart: %v", err)
+	}
+	// Before a probe of this generation the marker is unknown: refuse
+	// outright rather than trust the record's default of "not managed".
+	m.states[7].Ready = false
+	if _, err := p.qbtInstall(context.Background(), "https://example.com/qbittorrent-nox"); !errors.Is(err, ErrNotReady) {
+		t.Errorf("install before a probe: %v", err)
+	}
+	if _, err := p.qbtAutostart(context.Background()); !errors.Is(err, ErrNotReady) {
+		t.Errorf("autostart before a probe: %v", err)
 	}
 }
 

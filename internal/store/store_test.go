@@ -119,6 +119,49 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// ResolveBoxAlerts resolves a box's active alerts except the named keys
+// (the renewal alert belongs to the record, not the machine), and
+// DeleteCache drops only the named kinds.
+func TestResolveBoxAlertsAndDeleteCache(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	b := &Box{Name: "a", Host: "h", User: "u", Port: 22}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"disk", "unreachable", "renewal"} {
+		if _, err := s.RaiseAlert(ctx, b.ID, k, "warn", k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.ResolveBoxAlerts(ctx, b.ID, "renewal")
+	if err != nil || n != 2 {
+		t.Fatalf("resolved %d, %v", n, err)
+	}
+	keys, _ := s.ActiveAlertKeys(ctx, b.ID)
+	if len(keys) != 1 || keys[0] != "renewal" {
+		t.Fatalf("active after resolve: %v", keys)
+	}
+	for _, k := range []string{"state", "du", "qbt_auth"} {
+		if err := s.SetCache(ctx, b.ID, k, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.DeleteCache(ctx, b.ID, "state", "du"); err != nil {
+		t.Fatal(err)
+	}
+	var v string
+	for k, want := range map[string]error{"state": ErrNotFound, "du": ErrNotFound, "qbt_auth": nil} {
+		if _, err := s.GetCache(ctx, b.ID, k, &v); !errors.Is(err, want) {
+			t.Errorf("%s after delete: %v, want %v", k, err, want)
+		}
+	}
+}
+
 func TestOneActiveAlertPerKey(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "d", "test.db"))
 	if err != nil {
