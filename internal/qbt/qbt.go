@@ -730,12 +730,13 @@ func decodeRemoved(dec *json.Decoder, maxEntries int) ([]string, error) {
 	return out, expectDelim(dec, ']')
 }
 
-// Bounds on what one retained entry may hold, so the view's memory is
-// bounded by MaxTorrents times a few hundred bytes however large the
-// strings in individual responses are (each response is itself capped at
-// maxBody, but deltas accumulate). Hash keys over the bound are refused
-// as malformed (a v1 hash is 40 hex characters, a v2 hash 64); the other
-// strings are clipped at a rune boundary.
+// Bounds on what one retained entry may hold, in runes (at most four
+// bytes each), so the view's memory is bounded by MaxTorrents times a few
+// KiB however large the strings in individual responses are (each
+// response is itself capped at maxBody, but deltas accumulate). They are
+// the limits the dashboard displays anyway. Hash keys over the bound are
+// refused as malformed (a v1 hash is 40 hex characters, a v2 hash 64); the
+// other strings are clipped.
 const (
 	maxHashLen     = 64
 	maxNameLen     = 400
@@ -750,15 +751,23 @@ func (t Torrent) clipped() Torrent {
 	return t
 }
 
+// clipStr keeps the first n runes of s. A clipped result is a copy: a
+// substring would keep the whole original allocation alive, which is the
+// very thing the bounds are for.
 func clipStr(s string, n int) string {
-	if len(s) <= n {
+	if len(s) <= n { // n runes need at least n bytes
 		return s
 	}
-	cut := n
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
+	cut, runes := 0, 0
+	for cut < len(s) && runes < n {
+		_, w := utf8.DecodeRuneInString(s[cut:])
+		cut += w
+		runes++
 	}
-	return s[:cut]
+	if cut >= len(s) {
+		return s
+	}
+	return strings.Clone(s[:cut])
 }
 
 func expectDelim(dec *json.Decoder, want json.Delim) error {

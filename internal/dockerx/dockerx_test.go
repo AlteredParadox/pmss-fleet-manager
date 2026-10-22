@@ -147,7 +147,7 @@ func TestContainerCaps(t *testing.T) {
 }
 
 func TestDecodeContainersMalformed(t *testing.T) {
-	for _, body := range []string{``, `{}`, `[{"Id":1}]`, `[{"Id":"a"}`, `[{"Id":"a"},]`, `[] x`, `[][]`} {
+	for _, body := range []string{``, `{}`, `[{"Id":1}]`, `[{"Id":"a"}`, `[{"Id":"a"},]`, `[] x`, `[][]`, `null x`, `null[]`} {
 		if _, err := decodeContainers([]byte(body), MaxContainers); err == nil {
 			t.Errorf("%q decoded", body)
 		}

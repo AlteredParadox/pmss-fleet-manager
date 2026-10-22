@@ -113,7 +113,10 @@ func decodeContainers(body []byte, maxEntries int) ([]Container, error) {
 	if err != nil {
 		return nil, err
 	}
-	if tok == nil {
+	if tok == nil { // null: no containers, but still nothing may follow it
+		if _, err := dec.Token(); err != io.EOF {
+			return nil, fmt.Errorf("docker: trailing data after the container list")
+		}
 		return nil, nil
 	}
 	if tok != json.Delim('[') {

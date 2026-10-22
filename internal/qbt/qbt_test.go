@@ -31,6 +31,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
+	"unsafe"
 )
 
 func TestClientFlow(t *testing.T) {
@@ -895,14 +897,29 @@ func TestRetainedStringsBounded(t *testing.T) {
 	for _, tr := range view.torrents {
 		total += len(tr.Hash) + len(tr.Name) + len(tr.State) + len(tr.Category)
 	}
-	if bound := 20*(maxHashLen+maxNameLen+maxStateLen+maxCategoryLen) + 2*maxServerStr; total > bound || len(view.torrents) != 20 || view.rid != 20 {
+	if bound := 4 * (20*(maxHashLen+maxNameLen+maxStateLen+maxCategoryLen) + 2*maxServerStr); total > bound || len(view.torrents) != 20 || view.rid != 20 {
 		t.Fatalf("retained %d bytes of strings in %d torrents (rid %d), bound %d", total, len(view.torrents), view.rid, bound)
 	}
 	if n := view.torrents[fmt.Sprintf("%040d", 7)].Name; len(n) != maxNameLen {
 		t.Fatalf("name clipped to %d, want %d", len(n), maxNameLen)
 	}
-	// Clipping keeps whole runes.
-	if got := clipStr("ab\u00e9", 3); got != "ab" {
-		t.Fatalf("clipStr cut a rune: %q", got)
+	// The bounds are runes, as the display limits are: 400 emoji keep all
+	// 400 (1600 bytes), and a 401st goes.
+	emoji := strings.Repeat("\U0001F600", maxNameLen+1)
+	if got := clipStr(emoji, maxNameLen); utf8.RuneCountInString(got) != maxNameLen || len(got) != 4*maxNameLen || !utf8.ValidString(got) {
+		t.Fatalf("rune clip: %d runes, %d bytes", utf8.RuneCountInString(got), len(got))
+	}
+	if got := clipStr("ab\u00e9", 3); got != "ab\u00e9" {
+		t.Fatalf("three runes fit: %q", got)
+	}
+	// A clipped prefix must not alias the oversized source, or the whole
+	// source stays allocated for as long as the view keeps the prefix
+	// (fred review on PR 95).
+	src := strings.Repeat("x", 1<<16)
+	if got := clipStr(src, 10); len(got) != 10 || unsafe.StringData(got) == unsafe.StringData(src) {
+		t.Fatal("clipped prefix aliases the source allocation")
+	}
+	if got := clipStr(src[:10], 10); unsafe.StringData(got) != unsafe.StringData(src) {
+		t.Fatal("an unclipped string need not be copied")
 	}
 }
