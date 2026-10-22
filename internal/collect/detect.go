@@ -272,7 +272,7 @@ func detectQbt(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *s
 		}
 		qctx, qcancel := context.WithTimeout(ctx, 15*time.Second)
 		hp := fmt.Sprintf("127.0.0.1:%d", port)
-		qc := qbt.NewWithGuard(func(ctx context.Context) (netConn, error) { return cli.DialTCP(ctx, hp) }, hp, b.QbtUser, b.QbtPass, g)
+		qc := qbt.NewWithGuard(verifiedDial(cli, hp, port), hp, b.QbtUser, b.QbtPass, g)
 		v, err := qc.Version(qctx)
 		qcancel()
 		qc.Close()

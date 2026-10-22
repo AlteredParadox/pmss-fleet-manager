@@ -233,6 +233,88 @@ func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
 	return s.PortOwner(port)
 }
 
+// EstablishedOwner evaluates EstablishedScript's output for port. known is
+// false only for a box that hides non-listening sockets by policy
+// ("privacy"); the caller then has the pre-connect listener check alone. A
+// failed inspection, a cut-off output, or an output in which this
+// account's own tunnel connection to the port does not appear refuses. ok
+// requires every tunnel connection of this account whose peer is the
+// loopback port to have an accepting socket owned by this uid, in any
+// TCP state (a half-closed acceptor still reads); connections other
+// accounts hold to the same port, or ours to other addresses, are not
+// this connection and do not count either way.
+func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if strings.TrimSpace(lines[len(lines)-1]) != "end" {
+		return false, true, "the box's socket table came back incomplete"
+	}
+	uid, base := -1, 0
+	acceptors := map[string]int{} // our ephemeral port (as printed) -> uid of the accepting socket
+	var clients []string          // our ephemeral ports, for connections to the loopback port
+	for _, l := range lines {
+		f := strings.Fields(l)
+		if len(f) == 0 {
+			continue
+		}
+		switch f[0] {
+		case "uid":
+			if len(f) == 2 {
+				uid, _ = strconv.Atoi(f[1])
+			}
+		case "privacy":
+			return false, false, "the box hides its non-listening sockets (socket-table privacy)"
+		case "failed":
+			return false, true, "could not inspect the box's socket table (" + strings.Join(f[1:], " ") + ")"
+		case "base":
+			if len(f) == 2 && f[1] == "hex" {
+				base = 16
+			} else {
+				base = 10
+			}
+		case "c", "s":
+			if len(f) != 5 || base == 0 {
+				continue
+			}
+			p, owner, good := listenerPortUID([]string{map[int]string{16: "h", 10: "d"}[base], f[1], f[2]})
+			if !good {
+				continue
+			}
+			_ = p
+			if f[0] == "c" {
+				// Our tunnel: this account's socket whose peer is the loopback port.
+				if owner == uid && loopbackReachable(f[4]) {
+					clients = append(clients, f[1])
+				}
+				continue
+			}
+			if !loopbackReachable(f[4]) {
+				continue // accepted on another address: not reachable by our dial, not ours to judge
+			}
+			if prev, dup := acceptors[f[1]]; dup && prev != owner {
+				acceptors[f[1]] = contestedPort
+			} else {
+				acceptors[f[1]] = owner
+			}
+		}
+	}
+	if uid < 0 {
+		return false, true, "could not read the account's uid on the box"
+	}
+	if len(clients) == 0 {
+		return false, true, fmt.Sprintf("the connection to port %d is not in the box's socket table", port)
+	}
+	for _, eph := range clients {
+		owner, found := acceptors[eph]
+		switch {
+		case !found:
+			return false, true, fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
+		case owner != uid:
+			return false, true, fmt.Sprintf("the connection to port %d was accepted by another account (uid %d); refusing to use it", port, owner)
+		}
+	}
+	return true, true, ""
+}
+
 // parseListeners reads the probe's listen section: one listening socket per
 // line as "h <hexport> <uid> [<hexaddr>]" from /proc/net/tcp{,6}, or as
 // "d <port> <uid|x> [<addr>]" from ss (see listenShell). Only

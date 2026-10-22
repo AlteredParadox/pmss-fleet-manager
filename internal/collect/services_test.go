@@ -19,11 +19,15 @@ package collect
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -485,5 +489,66 @@ func TestServiceActiveStatuses(t *testing.T) {
 	m.decorate(s)
 	if s.Service == nil || s.Service.ID != 2 {
 		t.Fatalf("want the active service 2 on a host-only match, got %+v", s.Service)
+	}
+}
+
+// fakeTunnel stands in for the SSH client: DialTCP hands out one end of a
+// pipe (the other end is the "server"), Run answers EstablishedScript with
+// a canned table.
+type fakeTunnel struct {
+	out    string
+	runErr error
+	server net.Conn
+}
+
+func (f *fakeTunnel) DialTCP(ctx context.Context, addr string) (net.Conn, error) {
+	c, s := net.Pipe()
+	f.server = s
+	return c, nil
+}
+
+func (f *fakeTunnel) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
+	return []byte(f.out), nil, f.runErr
+}
+
+// verifiedDial hands out a connection only when the box attributes its
+// acceptor to this account; on a refusal or a failed inspection the
+// connection is closed before anything could be written, and the privacy
+// fallback lets it through.
+func TestVerifiedDial(t *testing.T) {
+	uid := os.Getuid()
+	ok := fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\ns BEEF %d 01 0100007F\nend\n", uid, uid, uid)
+	bad := fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\ns BEEF %d 05 0100007F\nend\n", uid, uid, uid+1)
+	ctx := context.Background()
+	ft := &fakeTunnel{out: ok}
+	conn, err := verifiedDial(ft, "127.0.0.1:8089", 8089)(ctx)
+	if err != nil {
+		t.Fatalf("own acceptor: %v", err)
+	}
+	go func() { conn.Write([]byte("hello")); conn.Close() }()
+	buf := make([]byte, 5)
+	if n, _ := io.ReadFull(ft.server, buf); n != 5 || string(buf) != "hello" {
+		t.Fatal("verified connection must be usable")
+	}
+	for name, f := range map[string]*fakeTunnel{
+		"foreign half-closed acceptor": {out: bad},
+		"inspection failed":            {out: fmt.Sprintf("uid %d\nfailed 255\nend\n", uid)},
+		"run error, no output":         {runErr: errors.New("session dropped")},
+	} {
+		conn, err := verifiedDial(f, "127.0.0.1:8089", 8089)(ctx)
+		if err == nil {
+			t.Fatalf("%s: must refuse", name)
+		}
+		_ = conn
+		// The server end sees EOF and nothing else: no bytes were sent.
+		f.server.SetReadDeadline(time.Now().Add(time.Second))
+		if n, rerr := f.server.Read(make([]byte, 16)); n != 0 || rerr != io.EOF {
+			t.Fatalf("%s: connection must be closed before any byte, got n=%d err=%v", name, n, rerr)
+		}
+	}
+	// Privacy fallback: the connection is allowed.
+	fp := &fakeTunnel{out: fmt.Sprintf("uid %d\nprivacy\nend\n", uid)}
+	if _, err := verifiedDial(fp, "127.0.0.1:8089", 8089)(ctx); err != nil {
+		t.Fatalf("privacy fallback: %v", err)
 	}
 }
