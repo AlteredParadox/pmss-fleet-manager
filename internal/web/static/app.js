@@ -386,7 +386,7 @@ function renderMain() {
     const b = curBox();
     if (b?.status === 'disabled') {
       // Polling is off: the server refuses every action, so say so up front.
-      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="disc:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
+      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="disc:"], button[data-act^="ctr:"], button[data-act^="log:"], button[data-act="du"]').forEach((el) => {
         el.disabled = true;
         el.title = 'polling is disabled for this box; enable it to run actions';
       });

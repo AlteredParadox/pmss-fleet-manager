@@ -17,10 +17,13 @@
 package dockerx
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -59,6 +62,21 @@ func TestContainersAndStats(t *testing.T) {
 	}
 	if _, err := c.Logs(ctx, "nope", 50); err == nil {
 		t.Fatal("missing container: want error")
+	}
+	// The byte cap keeps the newest output, not the oldest, and never cuts
+	// inside a frame header.
+	var framed []byte
+	for i := 0; i < 100; i++ {
+		line := []byte(fmt.Sprintf("line %03d of a long container log\n", i))
+		framed = append(framed, 1, 0, 0, 0, 0, 0, byte(len(line)>>8), byte(len(line)))
+		framed = append(framed, line...)
+	}
+	got, err := demuxTail(bytes.NewReader(framed), 200)
+	if err != nil || len(got) != 200 || !bytes.HasSuffix(got, []byte("line 099 of a long container log\n")) || bytes.Contains(got, []byte{1, 0, 0, 0}) {
+		t.Fatalf("tail cap: %v %q", err, got)
+	}
+	if got, _ := demuxTail(strings.NewReader("raw tty output that is longer than the cap\n"), 10); string(got) != "n the cap\n" {
+		t.Fatalf("raw tail cap: %q", got)
 	}
 	cs, err := c.Containers(ctx)
 	if err != nil || len(cs) != 1 || cs[0].Name() != "jellyfin" || cs[0].Ports[0].PublicPort != 8096 {
