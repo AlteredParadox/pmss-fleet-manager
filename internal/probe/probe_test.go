@@ -115,6 +115,7 @@ WebUI\LocalHostAuth=false
 4242 /home/ragnar/bin/qbittorrent-nox -d
 5001 /home/ragnar/.bin/Radarr/Radarr -nobrowser -data=/home/ragnar/.config/Radarr
 5003 rtorrent main
+end
 @@proc_stat
 100
 4242 500000 117250 1234567
@@ -302,7 +303,7 @@ func TestParseProcsHostileAndMissing(t *testing.T) {
 		t.Fatalf("empty ps must be unknown, got %v %v", known, procs)
 	}
 	raw := "1 0 -5 nan -1 bad\n2 0 99999999999999 1e99 5 huge\nx y z\n3 0 10 1 1 ok"
-	procs, known, argsKnown = parseProcs(raw, "3 cmd with args\nnotanumber args", "0\n3 100 100 5", 0) // CLK_TCK 0: stat ignored
+	procs, known, argsKnown = parseProcs(raw, "3 cmd with args\nnotanumber args\nend", "0\n3 100 100 5", 0) // CLK_TCK 0: stat ignored
 	if !known || !argsKnown || len(procs) != 3 {
 		t.Fatalf("procs: %+v", procs)
 	}
@@ -414,7 +415,7 @@ func TestQbtVersionSkippedWhileUnchanged(t *testing.T) {
 	if strings.Count(string(calls), "run") != 4 {
 		t.Fatalf("calls: %q", calls)
 	}
-	if s := ScriptWith("abc", "12 34'; rm -rf /"); !strings.HasPrefix(s, "PMSS_TAG='abc'\nPMSS_QBT_SEEN='12 34   '\n") {
+	if s := ScriptWith("abc", "12 34'; rm -rf /", true); !strings.HasPrefix(s, "PMSS_TAG='abc'\nPMSS_QBT_SEEN='12 34   '\nPMSS_INVENTORY=1\n") {
 		t.Fatalf("seen must be digits and spaces only: %q", s[:60])
 	}
 }
@@ -483,7 +484,7 @@ func TestScriptWithTag(t *testing.T) {
 		t.Fatalf("bad tag %q", tag)
 	}
 	src := ScriptWithTag(tag)
-	if !strings.HasPrefix(src, "PMSS_TAG='"+tag+"'\nPMSS_QBT_SEEN=''\n#!/bin/sh") {
+	if !strings.HasPrefix(src, "PMSS_TAG='"+tag+"'\nPMSS_QBT_SEEN=''\nPMSS_INVENTORY=1\n#!/bin/sh") {
 		t.Fatalf("tag line missing: %q", src[:60])
 	}
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -798,13 +799,78 @@ func TestProcsShellDropsTimedOutListing(t *testing.T) {
 		out, _ := cmd.Output()
 		return string(out)
 	}
+	// The command lines are streamed (no shell variable holds them all)
+	// and a completed ps appends the "end" marker; a cut listing lacks it
+	// and the parser ignores it whole.
 	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 python3 bot.py'\nexit 124\n"), 0o700)
-	if out := runArgs(); out != "" {
-		t.Fatalf("timed-out args ps must print nothing, got %q", out)
-	}
-	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 python3 bot.py'\n"), 0o700)
 	if out := runArgs(); out != "1 python3 bot.py\n" {
+		t.Fatalf("timed-out args ps must print no marker, got %q", out)
+	}
+	if _, _, argsKnown := parseProcs("1 0 1 0 1 python3", "1 python3 bot.py\n", "", 0); argsKnown {
+		t.Fatal("a listing without the marker must not count as known")
+	}
+	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 python3 bot.py'\necho \"2 $(head -c 600 /dev/zero | tr '\\0' x)\"\n"), 0o700)
+	out := runArgs()
+	if !strings.HasPrefix(out, "1 python3 bot.py\n2 xxxx") || !strings.HasSuffix(out, "\nend\n") || len(strings.Split(strings.TrimSpace(out), "\n")[1]) != 400 {
 		t.Fatalf("completed args ps: %q", out)
+	}
+	procs, _, argsKnown := parseProcs("1 0 1 0 1 python3\n2 0 1 0 1 x\n3 0 1 0 1 end", out+"3 end\nend\n", "", 0)
+	if !argsKnown || len(procs) != 3 || procs[0].Args != "python3 bot.py" || len(procs[1].Args) != 398 || procs[2].Args != "end" {
+		t.Fatalf("parsed args: known=%v %+v", argsKnown, procs)
+	}
+	if _, _, argsKnown := parseProcs("1 0 1 0 1 sh", "end\n", "", 0); !argsKnown {
+		t.Fatal("a marker alone is a complete (empty) listing")
+	}
+}
+
+// With PMSS_INVENTORY=0 the probe skips the inventory sections and says so;
+// the poller carries the last inventory over such a poll.
+func TestInventoryGated(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	run := func(inventory bool) *Snapshot {
+		cmd := exec.Command("sh")
+		cmd.Stdin = strings.NewReader(ScriptWith("t1", "", inventory))
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap, err := ParseTagged(out, "t1", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snap
+	}
+	full := run(true)
+	if !full.Inventory || full.Host.Kernel == "" || full.Host.NCPU == 0 || !full.LogsKnown {
+		t.Fatalf("full probe: inventory=%v kernel=%q ncpu=%d logs=%v", full.Inventory, full.Host.Kernel, full.Host.NCPU, full.LogsKnown)
+	}
+	fast := run(false)
+	if fast.Inventory || fast.Host.Kernel != "" || fast.Host.NCPU != 0 || fast.LogsKnown || fast.Qbt.BinaryStat != "" {
+		t.Fatalf("fast probe ran inventory sections: %+v", fast.Host)
+	}
+	if fast.Host.UptimeSec <= 0 || fast.Host.MemTotal <= 0 || !fast.ProcsKnown {
+		t.Fatalf("fast probe must still measure: %+v procs=%v", fast.Host, fast.ProcsKnown)
+	}
+	kept := full.InventoryOnly()
+	if len(kept.Procs) != 0 || !kept.Inventory || kept.Host.Kernel != full.Host.Kernel || kept.Host.UptimeSec != 0 {
+		t.Fatalf("InventoryOnly: %+v", kept.Host)
+	}
+	fast.CarryInventory(kept)
+	if fast.Inventory || fast.Host.Kernel != full.Host.Kernel || fast.Host.NCPU != full.Host.NCPU || fast.LogsKnown != full.LogsKnown || len(fast.Logs) != len(full.Logs) {
+		t.Fatalf("carry: kernel=%q ncpu=%d logs=%v", fast.Host.Kernel, fast.Host.NCPU, fast.LogsKnown)
+	}
+	// A probe that ran the sections itself is never overwritten by a carry.
+	prev := &Snapshot{Inventory: true, Host: HostInfo{Kernel: "old"}}
+	full.CarryInventory(prev)
+	if full.Host.Kernel == "old" {
+		t.Fatal("carry overwrote a fresh inventory")
+	}
+	fast2 := &Snapshot{}
+	fast2.CarryInventory(nil)
+	if fast2.Host.Kernel != "" {
+		t.Fatal("carry from nothing")
 	}
 }
 

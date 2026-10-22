@@ -1051,10 +1051,26 @@ function tabLogs(b) {
   const list = `${[...groups].map(([d, fs]) => logGroup(d, fs, sel)).join('')}
     ${ctrs.length ? `<div class="loggroup"><div class="tile-label">containers</div>${ctrs.map((c) => `<button class="logitem ${sel('ctr', c.id)}" data-act="log:ctr" data-cid="${esc(c.id)}" data-name="${esc(c.name)}"><span class="ellip">${esc(c.name)}</span><span class="muted">${c.state === 'running' ? 'running' : esc(c.state)}</span></button>`).join('')}</div>` : ''}`;
   const empty = !L.ok ? `<div class="hint">log listing not read${b.status === 'offline' ? ' (box unreachable)' : b.status === 'pending' ? ' yet' : ''}.</div>` : files.length === 0 && ctrs.length === 0 ? `<div class="hint">no log files in the usual places (~/.logs, qBittorrent, the *arr apps, Jellyfin, SABnzbd, Deluge, rclone, FlexGet, pyLoad, Cloudplow, lighttpd) and no containers.</div>` : '';
+  // The listing comes from the inventory poll (every 15 minutes), not every poll.
+  const when = L.ok && L.at && !L.at.startsWith('0001') ? `<div class="hint" style="display:flex;justify-content:space-between;align-items:center">listed ${fmtAgo(L.at)}<button class="small" data-act="rescan-logs" ${b.status === 'disabled' ? 'disabled' : ''}>rescan</button></div>` : '';
   return `<div class="logs">
-    <div class="panel loglist">${empty}${list}</div>
+    <div class="panel loglist">${when}${empty}${list}</div>
     <div class="panel logpane">${logViewer(V)}</div>
   </div>`;
+}
+// Opening the logs tab on a listing older than ten minutes asks the box
+// for a fresh one (a refresh runs the inventory sections); once per box
+// per ten minutes, so flipping tabs does not queue probes.
+const LOGS_STALE_MS = 10 * 60 * 1000;
+const logsRescanAt = new Map();
+function rescanLogsIfStale() {
+  const b = S.detail && S.detail.id === S.selId ? S.detail : boxById(S.selId);
+  if (!b || b.status === 'disabled' || !b.logs || !b.logs.ok) return;
+  const at = new Date(b.logs.at || 0).getTime();
+  const last = logsRescanAt.get(b.id) || 0;
+  if (Date.now() - at < LOGS_STALE_MS || Date.now() - last < LOGS_STALE_MS) return;
+  logsRescanAt.set(b.id, Date.now());
+  api('POST', `${BASE}/api/boxes/${b.id}/refresh`).catch(() => {});
 }
 function logViewer(V) {
   if (!V) return `<div class="empty" style="border:0">pick a log on the left: the last ${300} lines are fetched from the box each time, nothing is streamed or stored.</div>`;
@@ -1509,7 +1525,7 @@ document.addEventListener('click', async (e) => {
   const fv = e.target.closest('[data-fleetview]');
   if (fv) { S.fleetView = fv.dataset.fleetview; S.fleetViewTouched = true; render(); return; }
   const tab = e.target.closest('[data-tab]');
-  if (tab) { S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; S.logView = null; S.logOpen = new Set(); history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); render(); return; }
+  if (tab) { S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; S.logView = null; S.logOpen = new Set(); history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); if (S.tab === 'logs') rescanLogsIfStale(); render(); return; }
   const seg = e.target.closest('[data-s-seg]');
   if (seg) {
     S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; S.settingsTouched[seg.dataset.sSeg] = true;
@@ -1539,6 +1555,7 @@ async function boxAction(a) {
     else toast(`refresh requested for ${live.length} boxes`);
   }
   else if (a === 'refresh') { await api('POST', `${BASE}/api/boxes/${S.selId}/refresh`); toast('refresh requested'); }
+  else if (a === 'rescan-logs') { await api('POST', `${BASE}/api/boxes/${S.selId}/refresh`); toast('rescanning logs with the next poll'); }
   else if (a === 'du') { const id = S.selId; await api('POST', `${BASE}/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
   else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `${BASE}/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
 }
@@ -1650,7 +1667,7 @@ async function wizardAction(a) {
   else if (a === 'edit:save') { const A = S.add; A.errors = validateForm(A.form); if (Object.keys(A.errors).length) { render(); return; } void confirmAdd(); }
 }
 async function runAction(a, act) {
-  if (a === 'refresh-all' || a === 'refresh' || a === 'du' || a === 'remove') await boxAction(a);
+  if (a === 'refresh-all' || a === 'refresh' || a === 'rescan-logs' || a === 'du' || a === 'remove') await boxAction(a);
   else if (a.startsWith('qbt:')) await qbtAction(a, act);
   else if (a.startsWith('tor:')) await torrentAction(a, act);
   else if (a.startsWith('tor-add:')) await torAddAction(a);

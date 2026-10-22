@@ -91,6 +91,7 @@ type LogFileView struct {
 // the list. Reading one is on demand (Manager.ReadLog).
 type LogsState struct {
 	OK    bool          `json:"ok"`
+	At    time.Time     `json:"at"` // when the listing was read (inventory polls only; a refresh re-reads it)
 	Files []LogFileView `json:"files,omitempty"`
 }
 

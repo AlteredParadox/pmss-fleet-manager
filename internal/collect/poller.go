@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -62,6 +63,14 @@ type poller struct {
 	// version it answered, so the probe can skip --version (which writes to
 	// the user's qBittorrent log) while the binary is unchanged.
 	qbtBinStat, qbtBinVersion string
+	// inv is the last probe that ran the inventory sections (trimmed to
+	// them) and invAt when; fast polls carry it (every inventoryInterval
+	// the sections run again). invWant asks the next poll to run them
+	// regardless of age: a manual refresh, an install or an autostart
+	// change, or the logs tab finding its listing stale.
+	inv     *probe.Snapshot
+	invAt   time.Time
+	invWant atomic.Bool
 	// qbtProcKey identifies the running qbittorrent-nox process(es) by pid
 	// and start tick, so a restart between two polls that both saw the
 	// client up is noticed (see carriedFirewalledSince).
@@ -223,6 +232,24 @@ func (p *poller) wake() {
 	case p.wakeCh <- struct{}{}:
 	default:
 	}
+}
+
+// inventoryInterval is how often a poll re-reads the inventory sections on
+// its own (see probe.Script): a quarter of an hour, so a change made on
+// the PMSS side (a client update, a crontab rewrite, a new log) is seen
+// soon enough without paying for it every 30 s.
+const inventoryInterval = 15 * time.Minute
+
+// inventoryDue reports whether the poll starting at now should run the
+// inventory sections: never run yet, inventoryInterval old, or asked for.
+func (p *poller) inventoryDue(now time.Time) bool {
+	return p.inv == nil || now.Sub(p.invAt) >= inventoryInterval || p.invWant.Load()
+}
+
+// wakeInventory polls now with the inventory sections included.
+func (p *poller) wakeInventory() {
+	p.invWant.Store(true)
+	p.wake()
 }
 
 func (p *poller) stopAndWait() {
@@ -466,8 +493,9 @@ func (p *poller) poll(ctx context.Context) {
 	}
 	st.HostKeyFP = fingerprintOrEmpty(p.hostKey()) // after the dial: the first connect pins it
 	tag := probe.NewTag()
+	inventory := p.inventoryDue(start)
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWith(tag, p.qbtBinStat)))
+	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWith(tag, p.qbtBinStat, inventory)))
 	cancel()
 	if err != nil && len(out) == 0 {
 		p.mu.Lock()
@@ -483,6 +511,12 @@ func (p *poller) poll(ctx context.Context) {
 	if err != nil {
 		p.fail(ctx, &st, err, start)
 		return
+	}
+	if snap.Inventory {
+		p.inv, p.invAt = snap.InventoryOnly(), start
+		p.invWant.Store(false)
+	} else {
+		snap.CarryInventory(p.inv)
 	}
 	p.qbtBinStat, p.qbtBinVersion, snap.Qbt.BinaryVersion = resolveQbtVersion(p.qbtBinStat, p.qbtBinVersion, snap.Qbt)
 	p.apply(&st, snap)
@@ -713,7 +747,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 		p.mu.Unlock()
 	}
 
-	st.Logs = LogsState{OK: snap.LogsKnown}
+	st.Logs = LogsState{OK: snap.LogsKnown, At: p.invAt}
 	for _, f := range snap.Logs {
 		st.Logs.Files = append(st.Logs.Files, LogFileView{Path: f.Path, Size: f.Size, MTime: f.MTime})
 	}

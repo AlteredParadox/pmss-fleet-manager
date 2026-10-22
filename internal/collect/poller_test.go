@@ -283,3 +283,30 @@ func TestQbtProcKey(t *testing.T) {
 		t.Fatal("start tick ignored")
 	}
 }
+
+// The inventory sections run on the first poll, then every
+// inventoryInterval, and at once when asked (refresh, install, autostart,
+// a stale logs listing).
+func TestInventoryDue(t *testing.T) {
+	p := newPoller(nil, &store.Box{ID: 1})
+	now := time.Now()
+	if !p.inventoryDue(now) {
+		t.Fatal("first poll must run the inventory")
+	}
+	p.inv, p.invAt = &probe.Snapshot{Inventory: true}, now
+	if p.inventoryDue(now.Add(inventoryInterval - time.Second)) {
+		t.Fatal("too soon")
+	}
+	if !p.inventoryDue(now.Add(inventoryInterval)) {
+		t.Fatal("due again after the interval")
+	}
+	p.wakeInventory()
+	if !p.inventoryDue(now) {
+		t.Fatal("asked for")
+	}
+	select {
+	case <-p.wakeCh:
+	default:
+		t.Fatal("wakeInventory must wake the poller")
+	}
+}
