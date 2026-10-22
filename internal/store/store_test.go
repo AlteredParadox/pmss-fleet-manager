@@ -326,3 +326,75 @@ func TestSetHostKeyReportsPin(t *testing.T) {
 		t.Fatalf("pin: %q", got.HostKey)
 	}
 }
+
+// UpdateBox is a compare-and-set on the revision, and the host-key pin is
+// decided inside the statement: kept unless forgotten or the endpoint
+// changed, filled when empty.
+func TestUpdateBoxRevisionAndPin(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "r.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	b := &Box{Name: "x", Host: "h", User: "u", Port: 22, Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := s.GetBox(ctx, b.ID) // two tabs load revision 0
+	c, _ := s.GetBox(ctx, b.ID)
+	a.Name = "from A"
+	if err := s.UpdateBox(ctx, a, Clears{}); err != nil || a.Revision != 1 {
+		t.Fatalf("first edit: %v rev %d", err, a.Revision)
+	}
+	c.Name = "from C"
+	if err := s.UpdateBox(ctx, c, Clears{}); !errors.Is(err, ErrStale) {
+		t.Fatalf("stale edit must be refused, got %v", err)
+	}
+	got, _ := s.GetBox(ctx, b.ID)
+	if got.Name != "from A" || got.Revision != 1 {
+		t.Fatalf("after stale edit: %+v", got)
+	}
+	// Pin rules. A poll pins between the edit's read and its write: kept.
+	e, _ := s.GetBox(ctx, b.ID)
+	if pinned, _ := s.SetHostKey(ctx, b.ID, "h", 22, "ssh-ed25519 POLL"); !pinned {
+		t.Fatal("pin")
+	}
+	e.HostKey = "" // the edit carries no key
+	if err := s.UpdateBox(ctx, e, Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.GetBox(ctx, b.ID); got.HostKey != "ssh-ed25519 POLL" {
+		t.Fatalf("a pin stored meanwhile must survive an unrelated edit: %q", got.HostKey)
+	}
+	// A supplied key does not replace an existing pin, forget clears it,
+	// an empty pin is filled, a changed endpoint takes the supplied key.
+	e, _ = s.GetBox(ctx, b.ID)
+	e.HostKey = "ssh-ed25519 OTHER"
+	s.UpdateBox(ctx, e, Clears{})
+	if got, _ = s.GetBox(ctx, b.ID); got.HostKey != "ssh-ed25519 POLL" {
+		t.Fatalf("existing pin replaced: %q", got.HostKey)
+	}
+	e, _ = s.GetBox(ctx, b.ID)
+	s.UpdateBox(ctx, e, Clears{ForgetHostKey: true})
+	if got, _ = s.GetBox(ctx, b.ID); got.HostKey != "" {
+		t.Fatalf("forget: %q", got.HostKey)
+	}
+	e, _ = s.GetBox(ctx, b.ID)
+	e.HostKey = "ssh-ed25519 FILL"
+	s.UpdateBox(ctx, e, Clears{})
+	if got, _ = s.GetBox(ctx, b.ID); got.HostKey != "ssh-ed25519 FILL" {
+		t.Fatalf("fill: %q", got.HostKey)
+	}
+	e, _ = s.GetBox(ctx, b.ID)
+	e.Host, e.HostKey = "h2", ""
+	s.UpdateBox(ctx, e, Clears{ReplaceHostKey: true})
+	if got, _ = s.GetBox(ctx, b.ID); got.HostKey != "" || got.Host != "h2" {
+		t.Fatalf("replace on move: %+v", got)
+	}
+	gone := *got
+	gone.ID = 9999
+	if err := s.UpdateBox(ctx, &gone, Clears{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing row: %v", err)
+	}
+}

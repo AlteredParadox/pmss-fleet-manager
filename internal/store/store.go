@@ -66,6 +66,11 @@ type Box struct {
 	// raise an alert when they are not running. Edited only through
 	// SetAppsWatch, so a box edit never touches it.
 	AppsWatch []string `json:"apps_watch"`
+	// Revision counts edits of the record. An update must name the
+	// revision it was based on and fails with ErrStale otherwise, so two
+	// tabs editing one box from the same snapshot cannot each apply their
+	// view of the endpoint and leave a password bound to the wrong host.
+	Revision int64 `json:"revision"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -236,7 +241,24 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
-	return s.ensureAppsWatchColumn()
+	if err := s.ensureAppsWatchColumn(); err != nil {
+		return err
+	}
+	return s.ensureRevisionColumn()
+}
+
+const addRevisionColSQL = "ALTER TABLE boxes ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"
+
+// ensureRevisionColumn adds boxes.revision to a database from before it existed.
+func (s *Store) ensureRevisionColumn() error {
+	has, err := s.hasBoxesColumn("revision")
+	if err != nil || has {
+		return err
+	}
+	if _, err := s.db.Exec(addRevisionColSQL); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	return nil
 }
 
 // Columns added after 1.3.1; SQLite has no ADD COLUMN IF NOT EXISTS, so the
@@ -305,7 +327,7 @@ func (s *Store) SetAppsWatch(ctx context.Context, id int64, keys []string) error
 }
 
 const boxCols = `id, name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
-	qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at, apps_watch`
+	qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at, apps_watch, revision`
 
 // The box queries are constants: nothing from a request is ever spliced in.
 const (
@@ -318,7 +340,7 @@ func scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 	var created, updated, watch string
 	err := row.Scan(&b.ID, &b.Name, &b.Host, &b.Port, &b.User, &b.AuthMethod, &b.KeyPath, &b.Password, &b.HostKey,
 		&b.Type, &b.Plan, &b.Datacenter, &b.Renewal, &b.QbtEnabled, &b.QbtPort, &b.QbtUser, &b.QbtPass, &b.QbtStartCmd,
-		&b.DockerEnabled, &b.DuEnabled, &b.Enabled, &created, &updated, &watch)
+		&b.DockerEnabled, &b.DuEnabled, &b.Enabled, &created, &updated, &watch, &b.Revision)
 	if err != nil {
 		return nil, err
 	}
@@ -352,6 +374,10 @@ func (s *Store) ListBoxes(ctx context.Context) ([]*Box, error) {
 
 // ErrNotFound is returned when a row does not exist.
 var ErrNotFound = errors.New("not found")
+
+// ErrStale is returned by UpdateBox when the record changed since the
+// revision the edit was based on.
+var ErrStale = errors.New("the box was changed by another edit since this form was loaded; reload it and apply your change again")
 
 // GetBox loads one box.
 func (s *Store) GetBox(ctx context.Context, id int64) (*Box, error) {
@@ -390,12 +416,21 @@ func (s *Store) CreateBox(ctx context.Context, b *Box) error {
 type Clears struct {
 	Password bool // the SSH password
 	QbtPass  bool // the WebUI password
+	// The host-key pin: ForgetHostKey clears it, ReplaceHostKey (the
+	// endpoint changed) sets it to the Box's HostKey (possibly none), and
+	// neither keeps a pin already in the row, filling an empty one with the
+	// Box's HostKey. Decided in the same statement as the rest, so a pin a
+	// poll stored between the edit's read and its write survives.
+	ForgetHostKey  bool
+	ReplaceHostKey bool
 }
 
-// UpdateBox writes all mutable fields in one statement. For each secret the
-// outcome is clear, keep (blank field) or replace, so an edit and the
-// removal of a password it implies land together or not at all. A missing
-// row is ErrNotFound.
+// UpdateBox writes all mutable fields in one statement, conditioned on
+// b.Revision being the row's current revision (compare-and-set) and
+// incrementing it. For each secret the outcome is clear, keep (blank field)
+// or replace, so an edit and the removal of a password it implies land
+// together or not at all. A missing row is ErrNotFound, a changed row
+// ErrStale; on success b.Revision is the new revision.
 func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	now := time.Now().UTC()
 	b.UpdatedAt = now
@@ -406,18 +441,30 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 		b.QbtPass = ""
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
-		password=CASE WHEN ? THEN '' WHEN ?='' THEN password ELSE ? END, host_key=?, type=?, plan=?, datacenter=?, renewal=?,
+		password=CASE WHEN ? THEN '' WHEN ?='' THEN password ELSE ? END,
+		host_key=CASE WHEN ? THEN '' WHEN ? THEN ? WHEN host_key='' THEN ? ELSE host_key END,
+		type=?, plan=?, datacenter=?, renewal=?,
 		qbt_enabled=?, qbt_port=?, qbt_user=?, qbt_pass=CASE WHEN ? THEN '' WHEN ?='' THEN qbt_pass ELSE ? END, qbt_start_cmd=?,
-		docker_enabled=?, du_enabled=?, enabled=?, updated_at=? WHERE id=?`,
-		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clears.Password, b.Password, b.Password, b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
+		docker_enabled=?, du_enabled=?, enabled=?, updated_at=?, revision=revision+1 WHERE id=? AND revision=?`,
+		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clears.Password, b.Password, b.Password,
+		clears.ForgetHostKey, clears.ReplaceHostKey, b.HostKey, b.HostKey,
+		b.Type, b.Plan, b.Datacenter, b.Renewal,
 		b.QbtEnabled, b.QbtPort, b.QbtUser, clears.QbtPass, b.QbtPass, b.QbtPass, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
-		now.Format(time.RFC3339), b.ID)
+		now.Format(time.RFC3339), b.ID, b.Revision)
 	if err != nil {
 		return err
 	}
 	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		return ErrNotFound
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM boxes WHERE id=?`, b.ID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return ErrNotFound
+		}
+		return ErrStale
 	}
+	b.Revision++
 	return nil
 }
 

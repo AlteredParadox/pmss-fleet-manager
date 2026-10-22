@@ -59,6 +59,18 @@ func newTestServerWith(t *testing.T, auth, basePath string) (*Server, *store.Sto
 	return New(st, m, auth, basePath), st
 }
 
+// put edits a box the way the page does: with the record's current
+// revision spliced into the body.
+func put(t *testing.T, h http.Handler, st *store.Store, id int64, body string, hdr map[string]string) (int, string) {
+	t.Helper()
+	b, err := st.GetBox(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = fmt.Sprintf(`{"revision":%d,%s`, b.Revision, strings.TrimPrefix(strings.TrimSpace(body), "{"))
+	return do(t, h, "PUT", fmt.Sprintf("/api/boxes/%d", id), body, hdr)
+}
+
 func do(t *testing.T, h http.Handler, method, path, body string, hdr map[string]string) (int, string) {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -255,7 +267,7 @@ func TestEditClearsHostKeyOnHostChangeOrForget(t *testing.T) {
 		t.Fatal("pin not stored")
 	}
 	// Edit without touching host/port and without the key: pin kept.
-	code, body = do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u"}`, hdr)
+	code, body = put(t, s, st, id, `{"name":"b2","host":"a.example","user":"u"}`, hdr)
 	if code != 200 {
 		t.Fatalf("edit: %d %s", code, body)
 	}
@@ -264,14 +276,14 @@ func TestEditClearsHostKeyOnHostChangeOrForget(t *testing.T) {
 		t.Fatal("pin must survive an unrelated edit")
 	}
 	// Host change: pin cleared.
-	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"b.example","user":"u"}`, hdr)
+	put(t, s, st, id, `{"name":"b2","host":"b.example","user":"u"}`, hdr)
 	b, _ = st.GetBox(context.Background(), id)
 	if b.HostKey != "" {
 		t.Fatal("pin must clear when the host changes")
 	}
 	// Re-pin, then explicit forget.
-	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"b.example","user":"u","host_key":"ssh-ed25519 BBBB"}`, hdr)
-	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"b.example","user":"u","forget_host_key":true}`, hdr)
+	put(t, s, st, id, `{"name":"b2","host":"b.example","user":"u","host_key":"ssh-ed25519 BBBB"}`, hdr)
+	put(t, s, st, id, `{"name":"b2","host":"b.example","user":"u","forget_host_key":true}`, hdr)
 	b, _ = st.GetBox(context.Background(), id)
 	if b.HostKey != "" {
 		t.Fatal("forget_host_key must clear the pin")
@@ -320,7 +332,7 @@ func TestEditClearsSecrets(t *testing.T) {
 	do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","auth_method":"password","password":"pw","qbt_user":"q","qbt_pass":"qp"}`, hdr)
 	boxes, _ := st.ListBoxes(context.Background())
 	id := boxes[0].ID
-	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b","host":"a.example","user":"u","auth_method":"key","qbt_user":"q","clear_qbt_pass":true}`, hdr)
+	put(t, s, st, id, `{"name":"b","host":"a.example","user":"u","auth_method":"key","qbt_user":"q","clear_qbt_pass":true}`, hdr)
 	b, _ := st.GetBox(context.Background(), id)
 	if b.Password != "" || b.QbtPass != "" {
 		t.Fatalf("secrets not cleared: ssh=%q qbt=%q", b.Password, b.QbtPass)
@@ -335,26 +347,26 @@ func TestUpdateRulesForPinsAndSecrets(t *testing.T) {
 	id := boxes[0].ID
 	get := func() *store.Box { b, _ := st.GetBox(context.Background(), id); return b }
 	// Changed host with a blank password: refused, nothing changes.
-	code, body := do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b","host":"b.example","user":"u","auth_method":"password"}`, hdr)
+	code, body := put(t, s, st, id, `{"name":"b","host":"b.example","user":"u","auth_method":"password"}`, hdr)
 	if code != 400 || !strings.Contains(body, "re-enter") || get().Host != "A.example" {
 		t.Fatalf("host change without password: %d %s host=%s", code, body, get().Host)
 	}
 	// Changed user only: same refusal (secrets are bound to the user too).
-	if code, _ = do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b","host":"a.example","user":"v","auth_method":"password"}`, hdr); code != 400 {
+	if code, _ = put(t, s, st, id, `{"name":"b","host":"a.example","user":"v","auth_method":"password"}`, hdr); code != 400 {
 		t.Fatalf("user change without password: %d", code)
 	}
 	// Same endpoint (host case differs): a supplied key must not replace the pin.
-	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","auth_method":"password","host_key":"ssh-ed25519 OTHER"}`, hdr)
+	put(t, s, st, id, `{"name":"b2","host":"a.example","user":"u","auth_method":"password","host_key":"ssh-ed25519 OTHER"}`, hdr)
 	if b := get(); b.HostKey != "ssh-ed25519 PIN" || b.Name != "b2" || b.Password != "pw" {
 		t.Fatalf("unchanged endpoint must keep pin and password: %+v", b)
 	}
 	// Forget wins over a supplied key.
-	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"a.example","user":"u","auth_method":"password","host_key":"ssh-ed25519 OTHER","forget_host_key":true}`, hdr)
+	put(t, s, st, id, `{"name":"b2","host":"a.example","user":"u","auth_method":"password","host_key":"ssh-ed25519 OTHER","forget_host_key":true}`, hdr)
 	if get().HostKey != "" {
 		t.Fatal("forget_host_key must clear the pin even when a key is supplied")
 	}
 	// Changed host WITH a typed password: allowed, and the fresh detect key is pinned.
-	do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b2","host":"b.example","user":"u","auth_method":"password","password":"pw2","host_key":"ssh-ed25519 NEW"}`, hdr)
+	put(t, s, st, id, `{"name":"b2","host":"b.example","user":"u","auth_method":"password","password":"pw2","host_key":"ssh-ed25519 NEW"}`, hdr)
 	if b := get(); b.Host != "b.example" || b.HostKey != "ssh-ed25519 NEW" || b.Password != "pw2" {
 		t.Fatalf("host change with password: %+v", b)
 	}
@@ -374,11 +386,11 @@ func TestMoveRequiresWebUIPasswordToo(t *testing.T) {
 	do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","auth_method":"key","qbt_user":"q","qbt_pass":"qp"}`, hdr)
 	boxes, _ := st.ListBoxes(context.Background())
 	id := boxes[0].ID
-	code, body := do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b","host":"b.example","user":"u","auth_method":"key","qbt_user":"q"}`, hdr)
+	code, body := put(t, s, st, id, `{"name":"b","host":"b.example","user":"u","auth_method":"key","qbt_user":"q"}`, hdr)
 	if code != 400 || !strings.Contains(body, "WebUI password") {
 		t.Fatalf("move with saved WebUI password and blank field: %d %s", code, body)
 	}
-	if code, _ = do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"b","host":"b.example","user":"u","auth_method":"key","qbt_user":"q","clear_qbt_pass":true}`, hdr); code != 200 {
+	if code, _ = put(t, s, st, id, `{"name":"b","host":"b.example","user":"u","auth_method":"key","qbt_user":"q","clear_qbt_pass":true}`, hdr); code != 200 {
 		t.Fatalf("move with remove ticked: %d", code)
 	}
 	if b, _ := st.GetBox(context.Background(), id); b.Host != "b.example" || b.QbtPass != "" {
@@ -623,5 +635,54 @@ func TestAuthThrottleAndSSECap(t *testing.T) {
 	<-done
 	if rr.Code != 200 || len(s.sseSlots) != maxSSEStreams-1 {
 		t.Fatalf("stream: code %d slots %d", rr.Code, len(s.sseSlots))
+	}
+}
+
+// Two tabs edit one box from the same snapshot: A moves it to endpoint B
+// with a new password, then B (stale) saves an unrelated change. B must be
+// refused with 409, so the record can never end up as endpoint A with B's
+// password (external review 3, finding 1).
+func TestStaleEditCannotRebindSecret(t *testing.T) {
+	s, st := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","auth_method":"password","password":"P_A","qbt_pass":"Q_A"}`, hdr)
+	boxes, _ := st.ListBoxes(context.Background())
+	id := boxes[0].ID
+	snap, _ := st.GetBox(context.Background(), id) // both tabs loaded this
+	tabA := fmt.Sprintf(`{"revision":%d,"name":"b","host":"b.example","user":"u","auth_method":"password","password":"P_B","qbt_pass":"Q_B"}`, snap.Revision)
+	if code, body := do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), tabA, hdr); code != 200 {
+		t.Fatalf("tab A: %d %s", code, body)
+	}
+	tabB := fmt.Sprintf(`{"revision":%d,"name":"renamed","host":"a.example","user":"u","auth_method":"password"}`, snap.Revision)
+	code, body := do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), tabB, hdr)
+	if code != 409 || !strings.Contains(body, `"box"`) {
+		t.Fatalf("tab B must be refused as stale with the fresh record: %d %s", code, body)
+	}
+	got, _ := st.GetBox(context.Background(), id)
+	if got.Host != "b.example" || got.Password != "P_B" || got.QbtPass != "Q_B" || got.Name != "b" || got.Revision != snap.Revision+1 {
+		t.Fatalf("record must be exactly tab A's: %+v", got)
+	}
+	// Without a revision an edit is refused outright.
+	if code, _ := do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), `{"name":"x","host":"b.example","user":"u"}`, hdr); code != 400 {
+		t.Fatalf("no revision: %d", code)
+	}
+	// A pin a poll stored while the form was open survives the save.
+	do(t, s, "POST", "/api/boxes", `{"name":"p","host":"p.example","user":"u"}`, hdr)
+	boxes, _ = st.ListBoxes(context.Background())
+	var pid int64
+	for _, b := range boxes {
+		if b.Name == "p" {
+			pid = b.ID
+		}
+	}
+	snap, _ = st.GetBox(context.Background(), pid)
+	if pinned, _ := st.SetHostKey(context.Background(), pid, "p.example", 22, "ssh-ed25519 POLL"); !pinned {
+		t.Fatal("pin")
+	}
+	if code, body := do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", pid), fmt.Sprintf(`{"revision":%d,"name":"p2","host":"p.example","user":"u"}`, snap.Revision), hdr); code != 200 {
+		t.Fatalf("edit after a poll pinned: %d %s", code, body)
+	}
+	if got, _ := st.GetBox(context.Background(), pid); got.HostKey != "ssh-ed25519 POLL" || got.Name != "p2" {
+		t.Fatalf("pin stored meanwhile must survive: %+v", got)
 	}
 }

@@ -555,6 +555,9 @@ type boxInput struct {
 	ForgetHostKey bool `json:"forget_host_key"`
 	// ClearQbtPass removes the saved WebUI password (a blank field keeps it).
 	ClearQbtPass bool `json:"clear_qbt_pass"`
+	// Revision is the record revision the edit was based on (from GET);
+	// required on PUT, and a stale one is refused with 409.
+	Revision *int64 `json:"revision"`
 }
 
 func (in boxInput) validate() error {
@@ -749,13 +752,26 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err)
 		return
 	}
+	if in.Revision == nil {
+		writeErr(w, 400, errors.New("revision is required: send the box's current revision from GET /api/boxes/{id}"))
+		return
+	}
+	if *in.Revision != b.Revision {
+		// A fast answer for the common case; the store's compare-and-set is
+		// what makes it airtight against a concurrent edit.
+		writeJSON(w, http.StatusConflict, map[string]any{"error": store.ErrStale.Error(), "box": b})
+		return
+	}
 	stored := *b
 	in.apply(b)
+	b.Revision = *in.Revision
 	// The rules shared with detect (endpointChanged): the host-key pin
 	// belongs to host:port and a supplied key never replaces an existing
 	// pin; stored secrets are only ever used for the endpoint they were
 	// saved for, so a changed host/port/user with a blank password is
 	// refused rather than sent to the new host on trust-on-first-use.
+	// Both rules are evaluated against the revision the edit names, and the
+	// update applies only if the row still is that revision.
 	hostChanged, userChanged := endpointChanged(&stored, b)
 	if hostChanged || userChanged {
 		if b.Password == "" && stored.Password != "" && (b.AuthMethod == "password" || b.AuthMethod == "") {
@@ -767,29 +783,31 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	switch {
-	case in.ForgetHostKey:
-		b.HostKey = ""
-	case hostChanged:
-		b.HostKey = in.HostKey // the wizard's fresh detect result, or nothing
-	case stored.HostKey == "":
-		b.HostKey = in.HostKey // nothing pinned yet: the wizard's fresh key is as good as the poller's first contact
-	default:
-		b.HostKey = stored.HostKey
-	}
+	// The pin is decided inside the update statement (store.Clears): forget
+	// clears it, a changed host:port replaces it with the wizard's fresh
+	// detect result (or nothing), otherwise a pin already in the row is
+	// kept, even one a poll stored while this edit was open, and an empty
+	// one is filled from the wizard.
+	b.HostKey = in.HostKey
 	// Secrets: a blank field keeps the saved one, so clearing is explicit.
 	// The SSH password is dropped when the box no longer authenticates with
 	// one; the WebUI password on request, unless a new one was typed.
 	clears := store.Clears{
-		Password: in.AuthMethod == "key" || in.AuthMethod == "agent",
-		QbtPass:  in.ClearQbtPass && in.QbtPass == "",
+		Password:       in.AuthMethod == "key" || in.AuthMethod == "agent",
+		QbtPass:        in.ClearQbtPass && in.QbtPass == "",
+		ForgetHostKey:  in.ForgetHostKey,
+		ReplaceHostKey: hostChanged,
 	}
 	if err := s.m.UpdateBox(r.Context(), b, clears); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
 			writeErr(w, 404, err)
-			return
+		case errors.Is(err, store.ErrStale):
+			fresh, _ := s.st.GetBox(r.Context(), id)
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "box": fresh})
+		default:
+			writeErr(w, 500, err)
 		}
-		writeErr(w, 500, err)
 		return
 	}
 	fresh, _ := s.st.GetBox(r.Context(), id)
