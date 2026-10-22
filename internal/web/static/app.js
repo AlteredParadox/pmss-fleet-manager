@@ -23,7 +23,12 @@
 // '' at the root, '/fleet' behind a proxy that forwards the sub-path. Taking
 // it from the URL rather than baking it into this file also works when the
 // proxy strips the prefix before forwarding, since it strips it again here.
-const BASE = location.pathname.replace(/\/+$/, '');
+const BASE = trimSlashes(location.pathname);
+function trimSlashes(p) { // trailing slashes off, without a regex that backtracks on a run of them
+  let end = p.length;
+  while (end > 0 && p[end - 1] === '/') end--;
+  return p.slice(0, end);
+}
 
 const S = {
   view: 'fleet', fleetView: 'cards', tab: 'overview', selId: null,
@@ -267,7 +272,8 @@ function connectEvents() {
   // them: keep trying until one lands or the stream drops again.
   const resync = async () => {
     const gen = ++resyncGen;
-    for (let wait = 2000; S.live && gen === resyncGen; wait = Math.min(wait * 2, 30000)) {
+    let wait = 2000;
+    while (S.live && gen === resyncGen) { // one attempt at a time, by design: each retry waits for the last
       if (await loadState()) {
         if (gen !== resyncGen) return;
         if (S.view === 'box' && S.selId) void loadDetail(S.selId); else if (S.view === 'alerts') void loadAlerts(); else if (S.view === 'torrents') void loadTorrents();
@@ -275,6 +281,7 @@ function connectEvents() {
         return;
       }
       await new Promise((r) => setTimeout(r, wait));
+      wait = Math.min(wait * 2, 30000);
     }
   };
   es.onopen = () => {
@@ -1045,7 +1052,11 @@ function tabLogs(b) {
   const L = b.logs || {};
   const files = L.files || [];
   const groups = new Map();
-  for (const f of files) { const d = logDir(f.path); if (!groups.has(d)) groups.set(d, []); groups.get(d).push(f); }
+  for (const f of files) {
+    const d = logDir(f.path);
+    if (!groups.has(d)) groups.set(d, []);
+    groups.get(d).push(f);
+  }
   const ctrs = b.docker.enabled ? (b.docker.containers || []) : [];
   const V = S.logView;
   const sel = (kind, key) => V && V.kind === kind && V.key === key ? 'on' : '';
