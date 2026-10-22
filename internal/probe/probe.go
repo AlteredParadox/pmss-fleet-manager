@@ -834,7 +834,7 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap.ListenPIDs = parseListenPIDs(s["listen_pids"])
 	_, snap.LogsKnown = s["logs"]
 	snap.Logs = parseLogs(s["logs"])
-	snap.Live, snap.LiveKnown = parseLiveRings(s["live_node"], s["live_user"])
+	snap.Live, snap.LiveKnown = parseLiveRings(s["live_node"], s["live_user"], now)
 	_, snap.Inventory = s["inventory"]
 	return snap, nil
 }

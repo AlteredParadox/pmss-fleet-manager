@@ -21,6 +21,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 )
 
 // LiveRings are PMSS's live-stats rings (its ADR 0126): one five-minute
@@ -89,20 +90,30 @@ type liveUserJSON struct {
 	RX  *float64 `json:"rx"`
 }
 
+// liveMaxAge bounds a slot's time: a ring holds a day, so anything over
+// a year old is a stopped cron or a forgery, and a future time (a clock
+// stepped back, or milliseconds where seconds belong) would otherwise
+// become a time encoding/json refuses and take /api/state down.
+const liveMaxAge = 366 * 24 * time.Hour
+
 // parseLiveRings reads the two ring files. The node ring decides whether
 // anything is known: without it there is no node to compare with. Samples
-// with a missing, negative, non-finite or absurd field are dropped, slots
-// are sorted by time with duplicates collapsed, and only the newest
-// liveSlots remain.
-func parseLiveRings(node, user string) (LiveRings, bool) {
+// with a missing, negative, non-finite or absurd field, or a time more
+// than liveMaxAge before now or a day after it, are dropped; slots are
+// sorted by time with duplicates collapsed, and only the newest liveSlots
+// remain.
+func parseLiveRings(node, user string, now time.Time) (LiveRings, bool) {
 	var r LiveRings
+	tOK := func(t float64) bool {
+		return t >= float64(now.Add(-liveMaxAge).Unix()) && t <= float64(now.Add(24*time.Hour).Unix())
+	}
 	nodeRaw, ok := liveDecode(node)
 	if !ok {
 		return r, false
 	}
 	for _, raw := range nodeRaw {
 		var s liveNodeJSON
-		if json.Unmarshal(raw, &s) != nil || !liveOK(s.T, s.DT, s.CB, s.CT, s.MU, s.MT, s.TX, s.RX) || *s.DT < 1 || *s.CT <= 0 || *s.MT <= 0 {
+		if json.Unmarshal(raw, &s) != nil || !liveOK(s.T, s.DT, s.CB, s.CT, s.MU, s.MT, s.TX, s.RX) || !tOK(*s.T) || *s.DT < 1 || *s.CT <= 0 || *s.MT <= 0 {
 			continue
 		}
 		out := LiveNodeSample{T: int64(*s.T), DT: *s.DT, CB: *s.CB, CT: *s.CT, MU: *s.MU, MT: *s.MT, TX: *s.TX, RX: *s.RX}
@@ -119,7 +130,7 @@ func parseLiveRings(node, user string) (LiveRings, bool) {
 	if userRaw, ok := liveDecode(user); ok {
 		for _, raw := range userRaw {
 			var s liveUserJSON
-			if json.Unmarshal(raw, &s) != nil || !liveOK(s.T, s.CPU, s.Mem, s.TX, s.RX) {
+			if json.Unmarshal(raw, &s) != nil || !liveOK(s.T, s.CPU, s.Mem, s.TX, s.RX) || !tOK(*s.T) {
 				continue
 			}
 			r.User = append(r.User, LiveUserSample{T: int64(*s.T), CPU: *s.CPU, Mem: *s.Mem, TX: *s.TX, RX: *s.RX})

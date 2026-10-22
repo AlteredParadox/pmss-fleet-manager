@@ -121,7 +121,7 @@ button.disc:hover{color:var(--text)}
 .meter.thick{height:6px}
 .meter>i.warn{background:var(--warn)}.meter>i.bad{background:var(--bad)}.meter>i.dim{background:var(--dim)}
 .meter.split{display:flex;gap:0}.meter.split>i{border-radius:0}
-.lvtable{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}.lvtable th{text-align:left;color:var(--muted);font-weight:500;padding:4px 8px;white-space:nowrap}.lvtable td{padding:4px 8px;vertical-align:top;min-width:120px}
+.lvwrap{overflow-x:auto;margin-top:8px}.lvtable{width:100%;border-collapse:collapse;font-size:12px}.lvtable th{text-align:left;color:var(--muted);font-weight:500;padding:4px 8px;white-space:nowrap}.lvtable td{padding:4px 8px;vertical-align:top;min-width:120px}
 .lvbar{height:8px;background:var(--line);border-radius:4px;overflow:hidden}.lvbar>i{display:block;height:100%;background:var(--dim)}.lvbar>i>i{display:block;height:100%;background:var(--accent)}
 .lvsvg{width:100%;height:40px;display:block}.lvsvg polyline{fill:none;stroke-width:1.5}.lvsvg .n{stroke:var(--dim)}.lvsvg .y{stroke:var(--accent);stroke-width:2}
 .lvnode{color:var(--dim)}.lvyou{color:var(--accent);font-weight:600}

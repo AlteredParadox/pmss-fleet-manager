@@ -1168,7 +1168,8 @@ func TestParseLiveRings(t *testing.T) {
 	 {"t":1792696261,"dt":300,"cb":-1,"ct":2,"mu":1,"mt":1,"tx":1,"rx":1},
 	 {"t":1792695961,"dt":300,"cb":1,"ct":0,"mu":1,"mt":1,"tx":1,"rx":1}]}`
 	user := `{"v":1,"samples":[{"t":1792697161,"cpu":6.72,"mem":521621504,"tx":300469,"rx":333001},{"t":1792690000,"cpu":1e400,"mem":1,"tx":1,"rx":1}]}`
-	r, known := parseLiveRings(node, user)
+	now := time.Unix(1792697161+600, 0)
+	r, known := parseLiveRings(node, user, now)
 	if !known || len(r.Node) != 2 || len(r.User) != 1 {
 		t.Fatalf("known=%v node=%d user=%d", known, len(r.Node), len(r.User))
 	}
@@ -1178,11 +1179,11 @@ func TestParseLiveRings(t *testing.T) {
 	if u := r.User[0]; u.CPU != 6.72 || u.Mem != 521621504 {
 		t.Fatalf("user = %+v", u)
 	}
-	if r, known := parseLiveRings(node, ""); !known || len(r.User) != 0 {
+	if r, known := parseLiveRings(node, "", now); !known || len(r.User) != 0 {
 		t.Fatal("the node ring alone is enough; the user ring is optional")
 	}
 	for _, raw := range []string{"", "{", `{"samples":{}}`, `{"samples":[]}`, `[1,2]`} {
-		if _, known := parseLiveRings(raw, user); known {
+		if _, known := parseLiveRings(raw, user, now); known {
 			t.Errorf("%q counted as known", raw)
 		}
 	}
@@ -1196,10 +1197,17 @@ func TestParseLiveRings(t *testing.T) {
 		fmt.Fprintf(&sb, `{"t":%d,"dt":300,"cb":1,"ct":2,"mu":1,"mt":2,"tx":0,"rx":0}`, 1000+i*300)
 	}
 	sb.WriteString(`]}`)
-	if r, _ := parseLiveRings(sb.String(), ""); len(r.Node) != liveSlots || r.Node[0].T != 1000+112*300 {
+	if r, _ := parseLiveRings(sb.String(), "", time.Unix(1000+400*300, 0)); len(r.Node) != liveSlots || r.Node[0].T != 1000+112*300 {
 		t.Fatalf("trimmed to %d from %d", len(r.Node), 400)
 	}
 	if _, known := parseLiveRings(`{"pad":"`+strings.Repeat("x", liveMaxBytes)+`",`+node[1:], ""); known {
 		t.Fatal("an oversized ring must be refused")
+	}
+	// Milliseconds where seconds belong, a slot from the far past and one a
+	// week ahead are dropped: a time outside RFC 3339's range would make the
+	// whole state unencodable.
+	bad := `{"samples":[{"t":1792697161000,"dt":300,"cb":1,"ct":2,"mu":1,"mt":2,"tx":0,"rx":0},{"t":1000,"dt":300,"cb":1,"ct":2,"mu":1,"mt":2,"tx":0,"rx":0},{"t":1793301961,"dt":300,"cb":1,"ct":2,"mu":1,"mt":2,"tx":0,"rx":0}]}`
+	if _, known := parseLiveRings(bad, `{"samples":[{"t":1792697161000,"cpu":1,"mem":1,"tx":0,"rx":0}]}`, now); known {
+		t.Fatal("out-of-range slot times must be dropped")
 	}
 }

@@ -1237,9 +1237,9 @@ function liveTrendPanel(b) {
   const metrics = [['cpu', 'CPU', '%'], ['ram', 'RAM', '%'], ['tx', 'network out', 'Mbit/s'], ['rx', 'network in', 'Mbit/s']];
   const S = L.series || {};
   return `<div class="panel" style="margin-top:14px"><div class="tile-label">node vs. you · 24 h <small class="muted">as PMSS counts it · five-minute samples · ${fmtAgo(L.at)}</small></div>
-    <table class="lvtable"><tr><th></th>${L.windows.map((w) => `<th>${esc(w.label)}</th>`).join('')}<th>24 h trend</th></tr>
+    <div class="lvwrap"><table class="lvtable"><tr><th></th>${L.windows.map((w) => `<th>${esc(w.label)}</th>`).join('')}<th>24 h trend</th></tr>
     ${metrics.map(([k, name, unit]) => `<tr><th>${name}</th>${L.windows.map((w) => w.samples ? liveCell(w[k], unit) : '<td class="muted">n/a</td>').join('')}<td>${liveSvg(S[k], unit === '%' ? 100 : Math.max(1, ...(S[k] || [[1, 0]]).map((p) => p[0])))}</td></tr>`).join('')}
-    </table>
+    </table></div>
     <div class="note"><span class="lvnode">■ node</span> = the whole server · <span class="lvyou">■ you</span> = your account, cpu as a share of every host core; ram counts your page cache as yours but the node's reclaimable cache as free, so you can exceed the node there · you see the node's totals and your own numbers only</div></div>`;
 }
 
