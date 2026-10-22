@@ -334,3 +334,29 @@ func TestConcurrentOperationsOnWedgedTransport(t *testing.T) {
 	}
 	goroutinesSettle(t, base)
 }
+
+// Once the context has won, the result is the cancellation even when the
+// operation becomes done before settle looks (the kill we sent, or a
+// finish just in time): a cancelled command never reads as a success
+// whose partial output could pass for a complete result (Codex and fred
+// on PR 104).
+func TestSettleKeepsCancellation(t *testing.T) {
+	c := dialTest(t, testServer(t))
+	cli := c.transport()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	close(done) // ready before settle is entered
+	if err := c.settle(ctx, cli, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("settle with done ready: %v, want the cancellation", err)
+	}
+	if c.transport() != cli {
+		t.Fatal("a finished operation must not wedge the transport")
+	}
+	dctx, dcancel := context.WithDeadline(context.Background(), time.Now())
+	defer dcancel()
+	<-dctx.Done()
+	if err := c.settle(dctx, cli, done); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("settle with a deadline: %v", err)
+	}
+}

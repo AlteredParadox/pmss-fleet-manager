@@ -379,17 +379,26 @@ func (c *Client) wedged(cli *ssh.Client) {
 }
 
 // await waits for an operation that runs on cli to signal done. When ctx
-// ends first, the operation gets graceWait to finish on its own; if it does
-// not, the transport is wedged (see wedged) and the operation, now failing,
-// is joined. The join is itself bounded, so a library that did not unblock
-// could at worst leak the one goroutine, never hang the caller. Returns
-// ctx.Err() when ctx ended first, else nil.
+// ends first, the operation is settled (see settle) and ctx.Err() is
+// returned; else nil.
 func (c *Client) await(ctx context.Context, cli *ssh.Client, done <-chan struct{}) error {
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
+		return c.settle(ctx, cli, done)
 	}
+}
+
+// settle ends an operation whose context has already ended: it gets
+// graceWait to finish on its own; if it does not, the transport is wedged
+// (see wedged) and the operation, now failing, is joined. The join is
+// itself bounded, so a library that did not unblock could at worst leak
+// the one goroutine, never hang the caller. Always returns ctx.Err(): the
+// caller established that the context won, and an operation that finishes
+// during the grace (because it was killed, or just in time) is still the
+// cancelled one, never a success with a complete result.
+func (c *Client) settle(ctx context.Context, cli *ssh.Client, done <-chan struct{}) error {
 	select {
 	case <-done:
 		return ctx.Err() // finished within the grace: the transport is fine
@@ -430,7 +439,7 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 		select {
 		case <-opened:
 			if sess != nil {
-				sess.Close() // arrived within the grace, after the caller gave up
+				go sess.Close() // arrived within the grace, after the caller gave up; the close is a write that may block too
 			}
 		default: // left behind on a closed transport; it fails on its own
 		}
@@ -460,13 +469,15 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 	case <-ctx.Done():
 	}
 	// Ask the command to stop. Both writes go to the peer and would block
-	// on a wedged transport themselves, so they run aside; await handles
-	// the transport if the session does not end within the grace.
+	// on a wedged transport themselves, so they run aside; settle handles
+	// the transport if the session does not end within the grace, and
+	// reports the cancellation whether or not the session ended meanwhile
+	// (a command killed by us is not a command that completed).
 	go func() {
 		_ = sess.Signal(ssh.SIGKILL)
 		sess.Close()
 	}()
-	err := c.await(ctx, cli, done)
+	err := c.settle(ctx, cli, done)
 	// snapshot() copies under the lock the copiers write under, so a late
 	// write cannot tear the result.
 	return out.snapshot(), errb.snapshot(), err
@@ -506,7 +517,7 @@ func (c *Client) dial(ctx context.Context, network, addr string) (net.Conn, erro
 		select {
 		case <-done:
 			if conn != nil {
-				conn.Close()
+				go conn.Close() // a channel close is a write that may block too
 			}
 		default:
 		}
