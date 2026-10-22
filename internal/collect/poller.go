@@ -930,21 +930,30 @@ func trackQbtProcess(prevKey string, snap *probe.Snapshot) (restarted bool, key 
 	if !snap.ProcsKnown {
 		return false, prevKey
 	}
-	key = qbtProcKey(snap.Procs)
+	key, known := qbtProcKey(snap.Procs)
+	if !known {
+		return false, prevKey // a client without a start tick this poll is not evidence of a replacement
+	}
 	return key != "" && prevKey != "" && key != prevKey, key
 }
 
 // qbtProcKey names the qbittorrent-nox processes in a process list by pid
-// and start tick ("pid:tick,…", sorted), "" when there are none.
-func qbtProcKey(procs []probe.ProcInfo) string {
+// and start tick ("pid:tick,…", sorted): "" when there are none. known is
+// false when one of them has no start tick (its /proc stat line was not
+// read this poll), since "pid:0" would read as a different process.
+func qbtProcKey(procs []probe.ProcInfo) (key string, known bool) {
 	var parts []string
 	for _, p := range procs {
-		if p.Comm == "qbittorrent-nox" {
-			parts = append(parts, fmt.Sprintf("%d:%d", p.PID, p.StartTick))
+		if p.Comm != "qbittorrent-nox" {
+			continue
 		}
+		if p.StartTick == 0 {
+			return "", false
+		}
+		parts = append(parts, fmt.Sprintf("%d:%d", p.PID, p.StartTick))
 	}
 	sort.Strings(parts)
-	return strings.Join(parts, ",")
+	return strings.Join(parts, ","), true
 }
 
 // firewalledSince carries the time the client was first seen not

@@ -119,6 +119,12 @@ func TestTrackQbtProcessAndRestartReset(t *testing.T) {
 	if restarted || key != "42:100" {
 		t.Fatalf("unreadable list must keep the identity: %v %q", restarted, key)
 	}
+	// A client listed without its start tick (stat line missed this poll)
+	// is no evidence of a replacement either way.
+	restarted, key = trackQbtProcess(key, up(0))
+	if restarted || key != "42:100" {
+		t.Fatalf("missing start tick must keep the identity: %v %q", restarted, key)
+	}
 	restarted, key = trackQbtProcess(key, up(900))
 	if !restarted || key != "42:900" {
 		t.Fatalf("restart after an unreadable poll: %v %q", restarted, key)
@@ -140,14 +146,19 @@ func TestTrackQbtProcessAndRestartReset(t *testing.T) {
 
 func TestQbtProcKey(t *testing.T) {
 	procs := []probe.ProcInfo{{PID: 20, Comm: "sshd"}, {PID: 42, StartTick: 900, Comm: "qbittorrent-nox"}, {PID: 7, StartTick: 100, Comm: "qbittorrent-nox"}}
-	if k := qbtProcKey(procs); k != "42:900,7:100" {
-		t.Fatalf("key: %q", k)
+	if k, known := qbtProcKey(procs); k != "42:900,7:100" || !known {
+		t.Fatalf("key: %q %v", k, known)
 	}
-	if k := qbtProcKey(nil); k != "" {
-		t.Fatalf("empty: %q", k)
+	if k, known := qbtProcKey(nil); k != "" || !known {
+		t.Fatalf("empty: %q %v", k, known)
+	}
+	if _, known := qbtProcKey([]probe.ProcInfo{{PID: 42, Comm: "qbittorrent-nox"}}); known {
+		t.Fatal("no start tick must be unknown, not pid:0")
 	}
 	// A restart with the same pid is told apart by the start tick.
-	if qbtProcKey([]probe.ProcInfo{{PID: 42, StartTick: 901, Comm: "qbittorrent-nox"}}) == qbtProcKey([]probe.ProcInfo{{PID: 42, StartTick: 900, Comm: "qbittorrent-nox"}}) {
+	a, _ := qbtProcKey([]probe.ProcInfo{{PID: 42, StartTick: 901, Comm: "qbittorrent-nox"}})
+	b, _ := qbtProcKey([]probe.ProcInfo{{PID: 42, StartTick: 900, Comm: "qbittorrent-nox"}})
+	if a == b {
 		t.Fatal("start tick ignored")
 	}
 }

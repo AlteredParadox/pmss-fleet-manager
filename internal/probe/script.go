@@ -143,8 +143,8 @@ sec logs
 # cumulative CPU seconds; the poller turns two samples into a rate. The
 # command lines come separately and clipped: argv is the process's own text.
 sec procs
-` + procsShell + `sec proc_args; timeout 10 ps -ww -u "$uid" -o pid=,args= 2>/dev/null | cut -c1-400
-# The ps calls carry a timeout: reading a cmdline takes the target's mmap
+` + procsShell + `sec proc_args
+` + procArgsShell + `# The ps calls carry a timeout: reading a cmdline takes the target's mmap
 # lock, and a process stuck in D state on a dead mount would otherwise hold
 # the whole probe past its deadline (a cut section degrades to "unknown").
 # CPU in clock ticks (10 ms) and the start tick from /proc/<pid>/stat: ps
@@ -266,6 +266,12 @@ esac
 // it known as soon as one row parses) and every watched app missing from
 // the cut tail would be reported as not running.
 const procsShell = `o=$(timeout 10 ps -ww -u "$uid" -o pid=,ppid=,rss=,times=,etimes=,comm= 2>/dev/null) && [ -n "$o" ] && printf '%s\n' "$o"
+`
+
+// procArgsShell is the same for the command lines: a cut listing would
+// leave the processes past the cut without args, and an interpreter is
+// classified by its script.
+const procArgsShell = `o=$(timeout 10 ps -ww -u "$uid" -o pid=,args= 2>/dev/null) && [ -n "$o" ] && printf '%s\n' "$o" | cut -c1-400
 `
 
 // listenPIDsShell prints "<port> <pid>" for every listening TCP socket ss

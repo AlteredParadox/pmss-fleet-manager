@@ -769,6 +769,22 @@ func TestProcsShellDropsTimedOutListing(t *testing.T) {
 	if out := run(); out != "1 0 1 0 1 whole\n" {
 		t.Fatalf("completed ps: %q", out)
 	}
+	// Same for the command lines.
+	runArgs := func() string {
+		cmd := exec.Command("sh")
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+		cmd.Stdin = strings.NewReader("uid=1\n" + procArgsShell)
+		out, _ := cmd.Output()
+		return string(out)
+	}
+	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 python3 bot.py'\nexit 124\n"), 0o700)
+	if out := runArgs(); out != "" {
+		t.Fatalf("timed-out args ps must print nothing, got %q", out)
+	}
+	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 python3 bot.py'\n"), 0o700)
+	if out := runArgs(); out != "1 python3 bot.py\n" {
+		t.Fatalf("completed args ps: %q", out)
+	}
 }
 
 // The cached binary stat is echoed back to the box every poll: only a

@@ -174,6 +174,13 @@ func TestEvaluateSkipsUnpolled(t *testing.T) {
 	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); len(keys) != 0 {
 		t.Fatalf("unpolled state raised %v", keys)
 	}
+	// An app unwatched in that window still resolves its restored alert.
+	st.RaiseAlert(ctx, b.ID, "app:sonarr", "warn", "x")
+	st.RaiseAlert(ctx, b.ID, "app:radarr", "warn", "x")
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); !slices.Equal(keys, []string{"app:radarr"}) {
+		t.Fatalf("unwatched app alert must resolve while unpolled, watched one stays: %v", keys)
+	}
 	s.Unpolled = false
 	e.Evaluate(ctx, s)
 	keys, _ := st.ActiveAlertKeys(ctx, b.ID)
