@@ -298,3 +298,31 @@ func TestAppsWatchColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// SetHostKey pins only an unpinned row at the same endpoint and says so,
+// which is what the poller relies on to refuse an unpinned connection.
+func TestSetHostKeyReportsPin(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "p.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	b := &Box{Name: "x", Host: "H.example", User: "u", Port: 22, Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if pinned, err := s.SetHostKey(ctx, b.ID, "h.example", 22, "ssh-ed25519 AAA"); err != nil || !pinned {
+		t.Fatalf("first pin (host compared case-insensitively): %v %v", pinned, err)
+	}
+	if pinned, err := s.SetHostKey(ctx, b.ID, "h.example", 22, "ssh-ed25519 BBB"); err != nil || pinned {
+		t.Fatalf("a second key must not replace the pin: %v %v", pinned, err)
+	}
+	if pinned, _ := s.SetHostKey(ctx, b.ID, "other.example", 22, "ssh-ed25519 CCC"); pinned {
+		t.Fatal("another endpoint must not be pinned")
+	}
+	got, _ := s.GetBox(ctx, b.ID)
+	if got.HostKey != "ssh-ed25519 AAA" {
+		t.Fatalf("pin: %q", got.HostKey)
+	}
+}
