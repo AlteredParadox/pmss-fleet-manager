@@ -793,3 +793,76 @@ func TestSyncEntryCapAndBadDelta(t *testing.T) {
 		t.Fatal("want the cap")
 	}
 }
+
+// Malformed sync bodies are errors, not partial views.
+func TestDecodeMainDataMalformed(t *testing.T) {
+	for _, body := range []string{
+		``, `[]`, `{"torrents":[]}`, `{"torrents_removed":{}}`, `{"torrents":{"a":{}}`, `{"rid":"x"}`,
+		`{"trackers":{"u":[1,2}}`, `{"torrents":{"a":1,}}`, `{"server_state":5`, `{"torrents_removed":[1]}`,
+	} {
+		if _, err := decodeMainData(strings.NewReader(body), MaxTorrents); err == nil {
+			t.Errorf("%q decoded", body)
+		}
+	}
+	// A server_state that is not an object fails at apply, leaving the view.
+	d, err := decodeMainData(strings.NewReader(`{"rid":2,"server_state":[1]}`), MaxTorrents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := syncState{rid: 1, torrents: map[string]Torrent{}}
+	if next, err := have.apply(d, false); err == nil || next.rid != 1 {
+		t.Fatalf("bad server_state: %+v %v", next, err)
+	}
+}
+
+// A reset while a sync is in flight (Close is called under the poller's
+// lock the request's dialer may need, so it must not wait for the sync
+// lock) wins: the view built by that request is dropped by the next call.
+func TestResetDuringSync(t *testing.T) {
+	var mu sync.Mutex
+	var rids []string
+	release, arrived := make(chan struct{}), make(chan struct{}, 2)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/sync/maindata", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		rids = append(rids, r.URL.Query().Get("rid"))
+		first := len(rids) == 1
+		mu.Unlock()
+		arrived <- struct{}{}
+		if first {
+			<-release
+		}
+		w.Write([]byte(`{"rid":5,"full_update":true,"torrents":{"a":{}}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:1", "", "")
+	done := make(chan error, 1)
+	go func() { _, err := c.MainData(context.Background()); done <- err }()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never arrived")
+	}
+	closed := make(chan struct{})
+	go func() { c.Close(); close(closed) }() // must return while the request is still blocked
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close waited for the in-flight sync")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.MainData(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-arrived
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"0", "0"}; !slices.Equal(rids, want) {
+		t.Fatalf("rids sent: %v, want %v (the view from before the reset must not be used)", rids, want)
+	}
+}

@@ -55,16 +55,22 @@ type Client struct {
 	guard *AuthGuard
 
 	// sync is the retained sync/maindata view, see MainData. syncMu
-	// serialises MainData calls; mu is never held with it.
-	syncMu sync.Mutex
-	sync   syncState
+	// serialises MainData calls and is held across the request; mu is
+	// never held with it. syncGen is bumped by Close/ResetSync without
+	// any lock (Close is called under callers' own locks, which the
+	// request's dialer may need): a view whose gen is behind it is stale
+	// and the next MainData starts over.
+	syncMu  sync.Mutex
+	sync    syncState
+	syncGen atomic.Uint64
 }
 
 // syncState is what incremental sync needs between two MainData calls:
 // the server's response id and everything it has sent so far, merged
-// delta by delta. Zero means "nothing retained": the next request is a
-// full one (rid=0).
+// delta by delta. torrents nil means "nothing retained": the next request
+// is a full one (rid=0).
 type syncState struct {
+	gen      uint64 // Client.syncGen when the view was built
 	rid      int64
 	server   ServerState
 	torrents map[string]Torrent
@@ -577,6 +583,10 @@ const MaxTorrents = 20000
 func (c *Client) MainData(ctx context.Context) (*MainData, error) {
 	c.syncMu.Lock()
 	defer c.syncMu.Unlock()
+	gen := c.syncGen.Load()
+	if c.sync.gen != gen {
+		c.sync = syncState{} // reset since the view was built
+	}
 	rid := c.sync.rid
 	if c.sync.torrents == nil {
 		rid = 0
@@ -593,16 +603,16 @@ func (c *Client) MainData(ctx context.Context) (*MainData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("qbittorrent: sync/maindata: %w", err)
 	}
+	next.gen = gen // a reset during the request still wins: the view is dropped next time
 	c.sync = next
 	return &MainData{ServerState: next.server, Torrents: next.torrents}, nil
 }
 
 // ResetSync discards the retained sync view; the next MainData fetches
-// everything. Close does this too.
+// everything. Close does this too. It takes no lock, so it is safe under
+// any lock the in-flight request's dialer may be waiting for.
 func (c *Client) ResetSync() {
-	c.syncMu.Lock()
-	c.sync = syncState{}
-	c.syncMu.Unlock()
+	c.syncGen.Add(1)
 }
 
 // mainDelta is one decoded sync/maindata response, torrents still raw:

@@ -145,3 +145,11 @@ func TestContainerCaps(t *testing.T) {
 		t.Fatalf("null list: %+v %v", cs, err)
 	}
 }
+
+func TestDecodeContainersMalformed(t *testing.T) {
+	for _, body := range []string{``, `{}`, `[{"Id":1}]`, `[{"Id":"a"}`, `[{"Id":"a"},]`} {
+		if _, err := decodeContainers([]byte(body), MaxContainers); err == nil {
+			t.Errorf("%q decoded", body)
+		}
+	}
+}
