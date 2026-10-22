@@ -390,7 +390,7 @@ type QbtInfo struct {
 	SubnetList    string // WebUI\AuthSubnetWhitelist
 	Username      string
 	BinaryVersion string // "v5.2.3" from ~/bin/qbittorrent-nox --version; empty when the probe skipped the call (see ScriptWith)
-	BinaryStat    string // "size mtime" of ~/bin/qbittorrent-nox, the key the poller caches BinaryVersion under
+	BinaryStat    string // "size mtime ctime inode" of ~/bin/qbittorrent-nox, the key the poller caches BinaryVersion under
 	StartHelper   bool   // ~/bin/qbt-start exists
 	CronEntries   int    // crontab lines that run only bin/qbt-start (QbtCronPattern)
 	PMSSManaged   bool   // ~/.qbittorrentEnable: the PMSS panel runs and configures qBittorrent

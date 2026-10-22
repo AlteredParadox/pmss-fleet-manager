@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -84,7 +85,7 @@ WebUI\LocalHostAuth=false
 @@qbt_bin
 /home/ragnar/bin/qbittorrent-nox
 @@qbt_bin_stat
-30515200 1760500000
+30515200 1760500000 1760500001 4242
 @@qbt_cron
 2
 @@qbt_pmss
@@ -148,7 +149,7 @@ func TestParse(t *testing.T) {
 	if !snap.Account.OK || snap.Account.QuotaGiB != 2000 || !snap.Account.DockerEnabled {
 		t.Fatalf("account: %+v", snap.Account)
 	}
-	if !snap.Qbt.Running || snap.Qbt.ConfPort != 8089 || !snap.Qbt.LocalHostAuth || !snap.Qbt.BinaryPresent || snap.Qbt.CronEntries != 2 || !snap.Qbt.PMSSManaged || snap.Qbt.BinaryStat != "30515200 1760500000" {
+	if !snap.Qbt.Running || snap.Qbt.ConfPort != 8089 || !snap.Qbt.LocalHostAuth || !snap.Qbt.BinaryPresent || snap.Qbt.CronEntries != 2 || !snap.Qbt.PMSSManaged || snap.Qbt.BinaryStat != "30515200 1760500000 1760500001 4242" {
 		t.Fatalf("qbt: %+v", snap.Qbt)
 	}
 	if !snap.Docker.SocketPresent {
@@ -229,7 +230,11 @@ func TestQbtVersionSkippedWhileUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seen := fmt.Sprintf("%d %d", st.Size(), st.ModTime().Unix())
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no Stat_t")
+	}
+	seen := fmt.Sprintf("%d %d %d %d", st.Size(), st.ModTime().Unix(), sys.Ctim.Sec, sys.Ino)
 	run := func(seenVal string) string {
 		cmd := exec.Command("sh")
 		cmd.Stdin = strings.NewReader("home=$HOME; PMSS_QBT_SEEN='" + seenVal + "'\n" + qbtVersionShell)
@@ -245,11 +250,18 @@ func TestQbtVersionSkippedWhileUnchanged(t *testing.T) {
 	if got := run(seen); got != "" {
 		t.Fatalf("unchanged binary must skip the call, got %q", got)
 	}
-	if got := run("1 2"); got != "qBittorrent v5.2.4" {
+	if got := run("1 2 3 4"); got != "qBittorrent v5.2.4" {
 		t.Fatalf("changed binary: %q", got)
 	}
+	// A replacement that keeps size and mtime still changes ctime and inode.
+	os.WriteFile(home+"/bin/qbittorrent-nox.new", []byte(fake), 0o700)
+	os.Chtimes(home+"/bin/qbittorrent-nox.new", st.ModTime(), st.ModTime())
+	os.Rename(home+"/bin/qbittorrent-nox.new", home+"/bin/qbittorrent-nox")
+	if got := run(seen); got != "qBittorrent v5.2.4" {
+		t.Fatalf("timestamp-preserving replacement must be noticed, got %q", got)
+	}
 	calls, _ := os.ReadFile(home + "/calls")
-	if strings.Count(string(calls), "run") != 2 {
+	if strings.Count(string(calls), "run") != 3 {
 		t.Fatalf("calls: %q", calls)
 	}
 	if s := ScriptWith("abc", "12 34'; rm -rf /"); !strings.HasPrefix(s, "PMSS_TAG='abc'\nPMSS_QBT_SEEN='12 34   '\n") {

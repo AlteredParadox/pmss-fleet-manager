@@ -130,7 +130,7 @@ sec qbt_conf; grep -E '^WebUI\\(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|Au
 sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
 sec listen
 ` + listenShell + `sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
-sec qbt_bin_stat; stat -c '%s %Y' "$home/bin/qbittorrent-nox" 2>/dev/null
+sec qbt_bin_stat; stat -c '%s %Y %Z %i' "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version
 ` + qbtVersionShell + `sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + `
@@ -213,12 +213,15 @@ const listenPIDsShell = `timeout 10 ss -Hltnp 2>/dev/null | awk '$1=="LISTEN"{n=
 `
 
 // qbtVersionShell asks the installed qbittorrent-nox for its version, but
-// only when the binary's size and mtime differ from PMSS_QBT_SEEN, the
-// stat the poller last got an answer for. --version initialises the
+// only when the binary's identity (size, mtime, ctime, inode) differs from
+// PMSS_QBT_SEEN, the stat the poller last got an answer for. The ctime and
+// inode are there for a replacement that preserves size and mtime (a
+// timestamp-preserving copy): nothing a tenant runs can set a ctime, and
+// an atomic swap changes the inode. --version initialises the
 // application: it appends a "started … termination initiated" block to the
 // user's qBittorrent log on every call and rotates the log once that fills
 // up, so polling it every 30 s drowned the real log in probe noise.
-const qbtVersionShell = `if [ -x "$home/bin/qbittorrent-nox" ] && [ "$(stat -c '%s %Y' "$home/bin/qbittorrent-nox" 2>/dev/null)" != "${PMSS_QBT_SEEN:-}" ]; then
+const qbtVersionShell = `if [ -x "$home/bin/qbittorrent-nox" ] && [ "$(stat -c '%s %Y %Z %i' "$home/bin/qbittorrent-nox" 2>/dev/null)" != "${PMSS_QBT_SEEN:-}" ]; then
   timeout 10 "$home/bin/qbittorrent-nox" --version </dev/null 2>/dev/null | head -n 1
 fi
 `
@@ -228,8 +231,8 @@ fi
 // The version call runs unconditionally (no PMSS_QBT_SEEN).
 func ScriptWithTag(tag string) string { return ScriptWith(tag, "") }
 
-// ScriptWith is ScriptWithTag with the binary stat ("size mtime", as the
-// qbt_bin_stat section printed it) the caller already holds a version for,
+// ScriptWith is ScriptWithTag with the binary stat ("size mtime ctime
+// inode", as the qbt_bin_stat section printed it) the caller already holds a version for,
 // so the probe skips the --version call while the binary is unchanged.
 func ScriptWith(tag, qbtSeen string) string {
 	seen := strings.Map(func(r rune) rune {
