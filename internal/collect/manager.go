@@ -60,6 +60,12 @@ type Manager struct {
 	// list: two toggles at once would otherwise each save a list missing
 	// the other's change.
 	watchMu sync.Mutex
+	// hooksMu keeps the alert hooks in store order: it is held from the
+	// moment a state is stored until its hooks have run, by polls
+	// (setStateWith) and watch toggles (SetAppWatch) alike, so a stale
+	// evaluation can never undo the alert change of a newer state.
+	// Lock order: hooksMu before mu.
+	hooksMu sync.Mutex
 	pmapi   *pmapi.Client
 	svcMu   sync.RWMutex
 	svc     servicesCache
@@ -294,9 +300,11 @@ func (m *Manager) setStateWith(s *BoxState, fix func(s, stored *BoxState)) {
 	}
 	m.mu.Unlock()
 	m.decorate(s)
+	m.hooksMu.Lock()
 	m.mu.Lock()
 	if _, ok := m.states[s.ID]; !ok {
 		m.mu.Unlock()
+		m.hooksMu.Unlock()
 		return
 	}
 	fix(s, m.states[s.ID])
@@ -304,6 +312,7 @@ func (m *Manager) setStateWith(s *BoxState, fix func(s, stored *BoxState)) {
 	m.states[s.ID] = &cp
 	m.mu.Unlock()
 	m.runHooks(cp)
+	m.hooksMu.Unlock()
 	sum := cp.Summary()
 	m.Publish(Event{Type: "state", BoxID: cp.ID, State: &sum})
 }
@@ -349,6 +358,11 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 	// the manager's own context, not the request's.
 	sctx, scancel := context.WithTimeout(m.ctx, 30*time.Second)
 	defer scancel()
+	// A watch toggle landing between this read and startPoller's store
+	// would be in the database but not in the new state: keep them apart
+	// (after stopAndWait, so a toggle never waits on an in-flight poll).
+	m.watchMu.Lock()
+	defer m.watchMu.Unlock()
 	fresh, err := m.st.GetBox(sctx, b.ID)
 	if err != nil {
 		if p != nil {
@@ -464,6 +478,7 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		m.mutateState(id, func(s *BoxState) {
 			p.noteAction() // under the store lock: a poll's store is either before both or after both
 			s.Qbt.PortOK, s.Qbt.Reachable = false, false
+			s.Qbt.FirewalledSince = "" // the client that comes back starts its own ten-minute clock
 		})
 	}
 	p.wake()
@@ -520,14 +535,17 @@ func (m *Manager) SetAppWatch(ctx context.Context, id int64, key string, on bool
 	if err := m.st.SetAppsWatch(ctx, id, keys); err != nil {
 		return err
 	}
+	m.hooksMu.Lock()
 	cp, ok := m.mutateStateGet(id, func(s *BoxState) {
 		s.Apps.Watched = keys
 		s.Apps.markWatched()
 	})
 	if !ok {
+		m.hooksMu.Unlock()
 		return store.ErrNotFound
 	}
-	m.runHooks(cp)
+	m.runHooks(cp) // Evaluate skips an Unpolled state itself; the first poll raises the app alert then
+	m.hooksMu.Unlock()
 	sum := cp.Summary()
 	m.Publish(Event{Type: "state", BoxID: id, State: &sum})
 	return nil

@@ -87,6 +87,14 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 	if s.Status == "pending" {
 		return
 	}
+	// A state restored from the cache or carried across an edit has had
+	// its reachability flags reset and nothing has verified them yet
+	// (BoxState.Unpolled): the rules would raise "not responding" for a
+	// client that is merely unverified. The first poll runs the hooks;
+	// a disabled box still resolves its alerts.
+	if s.Unpolled && s.Status != "disabled" {
+		return
+	}
 	set := e.settings()
 	var active []want
 	if s.Status == "disabled" {

@@ -62,6 +62,11 @@ type poller struct {
 	// version it answered, so the probe can skip --version (which writes to
 	// the user's qBittorrent log) while the binary is unchanged.
 	qbtBinStat, qbtBinVersion string
+	// qbtProcKey identifies the running qbittorrent-nox process(es) by pid
+	// and start tick, so a restart between two polls that both saw the
+	// client up is noticed (see carriedFirewalledSince).
+	qbtProcKey   string
+	qbtRestarted bool
 
 	duMu      sync.Mutex
 	duRunning bool
@@ -626,6 +631,11 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	st.Account = AccountState{OK: a.OK, QuotaGiB: a.QuotaGiB, RAMMiB: a.RAMMiB, DockerEnabled: a.DockerEnabled, Suspended: a.Suspended}
 
 	st.Apps, p.procPrev = appsFromSnapshot(snap, p.box.User, p.procPrev, st.Apps.Watched)
+	key := qbtProcKey(snap.Procs)
+	p.qbtRestarted = key != "" && p.qbtProcKey != "" && key != p.qbtProcKey
+	if key != "" || !snap.ProcsKnown {
+		p.qbtProcKey = key // an unreadable process list keeps the last identity rather than forgetting it
+	}
 
 	st.Logs = LogsState{OK: snap.LogsKnown}
 	for _, f := range snap.Logs {
@@ -781,7 +791,7 @@ func qbtPortFor(b *store.Box, confPort int) int {
 func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot) {
 	port := p.qbtPort(snap)
 	qs := QbtState{Enabled: true, Installed: snap.Qbt.BinaryPresent, ProcessUp: snap.Qbt.Running, Port: port, Version: st.Qbt.Version,
-		FirewalledSince: carriedFirewalledSince(st.Qbt, snap.Qbt.Running), ListenPort: st.Qbt.ListenPort,
+		FirewalledSince: carriedFirewalledSince(st.Qbt, snap.Qbt.Running, p.qbtRestarted), ListenPort: st.Qbt.ListenPort,
 		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: clip(snap.Qbt.SubnetList, 1024), ConfUser: clip(snap.Qbt.Username, 64),
 		HasCreds:      p.box.QbtUser != "" || p.box.QbtPass != "",
 		BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0, PMSSManaged: snap.Qbt.PMSSManaged}
@@ -901,16 +911,29 @@ func connectionStatus(s string) string {
 }
 
 // carriedFirewalledSince is the FirewalledSince a poll starts from: the
-// previous value while the client process is still up, so a Web API
+// previous value while the same client process is still up, so a Web API
 // failure (a login hold, a timeout, a port check that refused) does not
 // restart the ten-minute clock and clear an alert the moment the API
-// answers again; nothing once the process is gone, since a fresh process
-// starts its own clock.
-func carriedFirewalledSince(prev QbtState, processUp bool) string {
-	if !processUp {
+// answers again; nothing once the process is gone or was replaced between
+// two polls (restarted), since a fresh process starts its own clock.
+func carriedFirewalledSince(prev QbtState, processUp, restarted bool) string {
+	if !processUp || restarted {
 		return ""
 	}
 	return prev.FirewalledSince
+}
+
+// qbtProcKey names the qbittorrent-nox processes in a process list by pid
+// and start tick ("pid:tick,…", sorted), "" when there are none.
+func qbtProcKey(procs []probe.ProcInfo) string {
+	var parts []string
+	for _, p := range procs {
+		if p.Comm == "qbittorrent-nox" {
+			parts = append(parts, fmt.Sprintf("%d:%d", p.PID, p.StartTick))
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 // firewalledSince carries the time the client was first seen not
@@ -934,10 +957,10 @@ func firewalledSince(prev, conn string, now time.Time) string {
 // next probe asks again.
 func resolveQbtVersion(seenStat, seenVersion string, q probe.QbtInfo) (stat, version, current string) {
 	switch {
+	case q.BinaryVersion != "": // a fresh answer always wins, whatever the stat said
+		return q.BinaryStat, q.BinaryVersion, q.BinaryVersion
 	case !q.BinaryPresent || q.BinaryStat == "":
 		return "", "", ""
-	case q.BinaryVersion != "":
-		return q.BinaryStat, q.BinaryVersion, q.BinaryVersion
 	case q.BinaryStat == seenStat && seenVersion != "":
 		return seenStat, seenVersion, seenVersion
 	}

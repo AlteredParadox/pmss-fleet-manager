@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"pmss-fleet-manager/internal/phpserial"
 )
@@ -416,10 +417,11 @@ type LogFile struct {
 const maxLogFiles = 200
 
 // ValidLogPath accepts the relative paths the listing produces and the
-// tail script will open: no leading slash, no ".." component, no control
-// characters, bounded length.
+// tail script will open: valid UTF-8 (a name with other bytes would be
+// listed as U+FFFD and never match on the way back), no leading slash, no
+// ".." component, no control characters, bounded length.
 func ValidLogPath(p string) bool {
-	if p == "" || len(p) > 300 || strings.HasPrefix(p, "/") || strings.HasSuffix(p, "/") {
+	if p == "" || len(p) > 300 || !utf8.ValidString(p) || strings.HasPrefix(p, "/") || strings.HasSuffix(p, "/") {
 		return false
 	}
 	for _, r := range p {
@@ -436,20 +438,19 @@ func ValidLogPath(p string) bool {
 }
 
 // parseLogs reads the logs section ("mtime<TAB>size<TAB>path" per line),
-// newest first, capped at maxLogFiles.
-func parseLogs(raw string) ([]LogFile, bool) {
+// newest first, capped at maxLogFiles. The mtime bound is written so that
+// NaN fails it: int64(NaN) is a time encoding/json refuses.
+func parseLogs(raw string) []LogFile {
 	var out []LogFile
-	known := false
 	for _, line := range strings.Split(raw, "\n") {
 		f := strings.SplitN(line, "\t", 3)
 		if len(f) != 3 {
 			continue
 		}
-		known = true
 		mt, err2 := strconv.ParseFloat(strings.TrimSpace(f[0]), 64)
 		size, err1 := strconv.ParseInt(strings.TrimSpace(f[1]), 10, 64)
 		p := strings.TrimPrefix(f[2], "./")
-		if err1 != nil || err2 != nil || size < 0 || size > 1<<50 || mt <= 0 || mt > 1e11 || !ValidLogPath(p) {
+		if err1 != nil || err2 != nil || size < 0 || size > 1<<50 || !(mt > 0 && mt <= 1e11) || !ValidLogPath(p) {
 			continue
 		}
 		out = append(out, LogFile{Path: p, Size: size, MTime: time.Unix(int64(mt), 0)})
@@ -458,7 +459,7 @@ func parseLogs(raw string) ([]LogFile, bool) {
 	if len(out) > maxLogFiles {
 		out = out[:maxLogFiles]
 	}
-	return out, known
+	return out
 }
 
 // ProcInfo is one of the account's processes as ps reported it.
@@ -492,7 +493,7 @@ func parseProcStat(raw string) map[int]procStat {
 		return out
 	}
 	hz, err := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
-	if err != nil || hz <= 0 || hz > 1e6 {
+	if err != nil || !(hz >= 1 && hz <= 1e6) { // CLK_TCK is a small integer; a tiny or NaN rate would make the seconds infinite
 		return out // without the tick rate the numbers mean nothing
 	}
 	for _, line := range lines[1:] {
@@ -528,7 +529,7 @@ func parseProcs(procs, args, stat string, probePID int) ([]ProcInfo, bool) {
 			argv[pid] = strings.Join(f[1:], " ")
 		}
 	}
-	var out []ProcInfo
+	var rows []ProcInfo
 	known := false
 	for _, line := range strings.Split(procs, "\n") {
 		f := strings.Fields(line)
@@ -544,9 +545,6 @@ func parseProcs(procs, args, stat string, probePID int) ([]ProcInfo, bool) {
 			continue
 		}
 		known = true
-		if probePID > 0 && (pid == probePID || ppid == probePID) {
-			continue
-		}
 		if rss < 0 || rss > 1<<40 { // KiB; a forged value must not skew totals
 			rss = 0
 		}
@@ -561,12 +559,37 @@ func parseProcs(procs, args, stat string, probePID int) ([]ProcInfo, bool) {
 		if ps, ok := stats[pid]; ok {
 			pi.CPUSec, pi.StartTick = ps.cpuSec, ps.start
 		}
-		out = append(out, pi)
+		rows = append(rows, pi)
+	}
+	// Drop the probe's own process tree: its shell, the ps/awk/xargs it
+	// runs, and their children (timeout wraps ps, so ps is a grandchild).
+	ppidOf := make(map[int]int, len(rows))
+	for _, r := range rows {
+		ppidOf[r.PID] = r.PPID
+	}
+	out := make([]ProcInfo, 0, len(rows))
+	for _, r := range rows {
+		if probePID > 0 && underPID(r.PID, probePID, ppidOf) {
+			continue
+		}
+		out = append(out, r)
 		if len(out) >= maxProcs {
 			break
 		}
 	}
 	return out, known
+}
+
+// underPID reports whether pid is root or one of its descendants in the
+// parent map, walking at most a few levels (a cycle in forged data stops).
+func underPID(pid, root int, ppidOf map[int]int) bool {
+	for depth := 0; depth < 8 && pid > 0; depth++ {
+		if pid == root {
+			return true
+		}
+		pid = ppidOf[pid]
+	}
+	return false
 }
 
 // parseListenPIDs reads "<port> <pid>" lines from the listen_pids section.
@@ -674,7 +697,7 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap.Procs, snap.ProcsKnown = parseProcs(s["procs"], s["proc_args"], s["proc_stat"], probePID)
 	snap.ListenPIDs = parseListenPIDs(s["listen_pids"])
 	_, snap.LogsKnown = s["logs"]
-	snap.Logs, _ = parseLogs(s["logs"])
+	snap.Logs = parseLogs(s["logs"])
 	return snap, nil
 }
 
@@ -1010,7 +1033,9 @@ func parseQbt(s map[string]string) QbtInfo {
 	q := QbtInfo{BinaryPresent: strings.TrimSpace(s["qbt_bin"]) != ""}
 	q.Running = len(strings.Fields(s["qbt_pid"])) > 0
 	q.BinaryVersion = qbtVersionString(s["qbt_bin_version"])
-	q.BinaryStat = strings.TrimSpace(s["qbt_bin_stat"])
+	if st := strings.TrimSpace(s["qbt_bin_stat"]); len(st) <= 80 && binaryStatShape.MatchString(st) {
+		q.BinaryStat = st // anything else is not a stat line, and it is echoed back to the box every poll
+	}
 	q.StartHelper = strings.TrimSpace(s["qbt_start_helper"]) == "1"
 	q.CronEntries, _ = strconv.Atoi(strings.TrimSpace(s["qbt_cron"]))
 	q.PMSSManaged = strings.TrimSpace(s["qbt_pmss"]) == "1"
@@ -1035,6 +1060,9 @@ func parseQbt(s map[string]string) QbtInfo {
 	}
 	return q
 }
+
+// binaryStatShape is what `stat -c '%s %Y %Z %i'` prints.
+var binaryStatShape = regexp.MustCompile(`^[0-9]+ [0-9]+ [0-9]+ [0-9]+$`)
 
 // qbtVersionString extracts "v5.2.3" from "qBittorrent v5.2.3" style output.
 func qbtVersionString(raw string) string {

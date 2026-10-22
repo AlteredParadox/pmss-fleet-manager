@@ -152,6 +152,43 @@ func TestWantApps(t *testing.T) {
 	}
 }
 
+// A state restored from the cache or carried across an edit (Unpolled) has
+// its reachability flags reset: evaluating it must raise nothing (round 20
+// MEDIUM: a watch toggle before the first poll raised "not responding").
+func TestEvaluateSkipsUnpolled(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	b := &store.Box{Name: "x", Host: "h", User: "u", Port: 22, Enabled: true}
+	if err := st.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	e := New(st, store.DefaultSettings, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	s := &collect.BoxState{ID: b.ID, Name: "x", Status: "online", Unpolled: true}
+	s.Qbt.Enabled, s.Docker.Enabled = true, true // Reachable false, as resetVolatile leaves them
+	s.Apps.OK, s.Apps.Watched, s.Apps.Apps = true, []string{"radarr"}, []collect.AppView{{Key: "radarr", Name: "Radarr", Watched: true}}
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); len(keys) != 0 {
+		t.Fatalf("unpolled state raised %v", keys)
+	}
+	s.Unpolled = false
+	e.Evaluate(ctx, s)
+	keys, _ := st.ActiveAlertKeys(ctx, b.ID)
+	slices.Sort(keys)
+	if want := []string{"app:radarr", "docker", "qbt"}; !slices.Equal(keys, want) {
+		t.Fatalf("polled state: %v, want %v", keys, want)
+	}
+	// A disabled box is still evaluated so its alerts resolve.
+	s.Unpolled, s.Status = true, "disabled"
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); len(keys) != 0 {
+		t.Fatalf("disabled unpolled state kept %v", keys)
+	}
+}
+
 // Unwatching an app while its box is offline must resolve the app alert at
 // once: the watch list is the dashboard's own, so no probe is needed.
 func TestUnwatchResolvesWhileOffline(t *testing.T) {

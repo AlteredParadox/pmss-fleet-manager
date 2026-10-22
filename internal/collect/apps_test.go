@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -293,6 +294,54 @@ func TestMarkWatchedCopies(t *testing.T) {
 	}
 	if want := []string{"lighttpd", "deluge", "sonarr", "rclone"}; !slices.Equal(got, want) {
 		t.Fatalf("order: %v, want %v", got, want)
+	}
+}
+
+// A helper chain listed child-first (after a pid wrap) still resolves to
+// the app at its root, however deep (round 20, LOW-1).
+func TestInheritAppsDeepChildFirst(t *testing.T) {
+	procs := []ProcView{{PID: 5, Name: "sleep", App: "other:sleep"}, {PID: 4, Name: "nice", App: "other:nice"}, {PID: 3, Name: "timeout", App: "other:timeout"}, {PID: 2, Name: "sh", App: "shell"}, {PID: 1, Name: "Radarr", App: "radarr"}}
+	ppid := map[int]int{5: 4, 4: 3, 3: 2, 2: 1, 1: 0}
+	inheritApps(procs, ppid)
+	for _, p := range procs {
+		if p.App != "radarr" {
+			t.Fatalf("%s: %s", p.Name, p.App)
+		}
+	}
+	// A cycle or a self-parent terminates.
+	loop := []ProcView{{PID: 1, Name: "sh", App: "shell"}, {PID: 2, Name: "sleep", App: "other:sleep"}}
+	inheritApps(loop, map[int]int{1: 2, 2: 1})
+	if loop[1].App != "other:sleep" {
+		t.Fatalf("cycle: %+v", loop)
+	}
+}
+
+// Duplicate keys in a hand-edited watch list yield one placeholder row.
+func TestMarkWatchedDedupes(t *testing.T) {
+	a := AppsState{OK: true, Watched: []string{"radarr", "radarr"}}
+	a.markWatched()
+	if len(a.Apps) != 1 {
+		t.Fatalf("rows: %+v", a.Apps)
+	}
+}
+
+// An infinite CPU rate (a forged reading the parser bounds let through)
+// is reported as unknown, never summed.
+func TestProcViewNonFiniteRate(t *testing.T) {
+	t0 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	prev := map[int]procSample{10: {cpuSec: 1, start: 5, at: t0}}
+	pv := procView(probe.ProcInfo{PID: 10, StartTick: 5, CPUSec: math.Inf(1), Comm: "x"}, prev, t0.Add(30*time.Second))
+	if pv.CPUKnown || pv.CPUPct != 0 {
+		t.Fatalf("inf rate: %+v", pv)
+	}
+}
+
+// A process name with control characters (prctl allows them) still yields
+// a key the watch endpoint accepts.
+func TestOtherKeyControlChars(t *testing.T) {
+	k, name := otherKey("\x01ctl\x7f", "")
+	if !ValidAppKey(k) || name != "?ctl?" {
+		t.Fatalf("key %q name %q", k, name)
 	}
 }
 
