@@ -196,6 +196,29 @@ echo "uid $uid"
 ` + listenShell + `echo end
 `
 
+// EstablishedScript lists the established TCP sockets whose local port is
+// port, with their owning uid, for the post-connect check: once the
+// dashboard's tunnel connection to 127.0.0.1:<port> is up, the accepting
+// side of every established socket on that port must belong to this
+// account, or whatever answered the port is not our client. "total N" is
+// the number of established rows the table showed at all (the SSH session
+// itself is one), so an unreadable table (0) is told from "none on this
+// port". Falls back to ss where /proc/net/tcp is root-only; with a state
+// filter ss prints no State column (Local is $3, Process $5).
+func EstablishedScript(port int) string {
+	return "#!/bin/sh\nLC_ALL=C; export LC_ALL\nport=" + strconv.Itoa(port) + "\n" +
+		`uid=$(id -u)
+echo "uid $uid"
+hp=$(printf '%04X' "$port")
+e=$(awk -v hp="$hp" '$4=="01"{n++; x=$2; sub(/.*:/,"",x); if (x==hp) print "h", x, $8} END{print "total", n+0}' /proc/net/tcp /proc/net/tcp6 2>/dev/null)
+if [ -n "$e" ] && [ "$(printf '%s\n' "$e" | tail -n 1)" != "total 0" ]; then printf '%s\n' "$e"; else
+  echo "via ss"
+  timeout 10 ss -Htnp state established 2>/dev/null | awk -v uid="$uid" -v port="$port" '{n++; m=split($3,a,":"); p=a[m]; if (p==port) { o="x"; if ($5 ~ /^users:\(\(/) o=uid; print "d", p, o } } END{print "total", n+0}'
+fi
+echo end
+`
+}
+
 // listenShell lists the listening TCP sockets a 127.0.0.1 dial could reach,
 // one per line, for parseListeners. It needs $uid set.
 //

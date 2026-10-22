@@ -233,6 +233,58 @@ func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
 	return s.PortOwner(port)
 }
 
+// EstablishedOwner evaluates EstablishedScript's output for port. known is
+// false when the box could not show its established sockets at all (the
+// table is root-only and ss dumps of non-listening sockets are filtered):
+// the caller then has only the pre-connect listener check to go on. With a
+// readable table, ok requires every established socket on the port to be
+// this account's: the dashboard's own just-made connection is among them,
+// and a foreign owner means something else answered the port.
+func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if strings.TrimSpace(lines[len(lines)-1]) != "end" {
+		return false, true, "the box's socket table came back incomplete"
+	}
+	uid, total := -1, 0
+	var rows []string
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		switch {
+		case strings.HasPrefix(l, "uid "):
+			uid, _ = strconv.Atoi(strings.TrimSpace(l[4:]))
+		case strings.HasPrefix(l, "total "):
+			total, _ = strconv.Atoi(strings.TrimSpace(l[6:]))
+		default:
+			rows = append(rows, l)
+		}
+	}
+	if uid < 0 {
+		return false, true, "could not read the account's uid on the box"
+	}
+	if total <= 0 {
+		return false, false, "the box does not show its established sockets"
+	}
+	seen := 0
+	for _, r := range rows {
+		f := strings.Fields(r)
+		if len(f) != 3 {
+			continue
+		}
+		p, owner, good := listenerPortUID(f)
+		if !good || p != port {
+			continue
+		}
+		seen++
+		if owner != uid {
+			return false, true, fmt.Sprintf("an established connection on port %d is held by another account (uid %d); refusing to use the port", port, owner)
+		}
+	}
+	if seen == 0 {
+		return false, true, fmt.Sprintf("the connection to port %d is not in the box's socket table", port)
+	}
+	return true, true, ""
+}
+
 // parseListeners reads the probe's listen section: one listening socket per
 // line as "h <hexport> <uid> [<hexaddr>]" from /proc/net/tcp{,6}, or as
 // "d <port> <uid|x> [<addr>]" from ss (see listenShell). Only

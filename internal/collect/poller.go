@@ -396,6 +396,8 @@ func sshConfig(b *store.Box) sshx.Config {
 	}
 }
 
+// sshDialTCP dials the WebUI through the current SSH connection, with the
+// post-connect owner check (verifiedDial) on every new connection.
 func (p *poller) sshDialTCP(addr string) qbt.Dialer {
 	return func(ctx context.Context) (net.Conn, error) {
 		p.mu.Lock()
@@ -404,7 +406,11 @@ func (p *poller) sshDialTCP(addr string) qbt.Dialer {
 		if cli == nil {
 			return nil, ErrUnavailable
 		}
-		return cli.DialTCP(ctx, addr)
+		port := 0
+		if _, ps, err := net.SplitHostPort(addr); err == nil {
+			port, _ = strconv.Atoi(ps)
+		}
+		return verifiedDial(cli, addr, port)(ctx)
 	}
 }
 
@@ -696,6 +702,15 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	// unreadable or client-less poll leaves it for the next one.
 	if snap.ProcsKnown && p.qbtProcKey != "" && p.takeRestartBefore(p.pollStart) {
 		p.qbtRestarted = true
+	}
+	if p.qbtRestarted {
+		// The pooled connections led to the previous process; whatever
+		// answers the port now is verified afresh on the next connect.
+		p.mu.Lock()
+		if p.qbt != nil {
+			p.qbt.Close()
+		}
+		p.mu.Unlock()
 	}
 
 	st.Logs = LogsState{OK: snap.LogsKnown}

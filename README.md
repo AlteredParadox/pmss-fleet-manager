@@ -249,7 +249,12 @@ These are the design decisions that came out of it.
   password is sent only when the socket table (`/proc/net/tcp`, or `ss -tlnp`
   where that is root-only) shows the port bound by your uid
   alone, re-read live over the same SSH connection immediately before any
-  stop, pause or resume. One login attempt runs at a time per box and its
+  stop, pause or resume; and after every new tunnel connection, before a
+  byte is written, the established sockets on that port are checked to be
+  yours too, so a co-tenant who grabs the port between the check and the
+  connect gets the connection closed, not the credentials (on hosts whose
+  socket-table privacy hides established sockets, the listener check is
+  what applies). One login attempt runs at a time per box and its
   outcome is shared with every request that was waiting on it, so a burst of
   actions sends the credentials once. A rejected login is held until the
   credentials change or the client is restarted from the dashboard, and a

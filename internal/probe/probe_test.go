@@ -868,3 +868,63 @@ func TestBoundedSkipsWhileLocked(t *testing.T) {
 		t.Fatalf("locked run must return at once, took %v", time.Since(start))
 	}
 }
+
+// EstablishedScript, run locally against a real connection: the accepting
+// side belongs to this uid, so the check passes; the parser's refusals are
+// exercised on crafted tables.
+func TestEstablishedOwner(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	out, stderr, code := runSh(t, EstablishedScript(port))
+	if code != 0 {
+		t.Fatalf("script: code %d err %q", code, stderr)
+	}
+	ok, known, reason := EstablishedOwner([]byte(out), port)
+	if !known {
+		t.Skipf("established sockets not visible here: %q", out)
+	}
+	if !ok {
+		t.Fatalf("own connection refused: %s\n%s", reason, out)
+	}
+	uid := os.Getuid()
+	mk := func(rows string) []byte { return []byte(fmt.Sprintf("uid %d\n%stotal 5\nend\n", uid, rows)) }
+	if ok, known, _ := EstablishedOwner(mk(fmt.Sprintf("h %04X %d\n", port, uid)), port); !ok || !known {
+		t.Fatal("own socket must pass")
+	}
+	if ok, _, reason := EstablishedOwner(mk(fmt.Sprintf("h %04X %d\nh %04X %d\n", port, uid, port, uid+1)), port); ok || !strings.Contains(reason, "another account") {
+		t.Fatalf("a foreign established socket on the port must refuse: %v %s", ok, reason)
+	}
+	if ok, _, _ := EstablishedOwner(mk(fmt.Sprintf("d %d x\n", port)), port); ok {
+		t.Fatal("an unattributable socket (ss fallback) must refuse")
+	}
+	if ok, _, reason := EstablishedOwner(mk(""), port); ok || !strings.Contains(reason, "not in the box's socket table") {
+		t.Fatalf("no socket on the port while the table is readable must refuse: %v %s", ok, reason)
+	}
+	if _, known, _ := EstablishedOwner([]byte(fmt.Sprintf("uid %d\ntotal 0\nend\n", uid)), port); known {
+		t.Fatal("an empty table is unknown, not a verdict")
+	}
+	if ok, known, _ := EstablishedOwner([]byte(fmt.Sprintf("uid %d\nh %04X %d\n", uid, port, uid)), port); ok || !known {
+		t.Fatal("a cut-off table must refuse")
+	}
+	if ok, _, _ := EstablishedOwner([]byte("total 3\nend\n"), port); ok {
+		t.Fatal("no uid must refuse")
+	}
+}
