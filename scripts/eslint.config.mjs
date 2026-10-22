@@ -1,7 +1,8 @@
-// ESLint flat config for the embedded frontend (internal/web/static/app.js),
-// run by `make jscheck`. Correctness rules only: the file is vanilla script
-// code in an IIFE, so every browser global it uses is listed here and
-// anything else referenced but never declared is an error.
+// ESLint flat config for the embedded frontend (internal/web/static/*.js)
+// and its Node test, run by `make jscheck`. Correctness rules only: the
+// page files are vanilla script code in IIFEs, so every browser global they
+// use is listed here and anything else referenced but never declared is an
+// error.
 export default [{
   files: ["**/*.js"],
   languageOptions: {
@@ -13,7 +14,12 @@ export default [{
       setTimeout: "readonly", clearTimeout: "readonly", setInterval: "readonly", confirm: "readonly",
       Promise: "readonly", console: "readonly", Set: "readonly", Map: "readonly", Number: "readonly",
       String: "readonly", Math: "readonly", Date: "readonly", Object: "readonly", JSON: "readonly", Array: "readonly",
+      globalThis: "readonly", pfmRevisions: "readonly", // static/revisions.js defines it, app.js uses it
     },
   },
+  rules: { "no-undef": "error", "no-unreachable": "error", "no-dupe-keys": "error", "no-unused-vars": "warn" },
+}, {
+  files: ["**/*_test.mjs"],
+  languageOptions: { ecmaVersion: 2022, sourceType: "module", globals: { Map: "readonly", Set: "readonly", URL: "readonly" } },
   rules: { "no-undef": "error", "no-unreachable": "error", "no-dupe-keys": "error", "no-unused-vars": "warn" },
 }];
