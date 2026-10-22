@@ -18,12 +18,14 @@ package qbt
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -681,5 +683,113 @@ func TestAmbiguousSignalIsPerRequest(t *testing.T) {
 	}
 	if _, held := c.AuthBlocked(); held {
 		t.Fatal("logins that never wrote must not be charged, whatever other requests did")
+	}
+}
+
+// Incremental sync: the first request is rid=0 and every later one carries
+// the last response id; a delta merges field by field into the retained
+// view, torrents_removed drops entries, a failed request leaves the view
+// and the id as they were, a full_update replaces the view, and Close
+// starts over (external review 3, finding 8).
+func TestIncrementalSync(t *testing.T) {
+	var rids []string
+	var step int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/sync/maindata", func(w http.ResponseWriter, r *http.Request) {
+		rids = append(rids, r.URL.Query().Get("rid"))
+		switch step {
+		case 0:
+			w.Write([]byte(`{"rid":1,"full_update":true,"server_state":{"dl_info_speed":10,"up_info_speed":20,"connection_status":"connected"},"categories":{"tv":{"name":"tv","savePath":"/x"}},"tags":["a"],"trackers":{"http://t":["abc","def"]},"torrents":{"abc":{"name":"A","size":100,"upspeed":1,"state":"uploading"},"def":{"name":"D","size":200,"state":"stalledUP"}}}`))
+		case 1:
+			w.Write([]byte(`{"rid":2,"server_state":{"up_info_speed":99},"torrents":{"abc":{"upspeed":500},"ghi":{"name":"G","size":5}},"torrents_removed":["def"]}`))
+		case 2:
+			w.WriteHeader(500)
+		case 3:
+			w.Write([]byte(`{"rid":7,"full_update":true,"server_state":{"dl_info_speed":1},"torrents":{"zzz":{"name":"Z"}}}`))
+		default:
+			w.Write([]byte(`{"rid":8,"full_update":true,"torrents":{}}`))
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:1", "", "")
+	ctx := context.Background()
+
+	md, err := c.MainData(ctx)
+	if err != nil || len(md.Torrents) != 2 || md.Torrents["abc"].Hash != "abc" || md.ServerState.DLInfoSpeed != 10 {
+		t.Fatalf("full: %+v %v", md, err)
+	}
+	step = 1
+	md, err = c.MainData(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := md.Torrents["abc"]; a.UPSpeed != 500 || a.Name != "A" || a.Size != 100 || a.State != "uploading" {
+		t.Fatalf("delta must change only the fields it carries: %+v", a)
+	}
+	if _, ok := md.Torrents["def"]; ok || md.Torrents["ghi"].Name != "G" || md.Torrents["ghi"].Hash != "ghi" || len(md.Torrents) != 2 {
+		t.Fatalf("removed/added: %+v", md.Torrents)
+	}
+	if md.ServerState.UPInfoSpeed != 99 || md.ServerState.DLInfoSpeed != 10 || md.ServerState.ConnectionStatus != "connected" {
+		t.Fatalf("server_state merges too: %+v", md.ServerState)
+	}
+	step = 2
+	if _, err := c.MainData(ctx); err == nil {
+		t.Fatal("want the 500")
+	}
+	step = 3
+	md, err = c.MainData(ctx)
+	if err != nil || len(md.Torrents) != 1 || md.Torrents["zzz"].Name != "Z" || md.ServerState.UPInfoSpeed != 0 || md.ServerState.DLInfoSpeed != 1 {
+		t.Fatalf("full_update must replace the view: %+v %+v %v", md.Torrents, md.ServerState, err)
+	}
+	c.Close()
+	step = 4
+	if _, err := c.MainData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// rid=0 first; then 1; the failed request asked with 2 and so does the
+	// retry (nothing advanced), which got the full update; after Close, 0.
+	if want := []string{"0", "1", "2", "2", "0"}; !slices.Equal(rids, want) {
+		t.Fatalf("rids sent: %v, want %v", rids, want)
+	}
+}
+
+// A response carrying more torrents than MaxTorrents is refused before the
+// decoder materialises them, and an entry that does not decode leaves the
+// retained view and its id untouched.
+func TestSyncEntryCapAndBadDelta(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"rid":3,"full_update":true,"torrents":{`)
+	for i := 0; i <= MaxTorrents; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, `"%040d":{}`, i)
+	}
+	sb.WriteString(`}}`)
+	if _, err := decodeMainData(strings.NewReader(sb.String()), MaxTorrents); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("want the cap, got %v", err)
+	}
+	d, err := decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"abc":{"size":"not a number"}},"torrents_removed":null,"torrents":null}`), MaxTorrents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err = decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"abc":{"size":"not a number"}},"torrents_removed":["x"],"trackers":{"u":[1,[2,{"a":null}]]}}`), MaxTorrents)
+	if err != nil || d.rid != 4 || len(d.removed) != 1 {
+		t.Fatalf("decode: %+v %v", d, err)
+	}
+	have := syncState{rid: 3, torrents: map[string]Torrent{"abc": {Hash: "abc", Size: 7}, "x": {Hash: "x"}}}
+	next, err := have.apply(d, false)
+	if err == nil || next.rid != 3 || next.torrents["abc"].Size != 7 || len(next.torrents) != 2 {
+		t.Fatalf("a bad entry must not advance anything: %+v %v", next, err)
+	}
+	// Growing past the cap by deltas is refused as well.
+	big := syncState{rid: 1, torrents: make(map[string]Torrent, MaxTorrents)}
+	for i := 0; i < MaxTorrents; i++ {
+		big.torrents[fmt.Sprintf("%040d", i)] = Torrent{}
+	}
+	if _, err := big.apply(&mainDelta{rid: 2, torrents: map[string]json.RawMessage{"new": json.RawMessage(`{}`)}}, false); err == nil {
+		t.Fatal("want the cap")
 	}
 }
