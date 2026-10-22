@@ -176,12 +176,13 @@ sec listen_pids
 const QbtCronPattern = `"^[[:space:]]*(@[a-z]+|[^#@[:space:]]+([[:space:]]+[^[:space:]]+){4})[[:space:]]+(sleep[[:space:]]+[0-9]+[[:space:]]*;[[:space:]]*)?[\"']?([\$]HOME|[\$][{]HOME[}]|~|/[^[:space:]\"';&|]*)/bin/qbt-start[\"']?([[:space:]]*[0-9]*[<>]{1,2}&?[[:space:]]*[^[:space:];&|<>]*)*[[:space:]]*\$"`
 
 // boundedShell is the probe's bounded() helper. The command runs under a
-// per-command lock (flock, where present) in the tenant's scratch dir: a
-// run from an earlier probe that is stuck in the kernel (a hung filesystem
-// under df or quota cannot act on SIGKILL) still holds the lock, so this
-// probe skips the command, and the section is empty, instead of adding
-// another unkillable process to the slice every poll. The lock is the
-// exec'd command's own fd, so it is released exactly when that returns.
+// per-command lock (flock) in the tenant's scratch dir: a run from an
+// earlier probe that is stuck in the kernel (a hung filesystem under df or
+// quota cannot act on SIGKILL) still holds the lock, so this probe skips
+// the command, and the section is empty, instead of adding another
+// unkillable process to the slice every poll. The lock is the exec'd
+// command's own fd, so it is released exactly when that returns. Without
+// flock the command is skipped altogether.
 const boundedShell = `bounded(){
   secs=$1; shift
   # The scratch file lives in the tenant's own runtime dir or home, never
@@ -190,11 +191,11 @@ const boundedShell = `bounded(){
   # reading survives the box being full.
   f=$(mktemp "$scratch/.pmss-probe.XXXXXX" 2>/dev/null) || return 0
   lock="$scratch/.pmss-probe-lock.$(basename "$1")"
-  if command -v flock >/dev/null 2>&1; then
-    ( exec 9>"$lock" && flock -n 9 && exec "$@" >"$f" 2>/dev/null ) & bp=$!
-  else
-    ( "$@" >"$f" 2>/dev/null ) & bp=$!
-  fi
+  # No flock (util-linux is Essential on Debian, so this is not a PMSS
+  # host): nothing can tell a stuck earlier run from none, so the reading
+  # is skipped rather than risk a stuck process per poll.
+  command -v flock >/dev/null 2>&1 || { rm -f "$f"; return 0; }
+  ( exec 9>"$lock" && flock -n 9 && exec "$@" >"$f" 2>/dev/null ) & bp=$!
   i=0; while [ $i -lt $((secs*5)) ] && kill -0 $bp 2>/dev/null; do sleep 0.2; i=$((i+1)); done
   kill -9 $bp 2>/dev/null
   cat "$f" 2>/dev/null; rm -f "$f"

@@ -119,6 +119,40 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// A data directory with characters that mean something in a SQLite file
+// URI still opens the file that was created and chmodded (GPT audit
+// 2026-10-22 finding 10).
+func TestOpenPathWithURICharacters(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "odd ?dir#%41 x")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "fleet.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateBox(ctx, &Box{Name: "a", Host: "h", User: "u", Port: 22}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
+		t.Fatalf("the database is not at the configured path: %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) > 3 {
+		t.Fatalf("unexpected files in the data dir: %v", entries)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if boxes, err := s.ListBoxes(ctx); err != nil || len(boxes) != 1 {
+		t.Fatalf("reopen: %v %d boxes", err, len(boxes))
+	}
+}
+
 func TestOneActiveAlertPerKey(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "d", "test.db"))
 	if err != nil {

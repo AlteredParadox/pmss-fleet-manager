@@ -238,3 +238,63 @@ func TestRemoveBoxNotifiesAlertsAfterDelete(t *testing.T) {
 		t.Fatalf("second event must report the cascaded alerts: %+v", got[1])
 	}
 }
+
+// Every event carries a higher alert revision than the last, with the
+// count read under that revision, and AlertsView reports the count with
+// the revision it is current at: a client keeping the highest-revision
+// count can never regress to an older one, however the stream and a late
+// snapshot interleave (GPT audit 2026-10-22 finding 4).
+func TestAlertRevisionOrdersCounts(t *testing.T) {
+	ctx := context.Background()
+	m, boxes := revTestManager(t, 1)
+	ch, cancel := m.Bus().Subscribe()
+	defer cancel()
+	next := func() Event {
+		select {
+		case ev := <-ch:
+			return ev
+		case <-time.After(5 * time.Second):
+			t.Fatal("no event")
+		}
+		return Event{}
+	}
+	if _, err := m.st.RaiseAlert(ctx, boxes[0].ID, "disk", "warn", "disk"); err != nil {
+		t.Fatal(err)
+	}
+	m.Publish(Event{Type: "alerts"})
+	ev := next()
+	n, rev := m.AlertsView(ctx)
+	if ev.Unacked != 1 || ev.AlertsRev == 0 || n != 1 || rev != ev.AlertsRev {
+		t.Fatalf("after raise: event %+v view %d@%d", ev, n, rev)
+	}
+	// A change not yet announced: the view reads the new count under the
+	// same revision; the announcement then carries a higher one.
+	if err := m.st.AckAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, r := m.AlertsView(ctx); n != 0 || r != rev {
+		t.Fatalf("after ack, before publish: %d@%d, want 0@%d", n, r, rev)
+	}
+	m.Publish(Event{Type: "alerts"})
+	if ev = next(); ev.Unacked != 0 || ev.AlertsRev != rev+1 {
+		t.Fatalf("after publish: %+v, want 0@%d", ev, rev+1)
+	}
+	// Concurrent publishers: revisions on the bus are strictly increasing.
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.Publish(Event{Type: "alerts"})
+		}()
+	}
+	wg.Wait()
+	last := ev.AlertsRev
+	for i := 0; i < 20; i++ {
+		ev = next()
+		if ev.AlertsRev <= last {
+			t.Fatalf("revision %d after %d", ev.AlertsRev, last)
+		}
+		last = ev.AlertsRev
+	}
+}

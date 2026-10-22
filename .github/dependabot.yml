@@ -45,6 +45,20 @@ updates:
         applies-to: security-updates
         patterns: ['*']
 
+  # package.json pins ESLint (the one npm dependency, used by `make jscheck`
+  # only) and package-lock.json its tree; Dependabot regenerates the lock.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        applies-to: version-updates
+        patterns: ['*']
+      npm-security:
+        applies-to: security-updates
+        patterns: ['*']
+
   # The Dockerfile pins both base images by digest; this refreshes them the
   # same way the actions pins are refreshed.
   - package-ecosystem: docker

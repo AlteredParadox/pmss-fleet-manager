@@ -33,7 +33,7 @@ function trimSlashes(p) { // trailing slashes off, without a regex that backtrac
 const S = {
   view: 'fleet', fleetView: 'cards', tab: 'overview', selId: null,
   boxes: [], totals: {}, unacked: 0, settings: {}, detail: null,
-  snapRev: 0, removed: new Map(), // revision bookkeeping, see static/revisions.js (pfmRevisions)
+  snapRev: 0, removed: new Map(), alertsRev: 0, // revision bookkeeping, see static/revisions.js (pfmRevisions)
   alerts: [], filter: '', live: false,
   torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
   torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, status_reason, qbt}]
@@ -181,7 +181,14 @@ function route() {
 const go = (hash) => { location.hash = hash; };
 
 /* ---------- data ---------- */
+// Per-resource request sequences: only the newest-started request may set
+// the fields that carry no revision of their own (settings, totals, the
+// services and alerts lists). A successful save bumps the sequence too, so
+// a GET that started before the save cannot land after it with the old
+// values. Boxes and the alert badge carry revisions and merge on their own.
+let stateSeq = 0, servicesSeq = 0, alertsSeq = 0;
 async function loadState() {
+  const seq = ++stateSeq;
   try {
     const d = await api('GET', BASE + '/api/state');
     if (d.instance && S.instance && d.instance !== S.instance) { location.reload(); return; } // server was rebuilt: pick up new JS/CSS
@@ -190,11 +197,11 @@ async function loadState() {
     // all be in flight): one taken before a snapshot that already landed
     // is superseded and must not put back a box removed between the two.
     const r = pfmRevisions.acceptSnapshot(S, d.boxes || [], d.rev || 0);
-    if (!r.accepted) return true;
+    pfmRevisions.acceptAlerts(S, d.alerts_unacked, d.alerts_rev || 0);
+    if (!r.accepted || seq !== stateSeq) return true; // superseded: the boxes and badge merged by revision, the rest is stale
     S.version = d.version; S.sourceUrl = d.source_url;
     S.totals = d.totals || {};
     if (r.kept) recomputeTotals(); // the list is newer than the snapshot's totals
-    S.unacked = d.alerts_unacked || 0;
     S.settings = d.settings || {};
     applyTheme(S.view === 'settings' && S.settingsDraft && S.settingsTouched.theme ? S.settingsDraft.theme : S.settings.theme); // keep an unsaved preview
     if (!S.fleetViewTouched) S.fleetView = S.settings.fleet_view || 'cards';
@@ -250,9 +257,21 @@ async function loadTorrents() {
   if (S.view === 'torrents') render();
   if (torDirty) loadTorrentsSoon();
 }
-async function loadServices() { try { S.services = await api('GET', BASE + '/api/services'); } catch (e) { S.services = { configured: false, services: [], error: e.message }; } if (S.view === 'settings') render(); }
+async function loadServices() {
+  const seq = ++servicesSeq;
+  let next;
+  try { next = await api('GET', BASE + '/api/services'); } catch (e) { next = { configured: false, services: [], error: e.message }; }
+  if (seq !== servicesSeq) return; // a newer load or a sync result landed meanwhile
+  S.services = next;
+  if (S.view === 'settings') render();
+}
 async function loadAlerts() {
-  try { S.alerts = await api('GET', BASE + '/api/alerts'); render(); } catch (e) { toast(`alerts: ${e.message}`, 'bad'); }
+  const seq = ++alertsSeq;
+  try {
+    const d = await api('GET', BASE + '/api/alerts');
+    if (seq !== alertsSeq) return;
+    S.alerts = d; render();
+  } catch (e) { toast(`alerts: ${e.message}`, 'bad'); }
 }
 function applyTheme(t) {
   document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
@@ -295,7 +314,7 @@ function connectEvents() {
   es.onerror = () => { S.live = false; resyncGen++; renderSide(); };
   es.addEventListener('state', (ev) => {
     const e = JSON.parse(ev.data);
-    if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
+    pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
     if (!pfmRevisions.applyState(S, e)) { renderSide(); return; } // stale: a snapshot or a later event already covered it
     recomputeTotals();
     if (S.view === 'box' && S.selId === e.box_id) void loadDetail(e.box_id);
@@ -304,7 +323,7 @@ function connectEvents() {
   });
   es.addEventListener('removed', (ev) => {
     const e = JSON.parse(ev.data);
-    if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
+    pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
     if (!pfmRevisions.applyRemoved(S, e)) { renderSide(); return; }
     if (S.detail && S.detail.id === e.box_id) S.detail = null;
     recomputeTotals();
@@ -326,7 +345,7 @@ function connectEvents() {
   });
   es.addEventListener('services', async (ev) => {
     const e = JSON.parse(ev.data);
-    if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
+    pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
     await loadState();
     if (S.view === 'settings') void loadServices();
     else if (S.view === 'box' && S.selId) void loadDetail(S.selId);
@@ -334,7 +353,7 @@ function connectEvents() {
   });
   es.addEventListener('alerts', (ev) => {
     const e = JSON.parse(ev.data);
-    if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
+    pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
     if (S.view === 'alerts') void loadAlerts(); else renderSide();
   });
 }
@@ -1535,7 +1554,7 @@ document.addEventListener('click', async (e) => {
     render();
     // Send only this field: the server merges it onto its current settings,
     // so a stale copy in this tab cannot revert changes made elsewhere.
-    api('PUT', BASE + '/api/settings', { card_min_px: S.settings.card_min_px }).then((d) => { S.settings = d; }).catch((err) => toast(err.message, 'bad'));
+    api('PUT', BASE + '/api/settings', { card_min_px: S.settings.card_min_px }).then((d) => { stateSeq++; S.settings = d; }).catch((err) => toast(err.message, 'bad'));
     return;
   }
   const fv = e.target.closest('[data-fleetview]');
@@ -1658,16 +1677,32 @@ async function alertsAction(a, act) {
 }
 async function settingsAction(a) {
   if (a === 'settings:save') {
-    const d = { ...S.settingsDraft };
-    for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px']) d[k] = Number(d[k]);
+    // Only the fields touched in this tab go up (plus the API-key
+    // operation): the server merges them onto its current settings, so a
+    // save here cannot revert a change another tab made meanwhile, even one
+    // whose settings event has not reached this tab yet.
+    const d = settingsPatch(S.settingsDraft, S.settingsTouched);
     const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
-    S.settings = await api('PUT', BASE + '/api/settings', d); S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
-    if (keyChanged) { S.services = null; setTimeout(loadServices, 1500); }
+    const saved = await api('PUT', BASE + '/api/settings', d);
+    stateSeq++; // a state load started before the save must not put the old values back
+    S.settings = saved; S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
+    if (keyChanged) { S.services = null; servicesSeq++; setTimeout(loadServices, 1500); }
   }
-  else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; render(); }
+  else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; S.settingsTouched.clear_pm_api_key = true; render(); }
+}
+// settingsPatch is the settings save body: the touched fields, numbers as
+// numbers, the API key only when typed and the clear flag only when set
+// (typing a key after "remove" cancels the removal).
+function settingsPatch(draft, touched) {
+  const d = {};
+  for (const k of Object.keys(touched)) if (k in draft) d[k] = draft[k];
+  for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px']) if (k in d) d[k] = Number(d[k]);
+  if (draft.pm_api_key) { d.pm_api_key = draft.pm_api_key; delete d.clear_pm_api_key; }
+  else { delete d.pm_api_key; if (draft.clear_pm_api_key) d.clear_pm_api_key = true; else delete d.clear_pm_api_key; }
+  return d;
 }
 async function servicesAction(a, act) {
-  if (a === 'svc:sync') { act.disabled = true; toast('syncing services from pulsedmedia.com…'); S.services = await api('POST', BASE + '/api/services/sync'); await loadState(); toast(`synced ${S.services.services.length} services`, 'ok'); render(); }
+  if (a === 'svc:sync') { act.disabled = true; toast('syncing services from pulsedmedia.com…'); const synced = await api('POST', BASE + '/api/services/sync'); servicesSeq++; S.services = synced; await loadState(); toast(`synced ${S.services.services.length} services`, 'ok'); render(); }
   else if (a === 'svc:add') {
     const sv = (S.services?.services || []).find((x) => String(x.id) === act.dataset.id);
     if (!sv) return;
@@ -1737,7 +1772,11 @@ document.addEventListener('input', (e) => {
     return;
   }
   const s = e.target.closest('[data-s]');
-  if (s && S.settingsDraft) { S.settingsDraft[s.dataset.s] = s.value; S.settingsTouched[s.dataset.s] = true; return; }
+  if (s && S.settingsDraft) {
+    S.settingsDraft[s.dataset.s] = s.value; S.settingsTouched[s.dataset.s] = true;
+    if (s.dataset.s === 'pm_api_key' && s.value) S.settingsDraft.clear_pm_api_key = false; // a key typed after "remove" replaces instead
+    return;
+  }
   const fl = e.target.closest('[data-filter]');
   if (fl) {
     S.filter = fl.value;

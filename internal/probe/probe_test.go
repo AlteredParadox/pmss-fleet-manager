@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -297,19 +298,36 @@ func runSh(t *testing.T, script string) (string, string, int) {
 	return out.String(), errb.String(), code
 }
 
+// More processes than the list keeps: the kept prefix is reported as
+// truncated, so a watched app beyond it is not judged absent (GPT audit
+// 2026-10-22 finding 9).
+func TestParseProcsTruncated(t *testing.T) {
+	var sb strings.Builder
+	for i := 1; i <= maxProcs+1; i++ {
+		fmt.Fprintf(&sb, "%d 1 10 1 1 p%d\n", i, i)
+	}
+	procs, known, _, truncated := parseProcs(sb.String(), "", "", 0)
+	if !known || !truncated || len(procs) != maxProcs {
+		t.Fatalf("known %v truncated %v kept %d", known, truncated, len(procs))
+	}
+	if _, _, _, truncated := parseProcs("1 1 10 1 1 p1\n2 1 10 1 1 p2", "", "", 0); truncated {
+		t.Fatal("a short list reported truncated")
+	}
+}
+
 func TestParseProcsHostileAndMissing(t *testing.T) {
-	procs, known, argsKnown := parseProcs("", "", "", 0)
+	procs, known, argsKnown, _ := parseProcs("", "", "", 0)
 	if known || argsKnown || len(procs) != 0 {
 		t.Fatalf("empty ps must be unknown, got %v %v", known, procs)
 	}
 	raw := "1 0 -5 nan -1 bad\n2 0 99999999999999 1e99 5 huge\nx y z\n3 0 10 1 1 ok"
-	procs, known, argsKnown = parseProcs(raw, "3 cmd with args\nnotanumber args\nend", "0\n3 100 100 5", 0) // CLK_TCK 0: stat ignored
+	procs, known, argsKnown, _ = parseProcs(raw, "3 cmd with args\nnotanumber args\nend", "0\n3 100 100 5", 0) // CLK_TCK 0: stat ignored
 	if !known || !argsKnown || len(procs) != 3 {
 		t.Fatalf("procs: %+v", procs)
 	}
 	// A readable process list with a cut (empty) args listing: the
 	// processes are known, their command lines are not.
-	if _, known, argsKnown := parseProcs("3 0 10 1 1 python3", "", "", 0); !known || argsKnown {
+	if _, known, argsKnown, _ := parseProcs("3 0 10 1 1 python3", "", "", 0); !known || argsKnown {
 		t.Fatalf("args cut: known %v argsKnown %v", known, argsKnown)
 	}
 	if procs[0].RSS != 0 || procs[0].CPUSec != 0 || procs[0].ElapsedSec != 0 {
@@ -331,7 +349,7 @@ func TestParseProcsHostileAndMissing(t *testing.T) {
 	}
 	// The probe's whole tree is dropped: timeout wraps ps, so ps is a grandchild.
 	tree := "777 1 100 0 1 sh\n778 777 100 0 1 timeout\n779 778 100 0 1 ps\n780 779 100 0 1 cat\n900 1 100 0 1 radarr"
-	if procs, _, _ := parseProcs(tree, "", "", 777); len(procs) != 1 || procs[0].Comm != "radarr" {
+	if procs, _, _, _ := parseProcs(tree, "", "", 777); len(procs) != 1 || procs[0].Comm != "radarr" {
 		t.Fatalf("probe tree exclusion: %+v", procs)
 	}
 	if got := parseListenPIDs("80 1\n70000 2\nabc 3\n80 1\n81"); len(got) != 1 || len(got[80]) != 1 {
@@ -806,7 +824,7 @@ func TestProcsShellDropsTimedOutListing(t *testing.T) {
 	if out := runArgs(); out != "1 python3 bot.py\n" {
 		t.Fatalf("timed-out args ps must print no marker, got %q", out)
 	}
-	if _, _, argsKnown := parseProcs("1 0 1 0 1 python3", "1 python3 bot.py\n", "", 0); argsKnown {
+	if _, _, argsKnown, _ := parseProcs("1 0 1 0 1 python3", "1 python3 bot.py\n", "", 0); argsKnown {
 		t.Fatal("a listing without the marker must not count as known")
 	}
 	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 python3 bot.py'\necho \"2 $(head -c 600 /dev/zero | tr '\\0' x)\"\n"), 0o700)
@@ -814,11 +832,11 @@ func TestProcsShellDropsTimedOutListing(t *testing.T) {
 	if !strings.HasPrefix(out, "1 python3 bot.py\n2 xxxx") || !strings.HasSuffix(out, "\nend\n") || len(strings.Split(strings.TrimSpace(out), "\n")[1]) != 400 {
 		t.Fatalf("completed args ps: %q", out)
 	}
-	procs, _, argsKnown := parseProcs("1 0 1 0 1 python3\n2 0 1 0 1 x\n3 0 1 0 1 end", out+"3 end\nend\n", "", 0)
+	procs, _, argsKnown, _ := parseProcs("1 0 1 0 1 python3\n2 0 1 0 1 x\n3 0 1 0 1 end", out+"3 end\nend\n", "", 0)
 	if !argsKnown || len(procs) != 3 || procs[0].Args != "python3 bot.py" || len(procs[1].Args) != 398 || procs[2].Args != "end" {
 		t.Fatalf("parsed args: known=%v %+v", argsKnown, procs)
 	}
-	if _, _, argsKnown := parseProcs("1 0 1 0 1 sh", "end\n", "", 0); !argsKnown {
+	if _, _, argsKnown, _ := parseProcs("1 0 1 0 1 sh", "end\n", "", 0); !argsKnown {
 		t.Fatal("a marker alone is a complete (empty) listing")
 	}
 }
@@ -1097,5 +1115,25 @@ func TestEstablishedScriptFallbacks(t *testing.T) {
 	}
 	if ok, known, reason := EstablishedOwner([]byte(out), 8089); ok || !known || !strings.Contains(reason, "another account") {
 		t.Fatalf("half-closed foreign acceptor via ss must refuse: %v %v %s", ok, known, reason)
+	}
+}
+
+// Without flock, bounded() skips the command instead of running it
+// unguarded: a stuck earlier run could not be told from none (GPT audit
+// 2026-10-22 finding 12).
+func TestBoundedSkipsWithoutFlock(t *testing.T) {
+	bin := t.TempDir()
+	for _, tool := range []string{"sh", "mktemp", "basename", "rm", "cat", "echo", "kill", "sleep", "true"} {
+		if p, err := exec.LookPath(tool); err == nil {
+			_ = os.Symlink(p, filepath.Join(bin, tool))
+		}
+	}
+	scratch := t.TempDir()
+	cmd := exec.Command(filepath.Join(bin, "sh"))
+	cmd.Env = []string{"PATH=" + bin}
+	cmd.Stdin = strings.NewReader("scratch='" + scratch + "'\n" + boundedShell + "bounded 2 echo hello\necho rc=$?\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != "rc=0\n" {
+		t.Fatalf("without flock: %q %v (want the command skipped and status 0)", out, err)
 	}
 }

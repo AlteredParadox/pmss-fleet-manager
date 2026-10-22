@@ -316,26 +316,40 @@ func expandHome(p string) string {
 // maxOutput bounds what a remote command may send back on stdout.
 const maxOutput = 16 << 20
 
+// ErrOutputLimit is returned by Run when the command wrote more to stdout
+// than maxOutput: what was kept is a prefix, not the output, and a caller
+// that parses line-oriented output (a du listing) must not take it for a
+// complete one.
+var ErrOutputLimit = errors.New("ssh: command output exceeded the limit; the result is incomplete")
+
 // cappedWriter drops bytes beyond its budget instead of growing without
-// bound; the session keeps draining so the remote side is not blocked.
+// bound; the session keeps draining so the remote side is not blocked. It
+// remembers that it dropped something, so Run can say so.
 type cappedWriter struct {
 	mu   sync.Mutex // the session's copier writes; Run reads after a timeout
 	w    bytes.Buffer
 	left int
+	over bool
 }
 
 func (c *cappedWriter) Write(p []byte) (int, error) {
 	n := len(p)
 	c.mu.Lock()
-	if c.left > 0 {
-		if len(p) > c.left {
-			p = p[:c.left]
-		}
-		c.w.Write(p)
-		c.left -= len(p)
+	if len(p) > c.left {
+		c.over = true
+		p = p[:c.left]
 	}
+	c.w.Write(p)
+	c.left -= len(p)
 	c.mu.Unlock()
 	return n, nil
+}
+
+// overflowed reports whether bytes were dropped.
+func (c *cappedWriter) overflowed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.over
 }
 
 // snapshot returns a copy of what has been written so far.
@@ -403,6 +417,9 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 		}
 		return out.snapshot(), errb.snapshot(), ctx.Err()
 	case err := <-done:
+		if err == nil && out.overflowed() {
+			err = fmt.Errorf("%w (%d MiB kept)", ErrOutputLimit, maxOutput>>20)
+		}
 		return out.snapshot(), errb.snapshot(), err
 	}
 }

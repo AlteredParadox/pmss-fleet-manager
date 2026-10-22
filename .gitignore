@@ -9,6 +9,8 @@
 *.db-wal
 *.db-shm
 config.local.yaml
+# the ESLint install `make jscheck` makes (package-lock.json pins it)
+node_modules/
 # editor / os
 .DS_Store
 *.swp

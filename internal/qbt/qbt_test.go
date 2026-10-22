@@ -773,11 +773,10 @@ func TestSyncEntryCapAndBadDelta(t *testing.T) {
 	if _, err := decodeMainData(strings.NewReader(sb.String()), MaxTorrents); err == nil || !strings.Contains(err.Error(), "more than") {
 		t.Fatalf("want the cap, got %v", err)
 	}
-	d, err := decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"abc":{"size":"not a number"}},"torrents_removed":null,"torrents":null}`), MaxTorrents)
-	if err != nil {
+	if _, err := decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"abc":{"size":"not a number"}},"torrents_removed":null,"torrents":null}`), MaxTorrents); err != nil {
 		t.Fatal(err)
 	}
-	d, err = decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"abc":{"size":"not a number"}},"torrents_removed":["x"],"trackers":{"u":[1,[2,{"a":null}]]}}`), MaxTorrents)
+	d, err := decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"abc":{"size":"not a number"}},"torrents_removed":["x"],"trackers":{"u":[1,[2,{"a":null}]]}}`), MaxTorrents)
 	if err != nil || d.rid != 4 || len(d.removed) != 1 {
 		t.Fatalf("decode: %+v %v", d, err)
 	}

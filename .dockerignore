@@ -15,3 +15,6 @@ pmss-fleet-manager
 coverage.out
 gpt_review_*.md
 sonar-project.properties
+node_modules
+package.json
+package-lock.json
