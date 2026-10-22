@@ -369,7 +369,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.3.1 is the current release. The code was written against five real Pulsed
+1.4.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -380,6 +380,41 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.4.0** adds three features chosen from the gaps between the
+[PMSS stack](https://wiki.pulsedmedia.com/wiki/PM_Software_Stack) and this
+dashboard, then puts the result through a six-reviewer round and an external
+review. The minor bump is for the new tabs and for one API change: every
+mutating request now needs the `X-PMSS-Request` header the page sends, so a
+script that POSTs to the API has to add it.
+
+- **Services tab.** Every process the account runs on the shared host,
+  grouped into the applications PMSS ships or customers install (qBittorrent,
+  rTorrent, Deluge, the *arr apps, Jellyfin, Plex, SABnzbd, pyLoad, FlexGet,
+  Cloudplow, rclone, Syncthing, Resilio, lighttpd, Docker, sessions), with
+  CPU share, memory, uptime, listening ports and a link to where PMSS serves
+  each. "Watch" an application to be alerted when it is not running. (#80,
+  #83, #84)
+- **Logs tab.** Log files found in the usual places under the home and every
+  container's output, the last 300 lines read on demand (gzip rotations
+  decompressed on the box), with a line filter. (#85)
+- **qBittorrent connectivity.** Connection status and listen port on the
+  overview; an alert when the client stays firewalled or disconnected for
+  more than ten minutes, with the clock surviving Web API failures and
+  restarting for a new client process. (#82)
+- The probe asks `qbittorrent-nox --version` only when the binary changed:
+  every call wrote a start/exit block into the box's qBittorrent log and
+  forced rotations. (#86)
+- Review round 20 and an external review (#87, #88, #89): false alerts on a
+  watch toggle before the first poll, bounded memory for gzip log tails, a
+  NaN mtime or a far-off box clock no longer break an endpoint, the Edit page
+  (broken in 1.3.1 by an undefined helper) works again and the frontend is
+  now linted in CI, a `200 {}` from the customer API no longer wipes the last
+  good feed, the host-key pin is persisted before any work runs over a
+  first-contact connection, `-h` no longer prints `PMSS_AUTH`, failed chmods
+  on the secrets database are fatal, and alert title or severity changes
+  reach an open alerts page.
+- Go 1.27.3. (#81)
 
 **1.3.1**
 
