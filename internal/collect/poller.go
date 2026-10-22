@@ -1298,10 +1298,11 @@ func (p *poller) maybeDu(ctx context.Context, st *BoxState) {
 	// reload the cached result whenever the live state has none or the
 	// cache is newer.
 	// A result from another generation (the record moved, the process
-	// died before the row was dropped) is not this machine's; one without
-	// a generation predates the tag.
+	// died before the row was dropped) is not this machine's. One without
+	// a generation predates the tag and cannot be placed either: it is
+	// dropped too, at the cost of one measurement after the upgrade.
 	var cached DirsState
-	if at, err := p.m.st.GetCache(ctx, p.box.ID, "du", &cached); err == nil && (len(st.Dirs.Entries) == 0 || at.After(st.Dirs.At)) && (cached.Gen == "" || p.sameGeneration(cached.Gen)) {
+	if at, err := p.m.st.GetCache(ctx, p.box.ID, "du", &cached); err == nil && (len(st.Dirs.Entries) == 0 || at.After(st.Dirs.At)) && p.sameGeneration(cached.Gen) {
 		cached.At = at
 		cached.Enabled = p.box.DuEnabled
 		cached.Running = false

@@ -349,3 +349,25 @@ func TestDockerClientKeyedByUID(t *testing.T) {
 		t.Fatal("the client for another UID was not rebuilt")
 	}
 }
+
+// maybeDu loads a cached measurement only for the box's own generation; a
+// row with no tag (written before the tag existed) cannot be placed and is
+// dropped rather than trusted (Codex on PR 101).
+func TestMaybeDuDropsUntaggedCache(t *testing.T) {
+	ctx := context.Background()
+	m, boxes := revTestManager(t, 1)
+	p := m.poller(boxes[0].ID)
+	for _, c := range []struct {
+		gen  string
+		want int
+	}{{"", 0}, {"other:22/u@", 0}, {p.generation(), 1}} {
+		if err := m.st.SetCache(ctx, p.box.ID, "du", DirsState{Gen: c.gen, Entries: []DirEntry{{Name: "x", Bytes: 1}}}); err != nil {
+			t.Fatal(err)
+		}
+		st := BoxState{}
+		p.maybeDu(ctx, &st)
+		if len(st.Dirs.Entries) != c.want {
+			t.Errorf("gen %q: %d entries loaded, want %d", c.gen, len(st.Dirs.Entries), c.want)
+		}
+	}
+}
