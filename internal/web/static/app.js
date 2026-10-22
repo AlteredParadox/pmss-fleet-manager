@@ -182,8 +182,9 @@ async function loadState() {
     if (d.instance && S.instance && d.instance !== S.instance) { location.reload(); return; } // server was rebuilt: pick up new JS/CSS
     S.instance = d.instance || S.instance;
     S.version = d.version; S.sourceUrl = d.source_url;
-    mergeSnapshot(d.boxes || [], d.rev || 0);
+    const kept = mergeSnapshot(d.boxes || [], d.rev || 0);
     S.totals = d.totals || {};
+    if (kept) recomputeTotals(); // the list is newer than the snapshot's totals
     S.unacked = d.alerts_unacked || 0;
     S.settings = d.settings || {};
     applyTheme(S.view === 'settings' && S.settingsDraft && S.settingsTouched.theme ? S.settingsDraft.theme : S.settings.theme); // keep an unsaved preview
@@ -198,20 +199,23 @@ async function loadState() {
 // overwrite the other: a box is taken from the snapshot unless the list
 // already holds a newer revision of it, a box only in the list stays if it
 // appeared after the snapshot, and a box only in the snapshot is dropped if
-// its removal was already seen.
+// its removal was already seen. Returns whether the stream had already
+// moved the list past the snapshot (so its totals are stale too).
 function mergeSnapshot(boxes, rev) {
   const mine = new Map(S.boxes.map((b) => [b.id, b]));
   const out = [];
+  let kept = false;
   for (const b of boxes) {
     const cur = mine.get(b.id);
     mine.delete(b.id);
-    if ((S.removed.get(b.id) || 0) > (b.rev || 0)) continue;
-    out.push(cur && (cur.rev || 0) > (b.rev || 0) ? cur : b);
+    if ((S.removed.get(b.id) || 0) > (b.rev || 0)) { kept = true; continue; }
+    if (cur && (cur.rev || 0) > (b.rev || 0)) { out.push(cur); kept = true; } else out.push(b);
   }
-  for (const cur of mine.values()) if ((cur.rev || 0) > rev) out.push(cur);
+  for (const cur of mine.values()) if ((cur.rev || 0) > rev) { out.push(cur); kept = true; }
   for (const [id, r] of S.removed) if (r <= rev) S.removed.delete(id); // the snapshot already lacks it
   S.boxes = out.sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
   S.snapRev = Math.max(S.snapRev, rev);
+  return kept;
 }
 // newer reports whether a state or removed event is news: above the box's
 // held revision, or for an unknown box, after the last snapshot and after

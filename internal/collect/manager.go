@@ -327,8 +327,7 @@ type commitOpts struct {
 
 // commit is the only write path for a box's live state. fn runs under
 // hooksMu and mu with a copy of the stored state (nil when the box has
-// none) and returns the state to store, or nil to store nothing; commit
-// then attaches the service matched against the feed of that very moment,
+// none) and returns the state to store; commit then attaches the service matched against the feed of that very moment,
 // assigns the next fleet-wide revision, stores, runs the hooks, and hands
 // the event to the bus in that same order (pubMu, taken before hooksMu is
 // released). Stores, alert evaluations and events therefore happen in one
@@ -350,11 +349,6 @@ func (m *Manager) commit(id int64, fn func(stored *BoxState) *BoxState, o commit
 		base = &cp
 	}
 	next := fn(base)
-	if next == nil {
-		m.mu.Unlock()
-		m.hooksMu.Unlock()
-		return BoxState{}, false
-	}
 	m.decorate(next)
 	m.rev++
 	next.Rev = m.rev
@@ -472,19 +466,27 @@ func authEndpointChanged(p *poller, fresh *store.Box) bool {
 func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
-	// Under hooksMu, then pubMu: a commit that stored before this delete
-	// has put its event on the bus before we get here, and none can store
-	// after it, so no state event for the box follows the removed event.
+	// The removal is a commit like any other: the box leaves memory under
+	// hooksMu (a commit that stored before this has put its event on the
+	// bus first, and none can store after it) and its event goes out under
+	// pubMu at its revision, before any later commit's. The row is deleted
+	// afterwards: the box is gone from the live view either way, and a
+	// failed delete is reported to the caller (and the row resurfaces at
+	// the next start).
 	m.hooksMu.Lock()
 	m.mu.Lock()
 	p := m.pollers[id]
+	_, had := m.states[id]
 	delete(m.pollers, id)
 	delete(m.states, id)
 	m.rev++
 	rev := m.rev
 	m.mu.Unlock()
-	m.pubMu.Lock() // an in-flight commit's event goes out first
+	m.pubMu.Lock()
 	m.hooksMu.Unlock()
+	if had {
+		m.Publish(Event{Type: "removed", BoxID: id, Rev: rev})
+	}
 	m.pubMu.Unlock()
 	if p != nil {
 		p.stopAndWait()
@@ -493,11 +495,7 @@ func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 	// manager's context so a closed browser cannot leave the row behind.
 	sctx, scancel := context.WithTimeout(m.ctx, 30*time.Second)
 	defer scancel()
-	if err := m.st.DeleteBox(sctx, id); err != nil {
-		return err
-	}
-	m.Publish(Event{Type: "removed", BoxID: id, Rev: rev})
-	return nil
+	return m.st.DeleteBox(sctx, id)
 }
 
 // Refresh asks one poller to poll now.
