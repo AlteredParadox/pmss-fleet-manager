@@ -45,37 +45,49 @@ function youInHost(hostPct, youPct, title, cls = '') {
   return `<div class="lvbar" title="${esc(title)}"><i style="width:${host}%"><i class="${esc(cls)}" style="width:${inner}%"></i></i></div>`;
 }
 
-/* ovCpuBar: the overview cpu bar and its caption. Host grey + you blue once
-   the host has a cpu reading; until then the quota-relative meter. An
-   unknown share shows as a dash, never as 0%. */
+/* quotaMeter: the thin line under a host bar that keeps the glanceable
+   answer to "how close to my own limit": your usage against your quota or
+   memory limit, in the warn / bad colour when near it. Your slice of a
+   whole host is a hairline, so the limit colour would be invisible there. */
+function quotaMeter(pctOfLimit, title, cls = '') {
+  return `<div class="meter quota" title="${esc(title)}"><i class="${esc(cls)}" style="width:${Math.min(100, Math.max(0, Number(pctOfLimit) || 0))}%"></i></div>`;
+}
+
+/* ovCpuBar: the overview cpu bars and their caption. Host grey + you blue
+   once the host has a cpu reading, with the quota meter under it; until
+   then the quota meter alone, thick. An unknown share shows as a dash,
+   never as 0%. */
 function ovCpuBar(cpu, host) {
   const c = cpu || {};
+  const quotaTitle = `${pct(c.pct)} of your ${c.quota_cpus ? `${Number(c.quota_cpus).toFixed(1)}-core quota` : 'host cores'}`;
   if (!host || !host.cpu_ok) {
-    return { html: `<div class="meter thick"><i style="width:${Math.min(100, Number(c.pct) || 0)}%"></i></div>`, caption: '' };
+    return { html: `<div class="meter thick" title="${esc(quotaTitle)}"><i style="width:${Math.min(100, Number(c.pct) || 0)}%"></i></div>`, caption: '' };
   }
   const share = hostShare(c);
   const busy = pct(host.cpu_busy_pct);
   return {
-    html: youInHost(host.cpu_busy_pct, share ?? 0, `host ${busy} busy · you ${share === null ? '—' : pctFine(share)} of the host`),
+    html: youInHost(host.cpu_busy_pct, share ?? 0, `host ${busy} busy · you ${share === null ? '—' : pctFine(share)} of the host`) + quotaMeter(c.pct, quotaTitle),
     caption: `host ${busy} busy`,
   };
 }
 
-/* ovRamBar: the overview ram bar and its caption. Host used (total minus
+/* ovRamBar: the overview ram bars and their caption. Host used (total minus
    available) in grey, your process memory against the host's total in
-   blue; without a host memory reading the meter against your limit. */
+   blue, with the against-your-limit meter under it in `cls` (warn / bad);
+   without a host memory reading that meter alone. */
 function ovRamBar(ram, host, cls = '') {
   const r = ram || {};
+  const limitTitle = `${pct(r.pct)} of your memory limit`;
   if (!host || !(Number(host.mem_total) > 0)) {
-    return { html: `<div class="meter"><i class="${esc(cls)}" style="width:${Math.min(100, Number(r.pct) || 0)}%"></i></div>`, caption: '' };
+    return { html: quotaMeter(r.pct, limitTitle, cls), caption: '' };
   }
   const hostPct = (1 - (Number(host.mem_avail) || 0) / host.mem_total) * 100;
   const youPct = ((Number(r.rss_bytes) || Number(r.used_bytes) || 0) / host.mem_total) * 100;
   return {
-    html: youInHost(hostPct, youPct, `host memory ${pct(hostPct)} used · your processes ${pctFine(youPct)} of it`, cls),
+    html: youInHost(hostPct, youPct, `host memory ${pct(hostPct)} used · your processes ${pctFine(youPct)} of it`) + quotaMeter(r.pct, limitTitle, cls),
     caption: `host ${pct(hostPct)}`,
   };
 }
 
-globalThis.pfmView = { hostShare, youInHost, ovCpuBar, ovRamBar };
+globalThis.pfmView = { hostShare, youInHost, quotaMeter, ovCpuBar, ovRamBar };
 })();

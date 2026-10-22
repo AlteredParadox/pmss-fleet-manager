@@ -22,6 +22,8 @@ test('an unknown host share is a dash, never 0% (fred review on #110)', () => {
   assert.doesNotMatch(out.html, /you 0/);
   assert.equal(width(out.html, 0), 40);
   assert.equal(width(out.html, 1), 0);
+  assert.equal(width(out.html, 2), 37, 'the quota meter under the host bar still shows usage against the quota');
+  assert.match(out.html, /37% of your 2\.0-core quota/);
   assert.equal(out.caption, 'host 40% busy');
   assert.equal(V.hostShare({ ok: false, host_cpus: 8, host_pct: 0 }), null, 'no tenant sample');
   assert.equal(V.hostShare(undefined), null);
@@ -32,29 +34,35 @@ test('a known share draws blue inside grey on one scale', () => {
   assert.match(out.html, /host 40% busy · you 0\.5% of the host/);
   assert.equal(width(out.html, 0), 40);
   assert.equal(width(out.html, 1), 1.3); // 0.52 of 40, so the blue part is 0.52% of the whole bar
+  assert.equal(width(out.html, 2), 2.1);
   assert.equal(V.hostShare({ ok: true, host_cpus: 8, host_pct: 0.52 }), 0.52);
 });
 
-test('without a host cpu reading the bar is the quota meter', () => {
+test('without a host cpu reading the bar is the quota meter alone', () => {
   const out = V.ovCpuBar({ ok: true, pct: 37, host_pct: 0.5, host_cpus: 8 }, { cpu_ok: false });
   assert.match(out.html, /class="meter thick"/);
+  assert.doesNotMatch(out.html, /lvbar/);
   assert.equal(width(out.html, 0), 37);
   assert.equal(out.caption, '');
   assert.equal(width(V.ovCpuBar({ ok: true, pct: 250 }, undefined).html, 0), 100, 'capped at the bar');
 });
 
-test('ram: host used in grey, your processes in blue, limit colour kept', () => {
+test('ram: host used in grey, your processes in blue, the limit meter under it in colour', () => {
   const out = V.ovRamBar({ ok: true, pct: 96, rss_bytes: 15, used_bytes: 40 }, { mem_total: 100, mem_avail: 40 }, 'bad');
   assert.equal(width(out.html, 0), 60);
   assert.equal(width(out.html, 1), 25); // 15 of 60
-  assert.match(out.html, /class="bad"/);
+  assert.equal(width(out.html, 2), 96, 'against your limit, where the warning belongs');
+  assert.match(out.html, /class="meter quota" title="96% of your memory limit"><i class="bad"/);
+  assert.doesNotMatch(out.html, /lvbar[^]*class="bad"[^]*<\/i><\/i>/, 'the hairline inside the host bar stays plain blue');
   assert.match(out.html, /host memory 60% used · your processes 15% of it/);
   assert.equal(out.caption, 'host 60%');
   const noRss = V.ovRamBar({ ok: true, pct: 10, rss_bytes: 0, used_bytes: 30 }, { mem_total: 100, mem_avail: 50 });
   assert.equal(width(noRss.html, 1), 60, 'falls back to charged memory when rss is unknown');
   const noHost = V.ovRamBar({ ok: true, pct: 42 }, { mem_total: 0 }, 'warn');
-  assert.match(noHost.html, /class="meter"/);
+  assert.match(noHost.html, /class="meter quota"/);
+  assert.doesNotMatch(noHost.html, /lvbar/);
   assert.equal(width(noHost.html, 0), 42);
+  assert.match(noHost.html, /class="warn"/);
 });
 
 test('youInHost clamps and escapes', () => {
