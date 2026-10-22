@@ -64,16 +64,16 @@ type AppView struct {
 // AppsState is the services view of one box: the account's own processes
 // grouped into applications.
 type AppsState struct {
-	OK      bool      `json:"ok"` // ps listed the account's processes this poll
+	OK bool `json:"ok"` // ps listed the account's processes this poll
 	// ArgsKnown is false when the command lines were not read although the
 	// processes were: interpreter-run apps are then unclassifiable, so no
 	// app alert is raised or resolved on this poll (see Reliable).
-	ArgsKnown bool `json:"args_known"`
-	At      time.Time `json:"at"`
-	Procs   int       `json:"procs"` // process count
-	RSS     int64     `json:"rss"`   // summed resident memory
-	Watched []string  `json:"watched"`
-	Apps    []AppView `json:"apps,omitempty"`
+	ArgsKnown bool      `json:"args_known"`
+	At        time.Time `json:"at"`
+	Procs     int       `json:"procs"` // process count
+	RSS       int64     `json:"rss"`   // summed resident memory
+	Watched   []string  `json:"watched"`
+	Apps      []AppView `json:"apps,omitempty"`
 	// Processes is the full list, largest first, for the per-box tab; the
 	// fleet summary drops it.
 	Processes []ProcView `json:"processes,omitempty"`
