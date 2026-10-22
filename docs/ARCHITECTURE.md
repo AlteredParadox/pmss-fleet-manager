@@ -41,7 +41,7 @@ PMSS "month" counters are a rolling 30-day window, not a billing cycle. The UI s
 - `internal/store` SQLite (modernc, pure Go): boxes, settings, alerts, per-box caches
 - `internal/sshx` SSH client (TOFU host keys, bounded dial/run), unix/tcp dialer; reconnects are the poller's job
 - `internal/phpserial` minimal PHP `unserialize`
-- `internal/probe` the remote shell probe and its parser -> `probe.Snapshot`
+- `internal/probe` the remote shell probe and its parser -> `probe.Snapshot`. The probe has two cadences: every poll measures (load, memory, quota, traffic, cgroup, processes, listeners); the inventory sections (host identity, the installed qBittorrent binary and its version, the start helper, the crontab, the log catalogue) run on a poller's first poll, every 15 minutes, and on demand (a refresh, an install or autostart action, the logs tab finding its listing older than ten minutes), and the poller carries the last inventory across the polls in between
 - `internal/qbt` qBittorrent Web API client over an arbitrary dialer
 - `internal/dockerx` minimal Docker Engine API client over an arbitrary dialer
 - `internal/pmapi` Pulsed Media customer API client (services feed)

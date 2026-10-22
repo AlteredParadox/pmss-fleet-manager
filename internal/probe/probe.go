@@ -65,6 +65,11 @@ type Snapshot struct {
 	// home (see logDirs); LogsKnown is false when the section is missing.
 	Logs      []LogFile
 	LogsKnown bool
+	// Inventory is true when the probe ran its inventory sections (host
+	// identity, the installed client, the crontab, the log catalogue; see
+	// Script): the poller asks for them every quarter hour and carries the
+	// last answer over the polls in between (CarryInventory).
+	Inventory bool
 	// ListenPIDs maps a listening TCP port to the pids of our processes
 	// that hold it, from ss -tlnp. Display only: PortOwner stays the gate.
 	ListenPIDs map[int][]int
@@ -606,8 +611,21 @@ func parseProcStat(raw string) map[int]procStat {
 // (ps, cut, awk).
 func parseProcs(procs, args, stat string, probePID int) (out []ProcInfo, known, argsKnown bool) {
 	stats := parseProcStat(stat)
+	// The args listing is complete only when its "end" marker arrived
+	// (procArgsShell): a listing cut by the ps timeout is ignored whole,
+	// since nothing says which processes it missed. ps prefixes every
+	// row with a pid, so a process whose argv is "end" cannot forge it.
+	args = strings.TrimRight(args, "\n")
+	argsComplete := false
+	if i := strings.LastIndex(args, "\n"); strings.TrimSpace(args[i+1:]) == "end" {
+		argsComplete = true
+		args = args[:i+1]
+	}
 	argv := map[int]string{}
 	for _, line := range strings.Split(args, "\n") {
+		if !argsComplete {
+			break
+		}
 		f := strings.Fields(line)
 		if len(f) < 2 {
 			continue
@@ -663,10 +681,7 @@ func parseProcs(procs, args, stat string, probePID int) (out []ProcInfo, known, 
 			break
 		}
 	}
-	// Every process has a command line row (ps prints [comm] for an empty
-	// one), so a readable process list with no args rows means the args
-	// listing was cut.
-	return out, known, known && len(argv) > 0
+	return out, known, known && argsComplete
 }
 
 // underPID reports whether pid is root or one of its descendants in the
@@ -793,7 +808,34 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap.ListenPIDs = parseListenPIDs(s["listen_pids"])
 	_, snap.LogsKnown = s["logs"]
 	snap.Logs = parseLogs(s["logs"])
+	_, snap.Inventory = s["inventory"]
 	return snap, nil
+}
+
+// CarryInventory fills the inventory fields of a snapshot whose probe
+// skipped those sections from prev, the last snapshot that ran them. A
+// snapshot that ran them itself, or no previous one, leaves s as it is.
+func (s *Snapshot) CarryInventory(prev *Snapshot) {
+	if s.Inventory || prev == nil {
+		return
+	}
+	h, ph := &s.Host, &prev.Host
+	h.NCPU, h.Kernel, h.Debian, h.PMSSVersion = ph.NCPU, ph.Kernel, ph.Debian, ph.PMSSVersion
+	h.CPUModel, h.CPUShort, h.CPUFlags, h.GPU = ph.CPUModel, ph.CPUShort, append([]string(nil), ph.CPUFlags...), ph.GPU
+	q, pq := &s.Qbt, &prev.Qbt
+	q.BinaryPresent, q.BinaryVersion, q.BinaryStat = pq.BinaryPresent, pq.BinaryVersion, pq.BinaryStat
+	q.StartHelper, q.CronEntries = pq.StartHelper, pq.CronEntries // PMSSManaged is read every poll
+	s.Logs, s.LogsKnown = append([]LogFile(nil), prev.Logs...), prev.LogsKnown
+}
+
+// InventoryOnly returns a copy of s holding just what CarryInventory
+// copies, for a poller to keep between inventory runs without the process
+// list and the rest.
+func (s *Snapshot) InventoryOnly() *Snapshot {
+	out := &Snapshot{At: s.At}
+	out.CarryInventory(s)
+	out.Inventory = true
+	return out
 }
 
 func parseHost(s map[string]string) HostInfo {

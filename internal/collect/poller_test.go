@@ -283,3 +283,65 @@ func TestQbtProcKey(t *testing.T) {
 		t.Fatal("start tick ignored")
 	}
 }
+
+// The inventory sections run on the first poll, then every
+// inventoryInterval, and at once when asked (refresh, install, autostart,
+// a stale logs listing).
+func TestInventoryDue(t *testing.T) {
+	p := newPoller(nil, &store.Box{ID: 1})
+	now := time.Now()
+	if !p.inventoryDue(now) {
+		t.Fatal("first poll must run the inventory")
+	}
+	p.inv, p.invAt = &probe.Snapshot{Inventory: true}, now
+	if p.inventoryDue(now.Add(inventoryInterval - time.Second)) {
+		t.Fatal("too soon")
+	}
+	if !p.inventoryDue(now.Add(inventoryInterval)) {
+		t.Fatal("due again after the interval")
+	}
+	p.wakeInventory()
+	if !p.inventoryDue(now) {
+		t.Fatal("asked for")
+	}
+	select {
+	case <-p.wakeCh:
+	default:
+		t.Fatal("wakeInventory must wake the poller")
+	}
+	// The request is consumed by the poll that takes it: a request posted
+	// while that poll is in flight is for the next one, not wiped by it
+	// (Codex on PR 96), and a poll that failed gives its request back.
+	if p.inventoryDue(now) {
+		t.Fatal("consumed")
+	}
+	p.wakeInventory()
+	p.inventoryFailed(p.inventoryDue(now))
+	if !p.inventoryDue(now) {
+		t.Fatal("a failed poll must keep the request")
+	}
+	p.inventoryFailed(false)
+	if p.inventoryDue(now) {
+		t.Fatal("a failed poll without a request posts none")
+	}
+}
+
+// A manual refresh asks for the inventory sections (logs, crontab, binary).
+func TestRefreshRequestsInventory(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p := newPoller(m, &store.Box{ID: 7, Enabled: true})
+	m.mu.Lock()
+	m.pollers[7] = p
+	m.mu.Unlock()
+	if err := m.Refresh(7); err != nil || !p.invWant.Load() {
+		t.Fatalf("refresh: %v want=%v", err, p.invWant.Load())
+	}
+	if err := m.Refresh(8); err == nil {
+		t.Fatal("unknown box")
+	}
+}

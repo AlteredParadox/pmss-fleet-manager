@@ -513,7 +513,7 @@ func (m *Manager) Refresh(id int64) error {
 	if !p.box.Enabled {
 		return ErrDisabled
 	}
-	p.wake()
+	p.wakeInventory() // a person asked: re-read the inventory too (logs, crontab, binary)
 	return nil
 }
 
@@ -574,7 +574,11 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 			// action recorded above), which starts the new clock then.
 		})
 	}
-	p.wake()
+	if action == "install" || action == "autostart" {
+		p.wakeInventory() // the binary or the crontab changed: the inventory sections must see it
+	} else {
+		p.wake()
+	}
 	return out, err
 }
 

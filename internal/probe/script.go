@@ -59,6 +59,14 @@ sec tz; date +%z
 sec uptime; cat /proc/uptime 2>/dev/null
 sec loadavg; cat /proc/loadavg 2>/dev/null
 sec meminfo; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo 2>/dev/null
+# Inventory: what changes rarely (host identity, the installed client, the
+# crontab, the log catalogue). The poller asks for it on its first poll,
+# every quarter hour, and on demand (PMSS_INVENTORY=0 skips every section
+# between the markers; the parser reports whether they ran) and carries the
+# last answer across the fast polls in between, so the 30 s cadence pays
+# for metrics only.
+if [ "${PMSS_INVENTORY:-1}" = 1 ]; then
+sec inventory; echo 1
 sec ncpu; grep -c '^processor' /proc/cpuinfo 2>/dev/null
 sec cpu_model; grep -m1 -E '^(model name|Model|cpu model)' /proc/cpuinfo 2>/dev/null | cut -d: -f2-
 sec cpu_flags; grep -m1 -E '^(flags|Features)' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | tr ' ' '\n' | grep -E '^(avx2|avx512f|sse4_2|aes)$' | tr '\n' ' '
@@ -72,6 +80,7 @@ done
 sec kernel; uname -r 2>/dev/null
 sec debian; cat /etc/debian_version 2>/dev/null
 sec pmss_version; cat /etc/seedbox/config/version 2>/dev/null
+fi
 sec df_home; bounded 10 df -B1 --output=size,used,avail,fstype "$home" | tail -n 1
 sec quota; bounded 10 quota -v -w
 sec quota_file; cat "$home/.quota" 2>/dev/null
@@ -117,19 +126,25 @@ elif [ -f "/sys/fs/cgroup/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/cgro
 sec qbt_conf; grep -E '^WebUI\\(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=' "$home/.config/qBittorrent/qBittorrent.conf" 2>/dev/null
 sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
 sec listen
-` + listenShell + `sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
+` + listenShell + `sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
+# Every poll, not inventory: the panel can switch its own qBittorrent on
+# at any time, and install/autostart refuse to fight it only if they know.
+sec qbt_pmss; [ -e "$home/.qbittorrentEnable" ] && echo 1 || echo 0
+if [ "${PMSS_INVENTORY:-1}" = 1 ]; then
+sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_stat; stat -L -c '%s %Y %Z %i' "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version
 ` + qbtVersionShell + `sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + `
-sec qbt_pmss; [ -e "$home/.qbittorrentEnable" ] && echo 1 || echo 0
-sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
 sec logs
-` + logsListShell + `sec probe_pid; echo $$
+` + logsListShell + `fi
+sec probe_pid; echo $$
 # The account's own processes (hidepid=2 hides everyone else's anyway):
 # fixed numeric columns first, then comm, which may hold spaces. times is
 # cumulative CPU seconds; the poller turns two samples into a rate. The
-# command lines come separately and clipped: argv is the process's own text.
+# command lines come separately, streamed through cut so no shell variable
+# ever holds the full argv of every process, and end with a marker line:
+# without it the listing was cut short and the parser ignores it.
 sec procs
 ` + procsShell + `sec proc_args
 ` + procArgsShell + `# The ps calls carry a timeout: reading a cmdline takes the target's mmap
@@ -326,7 +341,7 @@ const procsShell = `o=$(timeout 10 ps -ww -u "$uid" -o pid=,ppid=,rss=,times=,et
 // procArgsShell is the same for the command lines: a cut listing would
 // leave the processes past the cut without args, and an interpreter is
 // classified by its script.
-const procArgsShell = `o=$(timeout 10 ps -ww -u "$uid" -o pid=,args= 2>/dev/null) && [ -n "$o" ] && printf '%s\n' "$o" | cut -c1-400
+const procArgsShell = `(timeout 10 ps -ww -u "$uid" -o pid=,args= 2>/dev/null && echo end) | cut -c1-400
 `
 
 // listenPIDsShell prints "<port> <pid>" for every listening TCP socket ss
@@ -353,19 +368,25 @@ fi
 // ScriptWithTag returns Script with the section tag set on its first line.
 // The tag must be [A-Za-z0-9]+ (NewTag guarantees that); it is quoted anyway.
 // The version call runs unconditionally (no PMSS_QBT_SEEN).
-func ScriptWithTag(tag string) string { return ScriptWith(tag, "") }
+func ScriptWithTag(tag string) string { return ScriptWith(tag, "", true) }
 
 // ScriptWith is ScriptWithTag with the binary stat ("size mtime ctime
-// inode", as the qbt_bin_stat section printed it) the caller already holds a version for,
-// so the probe skips the --version call while the binary is unchanged.
-func ScriptWith(tag, qbtSeen string) string {
+// inode", as the qbt_bin_stat section printed it) the caller already holds
+// a version for, so the probe skips the --version call while the binary is
+// unchanged, and with the inventory sections (see Script) switched on or
+// off: off, the probe measures only, and Snapshot.Inventory is false.
+func ScriptWith(tag, qbtSeen string, inventory bool) string {
 	seen := strings.Map(func(r rune) rune {
 		if (r >= '0' && r <= '9') || r == ' ' {
 			return r
 		}
 		return -1
 	}, qbtSeen)
-	return "PMSS_TAG='" + strings.ReplaceAll(tag, "'", "") + "'\nPMSS_QBT_SEEN='" + seen + "'\n" + Script
+	inv := "0"
+	if inventory {
+		inv = "1"
+	}
+	return "PMSS_TAG='" + strings.ReplaceAll(tag, "'", "") + "'\nPMSS_QBT_SEEN='" + seen + "'\nPMSS_INVENTORY=" + inv + "\n" + Script
 }
 
 // NewTag returns a random hex section tag for one probe run.
