@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"pmss-fleet-manager/internal/probe"
@@ -81,16 +82,26 @@ func verifyPortNow(ctx context.Context, cli *sshx.Client, port int) error {
 	return nil
 }
 
+// tunnel is what verifiedDial needs from an SSH client (sshx.Client, or a
+// fake in tests).
+type tunnel interface {
+	DialTCP(ctx context.Context, addr string) (net.Conn, error)
+	Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error)
+}
+
 // verifiedDial returns a qBittorrent dialer over cli's tunnel that, after
 // each new connection to 127.0.0.1:port, checks the accepting side of the
 // established sockets on that port before a single byte is written. The
 // pre-connect listener check (verifyPortNow, the probe) is check-then-
 // connect: a co-tenant can bind the port in the gap and accept our
 // connection, and a pooled connection to such a peer would outlive a later
-// listener check. Verified at connect time, a connection's peer is fixed,
-// so reuse is safe. Where the box cannot show established sockets at all,
-// the listener check is what remains and the connection is allowed.
-func verifiedDial(cli *sshx.Client, hp string, port int) qbt.Dialer {
+// listener check. The script pairs this account's own tunnel socket with
+// the socket that accepted it (any TCP state), so the check is of this
+// very connection. Verified at connect time, a connection's peer is fixed,
+// so reuse is safe. A box that hides non-listening sockets by policy falls
+// back to the listener check; a box where the inspection merely failed
+// does not get the connection.
+func verifiedDial(cli tunnel, hp string, port int) qbt.Dialer {
 	return func(ctx context.Context) (net.Conn, error) {
 		conn, err := cli.DialTCP(ctx, hp)
 		if err != nil {
@@ -104,7 +115,10 @@ func verifiedDial(cli *sshx.Client, hp string, port int) qbt.Dialer {
 			return nil, fmt.Errorf("could not verify who accepted the WebUI connection: %w", err)
 		}
 		ok, known, reason := probe.EstablishedOwner(out, port)
-		if known && !ok {
+		if !known {
+			return conn, nil // socket-table privacy: the listener check is what applies
+		}
+		if !ok {
 			conn.Close()
 			return nil, errors.New("refusing to use the WebUI connection: " + reason)
 		}

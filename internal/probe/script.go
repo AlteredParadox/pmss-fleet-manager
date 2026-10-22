@@ -196,24 +196,42 @@ echo "uid $uid"
 ` + listenShell + `echo end
 `
 
-// EstablishedScript lists the established TCP sockets whose local port is
-// port, with their owning uid, for the post-connect check: once the
-// dashboard's tunnel connection to 127.0.0.1:<port> is up, the accepting
-// side of every established socket on that port must belong to this
-// account, or whatever answered the port is not our client. "total N" is
-// the number of established rows the table showed at all (the SSH session
-// itself is one), so an unreadable table (0) is told from "none on this
-// port". Falls back to ss where /proc/net/tcp is root-only; with a state
-// filter ss prints no State column (Local is $3, Process $5).
+// EstablishedScript identifies the dashboard's own tunnel connections to
+// 127.0.0.1:<port> on the box and who accepted each. sshd opens the tunnel
+// as this account, so the client side of every such connection is a socket
+// owned by this uid whose peer is 127.0.0.1:<port>; its local (ephemeral)
+// port names the accepting socket on the other side, whose owner is the
+// process that will read whatever the dashboard writes. The parser pairs
+// them (EstablishedOwner). Every TCP state is reported: a hostile
+// acceptor can half-close (shutdown SHUT_WR) and still read, so filtering
+// on ESTABLISHED would miss it; a missing accepting row refuses too.
+//
+// Lines: "base hex|dec", then "c <localport> <uid> <state> <peeraddr>" for
+// client sides and "s <peerport> <uid> <state> <localaddr>" for accepting
+// sides, from /proc/net/tcp{,6} (hex) or, where those are root-only, from
+// ss -Htnp (dec; uid is ours for our own processes' sockets, else x).
+// "privacy" marks a box that hides non-listening sockets by policy
+// (Pulsed Media's opt-in marker file): the caller falls back to the
+// listener check there. Any other failure to inspect prints "failed <rc>"
+// and the caller refuses: a gate that cannot run must not pass.
 func EstablishedScript(port int) string {
 	return "#!/bin/sh\nLC_ALL=C; export LC_ALL\nport=" + strconv.Itoa(port) + "\n" +
 		`uid=$(id -u)
 echo "uid $uid"
 hp=$(printf '%04X' "$port")
-e=$(awk -v hp="$hp" '$4=="01"{n++; x=$2; sub(/.*:/,"",x); if (x==hp) print "h", x, $8} END{print "total", n+0}' /proc/net/tcp /proc/net/tcp6 2>/dev/null)
-if [ -n "$e" ] && [ "$(printf '%s\n' "$e" | tail -n 1)" != "total 0" ]; then printf '%s\n' "$e"; else
-  echo "via ss"
-  timeout 10 ss -Htnp state established 2>/dev/null | awk -v uid="$uid" -v port="$port" '{n++; m=split($3,a,":"); p=a[m]; if (p==port) { o="x"; if ($5 ~ /^users:\(\(/) o=uid; print "d", p, o } } END{print "total", n+0}'
+tables="${PMSS_TCP_TABLES:-/proc/net/tcp /proc/net/tcp6}"
+marker="${PMSS_PRIVACY_MARKER:-/etc/seedbox/config/socket-table-privacy.enabled}"
+rows=$(awk -v hp="$hp" '$4!="0A"{n++; l=$2; r=$3; lp=l; sub(/.*:/,"",lp); rp=r; sub(/.*:/,"",rp); la=l; sub(/:.*/,"",la); ra=r; sub(/:.*/,"",ra); if (rp==hp) print "c", lp, $8, $4, ra; if (lp==hp) print "s", rp, $8, $4, la} END{print "seen", n+0}' $tables 2>/dev/null)
+if [ -n "$rows" ] && [ "${rows##*seen }" != "0" ]; then
+  echo "base hex"; printf '%s\n' "$rows"
+else
+  out=$(timeout 10 ss -Htnp 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    if [ -e "$marker" ]; then echo "privacy"; else echo "failed $rc"; fi
+  else
+    echo "base dec"
+    printf '%s\n' "$out" | awk -v uid="$uid" -v port="$port" '{o="x"; if ($6 ~ /^users:\(\(/) o=uid; m=split($4,a,":"); lp=a[m]; la=substr($4,1,length($4)-length(lp)-1); sub(/%.*/,"",la); m=split($5,b,":"); rp=b[m]; ra=substr($5,1,length($5)-length(rp)-1); sub(/%.*/,"",ra); if (rp==port) print "c", lp, o, $1, ra; if (lp==port) print "s", rp, o, $1, la}'
+  fi
 fi
 echo end
 `

@@ -869,9 +869,9 @@ func TestBoundedSkipsWhileLocked(t *testing.T) {
 	}
 }
 
-// EstablishedScript, run locally against a real connection: the accepting
-// side belongs to this uid, so the check passes; the parser's refusals are
-// exercised on crafted tables.
+// EstablishedScript, run locally against a real connection: our client
+// socket pairs with an accepting socket of our uid, so the check passes.
+// Crafted tables cover the refusals and the two fallback decisions.
 func TestEstablishedOwner(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -899,32 +899,96 @@ func TestEstablishedOwner(t *testing.T) {
 	}
 	ok, known, reason := EstablishedOwner([]byte(out), port)
 	if !known {
-		t.Skipf("established sockets not visible here: %q", out)
+		t.Skipf("non-listening sockets not visible here: %q", out)
 	}
 	if !ok {
 		t.Fatalf("own connection refused: %s\n%s", reason, out)
 	}
+
 	uid := os.Getuid()
-	mk := func(rows string) []byte { return []byte(fmt.Sprintf("uid %d\n%stotal 5\nend\n", uid, rows)) }
-	if ok, known, _ := EstablishedOwner(mk(fmt.Sprintf("h %04X %d\n", port, uid)), port); !ok || !known {
-		t.Fatal("own socket must pass")
+	mk := func(rows string) []byte { return []byte(fmt.Sprintf("uid %d\nbase hex\n%send\n", uid, rows)) }
+	own := fmt.Sprintf("c BEEF %d 01 0100007F\ns BEEF %d 01 0100007F\n", uid, uid)
+	if ok, known, reason := EstablishedOwner(mk(own), port); !ok || !known {
+		t.Fatalf("own connection: %v %v %s", ok, known, reason)
 	}
-	if ok, _, reason := EstablishedOwner(mk(fmt.Sprintf("h %04X %d\nh %04X %d\n", port, uid, port, uid+1)), port); ok || !strings.Contains(reason, "another account") {
-		t.Fatalf("a foreign established socket on the port must refuse: %v %s", ok, reason)
+	// The acceptor belongs to another account: refuse, whatever its state
+	// (a half-closed acceptor still reads).
+	for _, state := range []string{"01", "04", "05", "08"} {
+		if ok, _, reason := EstablishedOwner(mk(fmt.Sprintf("c BEEF %d 01 0100007F\ns BEEF %d %s 0100007F\n", uid, uid+1, state)), port); ok || !strings.Contains(reason, "another account") {
+			t.Fatalf("foreign acceptor in state %s: %v %s", state, ok, reason)
+		}
 	}
-	if ok, _, _ := EstablishedOwner(mk(fmt.Sprintf("d %d x\n", port)), port); ok {
-		t.Fatal("an unattributable socket (ss fallback) must refuse")
+	// No acceptor visible for our connection: refuse.
+	if ok, _, reason := EstablishedOwner(mk(fmt.Sprintf("c BEEF %d 01 0100007F\n", uid)), port); ok || !strings.Contains(reason, "not visible") {
+		t.Fatalf("missing acceptor: %v %s", ok, reason)
 	}
-	if ok, _, reason := EstablishedOwner(mk(""), port); ok || !strings.Contains(reason, "not in the box's socket table") {
-		t.Fatalf("no socket on the port while the table is readable must refuse: %v %s", ok, reason)
+	// Another tenant's own connection to the same port, and our own
+	// connection to the port on another address, are not this connection.
+	noise := fmt.Sprintf("c CAFE %d 01 0100007F\ns CAFE %d 01 0100007F\nc F00D %d 01 0A0B0C0D\ns F00D %d 01 0A0B0C0D\n", uid+1, uid+1, uid, uid+2)
+	if ok, _, reason := EstablishedOwner(mk(own+noise), port); !ok {
+		t.Fatalf("unrelated connections must not refuse: %s", reason)
 	}
-	if _, known, _ := EstablishedOwner([]byte(fmt.Sprintf("uid %d\ntotal 0\nend\n", uid)), port); known {
-		t.Fatal("an empty table is unknown, not a verdict")
+	// Our connection does not appear at all (table readable): refuse.
+	if ok, _, reason := EstablishedOwner(mk(noise), port); ok || !strings.Contains(reason, "not in the box's socket table") {
+		t.Fatalf("absent connection: %v %s", ok, reason)
 	}
-	if ok, known, _ := EstablishedOwner([]byte(fmt.Sprintf("uid %d\nh %04X %d\n", uid, port, uid)), port); ok || !known {
+	// ss fallback: decimal ports, an unattributable acceptor refuses.
+	dec := []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d ESTAB 127.0.0.1\ns 51234 x ESTAB 127.0.0.1\nend\n", uid, uid))
+	if ok, _, _ := EstablishedOwner(dec, port); ok {
+		t.Fatal("an unattributable acceptor must refuse")
+	}
+	dec = []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d ESTAB 127.0.0.1\ns 51234 %d FIN-WAIT-2 127.0.0.1\nend\n", uid, uid, uid))
+	if ok, _, reason := EstablishedOwner(dec, port); !ok {
+		t.Fatalf("own acceptor via ss: %s", reason)
+	}
+	// Policy fallback versus failure.
+	if _, known, _ := EstablishedOwner([]byte(fmt.Sprintf("uid %d\nprivacy\nend\n", uid)), port); known {
+		t.Fatal("privacy is the one unknown")
+	}
+	if ok, known, reason := EstablishedOwner([]byte(fmt.Sprintf("uid %d\nfailed 255\nend\n", uid)), port); ok || !known || !strings.Contains(reason, "could not inspect") {
+		t.Fatalf("failed inspection must refuse: %v %v %s", ok, known, reason)
+	}
+	if ok, known, _ := EstablishedOwner([]byte(fmt.Sprintf("uid %d\nbase hex\n%s", uid, own)), port); ok || !known {
 		t.Fatal("a cut-off table must refuse")
 	}
-	if ok, _, _ := EstablishedOwner([]byte("total 3\nend\n"), port); ok {
+	if ok, _, _ := EstablishedOwner([]byte("base hex\n"+own+"end\n"), port); ok {
 		t.Fatal("no uid must refuse")
+	}
+}
+
+// The script's decisions when /proc/net/tcp is unreadable: a failing or
+// silent ss is a failure (refuse) unless the box carries the privacy
+// marker (fallback); a working ss yields decimal rows.
+func TestEstablishedScriptFallbacks(t *testing.T) {
+	bin := t.TempDir()
+	run := func(ss string, marker bool) string {
+		os.WriteFile(bin+"/ss", []byte(ss), 0o700)
+		m := bin + "/absent"
+		if marker {
+			m = bin + "/marker"
+			os.WriteFile(m, nil, 0o600)
+		}
+		cmd := exec.Command("sh")
+		cmd.Stdin = strings.NewReader(EstablishedScript(8089))
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "PMSS_TCP_TABLES="+bin+"/no-such-table", "PMSS_PRIVACY_MARKER="+m)
+		out, _ := cmd.Output()
+		return string(out)
+	}
+	if out := run("#!/bin/sh\nexit 255\n", false); !strings.Contains(out, "failed 255") {
+		t.Fatalf("ss failing must report a failure: %q", out)
+	}
+	if out := run("#!/bin/sh\nexit 0\n", false); !strings.Contains(out, "failed 0") {
+		t.Fatalf("ss printing nothing without the marker is a failure: %q", out)
+	}
+	if out := run("#!/bin/sh\nexit 0\n", true); !strings.Contains(out, "privacy") || strings.Contains(out, "failed") {
+		t.Fatalf("ss printing nothing with the marker is the privacy fallback: %q", out)
+	}
+	fake := "#!/bin/sh\necho 'ESTAB 0 0 127.0.0.1:41000 127.0.0.1:8089 users:((\"sshd\",pid=1,fd=9))'\necho 'FIN-WAIT-2 0 0 127.0.0.1:8089 127.0.0.1:41000'\n"
+	out := run(fake, false)
+	if !strings.Contains(out, "base dec") || !strings.Contains(out, "c 41000 "+strconv.Itoa(os.Getuid())+" ESTAB 127.0.0.1") || !strings.Contains(out, "s 41000 x FIN-WAIT-2 127.0.0.1") {
+		t.Fatalf("ss rows: %q", out)
+	}
+	if ok, known, reason := EstablishedOwner([]byte(out), 8089); ok || !known || !strings.Contains(reason, "another account") {
+		t.Fatalf("half-closed foreign acceptor via ss must refuse: %v %v %s", ok, known, reason)
 	}
 }
