@@ -136,17 +136,7 @@ sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + 
 sec qbt_pmss; [ -e "$home/.qbittorrentEnable" ] && echo 1 || echo 0
 sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
 sec logs
-# Log files in the places the PMSS stack and the usual self-installed apps
-# write them, as "size<TAB>mtime<TAB>path" relative to the home. Only a
-# listing: the tab fetches one file on demand (see LogTailScript).
-(cd "$home" 2>/dev/null && for d in ` + logDirsShell + `; do
-  [ -d "$d" ] || continue
-  find "$d" -maxdepth 1 -type f \( -name '*.log' -o -name '*.log.*' -o -name '*.txt' \) -printf '%s\t%T@\t%p\n' 2>/dev/null | head -n 40
-done
-for f in ` + logFilesShell + `; do
-  [ -f "$f" ] && stat -c '%s'"$(printf '\t')"'%Y'"$(printf '\t')"'%n' "$f" 2>/dev/null
-done)
-sec probe_pid; echo $$
+` + logsListShell + `sec probe_pid; echo $$
 # The account's own processes (hidepid=2 hides everyone else's anyway):
 # fixed numeric columns first, then comm, which may hold spaces. times is
 # cumulative CPU seconds; the poller turns two samples into a rate. The
@@ -228,6 +218,20 @@ const (
 		" .config/rclone .flexget .pyload/logs .config/pyload/logs .config/cloudplow .config/Jackett/log logs"
 	logFilesShell = ".trackerCleaner.log .rtorrent.log rtorrent.log .rtorrent.session/rtorrent.log"
 )
+
+// logsListShell lists log files in the places the PMSS stack and the usual
+// self-installed apps write them, as "mtime<TAB>size<TAB>path" relative to
+// the home ($home must be set): the 40 newest per directory, sorted before
+// the cut so a directory full of rotated copies never hides the live file.
+// Only a listing: the tab fetches one file on demand (see LogTailScript).
+const logsListShell = `(cd "$home" 2>/dev/null && for d in ` + logDirsShell + `; do
+  [ -d "$d" ] || continue
+  find "$d" -maxdepth 1 -type f \( -name '*.log' -o -name '*.log.*' -o -name '*.txt' \) -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -rn | head -n 40
+done
+for f in ` + logFilesShell + `; do
+  [ -f "$f" ] && stat -c '%Y'"$(printf '\t')"'%s'"$(printf '\t')"'%n' "$f" 2>/dev/null
+done)
+`
 
 // LogTailScript prints the last lines of one log file under the home. The
 // path (already ValidLogPath-checked) is embedded single-quoted, so it never

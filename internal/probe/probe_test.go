@@ -90,11 +90,11 @@ WebUI\LocalHostAuth=false
 @@docker_sock
 1
 @@logs
-1234	1760572000.5	.logs/trackerCleaner.log
-99	1760572700	.local/share/qBittorrent/logs/qbittorrent.log
-5	1760570000	../etc/passwd
-x	1	.logs/bad.log
-7	1760571000	./.lighttpd/error.log
+1760572000.5	1234	.logs/trackerCleaner.log
+1760572700	99	.local/share/qBittorrent/logs/qbittorrent.log
+1760570000	5	../etc/passwd
+1	x	.logs/bad.log
+1760571000	7	./.lighttpd/error.log
 @@probe_pid
 777
 @@procs
@@ -203,6 +203,28 @@ func TestParseLogs(t *testing.T) {
 	}
 	if _, known := parseLogs(""); known {
 		t.Error("empty section is not a listing")
+	}
+	// The listing shell keeps the newest files when a directory holds more
+	// than the cap: 45 rotated copies older than the live log must not push
+	// it out.
+	home := t.TempDir()
+	os.MkdirAll(home+"/.logs", 0o700)
+	for i := 0; i < 45; i++ {
+		name := fmt.Sprintf("%s/.logs/old.log.%d", home, i)
+		os.WriteFile(name, []byte("x"), 0o600)
+		os.Chtimes(name, time.Unix(1700000000+int64(i), 0), time.Unix(1700000000+int64(i), 0))
+	}
+	os.WriteFile(home+"/.logs/live.log", []byte("live"), 0o600)
+	os.Chtimes(home+"/.logs/live.log", time.Unix(1800000000, 0), time.Unix(1800000000, 0))
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader("home=" + home + "\n" + logsListShell)
+	lsOut, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, known := parseLogs(string(lsOut))
+	if !known || len(files) != 40 || files[0].Path != ".logs/live.log" || files[0].Size != 4 {
+		t.Fatalf("newest-first cap: %d files, first %+v", len(files), files[:min(2, len(files))])
 	}
 	// LogTailScript refuses on the box what ValidLogPath refuses here, even
 	// for a path that slipped past (the function quotes whatever it is given).

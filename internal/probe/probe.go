@@ -434,7 +434,7 @@ func ValidLogPath(p string) bool {
 	return true
 }
 
-// parseLogs reads the logs section ("size<TAB>mtime<TAB>path" per line),
+// parseLogs reads the logs section ("mtime<TAB>size<TAB>path" per line),
 // newest first, capped at maxLogFiles.
 func parseLogs(raw string) ([]LogFile, bool) {
 	var out []LogFile
@@ -445,8 +445,8 @@ func parseLogs(raw string) ([]LogFile, bool) {
 			continue
 		}
 		known = true
-		size, err1 := strconv.ParseInt(strings.TrimSpace(f[0]), 10, 64)
-		mt, err2 := strconv.ParseFloat(strings.TrimSpace(f[1]), 64)
+		mt, err2 := strconv.ParseFloat(strings.TrimSpace(f[0]), 64)
+		size, err1 := strconv.ParseInt(strings.TrimSpace(f[1]), 10, 64)
 		p := strings.TrimPrefix(f[2], "./")
 		if err1 != nil || err2 != nil || size < 0 || size > 1<<50 || mt <= 0 || mt > 1e11 || !ValidLogPath(p) {
 			continue

@@ -365,6 +365,10 @@ function renderSide() {
 
 function renderMain() {
   const m = $('#main');
+  // The log viewer is rebuilt on every render (an SSE event, a keystroke in
+  // the filter): keep where the reader was.
+  const prevLog = $('#logview');
+  const logTop = prevLog ? prevLog.scrollTop : null;
   switch (S.view) {
     case 'box': m.innerHTML = viewBox(); break;
     case 'torrents': m.innerHTML = viewTorrents(); break;
@@ -372,6 +376,11 @@ function renderMain() {
     case 'alerts': m.innerHTML = viewAlerts(); break;
     case 'settings': m.innerHTML = viewSettings(); break;
     default: m.innerHTML = viewFleet();
+  }
+  const lv = $('#logview');
+  if (lv && S.logView && !S.logView.busy) {
+    if (!S.logView.scrolled) { lv.scrollTop = lv.scrollHeight; S.logView.scrolled = true; } // a freshly read log opens at its end, like tail
+    else if (logTop !== null) lv.scrollTop = logTop;
   }
   if (S.view === 'box') {
     const b = curBox();
@@ -1029,6 +1038,7 @@ function logViewer(V) {
   if (!V) return `<div class="empty" style="border:0">pick a log on the left: the last ${300} lines are fetched from the box each time, nothing is streamed or stored.</div>`;
   const head = `<div class="thead-tools" style="padding:0 0 10px;border:0"><div style="font-size:12px"><b>${esc(V.label)}</b> <span class="muted">· ${V.busy ? '<span class="pulse">reading…</span>' : V.err ? '' : `last ${V.lines || 300} lines · read ${fmtAgo(V.at)}`}</span></div><div class="actions"><input class="filter" placeholder="filter lines…" data-filter value="${esc(S.filter)}"><button class="small" data-act="log:refresh" ${V.busy ? 'disabled' : ''}>refresh</button></div></div>`;
   if (V.err) return `${head}<div class="err-box">${esc(V.err)}</div>`;
+  if (V.busy && V.text == null) return `${head}<div class="hint">reading…</div>`; // no #logview yet: the scroll-to-end waits for the content
   const f = S.filter.trim().toLowerCase();
   let lines = (V.text || '').replace(/\n$/, '').split('\n');
   if (f) lines = lines.filter((l) => l.toLowerCase().includes(f));
@@ -1435,9 +1445,6 @@ function viewServices() {
 
 /* ---------- events ---------- */
 function afterRender() {
-  // A freshly read log opens at its end, like tail.
-  const lv = $('#logview');
-  if (lv && S.logView && !S.logView.scrolled) { lv.scrollTop = lv.scrollHeight; S.logView.scrolled = true; }
   // Tooltips for the traffic bars.
   const bars = $('#bars');
   if (bars) {
