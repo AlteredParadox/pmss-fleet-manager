@@ -1328,7 +1328,9 @@ func (p *poller) record(ctx context.Context, st *BoxState) {
 	}
 	// The auth hold must survive restarts, or every restart would retry a
 	// rejected login and walk the box toward qBittorrent's IP ban.
-	if err := p.m.st.SetCache(sctx, p.box.ID, authCacheKind, p.guard.State()); err != nil {
+	auth := p.guard.State()
+	auth.Endpoint = AuthEndpoint(p.box) // a restore applies the hold to this endpoint only
+	if err := p.m.st.SetCache(sctx, p.box.ID, authCacheKind, auth); err != nil {
 		p.m.log.Warn("cache auth hold", "box", p.box.Name, "err", err)
 	}
 }
@@ -1346,7 +1348,7 @@ func (p *poller) qbtAction(ctx context.Context, action string) error {
 			return err
 		}
 		cmd := p.startCommand()
-		_, stderr, err := cli.Run(actx, cmd, nil)
+		_, stderr, err := cli.Run(actx, startViaStdin, strings.NewReader(cmd+"\n"))
 		if err != nil {
 			return fmt.Errorf("start qbittorrent: %v %s", err, strings.TrimSpace(string(stderr)))
 		}

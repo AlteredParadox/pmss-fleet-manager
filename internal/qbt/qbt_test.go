@@ -548,3 +548,138 @@ func TestSuccessNotSharedAcrossClients(t *testing.T) {
 		t.Fatalf("two clients need two sessions; logins = %d", n)
 	}
 }
+
+// Logins that end without an answer spend a budget; once it is gone the
+// guard holds like a rejection, and a seen outcome resets it.
+func TestAmbiguousLoginBudget(t *testing.T) {
+	g := &AuthGuard{}
+	for i := 1; i < ambiguousBudget; i++ {
+		g.noteAmbiguous("k")
+		if _, held := g.Blocked("k"); held {
+			t.Fatalf("held after %d ambiguous attempts", i)
+		}
+	}
+	g.noteAmbiguous("k")
+	if err, held := g.Blocked("k"); !held || err != ErrAmbiguous {
+		t.Fatalf("budget spent: %v %v", err, held)
+	}
+	st := g.State()
+	if st.Ambiguous != ambiguousBudget || st.AmbiguousKey != "k" || st.Error != ErrAmbiguous.Error() {
+		t.Fatalf("state: %+v", st)
+	}
+	// A ban hold has no key (the IP is banned): the ambiguous count must
+	// not make it credential-scoped through State/Restore.
+	gb := &AuthGuard{}
+	gb.noteAmbiguous("k")
+	gb.fail(ErrBanned, time.Now().Add(time.Hour), "")
+	sb := gb.State()
+	if sb.Key != "" || sb.AmbiguousKey != "k" || sb.Ambiguous != 1 {
+		t.Fatalf("ban state: %+v", sb)
+	}
+	gr := &AuthGuard{}
+	gr.Restore(sb)
+	if _, held := gr.Blocked("other"); !held {
+		t.Fatal("a restored ban must hold for every credential")
+	}
+	if _, held := g.Blocked("other"); held { // other credentials end the hold, as for a rejection
+		t.Fatal("other credentials are not held")
+	}
+	g2 := &AuthGuard{}
+	g2.Restore(st)
+	if err, held := g2.Blocked("k"); !held || err != ErrAmbiguous {
+		t.Fatalf("restored: %v %v", err, held)
+	}
+	g2.Clear()
+	if _, held := g2.Blocked("k"); held {
+		t.Fatal("cleared")
+	}
+	// A dial failure sends nothing: it must not spend the budget, however
+	// often it repeats, or a briefly unreachable box locks valid credentials.
+	c := New(func(ctx context.Context) (net.Conn, error) { return nil, errors.New("reset") }, "127.0.0.1:8080", "admin", "secret")
+	for i := 0; i < 2*ambiguousBudget; i++ {
+		if err := c.Login(context.Background()); err == nil {
+			t.Fatal("login must fail")
+		}
+	}
+	if _, held := c.AuthBlocked(); held {
+		t.Fatal("dial failures must not be charged as ambiguous")
+	}
+	// A server that reads the credentials and drops the connection is the
+	// ambiguous case: charged, and the hold survives State/Restore.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 4096)
+			conn.Read(buf)
+			conn.Close()
+		}
+	}()
+	addr := ln.Addr().String()
+	c2 := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:8080", "admin", "secret")
+	for i := 0; i < ambiguousBudget; i++ {
+		if err := c2.Login(context.Background()); err == nil {
+			t.Fatal("login must fail")
+		}
+	}
+	if err, held := c2.AuthBlocked(); !held || err != ErrAmbiguous {
+		t.Fatalf("after %d dropped answers: %v %v", ambiguousBudget, err, held)
+	}
+	g3 := &AuthGuard{}
+	g3.Restore(c2.guard.State())
+	if err, held := g3.Blocked(CredsKey("admin", "secret")); !held || err != ErrAmbiguous {
+		t.Fatalf("restored: %v %v", err, held)
+	}
+}
+
+// The ambiguous signal is per request: another request's traffic on the
+// same client while a login fails before writing must not charge the
+// budget.
+func TestAmbiguousSignalIsPerRequest(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() { // answers nothing, ever: every request times out
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					if _, err := conn.Read(buf); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	addr := ln.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:8080", "admin", "secret")
+	// A concurrent non-login request that is still writing/waiting.
+	bg, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+	go func() { _, _ = c.Version(bg) }()
+	time.Sleep(50 * time.Millisecond)
+	// Logins cancelled before they can be sent: a pre-cancelled context.
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 2*ambiguousBudget; i++ {
+		if err := c.Login(done); err == nil {
+			t.Fatal("login must fail")
+		}
+	}
+	if _, held := c.AuthBlocked(); held {
+		t.Fatal("logins that never wrote must not be charged, whatever other requests did")
+	}
+}

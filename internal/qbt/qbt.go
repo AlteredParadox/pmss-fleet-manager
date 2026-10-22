@@ -30,10 +30,12 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -93,6 +95,9 @@ type AuthGuard struct {
 	err      error
 	until    time.Time // zero = until cleared
 	key      string    // credentials fingerprint the hold applies to
+	// ambiguous counts outcome-less logins for ambKey (see noteAmbiguous).
+	ambiguous int
+	ambKey    string
 }
 
 // AuthState is the persistable form of a guard.
@@ -100,6 +105,39 @@ type AuthState struct {
 	Error string    `json:"error,omitempty"`
 	Until time.Time `json:"until,omitempty"`
 	Key   string    `json:"key,omitempty"`
+	// Ambiguous counts logins whose outcome was never seen (the connection
+	// failed after the credentials were sent) for AmbiguousKey; see
+	// ErrAmbiguous. Kept apart from Key: a ban hold has no key (it is the
+	// IP that is banned) and must not become credential-scoped on restore.
+	Ambiguous    int    `json:"ambiguous,omitempty"`
+	AmbiguousKey string `json:"ambiguous_key,omitempty"`
+	// Endpoint is the SSH endpoint the hold was recorded for (set by the
+	// poller); a restore ignores a hold recorded for another one.
+	Endpoint string `json:"endpoint,omitempty"`
+}
+
+// ambiguousBudget is how many logins may end without a visible outcome
+// before further attempts are held. qBittorrent counts a failure it saw
+// even when the reply never reached us, and five of those ban the box's
+// loopback IP; the budget keeps the worst case well under that.
+const ambiguousBudget = 3
+
+// ErrAmbiguous is the hold after ambiguousBudget logins ended without an
+// answer; it clears like ErrAuth (credentials re-entered or client restarted).
+var ErrAmbiguous = errors.New("qbittorrent login attempts kept ending without an answer (the connection failed after the credentials were sent); further attempts are suspended until the password is re-entered or the client is restarted, to stay clear of qBittorrent's IP ban")
+
+// noteAmbiguous records a login whose outcome was not seen and holds once
+// the budget is spent.
+func (g *AuthGuard) noteAmbiguous(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ambKey != key {
+		g.ambKey, g.ambiguous = key, 0
+	}
+	g.ambiguous++
+	if g.ambiguous >= ambiguousBudget {
+		g.err, g.until, g.key = ErrAmbiguous, time.Time{}, key
+	}
 }
 
 // CredsKey fingerprints a username/password pair without revealing it.
@@ -120,6 +158,7 @@ func (g *AuthGuard) Clear() {
 	g.mu.Lock()
 	g.err, g.until, g.key = nil, time.Time{}, ""
 	g.loginErr, g.loginAt, g.lastBy = nil, time.Time{}, nil
+	g.ambiguous, g.ambKey = 0, ""
 	g.mu.Unlock()
 }
 
@@ -152,11 +191,19 @@ func (g *AuthGuard) State() AuthState {
 	if g.err != nil {
 		s.Error = g.err.Error()
 	}
+	if g.ambiguous > 0 {
+		s.Ambiguous, s.AmbiguousKey = g.ambiguous, g.ambKey
+	}
 	return s
 }
 
 // Restore loads a persisted hold. Known errors map back to their sentinels.
 func (g *AuthGuard) Restore(s AuthState) {
+	if s.Ambiguous > 0 {
+		g.mu.Lock()
+		g.ambiguous, g.ambKey = s.Ambiguous, s.AmbiguousKey
+		g.mu.Unlock()
+	}
 	if s.Error == "" {
 		return
 	}
@@ -166,12 +213,15 @@ func (g *AuthGuard) Restore(s AuthState) {
 		err = ErrAuth
 	case ErrBanned.Error():
 		err = ErrBanned
+	case ErrAmbiguous.Error():
+		err = ErrAmbiguous
 	}
 	g.fail(err, s.Until, s.Key)
 }
 
-// New builds a client. hostport is what qBittorrent should see in the Host
-// header (its host-header validation accepts localhost/127.0.0.1 by default),
+// New builds a client with its own guard. Test support: the poller uses
+// NewWithGuard so the hold outlives the client. hostport is what qBittorrent
+// should see in the Host header (its host-header validation accepts localhost/127.0.0.1 by default),
 // e.g. "127.0.0.1:8080". user/pass may be empty when the WebUI bypasses
 // authentication for localhost.
 func New(dial Dialer, hostport, user, pass string) *Client {
@@ -313,8 +363,24 @@ func (c *Client) login(ctx context.Context) error {
 		return err
 	}
 	form := url.Values{"username": {c.user}, "password": {c.pass}}
+	// Per-request write evidence: WroteRequest fires for THIS request once
+	// headers and body (the credentials) were handed to the connection
+	// without error. A dial failure, a request cancelled before that, or a
+	// write that failed part-way sent nothing qBittorrent could count as a
+	// login and must not spend the ambiguous budget, or a briefly
+	// unreachable box would lock valid credentials; and another request's
+	// traffic on the shared transport cannot be mistaken for this one's.
+	var sent atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteRequest: func(i httptrace.WroteRequestInfo) {
+		if i.Err == nil {
+			sent.Store(true)
+		}
+	}})
 	code, body, resp, err := c.doResp(ctx, http.MethodPost, "/api/v2/auth/login", form)
 	if err != nil {
+		if sent.Load() {
+			c.guard.noteAmbiguous(c.credsKey())
+		}
 		return err
 	}
 	if code == http.StatusForbidden && strings.Contains(strings.ToLower(string(body)), "banned") {
@@ -332,7 +398,7 @@ func (c *Client) login(ctx context.Context) error {
 		c.guard.fail(ErrAuth, time.Time{}, c.credsKey())
 		return ErrAuth
 	}
-	c.guard.Clear()
+	c.guard.Clear() // a seen outcome, accepted: the ambiguous count resets too
 	if code < 200 || code >= 300 {
 		return fmt.Errorf("qbittorrent: login http %d: %s", code, clipBody(body))
 	}

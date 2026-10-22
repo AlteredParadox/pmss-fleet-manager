@@ -187,6 +187,31 @@ func TestReleaseDigest(t *testing.T) {
 
 // The install script's checksum step: a matching digest passes and says so,
 // a mismatch deletes the download and fails, no digest passes with a note.
+// The downloader gets the URL on its stdin, never in argv: a fake curl and
+// a fake wget record both.
+func TestDownloadShellKeepsURLOffArgv(t *testing.T) {
+	const token = "https://example.test/private/qbt?token=SECRET123"
+	for tool, line := range map[string]string{"curl": curlDownload, "wget": wgetDownload} {
+		bin := t.TempDir()
+		fake := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + bin + "/argv\ncat > " + bin + "/stdin\n: > \"$OUT\"\n"
+		os.WriteFile(bin+"/"+tool, []byte(fake), 0o700)
+		tmp := bin + "/out.bin"
+		cmd := exec.Command("sh", "-c", "url=$1; tmp=$2; "+line+"; exit $rc", "sh", token, tmp)
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "OUT="+tmp)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v %s", tool, err, out)
+		}
+		argv, _ := os.ReadFile(bin + "/argv")
+		stdin, _ := os.ReadFile(bin + "/stdin")
+		if strings.Contains(string(argv), "SECRET123") {
+			t.Fatalf("%s: the URL is on the command line: %q", tool, argv)
+		}
+		if !strings.Contains(string(stdin), token) {
+			t.Fatalf("%s: the URL did not reach stdin: %q", tool, stdin)
+		}
+	}
+}
+
 func TestVerifyChecksumShell(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")

@@ -80,6 +80,62 @@ type Server struct {
 	// listed; a rebinding page always arrives with its own hostname, never
 	// with an IP literal.
 	allowIPHosts bool
+
+	// sseSlots caps concurrent event streams (each holds a goroutine and a
+	// bus subscription); a browser needs one per tab.
+	sseSlots chan struct{}
+	// authFails throttles failed basic-auth attempts per client address.
+	authMu    sync.Mutex
+	authFails map[string]*authFail
+}
+
+// authFail is one client's run of failed basic-auth attempts.
+type authFail struct {
+	count int
+	until time.Time
+}
+
+const (
+	maxSSEStreams   = 32
+	authFreeTries   = 5                // failures before the throttle starts
+	authThrottle    = 30 * time.Second // added per failure past the free ones, capped
+	authThrottleMax = 10 * time.Minute
+)
+
+// authThrottled reports whether a failed-auth client must wait, and
+// records a failure or a success. Keyed by the connection's address, so
+// behind a reverse proxy it is one shared budget, which is what an
+// internet-facing deployment without the recommended proxy-side limiting
+// needs most.
+func (s *Server) authThrottled(addr string, failed bool) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	if s.authFails == nil || len(s.authFails) > 4096 {
+		s.authFails = map[string]*authFail{}
+	}
+	f := s.authFails[host]
+	now := time.Now()
+	if f != nil && now.Before(f.until) {
+		return true // the wait applies to every attempt, right password included: that is what slows guessing
+	}
+	if !failed {
+		delete(s.authFails, host)
+		return false
+	}
+	if f == nil {
+		f = &authFail{}
+		s.authFails[host] = f
+	}
+	f.count++
+	if f.count > authFreeTries {
+		f.until = now.Add(min(time.Duration(f.count-authFreeTries)*authThrottle, authThrottleMax))
+		return true
+	}
+	return false
 }
 
 // SetAllowedHosts restricts served Host headers to the given hostnames
@@ -130,7 +186,7 @@ func New(st *store.Store, m *collect.Manager, basicAuth string, basePath string)
 		panic("api.New: " + err.Error())
 	}
 	s := &Server{st: st, m: m, auth: basicAuth, basePath: bp, mux: http.NewServeMux(),
-		instance: strconv.FormatInt(time.Now().UnixNano(), 36)}
+		instance: strconv.FormatInt(time.Now().UnixNano(), 36), sseSlots: make(chan struct{}, maxSSEStreams)}
 	s.routes()
 	return s
 }
@@ -250,7 +306,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.auth != "" && !s.isPublicPath(r.URL.Path) {
 		u, p, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(u+":"+p), []byte(s.auth)) != 1 {
+		good := ok && subtle.ConstantTimeCompare([]byte(u+":"+p), []byte(s.auth)) == 1
+		if s.authThrottled(r.RemoteAddr, !good) {
+			http.Error(w, "too many failed logins from this address; try again later", http.StatusTooManyRequests)
+			return
+		}
+		if !good {
 			w.Header().Set("WWW-Authenticate", `Basic realm="pmss-fleet-manager"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -265,6 +326,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
+		// The server has no WriteTimeout (the SSE stream must live), so
+		// bound the body read here: a client trickling a capped body must
+		// not hold a handler forever. Two minutes covers a 40 MB torrent
+		// upload on a slow uplink.
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(2 * time.Minute))
 	}
 	s.mux.ServeHTTP(w, r)
 }
@@ -415,6 +481,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", 500)
+		return
+	}
+	select {
+	case s.sseSlots <- struct{}{}:
+		defer func() { <-s.sseSlots }()
+	default:
+		http.Error(w, "too many open event streams; close some dashboard tabs", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set(hdrContentType, "text/event-stream")

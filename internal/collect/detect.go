@@ -19,6 +19,7 @@ package collect
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,20 +65,28 @@ type Facts struct {
 }
 
 // detectGuards remembers rejected WebUI logins seen by the add/edit wizard,
-// per host and credentials, so clicking "detect" again never retries one
-// (five rejections ban the box's loopback IP). startPoller seeds the box's
-// poller guard from it; a dashboard-driven client restart clears it.
+// per SSH endpoint (host, port, account) and credentials, so clicking
+// "detect" again never retries one (five rejections ban the box's loopback
+// IP). Two accounts on one host with the same WebUI password are two
+// endpoints: a rejection on one must not suppress a valid login on the
+// other. startPoller seeds the box's poller guard from it; a
+// dashboard-driven client restart clears it.
 var (
 	detectMu     sync.Mutex
 	detectGuards = map[string]*qbt.AuthGuard{}
 )
 
-func detectKey(host, user, pass string) string {
-	return strings.ToLower(host) + ":" + qbt.CredsKey(user, pass)
+// AuthEndpoint identifies the SSH endpoint a WebUI hold belongs to.
+func AuthEndpoint(b *store.Box) string {
+	return strings.ToLower(b.Host) + ":" + strconv.Itoa(b.Port) + "/" + b.User
 }
 
-func detectGuard(host, user, pass string) *qbt.AuthGuard {
-	k := detectKey(host, user, pass)
+func detectKey(b *store.Box) string {
+	return AuthEndpoint(b) + ":" + qbt.CredsKey(b.QbtUser, b.QbtPass)
+}
+
+func detectGuard(b *store.Box) *qbt.AuthGuard {
+	k := detectKey(b)
 	detectMu.Lock()
 	defer detectMu.Unlock()
 	if len(detectGuards) > 256 {
@@ -91,11 +100,11 @@ func detectGuard(host, user, pass string) *qbt.AuthGuard {
 	return g
 }
 
-// detectGuardState returns the remembered hold for a box's host and
+// detectGuardState returns the remembered hold for a box's endpoint and
 // credentials without creating an entry.
-func detectGuardState(host, user, pass string) (qbt.AuthState, bool) {
+func detectGuardState(b *store.Box) (qbt.AuthState, bool) {
 	detectMu.Lock()
-	g, ok := detectGuards[detectKey(host, user, pass)]
+	g, ok := detectGuards[detectKey(b)]
 	detectMu.Unlock()
 	if !ok {
 		return qbt.AuthState{}, false
@@ -254,7 +263,7 @@ func detectQbt(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *s
 			b.QbtPort = port
 			break
 		}
-		g := detectGuard(b.Host, b.QbtUser, b.QbtPass)
+		g := detectGuard(b)
 		if err, held := g.Blocked(qbt.CredsKey(b.QbtUser, b.QbtPass)); held {
 			add("warn", "not retrying the WebUI login: %v", err)
 			b.QbtEnabled = true

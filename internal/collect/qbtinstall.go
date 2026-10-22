@@ -55,10 +55,7 @@ tmp="$HOME/bin/.qbittorrent-nox.new.$$"
 # redirecting to http. wget has no size option either: the subshell's
 # file-size limit (ulimit -f, 512-byte blocks under dash = 200 MiB) stops a
 # runaway download as it is written.
-if command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp" "$url"; rc=$?
-elif command -v wget >/dev/null 2>&1; then (ulimit -f 409600; exec wget -q -O "$tmp" "$url"); rc=$?
-else echo "neither curl nor wget available"; exit 1; fi
-[ "$rc" -eq 0 ] && [ -s "$tmp" ] || { echo "download failed (exit $rc)"; rm -f "$tmp"; exit 1; }
+` + downloadShell + `[ "$rc" -eq 0 ] && [ -s "$tmp" ] || { echo "download failed (exit $rc)"; rm -f "$tmp"; exit 1; }
 # The static build is ~30 MB; anything far above that is not it.
 size=$(wc -c < "$tmp")
 [ "$size" -le 209715200 ] || { echo "downloaded file is too large to be qbittorrent-nox ($size bytes)"; rm -f "$tmp"; exit 1; }
@@ -74,6 +71,21 @@ mv -f "$tmp" "$HOME/bin/qbittorrent-nox" || { rm -f "$tmp"; exit 1; }
 echo "installed: $new"
 echo "previous: ${old:-none}"
 `
+
+// downloadShell fetches $url into $tmp. The URL goes to the downloader on
+// ITS stdin (curl's config file, wget's URL list), never on its command
+// line: a custom URL may carry a private-build token, and on a host
+// without process hiding another tenant could read it from
+// /proc/<pid>/cmdline for the whole download. safeURL admits neither a
+// double quote nor a backslash, so the curl config line needs no escaping.
+const (
+	curlDownload  = `printf 'url = "%s"\n' "$url" | curl -fsSL -K - --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp"; rc=$?`
+	wgetDownload  = `(ulimit -f 409600; printf '%s\n' "$url" | wget -q -i - -O "$tmp"); rc=$?`
+	downloadShell = `if command -v curl >/dev/null 2>&1; then ` + curlDownload + `
+elif command -v wget >/dev/null 2>&1; then ` + wgetDownload + `
+else echo "neither curl nor wget available"; exit 1; fi
+`
+)
 
 // qbtStartHelper is the user's standard launcher, written to ~/bin/qbt-start.
 const qbtStartHelper = `#!/bin/bash
@@ -269,7 +281,9 @@ func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, er
 	}
 	ictx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	out, stderr, err := cli.Run(ictx, "QBT_URL="+shellQuote(downloadURL)+" QBT_SHA256="+shellQuote(digest)+" sh", strings.NewReader(installScript))
+	// The URL (which may carry a token for a private build) and the digest
+	// travel in the script on stdin, never on the command line /proc shows.
+	out, stderr, err := cli.Run(ictx, "sh", strings.NewReader("QBT_URL="+shellQuote(downloadURL)+"\nQBT_SHA256="+shellQuote(digest)+"\n"+installScript))
 	text := strings.TrimSpace(note + string(out) + "\n" + string(stderr))
 	if err != nil {
 		return text, fmt.Errorf("install failed: %s", firstLine(strings.TrimPrefix(text, note), err))
@@ -308,12 +322,18 @@ func (p *poller) qbtRestart(ctx context.Context) (string, error) {
 		return text, fmt.Errorf("restart failed: %s", firstLine(text, err))
 	}
 	cmd := p.startCommand()
-	_, stderr, err = cli.Run(rctx, cmd, nil)
+	_, stderr, err = cli.Run(rctx, startViaStdin, strings.NewReader(cmd+"\n"))
 	if err != nil {
 		return text, fmt.Errorf("stopped, but start command failed: %v %s", err, strings.TrimSpace(string(stderr)))
 	}
 	return text + "\nstarted with: " + cmd, nil
 }
+
+// startViaStdin is the SSH command that runs the start command read from
+// stdin in the account's login shell: the command (which may carry a
+// token) then never appears in /proc/<pid>/cmdline, where other tenants
+// could read it on a host without process hiding.
+const startViaStdin = `"${SHELL:-sh}" -s`
 
 // startCommand picks the configured start command, else ~/bin/qbt-start when
 // the probe saw it, else a plain daemonised launch.

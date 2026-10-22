@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -254,12 +255,19 @@ func (m *Manager) SyncServices(ctx context.Context) error {
 	now := time.Now()
 	m.svc = servicesCache{feed: feed, syncedAt: now}
 	rec, _ := json.Marshal(svcCacheRecord{KeyFP: keyFingerprint(key), SyncedAt: now.UTC(), Feed: raw})
-	if err := m.st.SetValue(ctx, svcCacheKey, string(rec)); err != nil {
-		m.log.Warn("persist services cache", "err", err)
+	perr := m.st.SetValue(ctx, svcCacheKey, string(rec))
+	if perr != nil {
+		// The live data is good and stays; what a restart would restore is
+		// not, so the caller (and a manual sync's toast) hears about it.
+		m.svc.err = "fetched, but the cache could not be saved: " + perr.Error()
+		m.log.Warn("persist services cache", "err", perr)
 	}
 	m.svcMu.Unlock()
 	m.log.Info("pmapi sync", "services", len(feed.Services))
 	m.reattachServices()
+	if perr != nil {
+		return fmt.Errorf("services fetched and applied, but not saved for the next start: %w", perr)
+	}
 	return nil
 }
 

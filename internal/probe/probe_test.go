@@ -831,3 +831,40 @@ func TestParseQbtPMSSManaged(t *testing.T) {
 		t.Error("no qbt_pmss section must not read as managed")
 	}
 }
+
+// bounded() skips a command whose previous run still holds its lock (a
+// df stuck in the kernel on a hung filesystem), instead of adding another
+// stuck process every poll; without a holder it runs the command.
+func TestBoundedSkipsWhileLocked(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("no flock")
+	}
+	scratch := t.TempDir()
+	prelude := "scratch='" + scratch + "'\n" + boundedShell
+	out, _, code := runSh(t, prelude+"bounded 2 echo hello\n")
+	if code != 0 || out != "hello\n" {
+		t.Fatalf("unlocked: code %d out %q", code, out)
+	}
+	// Hold the lock the way a stuck df would, then run bounded again.
+	holder := exec.Command("flock", scratch+"/.pmss-probe-lock.echo", "sleep", "20")
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { holder.Process.Kill(); holder.Wait() }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if l, err := exec.Command("flock", "-n", scratch+"/.pmss-probe-lock.echo", "true").CombinedOutput(); err != nil || time.Now().After(deadline) {
+			_ = l
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	start := time.Now()
+	out, _, code = runSh(t, prelude+"bounded 3 echo hello\n")
+	if code != 0 || out != "" {
+		t.Fatalf("locked: code %d out %q (must skip, not run)", code, out)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("locked run must return at once, took %v", time.Since(start))
+	}
+}

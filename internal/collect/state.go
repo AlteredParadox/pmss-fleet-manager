@@ -314,14 +314,6 @@ type DirsState struct {
 	Entries []DirEntry `json:"entries,omitempty"`
 }
 
-// EffectivePlan is the manual plan name, else the API product name.
-func (s BoxState) EffectivePlan() string {
-	if s.Plan != "" || s.Service == nil {
-		return s.Plan
-	}
-	return s.Service.Product
-}
-
 // EffectiveRenewal is the manual renewal date, else the next-due date of the
 // matched service if that service is active. A cancelled service's due date
 // is history, not a renewal to alert on.
