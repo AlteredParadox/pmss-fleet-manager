@@ -309,4 +309,39 @@ func TestInventoryDue(t *testing.T) {
 	default:
 		t.Fatal("wakeInventory must wake the poller")
 	}
+	// The request is consumed by the poll that takes it: a request posted
+	// while that poll is in flight is for the next one, not wiped by it
+	// (Codex on PR 96), and a poll that failed gives its request back.
+	if p.inventoryDue(now) {
+		t.Fatal("consumed")
+	}
+	p.wakeInventory()
+	p.inventoryFailed(p.inventoryDue(now))
+	if !p.inventoryDue(now) {
+		t.Fatal("a failed poll must keep the request")
+	}
+	p.inventoryFailed(false)
+	if p.inventoryDue(now) {
+		t.Fatal("a failed poll without a request posts none")
+	}
+}
+
+// A manual refresh asks for the inventory sections (logs, crontab, binary).
+func TestRefreshRequestsInventory(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p := newPoller(m, &store.Box{ID: 7, Enabled: true})
+	m.mu.Lock()
+	m.pollers[7] = p
+	m.mu.Unlock()
+	if err := m.Refresh(7); err != nil || !p.invWant.Load() {
+		t.Fatalf("refresh: %v want=%v", err, p.invWant.Load())
+	}
+	if err := m.Refresh(8); err == nil {
+		t.Fatal("unknown box")
+	}
 }

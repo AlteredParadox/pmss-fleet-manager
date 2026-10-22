@@ -242,8 +242,19 @@ const inventoryInterval = 15 * time.Minute
 
 // inventoryDue reports whether the poll starting at now should run the
 // inventory sections: never run yet, inventoryInterval old, or asked for.
+// It consumes the request, so one posted while that poll is in flight is
+// kept for the next poll rather than wiped by this one's result.
 func (p *poller) inventoryDue(now time.Time) bool {
-	return p.inv == nil || now.Sub(p.invAt) >= inventoryInterval || p.invWant.Load()
+	asked := p.invWant.Swap(false)
+	return asked || p.inv == nil || now.Sub(p.invAt) >= inventoryInterval
+}
+
+// inventoryFailed re-arms a consumed request when the poll that took it
+// produced no snapshot, so the next poll honours it.
+func (p *poller) inventoryFailed(requested bool) {
+	if requested {
+		p.invWant.Store(true)
+	}
 }
 
 // wakeInventory polls now with the inventory sections included.
@@ -493,7 +504,7 @@ func (p *poller) poll(ctx context.Context) {
 	}
 	st.HostKeyFP = fingerprintOrEmpty(p.hostKey()) // after the dial: the first connect pins it
 	tag := probe.NewTag()
-	inventory := p.inventoryDue(start)
+	inventory := p.inventoryDue(start) // consumes a pending request: one that lands from here on is for the next poll
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWith(tag, p.qbtBinStat, inventory)))
 	cancel()
@@ -504,17 +515,18 @@ func (p *poller) poll(ctx context.Context) {
 			p.ssh = nil
 		}
 		p.mu.Unlock()
+		p.inventoryFailed(inventory)
 		p.fail(ctx, &st, fmt.Errorf("probe: %w %s", explainSessionError(err), strings.TrimSpace(string(stderr))), start)
 		return
 	}
 	snap, err := probe.ParseTagged(out, tag, time.Now())
 	if err != nil {
+		p.inventoryFailed(inventory)
 		p.fail(ctx, &st, err, start)
 		return
 	}
 	if snap.Inventory {
 		p.inv, p.invAt = snap.InventoryOnly(), start
-		p.invWant.Store(false)
 	} else {
 		snap.CarryInventory(p.inv)
 	}

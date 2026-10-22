@@ -127,13 +127,15 @@ sec qbt_conf; grep -E '^WebUI\\(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|Au
 sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
 sec listen
 ` + listenShell + `sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
+# Every poll, not inventory: the panel can switch its own qBittorrent on
+# at any time, and install/autostart refuse to fight it only if they know.
+sec qbt_pmss; [ -e "$home/.qbittorrentEnable" ] && echo 1 || echo 0
 if [ "${PMSS_INVENTORY:-1}" = 1 ]; then
 sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_stat; stat -L -c '%s %Y %Z %i' "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version
 ` + qbtVersionShell + `sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + `
-sec qbt_pmss; [ -e "$home/.qbittorrentEnable" ] && echo 1 || echo 0
 sec logs
 ` + logsListShell + `fi
 sec probe_pid; echo $$

@@ -846,9 +846,22 @@ func TestInventoryGated(t *testing.T) {
 	if !full.Inventory || full.Host.Kernel == "" || full.Host.NCPU == 0 || !full.LogsKnown {
 		t.Fatalf("full probe: inventory=%v kernel=%q ncpu=%d logs=%v", full.Inventory, full.Host.Kernel, full.Host.NCPU, full.LogsKnown)
 	}
+	// The PMSS-managed marker is a safety check for install/autostart: it
+	// is read every poll, inventory or not.
+	home := t.TempDir()
+	os.WriteFile(home+"/.qbittorrentEnable", nil, 0o600)
+	t.Setenv("HOME", home)
 	fast := run(false)
 	if fast.Inventory || fast.Host.Kernel != "" || fast.Host.NCPU != 0 || fast.LogsKnown || fast.Qbt.BinaryStat != "" {
 		t.Fatalf("fast probe ran inventory sections: %+v", fast.Host)
+	}
+	if !fast.Qbt.PMSSManaged {
+		t.Fatal("the PMSS-managed marker must be read on a fast poll")
+	}
+	prevManaged := &Snapshot{Inventory: true, Qbt: QbtInfo{PMSSManaged: false}}
+	fast.CarryInventory(prevManaged)
+	if !fast.Qbt.PMSSManaged {
+		t.Fatal("carry must not overwrite the live marker")
 	}
 	if fast.Host.UptimeSec <= 0 || fast.Host.MemTotal <= 0 || !fast.ProcsKnown {
 		t.Fatalf("fast probe must still measure: %+v procs=%v", fast.Host, fast.ProcsKnown)

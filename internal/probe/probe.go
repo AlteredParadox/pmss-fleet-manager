@@ -824,7 +824,7 @@ func (s *Snapshot) CarryInventory(prev *Snapshot) {
 	h.CPUModel, h.CPUShort, h.CPUFlags, h.GPU = ph.CPUModel, ph.CPUShort, append([]string(nil), ph.CPUFlags...), ph.GPU
 	q, pq := &s.Qbt, &prev.Qbt
 	q.BinaryPresent, q.BinaryVersion, q.BinaryStat = pq.BinaryPresent, pq.BinaryVersion, pq.BinaryStat
-	q.StartHelper, q.CronEntries, q.PMSSManaged = pq.StartHelper, pq.CronEntries, pq.PMSSManaged
+	q.StartHelper, q.CronEntries = pq.StartHelper, pq.CronEntries // PMSSManaged is read every poll
 	s.Logs, s.LogsKnown = append([]LogFile(nil), prev.Logs...), prev.LogsKnown
 }
 
