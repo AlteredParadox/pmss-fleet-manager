@@ -363,15 +363,19 @@ func (c *Client) login(ctx context.Context) error {
 		return err
 	}
 	form := url.Values{"username": {c.user}, "password": {c.pass}}
-	// Per-request write evidence: WroteHeaders fires for THIS request once
-	// its headers are on the wire, after which the body with the
-	// credentials follows. A dial failure, or a request cancelled before
-	// that, sent nothing qBittorrent could count and must not spend the
-	// ambiguous budget, or a briefly unreachable box would lock valid
-	// credentials; and another request's traffic on the shared transport
-	// cannot be mistaken for this one's.
+	// Per-request write evidence: WroteRequest fires for THIS request once
+	// headers and body (the credentials) were handed to the connection
+	// without error. A dial failure, a request cancelled before that, or a
+	// write that failed part-way sent nothing qBittorrent could count as a
+	// login and must not spend the ambiguous budget, or a briefly
+	// unreachable box would lock valid credentials; and another request's
+	// traffic on the shared transport cannot be mistaken for this one's.
 	var sent atomic.Bool
-	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteHeaders: func() { sent.Store(true) }})
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteRequest: func(i httptrace.WroteRequestInfo) {
+		if i.Err == nil {
+			sent.Store(true)
+		}
+	}})
 	code, body, resp, err := c.doResp(ctx, http.MethodPost, "/api/v2/auth/login", form)
 	if err != nil {
 		if sent.Load() {
