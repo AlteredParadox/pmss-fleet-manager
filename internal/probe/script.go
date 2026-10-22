@@ -136,7 +136,8 @@ sec qbt_bin_version
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + `
 sec qbt_pmss; [ -e "$home/.qbittorrentEnable" ] && echo 1 || echo 0
 sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
-sec probe_pid; echo $$
+sec logs
+` + logsListShell + `sec probe_pid; echo $$
 # The account's own processes (hidepid=2 hides everyone else's anyway):
 # fixed numeric columns first, then comm, which may hold spaces. times is
 # cumulative CPU seconds; the poller turns two samples into a rate. The
@@ -206,6 +207,53 @@ if [ -n "$l" ]; then printf '%s\n' "$l"; else echo "via ss"; ` + listenViaSS + `
 // the last colon of Local (a %interface suffix dropped); a Process column
 // that starts with users:(( is one of our own sockets.
 const listenViaSS = `timeout 10 ss -Hltnp 2>/dev/null | awk -v uid="$uid" '$1=="LISTEN"{n=split($4,a,":"); p=a[n]; ad=substr($4,1,length($4)-length(p)-1); sub(/%.*/,"",ad); o="x"; if ($6 ~ /^users:\(\(/) o=uid; print "d", p, o, ad}'`
+
+// logDirsShell and logFilesShell are the places under the home where the
+// PMSS stack and the apps customers install on it keep their logs, as shell
+// words spliced into the probe: directories listed for *.log, *.log.* and
+// *.txt files, and single files.
+const (
+	logDirsShell = ".logs .local/share/qBittorrent/logs .local/share/data/qBittorrent/logs .lighttpd" +
+		" .config/Radarr/logs .config/Sonarr/logs .config/Lidarr/logs .config/Readarr/logs .config/Prowlarr/logs" +
+		" .config/Bazarr/log .config/jellyfin/log .config/sabnzbd/logs .sabnzbd/logs .config/deluge" +
+		" .config/rclone .flexget .pyload/logs .config/pyload/logs .config/cloudplow .config/Jackett/log logs"
+	logFilesShell = ".trackerCleaner.log .rtorrent.log rtorrent.log .rtorrent.session/rtorrent.log"
+)
+
+// logsListShell lists log files in the places the PMSS stack and the usual
+// self-installed apps write them, as "mtime<TAB>size<TAB>path" relative to
+// the home ($home must be set): the 40 newest per directory, sorted before
+// the cut so a directory full of rotated copies never hides the live file.
+// Only a listing: the tab fetches one file on demand (see LogTailScript).
+const logsListShell = `(cd "$home" 2>/dev/null && for d in ` + logDirsShell + `; do
+  [ -d "$d" ] || continue
+  find "$d" -maxdepth 1 -type f \( -name '*.log' -o -name '*.log.*' -o -name '*.txt' \) ! -name '*.xz' ! -name '*.bz2' ! -name '*.zst' ! -name '*.zip' -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -rn | head -n 40
+done
+for f in ` + logFilesShell + `; do
+  [ -f "$f" ] && stat -c '%Y'"$(printf '\t')"'%s'"$(printf '\t')"'%n' "$f" 2>/dev/null
+done; :)
+`
+
+// LogTailScript prints the last lines of one log file under the home. The
+// path (already ValidLogPath-checked) is embedded single-quoted, so it never
+// reaches a command line that /proc exposes, and is checked again on the
+// box: relative, no ".." component, a regular file. A gzip-rotated copy is
+// decompressed on the box into the same line and byte caps, so however
+// large it inflates, only the tail travels; the caps also bound a file of
+// enormous lines.
+func LogTailScript(path string, lines int) string {
+	q := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+	n := strconv.Itoa(lines)
+	return "#!/bin/sh\nLC_ALL=C; export LC_ALL\np=" + q + "\n" +
+		`cd "${HOME:-~}" || exit 3
+case "$p" in ''|/*|..|../*|*/../*|*/..) echo "refused path" >&2; exit 4;; esac
+[ -f "$p" ] || { echo "not a regular file" >&2; exit 5; }
+case "$p" in
+  *.gz) gzip -dc -- "$p" 2>/dev/null | tail -n ` + n + ` | tail -c 262144;;
+  *) tail -n ` + n + ` -- "$p" 2>/dev/null | tail -c 262144;;
+esac
+`
+}
 
 // listenPIDsShell prints "<port> <pid>" for every listening TCP socket ss
 // can attribute to one of our processes (its users:((...,pid=N,...)) column).

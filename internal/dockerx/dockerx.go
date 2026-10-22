@@ -19,6 +19,7 @@
 package dockerx
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -207,6 +208,96 @@ func (c *Client) StatsAll(ctx context.Context, ids []string, concurrency int) ma
 	}
 	wg.Wait()
 	return out
+}
+
+// maxLogBytes is how much of a container's output Logs keeps: the newest
+// bytes, since the call is a tail.
+const maxLogBytes = 1 << 20
+
+// Logs returns the last tail lines of a container's stdout and stderr,
+// interleaved in the order the daemon kept them, the newest maxLogBytes
+// of them.
+func (c *Client) Logs(ctx context.Context, id string, tail int) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://docker%s%s/logs?stdout=1&stderr=1&tail=%d", containersPath, id, tail), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		var e struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(body, &e)
+		if e.Message == "" {
+			e.Message = strings.TrimSpace(string(body))
+		}
+		return nil, fmt.Errorf("docker: logs %s: http %d %s", id, resp.StatusCode, e.Message)
+	}
+	return demuxTail(resp.Body, maxLogBytes)
+}
+
+// tailBuf keeps the last keep bytes written to it.
+type tailBuf struct {
+	keep int
+	b    []byte
+}
+
+func (t *tailBuf) Write(p []byte) (int, error) {
+	t.b = append(t.b, p...)
+	if len(t.b) > 2*t.keep { // trim rarely, not on every write
+		t.b = append(t.b[:0:0], t.b[len(t.b)-t.keep:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailBuf) bytes() []byte {
+	if len(t.b) > t.keep {
+		return t.b[len(t.b)-t.keep:]
+	}
+	return t.b
+}
+
+// demuxTail streams a container's log output into a buffer that retains
+// the newest keep bytes, stripping the stream framing the daemon uses for
+// containers without a TTY (an 8-byte header per frame: stream type, three
+// zero bytes, big-endian payload length) as it goes, so a cut never falls
+// inside a header. A TTY container's output has no framing and is copied
+// as is; so is a stream whose first header does not parse. A frame cut
+// short by the daemon keeps the bytes that arrived.
+func demuxTail(r io.Reader, keep int) ([]byte, error) {
+	br := bufio.NewReader(r)
+	out := &tailBuf{keep: keep}
+	head, err := br.Peek(8)
+	if err != nil || !looksFramed(head) {
+		if _, cerr := io.Copy(out, br); cerr != nil {
+			return out.bytes(), cerr
+		}
+		return out.bytes(), nil
+	}
+	var hdr [8]byte
+	for {
+		if _, err := io.ReadFull(br, hdr[:]); err != nil {
+			if err == io.EOF {
+				return out.bytes(), nil
+			}
+			return out.bytes(), nil // a partial trailing header: nothing more to show
+		}
+		n := int64(hdr[4])<<24 | int64(hdr[5])<<16 | int64(hdr[6])<<8 | int64(hdr[7])
+		if _, err := io.CopyN(out, br, n); err != nil {
+			return out.bytes(), nil // frame cut short: keep what came
+		}
+	}
+}
+
+// looksFramed checks the first header: stream type 0..2 and three zero
+// bytes, which printable log text never starts with.
+func looksFramed(b []byte) bool {
+	return len(b) >= 8 && b[0] <= 2 && b[1] == 0 && b[2] == 0 && b[3] == 0
 }
 
 // Start starts a container.

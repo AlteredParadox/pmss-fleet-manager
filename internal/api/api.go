@@ -35,6 +35,7 @@ import (
 	"unicode/utf8"
 
 	"pmss-fleet-manager/internal/collect"
+	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/store"
 	"pmss-fleet-manager/internal/web"
@@ -186,6 +187,8 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/discovery", s.handleSetDiscovery)
 	mux.HandleFunc("POST "+bp+boxRoute+"/containers/{cid}/{action}", s.handleContainerAction)
 	mux.HandleFunc("POST "+bp+boxRoute+"/apps/watch", s.handleAppWatch)
+	mux.HandleFunc("POST "+bp+boxRoute+"/logs/read", s.handleReadLog)                   // runs tail over SSH: POST so the CSRF check applies
+	mux.HandleFunc("POST "+bp+boxRoute+"/containers/{cid}/logs", s.handleContainerLogs) // literal segment wins over {action}
 	mux.HandleFunc("POST "+bp+"/api/detect", s.handleDetect)
 	mux.HandleFunc("GET "+bp+"/api/alerts", s.handleAlerts)
 	mux.HandleFunc("POST "+bp+"/api/alerts/ack-all", s.handleAckAll)
@@ -1001,6 +1004,63 @@ func (s *Server) handleTorrentAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
+// handleReadLog takes {"path": "<relative path from the box's log list>"}
+// and returns the file's last lines.
+func (s *Server) handleReadLog(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	var in struct {
+		Path string `json:"path"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		writeErr(w, 400, fmt.Errorf("bad body: %v", err))
+		return
+	}
+	if !probe.ValidLogPath(in.Path) {
+		writeErr(w, 400, errors.New("invalid log path"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	text, err := s.m.ReadLog(ctx, id, in.Path)
+	if err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"path": in.Path, "text": text, "lines": collect.LogTailLines})
+}
+
+func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	cid := r.PathValue("cid")
+	if !validContainerID(cid) {
+		writeErr(w, 400, errors.New("invalid container id"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	text, err := s.m.ContainerLogs(ctx, id, cid)
+	if err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"id": cid, "text": text, "lines": collect.LogTailLines})
+}
+
+// validContainerID accepts a full or abbreviated hex container id.
+func validContainerID(cid string) bool {
+	return len(cid) >= 12 && len(cid) <= 64 && strings.Trim(cid, "0123456789abcdef") == ""
+}
+
 func (s *Server) handleContainerAction(w http.ResponseWriter, r *http.Request) {
 	id, err := idParam(r)
 	if err != nil {
@@ -1014,7 +1074,7 @@ func (s *Server) handleContainerAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, fmt.Errorf("unknown action %q", action))
 		return
 	}
-	if len(cid) < 12 || len(cid) > 64 || strings.Trim(cid, "0123456789abcdef") != "" {
+	if !validContainerID(cid) {
 		writeErr(w, 400, errors.New("invalid container id"))
 		return
 	}

@@ -530,3 +530,30 @@ func TestAppWatch(t *testing.T) {
 		t.Fatalf("missing box: %d", code)
 	}
 }
+
+func TestReadLogValidation(t *testing.T) {
+	s, _ := newTestServer(t)
+	ctx := context.Background()
+	if err := s.m.AddBox(ctx, &store.Box{Name: "y", Host: "y.example", User: "u", Port: 22, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	boxes, _ := s.st.ListBoxes(ctx)
+	id := boxes[0].ID
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	for _, body := range []string{`{"path":"/etc/passwd"}`, `{"path":"../x"}`, `{"path":".logs/../../x"}`, `{"path":""}`, `{"path":"a.log","x":1}`} {
+		if code, out := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/logs/read", id), body, hdr); code != 400 {
+			t.Fatalf("%s: code %d %s", body, code, out)
+		}
+	}
+	// A well-formed path the box never listed is refused before any SSH.
+	code, out := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/logs/read", id), `{"path":".logs/x.log"}`, hdr)
+	if code != 502 || !strings.Contains(out, "not one of the log files found") {
+		t.Fatalf("unlisted path: %d %s", code, out)
+	}
+	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/containers/zz/logs", id), "", hdr); code != 400 {
+		t.Fatalf("bad container id: %d", code)
+	}
+	if code, _ := do(t, s, "POST", "/api/boxes/999999/logs/read", `{"path":".logs/x.log"}`, hdr); code != 404 {
+		t.Fatalf("missing box: %d", code)
+	}
+}

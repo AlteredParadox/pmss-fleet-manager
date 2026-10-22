@@ -17,6 +17,8 @@
 package probe
 
 import (
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"net"
 	"os"
@@ -92,6 +94,12 @@ WebUI\LocalHostAuth=false
 1
 @@docker_sock
 1
+@@logs
+1760572000.5	1234	.logs/trackerCleaner.log
+1760572700	99	.local/share/qBittorrent/logs/qbittorrent.log
+1760570000	5	../etc/passwd
+1	x	.logs/bad.log
+1760571000	7	./.lighttpd/error.log
 @@probe_pid
 777
 @@procs
@@ -174,6 +182,100 @@ func TestParse(t *testing.T) {
 	if got := snap.ListenPIDs[7878]; len(got) != 1 || got[0] != 5001 {
 		t.Fatalf("listen pids: %v", snap.ListenPIDs)
 	}
+}
+
+func TestParseLogs(t *testing.T) {
+	snap, err := Parse([]byte(sample), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.LogsKnown || len(snap.Logs) != 3 {
+		t.Fatalf("logs: %+v", snap.Logs)
+	}
+	// Newest first, the "./" prefix stripped, the escape and the junk line dropped.
+	if snap.Logs[0].Path != ".local/share/qBittorrent/logs/qbittorrent.log" || snap.Logs[1].Path != ".logs/trackerCleaner.log" || snap.Logs[2].Path != ".lighttpd/error.log" || snap.Logs[1].Size != 1234 || snap.Logs[1].MTime.Unix() != 1760572000 {
+		t.Fatalf("logs: %+v", snap.Logs)
+	}
+	for _, p := range []string{"", "/etc/passwd", "../x", "a/../b", "a/..", "./a", "a//b", "a\nb", "ok/"} {
+		if ValidLogPath(p) {
+			t.Errorf("%q should be invalid", p)
+		}
+	}
+	for _, p := range []string{".logs/x.log", "logs/a b.txt", ".config/Radarr/logs/radarr.txt"} {
+		if !ValidLogPath(p) {
+			t.Errorf("%q should be valid", p)
+		}
+	}
+	if _, known := parseLogs(""); known {
+		t.Error("empty section is not a listing")
+	}
+	// The listing shell keeps the newest files when a directory holds more
+	// than the cap: 45 rotated copies older than the live log must not push
+	// it out.
+	home := t.TempDir()
+	os.MkdirAll(home+"/.logs", 0o700)
+	for i := 0; i < 45; i++ {
+		name := fmt.Sprintf("%s/.logs/old.log.%d", home, i)
+		os.WriteFile(name, []byte("x"), 0o600)
+		os.Chtimes(name, time.Unix(1700000000+int64(i), 0), time.Unix(1700000000+int64(i), 0))
+	}
+	os.WriteFile(home+"/.logs/live.log", []byte("live"), 0o600)
+	os.Chtimes(home+"/.logs/live.log", time.Unix(1800000000, 0), time.Unix(1800000000, 0))
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader("home=" + home + "\n" + logsListShell)
+	lsOut, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, known := parseLogs(string(lsOut))
+	if !known || len(files) != 40 || files[0].Path != ".logs/live.log" || files[0].Size != 4 {
+		t.Fatalf("newest-first cap: %d files, first %+v", len(files), files[:min(2, len(files))])
+	}
+	// LogTailScript refuses on the box what ValidLogPath refuses here, even
+	// for a path that slipped past (the function quotes whatever it is given).
+	for _, p := range []string{"/etc/passwd", "../x", "a/../b", "", "it's/../x"} {
+		out, stderr, code := runSh(t, LogTailScript(p, 5))
+		if code != 4 || len(out) != 0 || !strings.Contains(stderr, "refused") {
+			t.Errorf("%q: code %d out %q err %q", p, code, out, stderr)
+		}
+	}
+	dir := t.TempDir()
+	os.WriteFile(dir+"/it's a.log", []byte("1\n2\n3\n4\n5\n6\n7\n"), 0o600)
+	t.Setenv("HOME", dir)
+	out, _, code := runSh(t, LogTailScript("it's a.log", 3))
+	if code != 0 || out != "5\n6\n7\n" {
+		t.Fatalf("tail: code %d out %q", code, out)
+	}
+	if _, stderr, code := runSh(t, LogTailScript("missing.log", 3)); code != 5 || !strings.Contains(stderr, "not a regular file") {
+		t.Fatalf("missing: code %d err %q", code, stderr)
+	}
+	// A gzip-rotated copy is decompressed on the box, never served as bytes.
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	zw.Write([]byte("a\nb\nc\nd\n"))
+	zw.Close()
+	os.WriteFile(dir+"/old.log.2.gz", gz.Bytes(), 0o600)
+	if out, _, code := runSh(t, LogTailScript("old.log.2.gz", 2)); code != 0 || out != "c\nd\n" {
+		t.Fatalf("gz tail: code %d out %q", code, out)
+	}
+}
+
+// runSh runs a probe-style script the way the SSH session does, on sh's
+// stdin, and returns stdout, stderr and the exit code.
+func runSh(t *testing.T, script string) (string, string, int) {
+	t.Helper()
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(script)
+	var out, errb strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	err := cmd.Run()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	return out.String(), errb.String(), code
 }
 
 func TestParseProcsHostileAndMissing(t *testing.T) {

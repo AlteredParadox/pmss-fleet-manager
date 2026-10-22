@@ -55,6 +55,10 @@ type Snapshot struct {
 	// account with no processes: sshd's session process is always there.
 	Procs      []ProcInfo
 	ProcsKnown bool
+	// Logs lists the log files found in the catalogued places under the
+	// home (see logDirs); LogsKnown is false when the section is missing.
+	Logs      []LogFile
+	LogsKnown bool
 	// ListenPIDs maps a listening TCP port to the pids of our processes
 	// that hold it, from ss -tlnp. Display only: PortOwner stays the gate.
 	ListenPIDs map[int][]int
@@ -401,6 +405,62 @@ type DockerInfo struct {
 	SocketPresent bool
 }
 
+// LogFile is one log file under the home.
+type LogFile struct {
+	Path  string // relative to the home, e.g. ".logs/trackerCleaner.log"
+	Size  int64
+	MTime time.Time
+}
+
+// maxLogFiles bounds the listing kept from one probe.
+const maxLogFiles = 200
+
+// ValidLogPath accepts the relative paths the listing produces and the
+// tail script will open: no leading slash, no ".." component, no control
+// characters, bounded length.
+func ValidLogPath(p string) bool {
+	if p == "" || len(p) > 300 || strings.HasPrefix(p, "/") || strings.HasSuffix(p, "/") {
+		return false
+	}
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// parseLogs reads the logs section ("mtime<TAB>size<TAB>path" per line),
+// newest first, capped at maxLogFiles.
+func parseLogs(raw string) ([]LogFile, bool) {
+	var out []LogFile
+	known := false
+	for _, line := range strings.Split(raw, "\n") {
+		f := strings.SplitN(line, "\t", 3)
+		if len(f) != 3 {
+			continue
+		}
+		known = true
+		mt, err2 := strconv.ParseFloat(strings.TrimSpace(f[0]), 64)
+		size, err1 := strconv.ParseInt(strings.TrimSpace(f[1]), 10, 64)
+		p := strings.TrimPrefix(f[2], "./")
+		if err1 != nil || err2 != nil || size < 0 || size > 1<<50 || mt <= 0 || mt > 1e11 || !ValidLogPath(p) {
+			continue
+		}
+		out = append(out, LogFile{Path: p, Size: size, MTime: time.Unix(int64(mt), 0)})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].MTime.After(out[j].MTime) })
+	if len(out) > maxLogFiles {
+		out = out[:maxLogFiles]
+	}
+	return out, known
+}
+
 // ProcInfo is one of the account's processes as ps reported it.
 type ProcInfo struct {
 	PID        int
@@ -613,6 +673,8 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	probePID, _ := strconv.Atoi(strings.TrimSpace(s["probe_pid"]))
 	snap.Procs, snap.ProcsKnown = parseProcs(s["procs"], s["proc_args"], s["proc_stat"], probePID)
 	snap.ListenPIDs = parseListenPIDs(s["listen_pids"])
+	_, snap.LogsKnown = s["logs"]
+	snap.Logs, _ = parseLogs(s["logs"])
 	return snap, nil
 }
 

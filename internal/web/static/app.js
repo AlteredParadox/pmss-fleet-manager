@@ -31,6 +31,7 @@ const S = {
   alerts: [], filter: '', live: false,
   torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
   torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, status_reason, qbt}]
+  logView: null, // open log on the logs tab: { kind: 'file'|'ctr', key, label, text, busy, err, at }
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
 };
@@ -160,6 +161,7 @@ function route() {
   if (S.view === 'settings') { S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; void loadServices(); }
   S.filter = '';
   S.torAdd = null;
+  S.logView = null;
   render();
 }
 const go = (hash) => { location.hash = hash; };
@@ -363,6 +365,10 @@ function renderSide() {
 
 function renderMain() {
   const m = $('#main');
+  // The log viewer is rebuilt on every render (an SSE event, a keystroke in
+  // the filter): keep where the reader was.
+  const prevLog = $('#logview');
+  const logTop = prevLog ? prevLog.scrollTop : null;
   switch (S.view) {
     case 'box': m.innerHTML = viewBox(); break;
     case 'torrents': m.innerHTML = viewTorrents(); break;
@@ -371,11 +377,16 @@ function renderMain() {
     case 'settings': m.innerHTML = viewSettings(); break;
     default: m.innerHTML = viewFleet();
   }
+  const lv = $('#logview');
+  if (lv && S.logView && !S.logView.busy) {
+    if (!S.logView.scrolled) { lv.scrollTop = lv.scrollHeight; S.logView.scrolled = true; } // a freshly read log opens at its end, like tail
+    else if (logTop !== null) lv.scrollTop = logTop;
+  }
   if (S.view === 'box') {
     const b = curBox();
     if (b?.status === 'disabled') {
       // Polling is off: the server refuses every action, so say so up front.
-      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="disc:"], button[data-act^="ctr:"], button[data-act="du"]').forEach((el) => {
+      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="disc:"], button[data-act^="ctr:"], button[data-act^="log:"], button[data-act="du"]').forEach((el) => {
         el.disabled = true;
         el.title = 'polling is disabled for this box; enable it to run actions';
       });
@@ -483,7 +494,7 @@ function viewBox() {
   const tabs = [['overview', 'overview'], ['traffic', 'traffic']];
   if (b.qbt.enabled || b.qbt.installed) tabs.push(['torrents', 'torrents']);
   if (b.docker.enabled || b.docker.socket_up) tabs.push(['containers', 'containers']);
-  tabs.push(['services', 'services'], ['storage', 'storage'], ['host', 'host']);
+  tabs.push(['services', 'services'], ['logs', 'logs'], ['storage', 'storage'], ['host', 'host']);
   if (!tabs.some(([k]) => k === S.tab)) S.tab = 'overview';
   const renewDays = daysUntil(renewalOf(b));
   let body = '';
@@ -492,6 +503,7 @@ function viewBox() {
     case 'torrents': body = tabTorrents(b); break;
     case 'containers': body = tabContainers(b); break;
     case 'services': body = tabServices(b); break;
+    case 'logs': body = tabLogs(b); break;
     case 'storage': body = tabStorage(b); break;
     case 'host': body = tabHost(b); break;
     default: body = tabOverview(b, renewDays);
@@ -993,6 +1005,46 @@ function appRow(b, a) {
     <span><button class="small ${a.watched ? 'good' : ''}" data-act="app:watch" data-key="${esc(a.key)}" data-on="${a.watched ? '1' : ''}" title="${a.watched ? 'watched: an alert is raised when it is not running; click to stop watching' : 'alert when this application is not running'}">${a.watched ? 'watching' : 'watch'}</button></span>
   </div>`;
 }
+/* ----- logs: the log files found under the home, and container output, read on demand ----- */
+function logDir(p) { const i = p.lastIndexOf('/'); return i < 0 ? '~' : p.slice(0, i); }
+function logBase(p) { return p.slice(p.lastIndexOf('/') + 1); }
+// Rotated copies (qbittorrent.log.bak12, error.log.1, rtorrent.log.1792210287, *.gz) fold under "older".
+const rotated = (p) => /\.(bak\d*|\d+|\d+\.gz|gz)$/i.test(p);
+function logItem(f, sel) {
+  return `<button class="logitem ${sel('file', f.path)}" data-act="log:file" data-path="${esc(f.path)}" title="${esc(f.path)}"><span class="ellip">${esc(logBase(f.path))}</span><span class="muted num">${fmtBytes(f.size, 0)} · ${fmtAgo(f.mtime)}</span></button>`;
+}
+function logGroup(d, fs, sel) {
+  const cur = fs.filter((f) => !rotated(f.path)), old = fs.filter((f) => rotated(f.path));
+  const openOld = old.some((f) => sel('file', f.path));
+  return `<div class="loggroup"><div class="tile-label ellip" title="~/${esc(d)}">~/${esc(d)}</div>${cur.map((f) => logItem(f, sel)).join('')}${old.length ? `<details class="adv"${openOld ? ' open' : ''}><summary>${old.length} older / rotated</summary><div style="gap:2px;margin-top:4px">${old.map((f) => logItem(f, sel)).join('')}</div></details>` : ''}</div>`;
+}
+function tabLogs(b) {
+  const L = b.logs || {};
+  const files = L.files || [];
+  const groups = new Map();
+  for (const f of files) { const d = logDir(f.path); if (!groups.has(d)) groups.set(d, []); groups.get(d).push(f); }
+  const ctrs = b.docker.enabled ? (b.docker.containers || []) : [];
+  const V = S.logView;
+  const sel = (kind, key) => V && V.kind === kind && V.key === key ? 'on' : '';
+  const list = `${[...groups].map(([d, fs]) => logGroup(d, fs, sel)).join('')}
+    ${ctrs.length ? `<div class="loggroup"><div class="tile-label">containers</div>${ctrs.map((c) => `<button class="logitem ${sel('ctr', c.id)}" data-act="log:ctr" data-cid="${esc(c.id)}" data-name="${esc(c.name)}"><span class="ellip">${esc(c.name)}</span><span class="muted">${c.state === 'running' ? 'running' : esc(c.state)}</span></button>`).join('')}</div>` : ''}`;
+  const empty = !L.ok ? `<div class="hint">log listing not read${b.status === 'offline' ? ' (box unreachable)' : b.status === 'pending' ? ' yet' : ''}.</div>` : files.length === 0 && ctrs.length === 0 ? `<div class="hint">no log files in the usual places (~/.logs, qBittorrent, the *arr apps, Jellyfin, SABnzbd, Deluge, rclone, FlexGet, pyLoad, Cloudplow, lighttpd) and no containers.</div>` : '';
+  return `<div class="logs">
+    <div class="panel loglist">${empty}${list}</div>
+    <div class="panel logpane">${logViewer(V)}</div>
+  </div>`;
+}
+function logViewer(V) {
+  if (!V) return `<div class="empty" style="border:0">pick a log on the left: the last ${300} lines are fetched from the box each time, nothing is streamed or stored.</div>`;
+  const head = `<div class="thead-tools" style="padding:0 0 10px;border:0"><div style="font-size:12px"><b>${esc(V.label)}</b> <span class="muted">· ${V.busy ? '<span class="pulse">reading…</span>' : V.err ? '' : `last ${V.lines || 300} lines · read ${fmtAgo(V.at)}`}</span></div><div class="actions"><input class="filter" placeholder="filter lines…" data-filter value="${esc(S.filter)}"><button class="small" data-act="log:refresh" ${V.busy ? 'disabled' : ''}>refresh</button></div></div>`;
+  if (V.err) return `${head}<div class="err-box">${esc(V.err)}</div>`;
+  if (V.busy && V.text == null) return `${head}<div class="hint">reading…</div>`; // no #logview yet: the scroll-to-end waits for the content
+  const f = S.filter.trim().toLowerCase();
+  let lines = (V.text || '').replace(/\n$/, '').split('\n');
+  if (f) lines = lines.filter((l) => l.toLowerCase().includes(f));
+  const body = lines.length ? esc(lines.join('\n')) : `<span class="muted">${V.text ? 'nothing matches' : '(empty)'}</span>`;
+  return `${head}<pre class="logview" id="logview">${body}</pre>`;
+}
 function tabStorage(b) {
   const dirs = b.dirs || {};
   const entries = (dirs.entries || []).slice();
@@ -1424,7 +1476,7 @@ document.addEventListener('click', async (e) => {
   const fv = e.target.closest('[data-fleetview]');
   if (fv) { S.fleetView = fv.dataset.fleetview; S.fleetViewTouched = true; render(); return; }
   const tab = e.target.closest('[data-tab]');
-  if (tab) { S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); render(); return; }
+  if (tab) { S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; S.logView = null; history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); render(); return; }
   const seg = e.target.closest('[data-s-seg]');
   if (seg) {
     S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; S.settingsTouched[seg.dataset.sSeg] = true;
@@ -1497,6 +1549,25 @@ async function torAddAction(a) {
     render();
   }
 }
+async function logAction(a, act) {
+  let V = S.logView;
+  if (a === 'log:file') V = { kind: 'file', key: act.dataset.path, label: act.dataset.path };
+  else if (a === 'log:ctr') V = { kind: 'ctr', key: act.dataset.cid, label: `container ${act.dataset.name || act.dataset.cid.slice(0, 12)}` };
+  else if (a !== 'log:refresh' || !V) return;
+  V = { ...V, busy: true, err: '', text: null, scrolled: false }; // a (re)read opens at its end again, like tail
+  S.logView = V; S.filter = ''; render();
+  try {
+    const r = V.kind === 'file'
+      ? await api('POST', `${BASE}/api/boxes/${S.selId}/logs/read`, { path: V.key })
+      : await api('POST', `${BASE}/api/boxes/${S.selId}/containers/${encodeURIComponent(V.key)}/logs`);
+    if (S.logView !== V) return; // another log was picked meanwhile
+    S.logView = { ...V, busy: false, text: r.text || '', lines: r.lines, at: new Date().toISOString() };
+  } catch (e) {
+    if (S.logView !== V) return;
+    S.logView = { ...V, busy: false, err: e.message };
+  }
+  render();
+}
 async function appWatchAction(act) {
   const on = !act.dataset.on;
   act.disabled = true;
@@ -1553,6 +1624,7 @@ async function runAction(a, act) {
   else if (a.startsWith('disc:')) await discoveryAction(a, act);
   else if (a.startsWith('ctr:')) await containerAction(a, act);
   else if (a === 'app:watch') await appWatchAction(act);
+  else if (a.startsWith('log:')) await logAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
   else if (a.startsWith('settings:')) await settingsAction(a);
   else if (a.startsWith('svc:')) await servicesAction(a, act);
