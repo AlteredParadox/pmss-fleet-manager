@@ -799,10 +799,15 @@ func TestDecodeMainDataMalformed(t *testing.T) {
 	for _, body := range []string{
 		``, `[]`, `{"torrents":[]}`, `{"torrents_removed":{}}`, `{"torrents":{"a":{}}`, `{"rid":"x"}`,
 		`{"trackers":{"u":[1,2}}`, `{"torrents":{"a":1,}}`, `{"server_state":5`, `{"torrents_removed":[1]}`,
+		`{"rid":1} x`, `{"rid":1}{"rid":2}`, `{"rid":1}]`,
+		`{"torrents":{"` + strings.Repeat("a", maxHashLen+1) + `":{}}}`, `{"torrents_removed":["` + strings.Repeat("a", maxHashLen+1) + `"]}`,
 	} {
 		if _, err := decodeMainData(strings.NewReader(body), MaxTorrents); err == nil {
 			t.Errorf("%q decoded", body)
 		}
+	}
+	if d, err := decodeMainData(strings.NewReader("{\"rid\":1} \n\t"), MaxTorrents); err != nil || d.rid != 1 {
+		t.Fatalf("trailing whitespace is fine: %+v %v", d, err)
 	}
 	// A server_state that is not an object fails at apply, leaving the view.
 	d, err := decodeMainData(strings.NewReader(`{"rid":2,"server_state":[1]}`), MaxTorrents)
@@ -864,5 +869,40 @@ func TestResetDuringSync(t *testing.T) {
 	defer mu.Unlock()
 	if want := []string{"0", "0"}; !slices.Equal(rids, want) {
 		t.Fatalf("rids sent: %v, want %v (the view from before the reset must not be used)", rids, want)
+	}
+}
+
+// Retained memory is bounded by the entry count times fixed string bounds,
+// not by what individual responses carry: a run of deltas that each add a
+// torrent with a huge name retains only the clipped name each time, and
+// the clip happens before anything is kept (fred review on PR 95).
+func TestRetainedStringsBounded(t *testing.T) {
+	huge := strings.Repeat("n", 64<<10) // 64 KiB name, state and category per entry
+	view := syncState{}
+	for i := 0; i < 20; i++ {
+		raw := json.RawMessage(fmt.Sprintf(`{"name":"%s","state":"%s","category":"%s"}`, huge, huge, huge))
+		d := &mainDelta{rid: int64(i + 1), full: i == 0, torrents: map[string]json.RawMessage{fmt.Sprintf("%040d", i): raw}}
+		if i == 0 {
+			d.server = json.RawMessage(`{"global_ratio":"` + huge + `","connection_status":"` + huge + `"}`)
+		}
+		next, err := view.apply(d, i == 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		view = next
+	}
+	total := len(view.server.GlobalRatio) + len(view.server.ConnectionStatus)
+	for _, tr := range view.torrents {
+		total += len(tr.Hash) + len(tr.Name) + len(tr.State) + len(tr.Category)
+	}
+	if bound := 20*(maxHashLen+maxNameLen+maxStateLen+maxCategoryLen) + 2*maxServerStr; total > bound || len(view.torrents) != 20 || view.rid != 20 {
+		t.Fatalf("retained %d bytes of strings in %d torrents (rid %d), bound %d", total, len(view.torrents), view.rid, bound)
+	}
+	if n := view.torrents[fmt.Sprintf("%040d", 7)].Name; len(n) != maxNameLen {
+		t.Fatalf("name clipped to %d, want %d", len(n), maxNameLen)
+	}
+	// Clipping keeps whole runes.
+	if got := clipStr("ab\u00e9", 3); got != "ab" {
+		t.Fatalf("clipStr cut a rune: %q", got)
 	}
 }

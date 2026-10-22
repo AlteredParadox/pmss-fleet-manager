@@ -663,6 +663,9 @@ func decodeMainData(r io.Reader, maxEntries int) (*mainDelta, error) {
 	if err := expectDelim(dec, '}'); err != nil {
 		return nil, err
 	}
+	if _, err := dec.Token(); err != io.EOF { // a prefix followed by anything else is not a response
+		return nil, fmt.Errorf("trailing data after the sync object")
+	}
 	return d, nil
 }
 
@@ -687,6 +690,9 @@ func decodeTorrentEntries(dec *json.Decoder, maxEntries int) (map[string]json.Ra
 			return nil, err
 		}
 		hash, _ := tok.(string)
+		if len(hash) > maxHashLen {
+			return nil, fmt.Errorf("torrent key longer than %d bytes", maxHashLen)
+		}
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
 			return nil, err
@@ -716,9 +722,43 @@ func decodeRemoved(dec *json.Decoder, maxEntries int) ([]string, error) {
 		if err := dec.Decode(&h); err != nil {
 			return nil, err
 		}
+		if len(h) > maxHashLen {
+			return nil, fmt.Errorf("removed key longer than %d bytes", maxHashLen)
+		}
 		out = append(out, h)
 	}
 	return out, expectDelim(dec, ']')
+}
+
+// Bounds on what one retained entry may hold, so the view's memory is
+// bounded by MaxTorrents times a few hundred bytes however large the
+// strings in individual responses are (each response is itself capped at
+// maxBody, but deltas accumulate). Hash keys over the bound are refused
+// as malformed (a v1 hash is 40 hex characters, a v2 hash 64); the other
+// strings are clipped at a rune boundary.
+const (
+	maxHashLen     = 64
+	maxNameLen     = 400
+	maxStateLen    = 32
+	maxCategoryLen = 100
+	maxServerStr   = 32
+)
+
+// clipped returns the torrent with its strings within the retention bounds.
+func (t Torrent) clipped() Torrent {
+	t.Hash, t.Name, t.State, t.Category = clipStr(t.Hash, maxHashLen), clipStr(t.Name, maxNameLen), clipStr(t.State, maxStateLen), clipStr(t.Category, maxCategoryLen)
+	return t
+}
+
+func clipStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func expectDelim(dec *json.Decoder, want json.Delim) error {
@@ -769,6 +809,7 @@ func (s syncState) apply(d *mainDelta, requestedFull bool) (syncState, error) {
 		if err := json.Unmarshal(d.server, &next.server); err != nil {
 			return s, fmt.Errorf("server_state: %w", err)
 		}
+		next.server.GlobalRatio, next.server.ConnectionStatus = clipStr(next.server.GlobalRatio, maxServerStr), clipStr(next.server.ConnectionStatus, maxServerStr)
 	}
 	updates := make(map[string]Torrent, len(d.torrents))
 	for hash, raw := range d.torrents {
@@ -782,7 +823,7 @@ func (s syncState) apply(d *mainDelta, requestedFull bool) (syncState, error) {
 		if t.Hash == "" {
 			t.Hash = hash
 		}
-		updates[hash] = t
+		updates[hash] = t.clipped()
 	}
 	if full {
 		next.torrents = updates

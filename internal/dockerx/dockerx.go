@@ -133,6 +133,9 @@ func decodeContainers(body []byte, maxEntries int) ([]Container, error) {
 	if tok, err := dec.Token(); err != nil || tok != json.Delim(']') {
 		return nil, fmt.Errorf("docker: malformed container list")
 	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("docker: trailing data after the container list")
+	}
 	return out, nil
 }
 
