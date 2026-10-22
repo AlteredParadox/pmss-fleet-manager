@@ -53,7 +53,7 @@ per-box tab.
   sessions. Per application: process count, resident memory, CPU share since
   the previous poll, uptime, listening ports and a link to where PMSS serves
   it. "Watch" an application to get an alert when it is not running. The
-  full process list sits below, filterable.
+  processes using the most memory (up to 300) sit below, filterable.
 - Logs: the log files found in the usual places under the home (PMSS's
   `~/.logs` and tracker cleaner, qBittorrent, Radarr / Sonarr / Prowlarr and
   friends, Jellyfin, SABnzbd, Deluge, rclone, FlexGet, pyLoad, Cloudplow,
@@ -280,7 +280,8 @@ These are the design decisions that came out of it.
   further. Requests whose Host header is not a listen address, localhost or an
   `-allowed-hosts` entry are refused (on a wildcard bind, whose addresses
   cannot be listed, any IP address is served as well); every mutating request
-  must be same-origin. A reverse proxy must pass the client's Host header
+  must carry the `X-PMSS-Request` header the page sends (a form cannot), pass
+  the browser's `Sec-Fetch-Site`, and be same-origin. A reverse proxy must pass the client's Host header
   through, port included (nginx: `proxy_set_header Host $http_host;`), and
   that name must be listed in `-allowed-hosts`; otherwise mutating requests
   fail the same-origin check or every request is refused. CSP is set; request

@@ -82,9 +82,12 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("raise: %v %v", created, err)
 	}
-	created, _ = s.RaiseAlert(ctx, b.ID, "disk", "bad", "disk at 99%")
-	if created {
-		t.Fatal("dup alert created")
+	// Escalation is a material change (announced); the same raise again is not.
+	if changed, _ := s.RaiseAlert(ctx, b.ID, "disk", "bad", "disk at 99%"); !changed {
+		t.Fatal("escalation must report a change")
+	}
+	if changed, _ := s.RaiseAlert(ctx, b.ID, "disk", "bad", "disk at 99%"); changed {
+		t.Fatal("unchanged alert must be a no-op")
 	}
 	n, _ := s.CountUnacked(ctx)
 	if n != 1 {
@@ -136,8 +139,11 @@ func TestOneActiveAlertPerKey(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO alerts (box_id, key, severity, title, active, acked, created_at, updated_at) VALUES (?,?,?,?,1,0,?,?)`, b.ID, "k", "warn", "dup", now, now); err == nil {
 		t.Fatal("duplicate active alert must be rejected by the index")
 	}
-	if created, err := s.RaiseAlert(ctx, b.ID, "k", "bad", "two"); err != nil || created {
-		t.Fatalf("second raise: %v %v", created, err)
+	if changed, err := s.RaiseAlert(ctx, b.ID, "k", "warn", "one"); err != nil || changed {
+		t.Fatalf("same raise again: %v %v", changed, err)
+	}
+	if changed, err := s.RaiseAlert(ctx, b.ID, "k", "bad", "two"); err != nil || !changed {
+		t.Fatalf("escalated raise: %v %v", changed, err)
 	}
 	if err := s.ResolveAlert(ctx, b.ID, "k"); err != nil {
 		t.Fatal(err)

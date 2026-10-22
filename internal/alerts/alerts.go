@@ -369,12 +369,12 @@ func (e *Evaluator) raise(ctx context.Context, s *collect.BoxState, active []wan
 	wanted = map[string]bool{}
 	for _, w := range active {
 		wanted[w.key] = true
-		created, err := e.st.RaiseAlert(ctx, s.ID, w.key, w.sev, w.title)
+		raised, err := e.st.RaiseAlert(ctx, s.ID, w.key, w.sev, w.title)
 		if err != nil {
 			e.log.Warn("raise alert", "err", err)
 			continue
 		}
-		if created {
+		if raised { // new, or its title/severity changed: the open alerts page must reload
 			changed = true
 			e.log.Info("alert", "box", name, "key", w.key, "title", w.title)
 		}

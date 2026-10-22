@@ -541,6 +541,22 @@ func TestTruncatedNamesLastSection(t *testing.T) {
 	}
 }
 
+// A box epoch far from the dashboard's clock is ignored in favour of the
+// local time; time.Unix(1<<63-1) would not even encode as JSON.
+func TestNowBounded(t *testing.T) {
+	now := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
+	for _, ts := range []string{"9223372036854775807", "1", "4102444800"} { // max, 1970, 2100
+		snap, err := Parse([]byte("@@now\n"+ts+"\n@@end\n"), now)
+		if err != nil || !snap.At.Equal(now) {
+			t.Errorf("now=%s: %v %v", ts, snap.At, err)
+		}
+	}
+	snap, _ := Parse([]byte("@@now\n1761091200\n@@end\n"), now) // 2026-10-22, within a year
+	if snap.At.Unix() != 1761091200 {
+		t.Fatalf("sane epoch not taken: %v", snap.At)
+	}
+}
+
 func TestParseTZ(t *testing.T) {
 	for in, want := range map[string]int{"+0300": 3 * 3600, "-0500": -5 * 3600, "+0530": 5*3600 + 1800, "Z": 0, "": 0, "+9900": 0} {
 		if _, got := time.Now().In(parseTZ(in)).Zone(); got != want {

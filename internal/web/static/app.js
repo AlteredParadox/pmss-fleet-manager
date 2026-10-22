@@ -131,6 +131,7 @@ function toast(msg, kind = '') {
 }
 async function api(method, path, body) {
   const opts = { method, headers: {} };
+  if (method !== 'GET') opts.headers['X-PMSS-Request'] = '1'; // the server's CSRF guard: a form cannot send it
   if (body instanceof FormData) opts.body = body; // multipart: the browser sets the boundary
   else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(path, opts);

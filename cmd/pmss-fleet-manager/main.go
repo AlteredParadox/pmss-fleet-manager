@@ -53,10 +53,15 @@ func main() {
 	listen := flag.String("listen", envOr("PMSS_LISTEN", "127.0.0.1:8080"), "address(es) to listen on, comma-separated")
 	allowedHosts := flag.String("allowed-hosts", os.Getenv("PMSS_ALLOWED_HOSTS"), "extra Host header names to serve (e.g. a reverse-proxy name), comma-separated; the listen addresses and localhost are always allowed")
 	dataDir := flag.String("data", envOr("PMSS_DATA", "./data"), "directory for the SQLite database")
-	auth := flag.String("auth", os.Getenv("PMSS_AUTH"), "optional HTTP basic auth as user:password")
+	auth := flag.String("auth", "", "optional HTTP basic auth as user:password (or set PMSS_AUTH, which -h never prints)")
 	basePath := flag.String("base-path", os.Getenv("PMSS_BASE_PATH"), "URL path prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged (e.g. /fleet)")
 	logLevel := flag.String("log", envOr("PMSS_LOG", "info"), "log level: debug, info, warn, error")
 	flag.Parse()
+	if *auth == "" {
+		// Read after parsing, not as the flag's default: -h and a flag
+		// typo print defaults, and a credential must not land in a log.
+		*auth = os.Getenv("PMSS_AUTH")
+	}
 
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(*logLevel)); err != nil {
