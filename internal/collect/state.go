@@ -19,6 +19,8 @@ package collect
 import (
 	"math"
 	"reflect"
+	"strconv"
+	"strings"
 	"time"
 
 	"pmss-fleet-manager/internal/store"
@@ -46,6 +48,15 @@ type BoxState struct {
 	// edit: its reachability fields were reset and nothing has verified
 	// them yet, so alert rules must not run on it until a poll lands.
 	Unpolled bool `json:"-"`
+
+	// Ready is set by a complete probe of the box's current generation
+	// (endpoint and pinned host key, see generation) and is never restored
+	// from the cache: every field below that names something on the box (the
+	// UID, container IDs, the log list) was read from that machine. Actions
+	// that use those fields refuse until it is set (ErrNotReady), so a record
+	// moved to another host cannot act on the previous host's data. A failed
+	// poll leaves it set: the facts are still that machine's.
+	Ready bool `json:"ready"`
 
 	// Rev is the fleet-wide revision this state was stored at (Manager
 	// .commit); a client drops a state event whose rev is not above the
@@ -313,7 +324,10 @@ type DirEntry struct {
 
 // DirsState is the cached du result.
 type DirsState struct {
-	Enabled bool       `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// Gen is the generation the measurement was taken under (see
+	// generation); a cached result from another is not this box's.
+	Gen     string     `json:"gen,omitempty"`
 	At      time.Time  `json:"at"`
 	Running bool       `json:"running"`
 	Error   string     `json:"error,omitempty"`
@@ -343,13 +357,57 @@ func (s *BoxState) adoptIdentity(from BoxState) {
 
 // resetVolatile clears what only a fresh poll by the current poller may
 // assert: port ownership (a credential-send gate), reachability, the auth
-// hold flag and the du-running flag, and marks the state Unpolled. Called
-// when a state is restored from cache or carried across an edit.
+// hold flag, the du-running flag and readiness, and marks the state
+// Unpolled. Called when a state is restored from cache or carried across
+// an edit.
 func (s *BoxState) resetVolatile() {
 	s.Qbt.PortOK, s.Qbt.Reachable, s.Qbt.AuthHold = false, false, false
 	s.Docker.Reachable = false
 	s.Dirs.Running = false
 	s.Unpolled = true
+	s.Ready = false
+}
+
+// has reports whether cid is one of the containers the last poll listed,
+// which is what a container action or log read may name.
+func (d DockerState) has(cid string) bool {
+	for _, c := range d.Containers {
+		if c.ID == cid {
+			return true
+		}
+	}
+	return false
+}
+
+// generation identifies the machine behind a box record: its SSH endpoint
+// (host, port, account) and the pinned host key's fingerprint. Everything
+// measured on the box belongs to the generation it was measured under; an
+// edit that moves the record, or forgets the pin so the next connect may
+// reach a reinstalled machine, starts a new one, and nothing from the old
+// generation (live state, cached state, cached du) is used for the new.
+func generation(host string, port int, user, hostKeyFP string) string {
+	return strings.ToLower(host) + ":" + strconv.Itoa(port) + "/" + user + "@" + hostKeyFP
+}
+
+func boxGeneration(b *store.Box) string {
+	return generation(b.Host, b.Port, b.User, fingerprintOrEmpty(b.HostKey))
+}
+
+// generation is the state's own generation (host, port, user and host-key
+// fingerprint are copied from the record and the pin that served it).
+func (s BoxState) generation() string {
+	return generation(s.Host, s.Port, s.User, s.HostKeyFP)
+}
+
+// sameGeneration reports whether a measurement taken under gen may serve
+// box b: the same endpoint and key, or the same endpoint before any key
+// was pinned (the first poll pins, then records).
+func sameGeneration(gen string, b *store.Box) bool {
+	if gen == boxGeneration(b) {
+		return true
+	}
+	endpoint, fp, ok := strings.Cut(gen, "@")
+	return ok && fp == "" && endpoint == AuthEndpoint(b)
 }
 
 // sanitizeFloats walks a value and replaces every NaN or infinite float64

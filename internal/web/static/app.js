@@ -412,6 +412,14 @@ function renderMain() {
         el.disabled = true;
         el.title = 'polling is disabled for this box; enable it to run actions';
       });
+    } else if (b && !b.ready) {
+      // No complete probe of this box since it was added, moved or the
+      // dashboard started: the server refuses everything that would act
+      // on facts read from it (its UID, container IDs, the log list).
+      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="disc:"], button[data-act^="ctr:"], button[data-act^="log:"]').forEach((el) => {
+        el.disabled = true;
+        el.title = 'waiting for the first poll of this box before running actions';
+      });
     }
   }
   afterRender();

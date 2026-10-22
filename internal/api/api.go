@@ -854,12 +854,13 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 }
 
 // actionCode maps a box action's failure to a status: the box is missing
-// (404), its polling is off (409), or the box itself did not cooperate (502).
+// (404), its polling is off or it has not been probed yet (409), or the
+// box itself did not cooperate (502).
 func actionCode(err error) int {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return 404
-	case errors.Is(err, collect.ErrDisabled):
+	case errors.Is(err, collect.ErrDisabled), errors.Is(err, collect.ErrNotReady):
 		return 409
 	}
 	return 502

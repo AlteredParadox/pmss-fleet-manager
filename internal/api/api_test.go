@@ -577,9 +577,11 @@ func TestReadLogValidation(t *testing.T) {
 			t.Fatalf("%s: code %d %s", body, code, out)
 		}
 	}
-	// A well-formed path the box never listed is refused before any SSH.
+	// A well-formed path is refused before any SSH while no probe of the
+	// box has listed its logs (409, like a disabled box); the listed-path
+	// check itself is tested in collect.
 	code, out := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/logs/read", id), `{"path":".logs/x.log"}`, hdr)
-	if code != 502 || !strings.Contains(out, "not one of the log files found") {
+	if code != 409 || !strings.Contains(out, "not been probed") {
 		t.Fatalf("unlisted path: %d %s", code, out)
 	}
 	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/containers/zz/logs", id), "", hdr); code != 400 {
