@@ -403,7 +403,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.7.0 is the current release. The code was written against five real Pulsed
+1.7.1 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -414,6 +414,14 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.7.1**
+
+- The overview's cpu / ram tile is a snapshot against your own quota and
+  memory limit again, with the near-limit colour on the ram bar; your share
+  of the whole host stays as text, now for ram as well as cpu. 1.7.0's
+  host-in-grey bars made the tile about the host, which the host tab
+  already covers. No API change. (#112)
 
 **1.7.0** follows PMSS's new "Node load vs. your share" panel (its ADR
 0126) so the two dashboards agree about the host. The minor bump is for the
