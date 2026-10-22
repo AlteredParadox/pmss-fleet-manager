@@ -1065,17 +1065,17 @@ function tabLogs(b) {
 const LOGS_STALE_MS = 10 * 60 * 1000;
 const logsRescanAt = new Map();
 function rescanLogsIfStale() {
-  const b = S.detail && S.detail.id === S.selId ? S.detail : boxById(S.selId);
-  if (!b || b.status === 'disabled' || !b.logs || !b.logs.ok) return;
+  // The id is the routed one (a number or null, see route); the box it
+  // names is looked up only to read the listing's age. The request is built
+  // from the routed id, like every other per-box action on this page.
+  const id = S.selId;
+  const b = S.detail && S.detail.id === id ? S.detail : boxById(id);
+  if (!id || !b || b.status === 'disabled' || !b.logs?.ok) return;
   const at = new Date(b.logs.at || 0).getTime();
-  const last = logsRescanAt.get(b.id) || 0;
+  const last = logsRescanAt.get(id) || 0;
   if (Date.now() - at < LOGS_STALE_MS || Date.now() - last < LOGS_STALE_MS) return;
-  logsRescanAt.set(b.id, Date.now());
-  // The id reaches this from the URL hash on a direct route (via Number(),
-  // so it is numeric or null and the lookup above has already matched it
-  // to a box the server listed); encoded anyway so the taint rules see a
-  // sanitised path segment.
-  api('POST', `${BASE}/api/boxes/${encodeURIComponent(b.id)}/refresh`).catch(() => {});
+  logsRescanAt.set(id, Date.now());
+  api('POST', `${BASE}/api/boxes/${id}/refresh`).catch(() => {});
 }
 function logViewer(V) {
   if (!V) return `<div class="empty" style="border:0">pick a log on the left: the last ${300} lines are fetched from the box each time, nothing is streamed or stored.</div>`;
@@ -1530,7 +1530,13 @@ document.addEventListener('click', async (e) => {
   const fv = e.target.closest('[data-fleetview]');
   if (fv) { S.fleetView = fv.dataset.fleetview; S.fleetViewTouched = true; render(); return; }
   const tab = e.target.closest('[data-tab]');
-  if (tab) { S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; S.logView = null; S.logOpen = new Set(); history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`); if (S.tab === 'logs') rescanLogsIfStale(); render(); return; }
+  if (tab) {
+    S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; S.logView = null; S.logOpen = new Set();
+    history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`);
+    if (S.tab === 'logs') rescanLogsIfStale();
+    render();
+    return;
+  }
   const seg = e.target.closest('[data-s-seg]');
   if (seg) {
     S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; S.settingsTouched[seg.dataset.sSeg] = true;
