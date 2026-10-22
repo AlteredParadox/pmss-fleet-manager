@@ -1014,9 +1014,9 @@ function tabServices(b) {
   const all = A.processes || [];
   const procs = all.filter((p) => !f || p.name.toLowerCase().includes(f) || (p.args || '').toLowerCase().includes(f) || appName(A, p.app).toLowerCase().includes(f)).slice(0, 200);
   const why = { offline: ' (box unreachable)', pending: ' yet', disabled: ' (polling is disabled)' }[b.status] || ' (ps printed nothing on the box)';
-  const reliable = A.ok && A.args_known;
+  const reliable = A.ok && A.args_known && !A.truncated; // as the server's AppsState.Reliable: no "not running" verdict from a cut list
   const note = !A.ok ? `<span class="warn">process list not read${why}</span>`
-    : `${A.procs} process${A.procs === 1 ? '' : 'es'} · ${fmtBytes(A.rss, 1)} resident${A.args_known ? '' : ' · <span class="warn" title="the command-line listing was cut this poll: applications run by an interpreter (python, mono, dotnet, node, java, php) cannot be told apart, so no app alert is raised or resolved">command lines not read</span>'}`;
+    : `${A.procs} process${A.procs === 1 ? '' : 'es'} · ${fmtBytes(A.rss, 1)} resident${A.args_known ? '' : ' · <span class="warn" title="the command-line listing was cut this poll: applications run by an interpreter (python, mono, dotnet, node, java, php) cannot be told apart, so no app alert is raised or resolved">command lines not read</span>'}${A.truncated ? ' · <span class="warn" title="the account runs more processes than the probe keeps, so this list is a prefix: an application missing from it may still be running, and no app alert is raised or resolved">list incomplete</span>' : ''}`;
   return `<div class="table app-table" style="overflow:hidden">
     <div class="thead-tools">
       <div style="font-size:12px"><b>services</b> <span class="muted">· ${note}</span></div>
