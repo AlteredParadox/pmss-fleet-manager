@@ -405,7 +405,8 @@ Newest first; each release's full notes are on the
 two accepted as they stand, one deferred until Pulsed Media exposes a
 tenant's own sockets on privacy hosts). The minor bump is for the API
 additions: every box carries `ready`, false until its first complete probe,
-and actions on a box answer 409 until then; every event and `/api/state`
+and its qBittorrent, WebUI, container and log actions answer 409 until then
+(refresh, directory scan and watch changes are not gated); every event and `/api/state`
 carry `alerts_rev`; and the JavaScript lint is pinned by a Node manifest and
 lockfile, so `make jscheck` needs `npm` where it finds it.
 
@@ -415,8 +416,8 @@ lockfile, so `make jscheck` needs `npm` where it finds it.
   drops the old machine's cached state and directory sizes, and resolves its
   alerts except the renewal one. Cached rows carry that identity and are
   refused across it, so a crash in the middle of a move cannot bring the old
-  machine's data back. Actions wait for the first probe (409, greyed in the
-  page), the Docker client follows the probed account, and the directory
+  machine's data back. Actions that use probed facts wait for the first
+  probe (409, greyed in the page), the Docker client follows the probed account, and the directory
   scan is joined on stop, keeps the last good result when interrupted and
   retries an hour later. (#101)
 - **The right password is never locked out.** A request with no credential
