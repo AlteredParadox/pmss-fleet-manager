@@ -1200,7 +1200,7 @@ func TestParseLiveRings(t *testing.T) {
 	if r, _ := parseLiveRings(sb.String(), "", time.Unix(1000+400*300, 0)); len(r.Node) != liveSlots || r.Node[0].T != 1000+112*300 {
 		t.Fatalf("trimmed to %d from %d", len(r.Node), 400)
 	}
-	if _, known := parseLiveRings(`{"pad":"`+strings.Repeat("x", liveMaxBytes)+`",`+node[1:], ""); known {
+	if _, known := parseLiveRings(`{"pad":"`+strings.Repeat("x", liveMaxBytes)+`",`+node[1:], "", now); known {
 		t.Fatal("an oversized ring must be refused")
 	}
 	// Milliseconds where seconds belong, a slot from the far past and one a
