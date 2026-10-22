@@ -38,6 +38,12 @@ jobs:
       - name: make vet
         run: make vet
 
+      # node --check + ESLint no-undef on the frontend: a reference to an
+      # undefined helper is a ReferenceError at click time that no Go
+      # test sees (the Edit route shipped broken that way once).
+      - name: make jscheck
+        run: make jscheck
+
       # Every first-party source carries the AGPL notice. Cheap and offline,
       # so unlike notices-check this one is safe to gate every PR on —
       # Dependabot never touches source headers.

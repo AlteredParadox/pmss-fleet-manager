@@ -77,9 +77,13 @@ function retryNote(b) {
   return `retry ${s < 5 ? 'now' : s < 90 ? `in ${s}s` : `in ${Math.round(s / 60)} min`}${b.backoff ? ', backed off' : ''}`;
 }
 function planOf(b) { return b.plan || b.service?.product || ''; }
+const boxById = (id) => S.boxes.find((b) => b.id === id);
+// serviceActive mirrors the server's ServiceActive: Active and Suspended
+// services count towards costs and renewals, every other status is history.
+const serviceActive = (sv) => !!sv && /^(active|suspended)$/i.test(sv.status || '');
 // serviceRenewal mirrors the server's EffectiveRenewal: an active or suspended
 // (usually overdue) service's next due date is a renewal; a cancelled one's is history.
-function serviceRenewal(sv) { return sv && /^(active|suspended)$/i.test(sv.status || '') ? sv.next_due || '' : ''; }
+function serviceRenewal(sv) { return serviceActive(sv) ? sv.next_due || '' : ''; }
 function renewalOf(b) { return b.renewal || serviceRenewal(b.service); }
 function fmtDur(sec) {
   sec = Math.max(0, Math.floor(Number(sec) || 0));
@@ -135,7 +139,7 @@ async function api(method, path, body) {
   else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(path, opts);
   let data = null;
-  try { data = await r.json(); } catch (e) { /* no body */ }
+  try { data = await r.json(); } catch { /* no body */ }
   if (!r.ok) throw Object.assign(new Error((data?.error ? data.error + (data.output ? ' — ' + data.output.split('\n').slice(-2).join(' · ') : '') : null) || `${r.status} ${r.statusText}`), { status: r.status });
   return data;
 }
@@ -334,7 +338,7 @@ function recomputeTotals() {
     t.torrents += b.qbt.total; t.seeding += b.qbt.seeding; t.containers += b.docker.running;
     const r = renewalOf(b);
     if (r && (!t.next_renewal || r < t.next_renewal)) t.next_renewal = r;
-    if (b.service && /^active$/i.test(b.service.status) && !seenSvc.has(b.service.id)) { seenSvc.add(b.service.id); t.monthly_cost += b.service.monthly || 0; t.currency = b.service.currency; }
+    if (serviceActive(b.service) && !seenSvc.has(b.service.id)) { seenSvc.add(b.service.id); t.monthly_cost += b.service.monthly || 0; t.currency = b.service.currency; }
     const lp = new Date(b.last_poll).getTime();
     if (lp > last) last = lp;
   }
@@ -1149,8 +1153,8 @@ function blankForm() {
 }
 function resetAdd() { S.add = { mode: 'add', step: 1, form: blankForm(), errors: {}, detect: null, busy: false, editId: null, service: null }; }
 async function startEdit(id) {
-  S.add = { mode: 'edit', step: 1, form: null, errors: {}, detect: null, busy: false, editId: id, service: boxById(id)?.service || null };
   try {
+    S.add = { mode: 'edit', step: 1, form: null, errors: {}, detect: null, busy: false, editId: id, service: boxById(id)?.service || null };
     const d = await api('GET', `${BASE}/api/boxes/${id}`);
     if (S.add.mode !== 'edit' || S.add.editId !== id) return; // navigated on before this answer came back
     const b = d.box;
@@ -1433,7 +1437,6 @@ function viewSettings() {
 function viewServices() {
   const v = S.services;
   if (!v?.configured) return '';
-  const boxById = (id) => S.boxes.find((b) => b.id === id);
   const status = v.error ? `<span class="bad">${esc(v.error)}</span>` : v.synced_at ? `synced ${fmtAgo(v.synced_at)}${v.generated_at ? ` · feed generated ${fmtAgo(v.generated_at)}` : ''}` : 'not synced yet';
   return `<div class="svc">
     <div class="head" style="margin:24px 0 10px"><div><div class="eyebrow">pulsedmedia.com${v.client_id ? ` · client ${v.client_id}` : ''}</div><h2 style="margin:0">Services</h2><div class="hint" style="margin-top:4px">${status}</div></div>
