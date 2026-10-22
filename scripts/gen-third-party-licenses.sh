@@ -111,6 +111,24 @@ emit_module() {
 
 	# The web font served from the embedded static tree (not a Go module).
 	emit_module "JetBrains Mono 2.304 web font (SIL Open Font License 1.1), embedded in the UI" internal/web/static/fonts
+
+	# First-party files that port code from PMSS (not a module; kept here by
+	# hand so the embedded notices page carries the credit too).
+	echo
+	echo "---"
+	echo
+	echo "## Code derived from PMSS (GPL-3.0-only)"
+	echo
+	echo "The \"node vs. you · 24 h\" panel is a port of the same panel in PMSS"
+	echo "(https://github.com/MagnaCapax/PMSS, etc/skel/www/statsLive.php, ADR 0126):"
+	echo "the averaging arithmetic and row join in internal/collect/live.go and the"
+	echo "share cell and trend drawing in internal/web/static/app.js follow that file."
+	echo "That code is Copyright (C) MagnaCapax / the PMSS Team and licensed under the"
+	echo "GNU General Public License v3.0 only. GPLv3 section 13 permits combining a"
+	echo "GPLv3 work with an AGPLv3 program; the derived portions remain under"
+	echo "GPL-3.0 and are marked in their file headers. The GPL-3.0 text is at"
+	echo "https://www.gnu.org/licenses/gpl-3.0.txt; the AGPL text this program ships"
+	echo "(/license) includes it by reference in its own section 13."
 } >"$OUT"
 
 echo "wrote $OUT ($(wc -c <"$OUT") bytes)"

@@ -12,7 +12,13 @@
 // for more details.
 //
 // You should have received a copy of the GNU Affero General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.//
+// The summary arithmetic and the row join in this file follow PMSS's
+// etc/skel/www/statsLive.php (pmssStatsLiveSummary, pmssStatsLiveRows):
+// Copyright (C) MagnaCapax / the PMSS Team, GPL-3.0-only,
+// https://github.com/MagnaCapax/PMSS. GPLv3 section 13 permits combining
+// that work with this AGPL program; the derived portion remains under
+// GPL-3.0 and the rest of this file under the licence above.
 
 package collect
 

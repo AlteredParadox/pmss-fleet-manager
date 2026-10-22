@@ -2704,3 +2704,18 @@ DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
+
+---
+
+## Code derived from PMSS (GPL-3.0-only)
+
+The "node vs. you · 24 h" panel is a port of the same panel in PMSS
+(https://github.com/MagnaCapax/PMSS, etc/skel/www/statsLive.php, ADR 0126):
+the averaging arithmetic and row join in internal/collect/live.go and the
+share cell and trend drawing in internal/web/static/app.js follow that file.
+That code is Copyright (C) MagnaCapax / the PMSS Team and licensed under the
+GNU General Public License v3.0 only. GPLv3 section 13 permits combining a
+GPLv3 work with an AGPLv3 program; the derived portions remain under
+GPL-3.0 and are marked in their file headers. The GPL-3.0 text is at
+https://www.gnu.org/licenses/gpl-3.0.txt; the AGPL text this program ships
+(/license) includes it by reference in its own section 13.
