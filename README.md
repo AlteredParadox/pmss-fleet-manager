@@ -369,7 +369,8 @@ averaging arithmetic in `internal/collect/live.go` and the share cell and
 trend drawing in `app.js` follow that file closely. That code is Copyright
 MagnaCapax / the PMSS Team, GPL-3.0-only; GPLv3 §13 permits combining it
 with this AGPL program, and the derived parts stay under GPL-3.0 (noted in
-their file headers and in `THIRD_PARTY_LICENSES.md`). The host cpu figures
+their file headers; `THIRD_PARTY_LICENSES.md` carries the credit and the
+full GPL-3.0 text from `licenses/GPL-3.0.txt`). The host cpu figures
 use the same `/proc/stat` accounting as PMSS's live-stats cron.
 
 The AGPL's §13 obligation is to offer the Corresponding Source to everyone who
