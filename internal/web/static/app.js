@@ -644,11 +644,15 @@ function ovBandwidthPanel(b) {
       <div class="note">${rateNote}${cap ? ` · throttled to ${cap} Mbit/s` : ''}</div></div>`;
 }
 function ovCpuRamPanel(b) {
+  // Bars in the "node vs. you" style (static/view.js): host in grey, you in blue.
+  const share = pfmView.hostShare(b.cpu);
+  const cpuBar = pfmView.ovCpuBar(b.cpu, b.host_sys);
+  const ramBar = pfmView.ovRamBar(b.ram, b.host_sys, levelClass(b.ram.pct, 95));
   return `<div class="panel"><div class="tile-label">cpu / ram</div>
-      <div class="tile-value">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} <small>cpu${b.cpu.quota_cpus ? ` · of ${b.cpu.quota_cpus.toFixed(1)} cores` : b.cpu.host_cpus ? ` · of ${b.cpu.host_cpus} host cores` : ''}${b.cpu.ok && b.cpu.quota_cpus && b.cpu.host_cpus ? ` · ${fmtPctFine(b.cpu.host_pct)} of the host` : ''}</small></div>
-      <div class="meter thick"><i style="width:${Math.min(100, b.cpu.pct || 0)}%"></i></div>
-      <div class="note" style="display:flex;justify-content:space-between;gap:8px"><span title="process memory (rss) against the slice limit; page cache is charged to the slice too but is reclaimed, not OOM-killed">ram ${b.ram.ok ? fmtPct(b.ram.pct) : '—'} · ${b.ram.rss_bytes ? `${fmtBytes(b.ram.rss_bytes, 1)} proc + ${fmtBytes(b.ram.cache_bytes, 1)} cache` : fmtBytes(b.ram.used_bytes, 1)} / ${b.ram.limit_bytes ? fmtBytes(b.ram.limit_bytes, 1) : '?'}${b.ram.last_oom && Date.now() - Date.parse(b.ram.last_oom) < 864e5 ? ` · <span class="bad" title="kernel OOM kill noticed ${esc(b.ram.last_oom)}">OOM kill</span>` : ''}</span><span>${b.ram.pids ? `${b.ram.pids} proc` : ''}</span></div>
-      <div class="meter" style="margin-top:4px"><i class="${levelClass(b.ram.pct, 95)}" style="width:${Math.min(100, b.ram.pct || 0)}%"></i></div></div>`;
+      <div class="tile-value">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} <small>cpu${b.cpu.quota_cpus ? ` · of ${b.cpu.quota_cpus.toFixed(1)} cores` : b.cpu.host_cpus ? ` · of ${b.cpu.host_cpus} host cores` : ''}${share !== null && b.cpu.quota_cpus ? ` · ${fmtPctFine(share)} of the host` : ''}${cpuBar.caption ? ` · <span class="lvnode">${cpuBar.caption}</span>` : ''}</small></div>
+      ${cpuBar.html}
+      <div class="note" style="display:flex;justify-content:space-between;gap:8px"><span title="process memory (rss) against the slice limit; page cache is charged to the slice too but is reclaimed, not OOM-killed">ram ${b.ram.ok ? fmtPct(b.ram.pct) : '—'} · ${b.ram.rss_bytes ? `${fmtBytes(b.ram.rss_bytes, 1)} proc + ${fmtBytes(b.ram.cache_bytes, 1)} cache` : fmtBytes(b.ram.used_bytes, 1)} / ${b.ram.limit_bytes ? fmtBytes(b.ram.limit_bytes, 1) : '?'}${b.ram.last_oom && Date.now() - Date.parse(b.ram.last_oom) < 864e5 ? ` · <span class="bad" title="kernel OOM kill noticed ${esc(b.ram.last_oom)}">OOM kill</span>` : ''}</span><span>${ramBar.caption ? `<span class="lvnode">${ramBar.caption}</span>` : ''}${b.ram.pids ? `${ramBar.caption ? ' · ' : ''}${b.ram.pids} proc` : ''}</span></div>
+      <div style="margin-top:4px">${ramBar.html}</div></div>`;
 }
 /* overview "box" panel rows */
 function ovHostStatusRows(b) {
@@ -1210,7 +1214,7 @@ function tabHost(b) {
     <div class="panel"><div class="tile-label">host cpu</div>
       <div class="tile-value">${h.cpu_ok ? fmtPct(h.cpu_busy_pct) : '—'} <small>busy${h.ncpu ? ` · ${h.ncpu} cores` : ''}${h.cpu_ok ? ` · iowait ${fmtPct(h.cpu_iowait_pct)}${h.cpu_steal_pct >= 0.5 ? ` · steal ${fmtPct(h.cpu_steal_pct)}` : ''}` : ''}</small></div>
       <div class="meter thick split" title="busy (every tenant's cpu time, steal included) and, lighter, iowait: cpus waiting on the disks"><i class="${levelClass(h.cpu_ok ? h.cpu_busy_pct : 0, 100)}" style="width:${h.cpu_ok ? Math.min(100, h.cpu_busy_pct) : 0}%"></i><i class="dim" style="width:${h.cpu_ok ? Math.min(100 - Math.min(100, h.cpu_busy_pct), h.cpu_iowait_pct) : 0}%"></i></div>
-      <div class="note">${h.cpu_ok ? `you ${b.cpu.ok && b.cpu.host_cpus ? fmtPctFine(b.cpu.host_pct) : '—'} of it` : 'measured from the second poll on'} · load ${h.load1?.toFixed(2) ?? '—'} / ${h.load5?.toFixed(2) ?? '—'} / ${h.load15?.toFixed(2) ?? '—'} · a busy neighbour shows up here, not in your own cpu meter</div></div>
+      <div class="note">${h.cpu_ok ? `you ${pfmView.hostShare(b.cpu) === null ? '—' : fmtPctFine(b.cpu.host_pct)} of it` : 'measured from the second poll on'} · load ${h.load1?.toFixed(2) ?? '—'} / ${h.load5?.toFixed(2) ?? '—'} / ${h.load15?.toFixed(2) ?? '—'} · a busy neighbour shows up here, not in your own cpu meter</div></div>
   </div>${liveTrendPanel(b)}`;
 }
 

@@ -14,7 +14,7 @@ export default [{
       setTimeout: "readonly", clearTimeout: "readonly", setInterval: "readonly", confirm: "readonly",
       Promise: "readonly", console: "readonly", Set: "readonly", Map: "readonly", Number: "readonly",
       String: "readonly", Math: "readonly", Date: "readonly", Object: "readonly", JSON: "readonly", Array: "readonly",
-      globalThis: "readonly", pfmRevisions: "readonly", // static/revisions.js defines it, app.js uses it
+      globalThis: "readonly", pfmRevisions: "readonly", pfmView: "readonly", // static/revisions.js and view.js define them, app.js uses them
     },
   },
   rules: { "no-undef": "error", "no-unreachable": "error", "no-dupe-keys": "error", "no-unused-vars": "warn" },

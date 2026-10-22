@@ -34,10 +34,11 @@ vet:
 jscheck:
 	node --check internal/web/static/app.js
 	node --check internal/web/static/revisions.js
-	node --test internal/web/revisions_test.mjs
+	node --check internal/web/static/view.js
+	node --test internal/web/revisions_test.mjs internal/web/view_test.mjs
 	@if command -v npm >/dev/null 2>&1; then \
 		npm ci --ignore-scripts --no-audit --no-fund --silent && \
-		npm exec --no -- eslint -c scripts/eslint.config.mjs internal/web/static/app.js internal/web/static/revisions.js internal/web/revisions_test.mjs; \
+		npm exec --no -- eslint -c scripts/eslint.config.mjs internal/web/static/app.js internal/web/static/revisions.js internal/web/static/view.js internal/web/revisions_test.mjs internal/web/view_test.mjs; \
 	elif [ -n "$$CI" ]; then echo "jscheck: npm not found and CI is set; ESLint is required here" >&2; exit 1; \
 	else echo "jscheck: npm not found, ESLint skipped"; fi
 

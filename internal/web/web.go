@@ -19,7 +19,7 @@ package web
 
 import "embed"
 
-// FS holds index.html, app.js, revisions.js and style.css under static/.
+// FS holds index.html, app.js, revisions.js, view.js and style.css under static/.
 //
 //go:embed static
 var FS embed.FS
