@@ -458,7 +458,7 @@ func totals(states []collect.BoxState) Totals {
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	states := s.m.States()
+	states, rev := s.m.Snapshot()
 	sums := make([]collect.BoxState, len(states))
 	for i, st := range states {
 		sums[i] = st.Summary()
@@ -472,6 +472,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{
 		"boxes":          sums,
+		"rev":            rev, // see collect.Manager.Snapshot: lets the client merge this with the events around it
 		"totals":         tot,
 		"alerts_unacked": unacked,
 		"settings":       s.m.Settings().Public(),
@@ -494,14 +495,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many open event streams; close some dashboard tabs", http.StatusServiceUnavailable)
 		return
 	}
+	// Subscribed before the headers go out: the client resyncs when the
+	// stream opens, and every change from that moment on must reach it.
+	ch, cancel := s.m.Bus().Subscribe()
+	defer cancel()
 	w.Header().Set(hdrContentType, "text/event-stream")
 	w.Header().Set(hdrCacheControl, noStore)
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(200)
 	fmt.Fprint(w, "retry: 3000\n\n")
 	fl.Flush()
-	ch, cancel := s.m.Bus().Subscribe()
-	defer cancel()
 	ping := time.NewTicker(25 * time.Second)
 	defer ping.Stop()
 	for {

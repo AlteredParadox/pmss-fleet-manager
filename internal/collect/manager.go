@@ -51,6 +51,11 @@ type Manager struct {
 	mu      sync.RWMutex
 	states  map[int64]*BoxState
 	pollers map[int64]*poller
+	// rev counts every commit and removal, fleet-wide. Each stored state
+	// carries the rev it was stored under and each state/removed event the
+	// rev it reports, so a client can tell a stale event from a newer
+	// snapshot (see commit and Snapshot).
+	rev uint64
 
 	hooks  []Hook
 	latest latestRelease
@@ -60,16 +65,22 @@ type Manager struct {
 	// list: two toggles at once would otherwise each save a list missing
 	// the other's change.
 	watchMu sync.Mutex
-	// hooksMu keeps the alert hooks in store order: it is held from the
-	// moment a state is stored until its hooks have run, by polls
-	// (setStateWith) and watch toggles (SetAppWatch) alike, so a stale
-	// evaluation can never undo the alert change of a newer state.
-	// Lock order: hooksMu before mu.
+	// hooksMu keeps the alert hooks and the state events in store order:
+	// commit holds it from the moment a state is stored until its hooks
+	// have run and its event is on the bus, so a stale evaluation can never
+	// undo the alert change of a newer state and a client never sees an
+	// older state after a newer one.
+	// Lock order: hooksMu before mu before svcMu; hooksMu before pubMu.
 	hooksMu sync.Mutex
-	pmapi   *pmapi.Client
-	svcMu   sync.RWMutex
-	svc     servicesCache
-	syncMu  sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
+	// pubMu keeps state events in store order without holding hooksMu
+	// while the event is built (the unacknowledged-alert count is a
+	// database read): commit takes it before releasing hooksMu, so the
+	// next box's store and alert evaluation proceed meanwhile.
+	pubMu  sync.Mutex
+	pmapi  *pmapi.Client
+	svcMu  sync.RWMutex
+	svc    servicesCache
+	syncMu sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -228,9 +239,6 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	if !b.Enabled {
 		st.Status, st.StatusReason, st.Failures = "disabled", "", 0 // nothing to retry; the reason belonged to the last poll
 	}
-	m.decorate(&st)
-	m.mu.Lock()
-	m.states[b.ID] = &st
 	p := newPoller(m, b)
 	p.ctx, p.cancel = context.WithCancel(m.ctx)
 	if authKnown {
@@ -241,18 +249,18 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	if ds, ok := detectGuardState(b); ok {
 		p.guard.Restore(ds)
 	}
-	m.pollers[b.ID] = p
-	m.mu.Unlock()
+	// No poll will ever run the hooks of a disabled box: let the alert
+	// rules see the disabled status now so open alerts for it resolve.
+	m.commit(b.ID, func(*BoxState) *BoxState {
+		m.pollers[b.ID] = p // fn runs under m.mu: state and poller appear together
+		return &st
+	}, commitOpts{insert: true, hooks: !b.Enabled, publish: true})
 	if b.Enabled {
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
 			p.run(p.ctx)
 		}()
-	} else {
-		// No poll will ever run the hooks: let the alert rules see the
-		// disabled status now so open alerts for this box resolve.
-		m.runHooks(st)
 	}
 }
 
@@ -276,6 +284,14 @@ func (m *Manager) runHooks(st BoxState) {
 
 // States returns a full copy of every box state sorted by name.
 func (m *Manager) States() []BoxState {
+	states, _ := m.Snapshot()
+	return states
+}
+
+// Snapshot is States with the revision it was taken at: every stored
+// state has a Rev at or below it, and every later commit or removal a Rev
+// above it, so a client can merge the snapshot with the events around it.
+func (m *Manager) Snapshot() ([]BoxState, uint64) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]BoxState, 0, len(m.states))
@@ -288,7 +304,7 @@ func (m *Manager) States() []BoxState {
 		}
 		return out[i].ID < out[j].ID
 	})
-	return out
+	return out, m.rev
 }
 
 // State returns a full copy of one box's state.
@@ -302,34 +318,74 @@ func (m *Manager) State(id int64) (BoxState, bool) {
 	return *s, true
 }
 
-// setStateWith stores s as the box's state; fix runs on it under the store
-// lock right before it is stored, with the state being replaced, so a
-// concurrent mutateState or du merge cannot slip in between the poller's
-// last look and the store.
-func (m *Manager) setStateWith(s *BoxState, fix func(s, stored *BoxState)) {
-	s.Sanitize()
-	m.mu.Lock()
-	if _, ok := m.states[s.ID]; !ok { // box was removed mid-poll
-		m.mu.Unlock()
-		return
-	}
-	m.mu.Unlock()
-	m.decorate(s)
+// commitOpts selects what commit does around the store.
+type commitOpts struct {
+	insert  bool // store even when the box has no state yet (startPoller)
+	hooks   bool // run the alert hooks on the stored state
+	publish bool // send the state event
+}
+
+// commit is the only write path for a box's live state. fn runs under
+// hooksMu and mu with a copy of the stored state (nil when the box has
+// none) and returns the state to store, or nil to store nothing; commit
+// then attaches the service matched against the feed of that very moment,
+// assigns the next fleet-wide revision, stores, runs the hooks, and hands
+// the event to the bus in that same order (pubMu, taken before hooksMu is
+// released). Stores, alert evaluations and events therefore happen in one
+// order for every box, a feed swap can never leave a state matched against
+// the feed it replaced (reattachServices re-commits every box after the
+// swap), and ok is false when the box is gone.
+func (m *Manager) commit(id int64, fn func(stored *BoxState) *BoxState, o commitOpts) (BoxState, bool) {
 	m.hooksMu.Lock()
 	m.mu.Lock()
-	if _, ok := m.states[s.ID]; !ok {
+	stored, ok := m.states[id]
+	if !ok && !o.insert {
 		m.mu.Unlock()
 		m.hooksMu.Unlock()
-		return
+		return BoxState{}, false
 	}
-	fix(s, m.states[s.ID])
-	cp := *s
-	m.states[s.ID] = &cp
+	var base *BoxState
+	if ok {
+		cp := *stored // the stored object may be in a hook's hands on another goroutine
+		base = &cp
+	}
+	next := fn(base)
+	if next == nil {
+		m.mu.Unlock()
+		m.hooksMu.Unlock()
+		return BoxState{}, false
+	}
+	m.decorate(next)
+	m.rev++
+	next.Rev = m.rev
+	cp := *next
+	m.states[id] = &cp
 	m.mu.Unlock()
-	m.runHooks(cp)
+	if o.hooks {
+		m.runHooks(cp)
+	}
+	if !o.publish {
+		m.hooksMu.Unlock()
+		return cp, true
+	}
+	m.pubMu.Lock()
 	m.hooksMu.Unlock()
 	sum := cp.Summary()
-	m.Publish(Event{Type: "state", BoxID: cp.ID, State: &sum})
+	m.Publish(Event{Type: "state", BoxID: id, Rev: cp.Rev, State: &sum})
+	m.pubMu.Unlock()
+	return cp, true
+}
+
+// setStateWith stores a poll result as the box's state; fix runs on it
+// under the store lock right before it is stored, with the state being
+// replaced, so a concurrent mutateState or du merge cannot slip in between
+// the poller's last look and the store.
+func (m *Manager) setStateWith(s *BoxState, fix func(s, stored *BoxState)) {
+	s.Sanitize()
+	m.commit(s.ID, func(stored *BoxState) *BoxState {
+		fix(s, stored)
+		return s
+	}, commitOpts{hooks: true, publish: true})
 }
 
 // AddBox persists and starts polling a new box.
@@ -339,11 +395,7 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 	if err := m.st.CreateBox(ctx, b); err != nil {
 		return err
 	}
-	m.startPoller(b, nil)
-	if s, ok := m.State(b.ID); ok {
-		sum := s.Summary()
-		m.Publish(Event{Type: "state", BoxID: b.ID, State: &sum})
-	}
+	m.startPoller(b, nil) // publishes the new box
 	return nil
 }
 
@@ -403,11 +455,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 	if !stillHere {
 		return store.ErrNotFound
 	}
-	m.startPoller(fresh, prev) // carries the last measured data over; runs the hooks if disabled
-	if s, ok := m.State(fresh.ID); ok {
-		sum := s.Summary()
-		m.Publish(Event{Type: "state", BoxID: fresh.ID, State: &sum})
-	}
+	m.startPoller(fresh, prev) // carries the last measured data over; runs the hooks if disabled; publishes
 	return nil
 }
 
@@ -424,11 +472,20 @@ func authEndpointChanged(p *poller, fresh *store.Box) bool {
 func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
+	// Under hooksMu, then pubMu: a commit that stored before this delete
+	// has put its event on the bus before we get here, and none can store
+	// after it, so no state event for the box follows the removed event.
+	m.hooksMu.Lock()
 	m.mu.Lock()
 	p := m.pollers[id]
 	delete(m.pollers, id)
 	delete(m.states, id)
+	m.rev++
+	rev := m.rev
 	m.mu.Unlock()
+	m.pubMu.Lock() // an in-flight commit's event goes out first
+	m.hooksMu.Unlock()
+	m.pubMu.Unlock()
 	if p != nil {
 		p.stopAndWait()
 	}
@@ -439,7 +496,7 @@ func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 	if err := m.st.DeleteBox(sctx, id); err != nil {
 		return err
 	}
-	m.Publish(Event{Type: "removed", BoxID: id})
+	m.Publish(Event{Type: "removed", BoxID: id, Rev: rev})
 	return nil
 }
 
@@ -517,24 +574,13 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 	return out, err
 }
 
-// mutateState applies fn to a copy of the stored state and stores the copy.
+// mutateState applies fn to a copy of the stored state and stores the
+// copy, without hooks or an event (the next poll reports the result).
 func (m *Manager) mutateState(id int64, fn func(*BoxState)) {
-	m.mutateStateGet(id, fn)
-}
-
-// mutateStateGet is mutateState returning the stored copy (ok false when
-// the box is gone).
-func (m *Manager) mutateStateGet(id int64, fn func(*BoxState)) (BoxState, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	cur, ok := m.states[id]
-	if !ok {
-		return BoxState{}, false
-	}
-	cp := *cur
-	fn(&cp)
-	m.states[id] = &cp
-	return cp, true
+	m.commit(id, func(s *BoxState) *BoxState {
+		fn(s)
+		return s
+	}, commitOpts{})
 }
 
 // SetAppWatch adds or removes one detected application from the box's
@@ -567,19 +613,15 @@ func (m *Manager) SetAppWatch(ctx context.Context, id int64, key string, on bool
 	if err := m.st.SetAppsWatch(ctx, id, keys); err != nil {
 		return err
 	}
-	m.hooksMu.Lock()
-	cp, ok := m.mutateStateGet(id, func(s *BoxState) {
+	// Evaluate skips an Unpolled state itself; the first poll raises the
+	// app alert then.
+	if _, ok := m.commit(id, func(s *BoxState) *BoxState {
 		s.Apps.Watched = keys
 		s.Apps.markWatched()
-	})
-	if !ok {
-		m.hooksMu.Unlock()
+		return s
+	}, commitOpts{hooks: true, publish: true}); !ok {
 		return store.ErrNotFound
 	}
-	m.runHooks(cp) // Evaluate skips an Unpolled state itself; the first poll raises the app alert then
-	m.hooksMu.Unlock()
-	sum := cp.Summary()
-	m.Publish(Event{Type: "state", BoxID: id, State: &sum})
 	return nil
 }
 

@@ -28,6 +28,8 @@ const BASE = location.pathname.replace(/\/+$/, '');
 const S = {
   view: 'fleet', fleetView: 'cards', tab: 'overview', selId: null,
   boxes: [], totals: {}, unacked: 0, settings: {}, detail: null,
+  snapRev: 0, // revision of the last /api/state snapshot; see mergeSnapshot
+  removed: new Map(), // box id -> revision of its "removed" event, for snapshots taken before the removal
   alerts: [], filter: '', live: false,
   torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
   torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, status_reason, qbt}]
@@ -180,7 +182,7 @@ async function loadState() {
     if (d.instance && S.instance && d.instance !== S.instance) { location.reload(); return; } // server was rebuilt: pick up new JS/CSS
     S.instance = d.instance || S.instance;
     S.version = d.version; S.sourceUrl = d.source_url;
-    S.boxes = d.boxes || [];
+    mergeSnapshot(d.boxes || [], d.rev || 0);
     S.totals = d.totals || {};
     S.unacked = d.alerts_unacked || 0;
     S.settings = d.settings || {};
@@ -190,11 +192,42 @@ async function loadState() {
     return true;
   } catch (e) { toast(`state: ${e.message}`, 'bad'); return false; }
 }
+// Every stored state and every state/removed event carries the fleet-wide
+// revision it was made at, and a snapshot the revision it was taken at. The
+// stream and the snapshot request race each other, so neither may blindly
+// overwrite the other: a box is taken from the snapshot unless the list
+// already holds a newer revision of it, a box only in the list stays if it
+// appeared after the snapshot, and a box only in the snapshot is dropped if
+// its removal was already seen.
+function mergeSnapshot(boxes, rev) {
+  const mine = new Map(S.boxes.map((b) => [b.id, b]));
+  const out = [];
+  for (const b of boxes) {
+    const cur = mine.get(b.id);
+    mine.delete(b.id);
+    if ((S.removed.get(b.id) || 0) > (b.rev || 0)) continue;
+    out.push(cur && (cur.rev || 0) > (b.rev || 0) ? cur : b);
+  }
+  for (const cur of mine.values()) if ((cur.rev || 0) > rev) out.push(cur);
+  for (const [id, r] of S.removed) if (r <= rev) S.removed.delete(id); // the snapshot already lacks it
+  S.boxes = out.sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
+  S.snapRev = Math.max(S.snapRev, rev);
+}
+// newer reports whether a state or removed event is news: above the box's
+// held revision, or for an unknown box, after the last snapshot and after
+// any removal seen for that id (a reconnect can replay an old event).
+function newer(e) {
+  const cur = S.boxes.find((b) => b.id === e.box_id);
+  const rev = e.rev || 0;
+  if (cur) return rev > (cur.rev || 0);
+  return rev > S.snapRev && rev > (S.removed.get(e.box_id) || 0);
+}
 async function loadDetail(id) {
   if (!id) return;
   try {
     const d = await api('GET', `${BASE}/api/boxes/${id}`);
     if (S.selId !== id) return;
+    if (S.detail && S.detail.id === id && (S.detail.rev || 0) > (d.state.rev || 0)) return; // a newer detail already landed
     S.detail = d.state;
     render();
   } catch (e) {
@@ -253,7 +286,6 @@ function renderSoon() {
 }
 function connectEvents() {
   const es = new EventSource(BASE + '/api/events');
-  let wasDown = false;
   let resyncGen = 0;
   // Events missed while disconnected (a box removed during a server restart,
   // say) are only recovered by a full reload, and nothing later will repeat
@@ -272,15 +304,17 @@ function connectEvents() {
   };
   es.onopen = () => {
     S.live = true;
-    // Also when the boot-time snapshot failed: the stream alone never
-    // delivers settings, totals or boxes that have not polled since.
-    if (wasDown || !S.baseline) void resync(); else renderSide();
-    wasDown = false;
+    // Always: whatever changed between the last snapshot and this
+    // subscription was never sent, and the server subscribes before it
+    // answers, so a snapshot taken now plus the stream misses nothing
+    // (mergeSnapshot keeps whichever of the two is newer per box).
+    void resync();
   };
-  es.onerror = () => { S.live = false; wasDown = true; resyncGen++; renderSide(); };
+  es.onerror = () => { S.live = false; resyncGen++; renderSide(); };
   es.addEventListener('state', (ev) => {
     const e = JSON.parse(ev.data);
     if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
+    if (!newer(e)) { renderSide(); return; } // stale: a snapshot or a later event already covered it
     const i = S.boxes.findIndex((b) => b.id === e.box_id);
     if (i >= 0) S.boxes[i] = e.state; else S.boxes.push(e.state);
     S.boxes.sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
@@ -291,9 +325,11 @@ function connectEvents() {
   });
   es.addEventListener('removed', (ev) => {
     const e = JSON.parse(ev.data);
+    if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
+    if (!newer(e)) { renderSide(); return; }
+    S.removed.set(e.box_id, e.rev || 0);
     S.boxes = S.boxes.filter((b) => b.id !== e.box_id);
     if (S.detail && S.detail.id === e.box_id) S.detail = null;
-    if (typeof e.alerts_unacked === 'number') S.unacked = e.alerts_unacked;
     recomputeTotals();
     if ((S.view === 'box' || S.view === 'edit') && S.selId === e.box_id) {
       if (S.removingId !== e.box_id) { toast('that box was removed', 'bad'); }

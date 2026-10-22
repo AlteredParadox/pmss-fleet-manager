@@ -45,7 +45,7 @@ PMSS "month" counters are a rolling 30-day window, not a billing cycle. The UI s
 - `internal/qbt` qBittorrent Web API client over an arbitrary dialer
 - `internal/dockerx` minimal Docker Engine API client over an arbitrary dialer
 - `internal/pmapi` Pulsed Media customer API client (services feed)
-- `internal/collect` per-box poll loop, rate math, state cache, event bus
+- `internal/collect` per-box poll loop, rate math, state cache, event bus. Every change to a box's live state goes through `Manager.commit`, which matches the services feed of that moment, assigns a fleet-wide revision, stores, runs the alert hooks and hands the event to the bus in that one order; `/api/state` reports the revision it was taken at, and the page merges snapshots and events by revision (a state below what it holds is dropped), so a stream that opens while a snapshot is in flight loses nothing
 - `internal/alerts` rule evaluation, dedup, auto-resolve, ack
 - `internal/api` HTTP JSON API, SSE, embedded static UI
 - `internal/web` the vanilla JS/CSS frontend (no build step)
