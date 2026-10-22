@@ -18,17 +18,21 @@ package qbt
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
+	"unsafe"
 )
 
 func TestClientFlow(t *testing.T) {
@@ -681,5 +685,241 @@ func TestAmbiguousSignalIsPerRequest(t *testing.T) {
 	}
 	if _, held := c.AuthBlocked(); held {
 		t.Fatal("logins that never wrote must not be charged, whatever other requests did")
+	}
+}
+
+// Incremental sync: the first request is rid=0 and every later one carries
+// the last response id; a delta merges field by field into the retained
+// view, torrents_removed drops entries, a failed request leaves the view
+// and the id as they were, a full_update replaces the view, and Close
+// starts over (external review 3, finding 8).
+func TestIncrementalSync(t *testing.T) {
+	var rids []string
+	var step int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/sync/maindata", func(w http.ResponseWriter, r *http.Request) {
+		rids = append(rids, r.URL.Query().Get("rid"))
+		switch step {
+		case 0:
+			w.Write([]byte(`{"rid":1,"full_update":true,"server_state":{"dl_info_speed":10,"up_info_speed":20,"connection_status":"connected"},"categories":{"tv":{"name":"tv","savePath":"/x"}},"tags":["a"],"trackers":{"http://t":["abc","def"]},"torrents":{"abc":{"name":"A","size":100,"upspeed":1,"state":"uploading"},"def":{"name":"D","size":200,"state":"stalledUP"}}}`))
+		case 1:
+			w.Write([]byte(`{"rid":2,"server_state":{"up_info_speed":99},"torrents":{"abc":{"upspeed":500},"ghi":{"name":"G","size":5}},"torrents_removed":["def"]}`))
+		case 2:
+			w.WriteHeader(500)
+		case 3:
+			w.Write([]byte(`{"rid":7,"full_update":true,"server_state":{"dl_info_speed":1},"torrents":{"zzz":{"name":"Z"}}}`))
+		default:
+			w.Write([]byte(`{"rid":8,"full_update":true,"torrents":{}}`))
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:1", "", "")
+	ctx := context.Background()
+
+	md, err := c.MainData(ctx)
+	if err != nil || len(md.Torrents) != 2 || md.Torrents["abc"].Hash != "abc" || md.ServerState.DLInfoSpeed != 10 {
+		t.Fatalf("full: %+v %v", md, err)
+	}
+	step = 1
+	md, err = c.MainData(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := md.Torrents["abc"]; a.UPSpeed != 500 || a.Name != "A" || a.Size != 100 || a.State != "uploading" {
+		t.Fatalf("delta must change only the fields it carries: %+v", a)
+	}
+	if _, ok := md.Torrents["def"]; ok || md.Torrents["ghi"].Name != "G" || md.Torrents["ghi"].Hash != "ghi" || len(md.Torrents) != 2 {
+		t.Fatalf("removed/added: %+v", md.Torrents)
+	}
+	if md.ServerState.UPInfoSpeed != 99 || md.ServerState.DLInfoSpeed != 10 || md.ServerState.ConnectionStatus != "connected" {
+		t.Fatalf("server_state merges too: %+v", md.ServerState)
+	}
+	step = 2
+	if _, err := c.MainData(ctx); err == nil {
+		t.Fatal("want the 500")
+	}
+	step = 3
+	md, err = c.MainData(ctx)
+	if err != nil || len(md.Torrents) != 1 || md.Torrents["zzz"].Name != "Z" || md.ServerState.UPInfoSpeed != 0 || md.ServerState.DLInfoSpeed != 1 {
+		t.Fatalf("full_update must replace the view: %+v %+v %v", md.Torrents, md.ServerState, err)
+	}
+	c.Close()
+	step = 4
+	if _, err := c.MainData(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// rid=0 first; then 1; the failed request asked with 2 and so does the
+	// retry (nothing advanced), which got the full update; after Close, 0.
+	if want := []string{"0", "1", "2", "2", "0"}; !slices.Equal(rids, want) {
+		t.Fatalf("rids sent: %v, want %v", rids, want)
+	}
+}
+
+// A response carrying more torrents than MaxTorrents is refused before the
+// decoder materialises them, and an entry that does not decode leaves the
+// retained view and its id untouched.
+func TestSyncEntryCapAndBadDelta(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"rid":3,"full_update":true,"torrents":{`)
+	for i := 0; i <= MaxTorrents; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, `"%040d":{}`, i)
+	}
+	sb.WriteString(`}}`)
+	if _, err := decodeMainData(strings.NewReader(sb.String()), MaxTorrents); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("want the cap, got %v", err)
+	}
+	d, err := decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"abc":{"size":"not a number"}},"torrents_removed":null,"torrents":null}`), MaxTorrents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err = decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"abc":{"size":"not a number"}},"torrents_removed":["x"],"trackers":{"u":[1,[2,{"a":null}]]}}`), MaxTorrents)
+	if err != nil || d.rid != 4 || len(d.removed) != 1 {
+		t.Fatalf("decode: %+v %v", d, err)
+	}
+	have := syncState{rid: 3, torrents: map[string]Torrent{"abc": {Hash: "abc", Size: 7}, "x": {Hash: "x"}}}
+	next, err := have.apply(d, false)
+	if err == nil || next.rid != 3 || next.torrents["abc"].Size != 7 || len(next.torrents) != 2 {
+		t.Fatalf("a bad entry must not advance anything: %+v %v", next, err)
+	}
+	// Growing past the cap by deltas is refused as well.
+	big := syncState{rid: 1, torrents: make(map[string]Torrent, MaxTorrents)}
+	for i := 0; i < MaxTorrents; i++ {
+		big.torrents[fmt.Sprintf("%040d", i)] = Torrent{}
+	}
+	if _, err := big.apply(&mainDelta{rid: 2, torrents: map[string]json.RawMessage{"new": json.RawMessage(`{}`)}}, false); err == nil {
+		t.Fatal("want the cap")
+	}
+}
+
+// Malformed sync bodies are errors, not partial views.
+func TestDecodeMainDataMalformed(t *testing.T) {
+	for _, body := range []string{
+		``, `[]`, `{"torrents":[]}`, `{"torrents_removed":{}}`, `{"torrents":{"a":{}}`, `{"rid":"x"}`,
+		`{"trackers":{"u":[1,2}}`, `{"torrents":{"a":1,}}`, `{"server_state":5`, `{"torrents_removed":[1]}`,
+		`{"rid":1} x`, `{"rid":1}{"rid":2}`, `{"rid":1}]`,
+		`{"torrents":{"` + strings.Repeat("a", maxHashLen+1) + `":{}}}`, `{"torrents_removed":["` + strings.Repeat("a", maxHashLen+1) + `"]}`,
+	} {
+		if _, err := decodeMainData(strings.NewReader(body), MaxTorrents); err == nil {
+			t.Errorf("%q decoded", body)
+		}
+	}
+	if d, err := decodeMainData(strings.NewReader("{\"rid\":1} \n\t"), MaxTorrents); err != nil || d.rid != 1 {
+		t.Fatalf("trailing whitespace is fine: %+v %v", d, err)
+	}
+	// A server_state that is not an object fails at apply, leaving the view.
+	d, err := decodeMainData(strings.NewReader(`{"rid":2,"server_state":[1]}`), MaxTorrents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := syncState{rid: 1, torrents: map[string]Torrent{}}
+	if next, err := have.apply(d, false); err == nil || next.rid != 1 {
+		t.Fatalf("bad server_state: %+v %v", next, err)
+	}
+}
+
+// A reset while a sync is in flight (Close is called under the poller's
+// lock the request's dialer may need, so it must not wait for the sync
+// lock) wins: the view built by that request is dropped by the next call.
+func TestResetDuringSync(t *testing.T) {
+	var mu sync.Mutex
+	var rids []string
+	release, arrived := make(chan struct{}), make(chan struct{}, 2)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/sync/maindata", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		rids = append(rids, r.URL.Query().Get("rid"))
+		first := len(rids) == 1
+		mu.Unlock()
+		arrived <- struct{}{}
+		if first {
+			<-release
+		}
+		w.Write([]byte(`{"rid":5,"full_update":true,"torrents":{"a":{}}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:1", "", "")
+	done := make(chan error, 1)
+	go func() { _, err := c.MainData(context.Background()); done <- err }()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never arrived")
+	}
+	closed := make(chan struct{})
+	go func() { c.Close(); close(closed) }() // must return while the request is still blocked
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close waited for the in-flight sync")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.MainData(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-arrived
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"0", "0"}; !slices.Equal(rids, want) {
+		t.Fatalf("rids sent: %v, want %v (the view from before the reset must not be used)", rids, want)
+	}
+}
+
+// Retained memory is bounded by the entry count times fixed string bounds,
+// not by what individual responses carry: a run of deltas that each add a
+// torrent with a huge name retains only the clipped name each time, and
+// the clip happens before anything is kept (fred review on PR 95).
+func TestRetainedStringsBounded(t *testing.T) {
+	huge := strings.Repeat("n", 64<<10) // 64 KiB name, state and category per entry
+	view := syncState{}
+	for i := 0; i < 20; i++ {
+		raw := json.RawMessage(fmt.Sprintf(`{"name":"%s","state":"%s","category":"%s"}`, huge, huge, huge))
+		d := &mainDelta{rid: int64(i + 1), full: i == 0, torrents: map[string]json.RawMessage{fmt.Sprintf("%040d", i): raw}}
+		if i == 0 {
+			d.server = json.RawMessage(`{"global_ratio":"` + huge + `","connection_status":"` + huge + `"}`)
+		}
+		next, err := view.apply(d, i == 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		view = next
+	}
+	total := len(view.server.GlobalRatio) + len(view.server.ConnectionStatus)
+	for _, tr := range view.torrents {
+		total += len(tr.Hash) + len(tr.Name) + len(tr.State) + len(tr.Category)
+	}
+	if bound := 4 * (20*(maxHashLen+maxNameLen+maxStateLen+maxCategoryLen) + 2*maxServerStr); total > bound || len(view.torrents) != 20 || view.rid != 20 {
+		t.Fatalf("retained %d bytes of strings in %d torrents (rid %d), bound %d", total, len(view.torrents), view.rid, bound)
+	}
+	if n := view.torrents[fmt.Sprintf("%040d", 7)].Name; len(n) != maxNameLen {
+		t.Fatalf("name clipped to %d, want %d", len(n), maxNameLen)
+	}
+	// The bounds are runes, as the display limits are: 400 emoji keep all
+	// 400 (1600 bytes), and a 401st goes.
+	emoji := strings.Repeat("\U0001F600", maxNameLen+1)
+	if got := clipStr(emoji, maxNameLen); utf8.RuneCountInString(got) != maxNameLen || len(got) != 4*maxNameLen || !utf8.ValidString(got) {
+		t.Fatalf("rune clip: %d runes, %d bytes", utf8.RuneCountInString(got), len(got))
+	}
+	if got := clipStr("ab\u00e9", 3); got != "ab\u00e9" {
+		t.Fatalf("three runes fit: %q", got)
+	}
+	// A clipped prefix must not alias the oversized source, or the whole
+	// source stays allocated for as long as the view keeps the prefix
+	// (fred review on PR 95).
+	src := strings.Repeat("x", 1<<16)
+	if got := clipStr(src, 10); len(got) != 10 || unsafe.StringData(got) == unsafe.StringData(src) {
+		t.Fatal("clipped prefix aliases the source allocation")
+	}
+	if got := clipStr(src[:10], 10); unsafe.StringData(got) != unsafe.StringData(src) {
+		t.Fatal("an unclipped string need not be copied")
 	}
 }

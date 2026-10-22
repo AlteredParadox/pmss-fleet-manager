@@ -20,6 +20,7 @@ package dockerx
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -64,9 +65,14 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20)) // a few hundred containers is well under 1 MiB
+	// One byte over the cap tells a body that was cut off from one that
+	// fits: a truncated list would otherwise fail as malformed JSON.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return err
+	}
+	if len(body) > maxBody {
+		return fmt.Errorf("docker: response from %s is larger than %d MiB", path, maxBody>>20)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var e struct {
@@ -84,7 +90,56 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 	if out == nil {
 		return nil
 	}
+	if cs, ok := out.(*[]Container); ok {
+		*cs, err = decodeContainers(body, MaxContainers)
+		return err
+	}
 	return json.Unmarshal(body, out)
+}
+
+// maxBody bounds any one response; a few hundred containers is well under
+// 1 MiB. A larger response is an error, never silently truncated.
+const maxBody = 16 << 20
+
+// MaxContainers bounds the container list the dashboard will decode; the
+// stream stops there before materialising more.
+const MaxContainers = 2000
+
+// decodeContainers reads the /containers/json array element by element,
+// stopping with an error once it exceeds maxEntries.
+func decodeContainers(body []byte, maxEntries int) ([]Container, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok == nil { // null: no containers, but still nothing may follow it
+		if _, err := dec.Token(); err != io.EOF {
+			return nil, fmt.Errorf("docker: trailing data after the container list")
+		}
+		return nil, nil
+	}
+	if tok != json.Delim('[') {
+		return nil, fmt.Errorf("docker: container list is not an array")
+	}
+	var out []Container
+	for dec.More() {
+		if len(out) >= maxEntries {
+			return nil, fmt.Errorf("docker: more than %d containers; not supported", maxEntries)
+		}
+		var c Container
+		if err := dec.Decode(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim(']') {
+		return nil, fmt.Errorf("docker: malformed container list")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("docker: trailing data after the container list")
+	}
+	return out, nil
 }
 
 // Version is the daemon version block.

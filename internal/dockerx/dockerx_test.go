@@ -109,3 +109,47 @@ func TestContainersAndStats(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+// A container list over the body cap is an explicit error, and one with
+// more entries than MaxContainers stops at the cap before materialising
+// the rest (external review 3, finding 8).
+func TestContainerCaps(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/json", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[` + strings.Repeat(" ", maxBody) + `]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) })
+	if _, err := c.Containers(context.Background()); err == nil || !strings.Contains(err.Error(), "larger than 16 MiB") {
+		t.Fatalf("want a size error, got %v", err)
+	}
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i := 0; i <= MaxContainers; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(`{"Id":"x"}`)
+	}
+	sb.WriteByte(']')
+	if _, err := decodeContainers([]byte(sb.String()), MaxContainers); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("want the entry cap, got %v", err)
+	}
+	cs, err := decodeContainers([]byte(`[{"Id":"abc","Names":["/n"]},{"Id":"def"}]`), MaxContainers)
+	if err != nil || len(cs) != 2 || cs[0].Name() != "n" {
+		t.Fatalf("plain list: %+v %v", cs, err)
+	}
+	if cs, err := decodeContainers([]byte(`null`), MaxContainers); err != nil || cs != nil {
+		t.Fatalf("null list: %+v %v", cs, err)
+	}
+}
+
+func TestDecodeContainersMalformed(t *testing.T) {
+	for _, body := range []string{``, `{}`, `[{"Id":1}]`, `[{"Id":"a"}`, `[{"Id":"a"},]`, `[] x`, `[][]`, `null x`, `null[]`} {
+		if _, err := decodeContainers([]byte(body), MaxContainers); err == nil {
+			t.Errorf("%q decoded", body)
+		}
+	}
+}

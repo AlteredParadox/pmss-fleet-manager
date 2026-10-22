@@ -53,6 +53,27 @@ type Client struct {
 	cookie string // session cookie header value, set by Login
 
 	guard *AuthGuard
+
+	// sync is the retained sync/maindata view, see MainData. syncMu
+	// serialises MainData calls and is held across the request; mu is
+	// never held with it. syncGen is bumped by Close/ResetSync without
+	// any lock (Close is called under callers' own locks, which the
+	// request's dialer may need): a view whose gen is behind it is stale
+	// and the next MainData starts over.
+	syncMu  sync.Mutex
+	sync    syncState
+	syncGen atomic.Uint64
+}
+
+// syncState is what incremental sync needs between two MainData calls:
+// the server's response id and everything it has sent so far, merged
+// delta by delta. torrents nil means "nothing retained": the next request
+// is a full one (rid=0).
+type syncState struct {
+	gen      uint64 // Client.syncGen when the view was built
+	rid      int64
+	server   ServerState
+	torrents map[string]Torrent
 }
 
 // banRetryAfter is the hold after qBittorrent reports the IP banned: its
@@ -245,11 +266,14 @@ func NewWithGuard(dial Dialer, hostport, user, pass string, g *AuthGuard) *Clien
 	return &Client{http: &http.Client{Transport: tr, Timeout: 30 * time.Second}, base: "http://" + hostport, user: user, pass: pass, guard: g}
 }
 
-// Close releases idle connections.
+// Close releases idle connections and discards the retained sync view: it
+// is called when whatever answers the port may be a different process,
+// whose sync position means nothing to ours.
 func (c *Client) Close() {
 	if tr, ok := c.http.Transport.(*http.Transport); ok {
 		tr.CloseIdleConnections()
 	}
+	c.ResetSync()
 }
 
 // doResp sends a URL-encoded form (or a bare request when form is nil).
@@ -531,25 +555,303 @@ func (c *Client) SetPreferences(ctx context.Context, prefs map[string]any) error
 	return c.call(ctx, http.MethodPost, "/api/v2/app/setPreferences", url.Values{"json": {string(b)}}, nil)
 }
 
-// MainData is one full sync snapshot.
+// MainData is the client's current view after a sync: server state plus
+// every torrent. Torrents is the client's retained map, not a copy: read
+// it before the next MainData call on the same client and do not modify it.
 type MainData struct {
-	ServerState ServerState        `json:"server_state"`
-	Torrents    map[string]Torrent `json:"torrents"`
+	ServerState ServerState
+	Torrents    map[string]Torrent
 }
 
-// MainData fetches a full (rid=0) sync snapshot: server state plus every torrent.
+// MaxTorrents bounds the torrents one client view may hold, and the
+// entries one sync response may carry. The decoder stops at the limit
+// before materialising more, so a hostile or runaway WebUI cannot make the
+// dashboard allocate without bound; a real list that large is reported as
+// an error rather than shown partially.
+const MaxTorrents = 20000
+
+// MainData syncs with the WebUI: the first call (and any after Close or a
+// failure that discarded the view) fetches everything with rid=0; later
+// calls send the last response id and receive only what changed since,
+// which is merged field by field into the retained view (a delta entry
+// holds only the fields that changed; torrents_removed drops entries; a
+// full_update replaces the view). A failed request or an undecodable
+// response leaves the view and its id untouched, so the next call asks
+// for the same delta again. qBittorrent keeps the sync position per
+// session, and a re-login is a new session: it then answers with a full
+// update, which is honoured like any other.
 func (c *Client) MainData(ctx context.Context) (*MainData, error) {
-	var md MainData
-	if err := c.call(ctx, http.MethodGet, "/api/v2/sync/maindata?rid=0", nil, &md); err != nil {
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
+	gen := c.syncGen.Load()
+	if c.sync.gen != gen {
+		c.sync = syncState{} // reset since the view was built
+	}
+	rid := c.sync.rid
+	if c.sync.torrents == nil {
+		rid = 0
+	}
+	var raw string
+	if err := c.call(ctx, http.MethodGet, "/api/v2/sync/maindata?rid="+strconv.FormatInt(rid, 10), nil, &raw); err != nil {
 		return nil, err
 	}
-	for h, t := range md.Torrents {
-		if t.Hash == "" {
-			t.Hash = h
-			md.Torrents[h] = t
+	d, err := decodeMainData(strings.NewReader(raw), MaxTorrents)
+	if err != nil {
+		return nil, fmt.Errorf("qbittorrent: sync/maindata: %w", err)
+	}
+	next, err := c.sync.apply(d, rid == 0)
+	if err != nil {
+		return nil, fmt.Errorf("qbittorrent: sync/maindata: %w", err)
+	}
+	next.gen = gen // a reset during the request still wins: the view is dropped next time
+	c.sync = next
+	return &MainData{ServerState: next.server, Torrents: next.torrents}, nil
+}
+
+// ResetSync discards the retained sync view; the next MainData fetches
+// everything. Close does this too. It takes no lock, so it is safe under
+// any lock the in-flight request's dialer may be waiting for.
+func (c *Client) ResetSync() {
+	c.syncGen.Add(1)
+}
+
+// mainDelta is one decoded sync/maindata response, torrents still raw:
+// each entry is merged into the retained Torrent by unmarshalling into a
+// copy of it, which sets only the fields the entry carries.
+type mainDelta struct {
+	rid      int64
+	full     bool
+	server   json.RawMessage
+	torrents map[string]json.RawMessage
+	removed  []string
+}
+
+// decodeMainData reads a sync/maindata body as a stream, keeping the keys
+// the dashboard uses and skipping the rest (categories, tags, trackers)
+// without materialising them. It stops with an error once the torrents
+// object or the removed list exceeds maxEntries.
+func decodeMainData(r io.Reader, maxEntries int) (*mainDelta, error) {
+	dec := json.NewDecoder(r)
+	if err := expectDelim(dec, '{'); err != nil {
+		return nil, err
+	}
+	d := &mainDelta{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, _ := tok.(string)
+		switch key {
+		case "rid":
+			err = dec.Decode(&d.rid)
+		case "full_update":
+			err = dec.Decode(&d.full)
+		case "server_state":
+			err = dec.Decode(&d.server)
+		case "torrents":
+			d.torrents, err = decodeTorrentEntries(dec, maxEntries)
+		case "torrents_removed":
+			d.removed, err = decodeRemoved(dec, maxEntries)
+		default:
+			err = skipValue(dec)
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
-	return &md, nil
+	if err := expectDelim(dec, '}'); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF { // a prefix followed by anything else is not a response
+		return nil, fmt.Errorf("trailing data after the sync object")
+	}
+	return d, nil
+}
+
+func decodeTorrentEntries(dec *json.Decoder, maxEntries int) (map[string]json.RawMessage, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok == nil { // "torrents": null
+		return nil, nil
+	}
+	if tok != json.Delim('{') {
+		return nil, fmt.Errorf("torrents is not an object")
+	}
+	out := map[string]json.RawMessage{}
+	for dec.More() {
+		if len(out) >= maxEntries {
+			return nil, fmt.Errorf("more than %d torrents; not supported", maxEntries)
+		}
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		hash, _ := tok.(string)
+		if len(hash) > maxHashLen {
+			return nil, fmt.Errorf("torrent key longer than %d bytes", maxHashLen)
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, err
+		}
+		out[hash] = raw
+	}
+	return out, expectDelim(dec, '}')
+}
+
+func decodeRemoved(dec *json.Decoder, maxEntries int) ([]string, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok == nil {
+		return nil, nil
+	}
+	if tok != json.Delim('[') {
+		return nil, fmt.Errorf("torrents_removed is not a list")
+	}
+	var out []string
+	for dec.More() {
+		if len(out) >= maxEntries {
+			return nil, fmt.Errorf("more than %d removed torrents; not supported", maxEntries)
+		}
+		var h string
+		if err := dec.Decode(&h); err != nil {
+			return nil, err
+		}
+		if len(h) > maxHashLen {
+			return nil, fmt.Errorf("removed key longer than %d bytes", maxHashLen)
+		}
+		out = append(out, h)
+	}
+	return out, expectDelim(dec, ']')
+}
+
+// Bounds on what one retained entry may hold, in runes (at most four
+// bytes each), so the view's memory is bounded by MaxTorrents times a few
+// KiB however large the strings in individual responses are (each
+// response is itself capped at maxBody, but deltas accumulate). They are
+// the limits the dashboard displays anyway. Hash keys over the bound are
+// refused as malformed (a v1 hash is 40 hex characters, a v2 hash 64); the
+// other strings are clipped.
+const (
+	maxHashLen     = 64
+	maxNameLen     = 400
+	maxStateLen    = 32
+	maxCategoryLen = 100
+	maxServerStr   = 32
+)
+
+// clipped returns the torrent with its strings within the retention bounds.
+func (t Torrent) clipped() Torrent {
+	t.Hash, t.Name, t.State, t.Category = clipStr(t.Hash, maxHashLen), clipStr(t.Name, maxNameLen), clipStr(t.State, maxStateLen), clipStr(t.Category, maxCategoryLen)
+	return t
+}
+
+// clipStr keeps the first n runes of s. A clipped result is a copy: a
+// substring would keep the whole original allocation alive, which is the
+// very thing the bounds are for.
+func clipStr(s string, n int) string {
+	if len(s) <= n { // n runes need at least n bytes
+		return s
+	}
+	cut, runes := 0, 0
+	for cut < len(s) && runes < n {
+		_, w := utf8.DecodeRuneInString(s[cut:])
+		cut += w
+		runes++
+	}
+	if cut >= len(s) {
+		return s
+	}
+	return strings.Clone(s[:cut])
+}
+
+func expectDelim(dec *json.Decoder, want json.Delim) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if tok != want {
+		return fmt.Errorf("expected %q, got %v", want, tok)
+	}
+	return nil
+}
+
+// skipValue consumes one JSON value, however nested, without keeping it.
+func skipValue(dec *json.Decoder) error {
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+		if depth == 0 {
+			return nil
+		}
+	}
+}
+
+// apply merges a delta into the retained view and returns the result; the
+// receiver is not modified, so a decode error part-way leaves it as it
+// was. requestedFull is true when the request carried rid=0: a WebUI that
+// omits full_update (older or fake ones) still answers that with a full
+// list, never a delta.
+func (s syncState) apply(d *mainDelta, requestedFull bool) (syncState, error) {
+	full := d.full || requestedFull || s.torrents == nil
+	next := syncState{rid: d.rid, server: s.server}
+	if full {
+		next.server = ServerState{}
+	}
+	if len(d.server) > 0 {
+		if err := json.Unmarshal(d.server, &next.server); err != nil {
+			return s, fmt.Errorf("server_state: %w", err)
+		}
+		next.server.GlobalRatio, next.server.ConnectionStatus = clipStr(next.server.GlobalRatio, maxServerStr), clipStr(next.server.ConnectionStatus, maxServerStr)
+	}
+	updates := make(map[string]Torrent, len(d.torrents))
+	for hash, raw := range d.torrents {
+		var t Torrent
+		if !full {
+			t = s.torrents[hash] // zero when new
+		}
+		if err := json.Unmarshal(raw, &t); err != nil {
+			return s, fmt.Errorf("torrent %s: %w", hash, err)
+		}
+		if t.Hash == "" {
+			t.Hash = hash
+		}
+		updates[hash] = t.clipped()
+	}
+	if full {
+		next.torrents = updates
+		return next, nil
+	}
+	next.torrents = make(map[string]Torrent, len(s.torrents)+len(updates))
+	for h, t := range s.torrents {
+		next.torrents[h] = t
+	}
+	for _, h := range d.removed {
+		delete(next.torrents, h)
+	}
+	for h, t := range updates {
+		next.torrents[h] = t
+	}
+	if len(next.torrents) > MaxTorrents {
+		return s, fmt.Errorf("more than %d torrents; not supported", MaxTorrents)
+	}
+	return next, nil
 }
 
 // PauseAll stops every torrent (qBittorrent 5 "stop", 4.x "pause").
