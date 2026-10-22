@@ -301,8 +301,11 @@ func appsFromSnapshot(snap *probe.Snapshot, user string, prev map[int]procSample
 	inheritApps(st.Processes, ppid)
 	apps := groupApps(st.Processes, user)
 	attachPorts(apps, st.Processes, snap.ListenPIDs)
-	st.Apps = sortedApps(apps)
-	st.markWatched()
+	st.Apps = make([]AppView, 0, len(apps))
+	for _, a := range apps {
+		st.Apps = append(st.Apps, *a)
+	}
+	st.markWatched() // also sorts
 	sort.SliceStable(st.Processes, func(i, j int) bool { return st.Processes[i].RSS > st.Processes[j].RSS })
 	if len(st.Processes) > maxProcViews {
 		st.Processes = st.Processes[:maxProcViews]
@@ -391,12 +394,9 @@ func attachPorts(apps map[string]*AppView, procs []ProcView, listenPIDs map[int]
 	}
 }
 
-// sortedApps orders the views: running first, then by category, memory, name.
-func sortedApps(apps map[string]*AppView) []AppView {
-	out := make([]AppView, 0, len(apps))
-	for _, a := range apps {
-		out = append(out, *a)
-	}
+// sortApps orders the views in place: running first, then by category,
+// memory, name. Only ever called on a slice markWatched just allocated.
+func sortApps(out []AppView) {
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if a.Running != b.Running {
@@ -410,7 +410,6 @@ func sortedApps(apps map[string]*AppView) []AppView {
 		}
 		return a.Name < b.Name
 	})
-	return out
 }
 
 // maxProcViews bounds the per-box process list served to the UI.
@@ -466,5 +465,6 @@ func (a *AppsState) markWatched() {
 			out = append(out, AppView{Key: k, Name: AppName(k), Category: categoryOf(k), Watched: true})
 		}
 	}
+	sortApps(out) // the placeholder rows take their category order among the other down apps
 	a.Apps = out
 }

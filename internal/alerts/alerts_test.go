@@ -17,10 +17,16 @@
 package alerts
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"pmss-fleet-manager/internal/collect"
+	"pmss-fleet-manager/internal/store"
 )
 
 // A good poll whose quota, traffic, memory or docker source was unavailable
@@ -143,5 +149,34 @@ func TestWantApps(t *testing.T) {
 	s.Apps.OK = true
 	if !recheckable(&s, "app:jellyfin") {
 		t.Error("read this poll: resolvable")
+	}
+}
+
+// Unwatching an app while its box is offline must resolve the app alert at
+// once: the watch list is the dashboard's own, so no probe is needed.
+func TestUnwatchResolvesWhileOffline(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	b := &store.Box{Name: "x", Host: "h", User: "u", Port: 22, Enabled: true}
+	if err := st.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"app:jellyfin", "app:radarr", "disk"} {
+		if _, err := st.RaiseAlert(ctx, b.ID, k, "warn", k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := New(st, store.DefaultSettings, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	s := &collect.BoxState{ID: b.ID, Name: "x", Status: "offline", LastError: "down", Failures: 3}
+	s.Apps.Watched = []string{"radarr"} // jellyfin was just unwatched
+	e.Evaluate(ctx, s)
+	keys, _ := st.ActiveAlertKeys(ctx, b.ID)
+	slices.Sort(keys)
+	if want := []string{"app:radarr", "disk", "unreachable"}; !slices.Equal(keys, want) {
+		t.Fatalf("active after unwatch while offline: %v, want %v", keys, want)
 	}
 }
