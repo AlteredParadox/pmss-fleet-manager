@@ -430,14 +430,20 @@ type ServerState struct {
 	DLInfoSpeed int64  `json:"dl_info_speed"`
 	UPInfoSpeed int64  `json:"up_info_speed"`
 	GlobalRatio string `json:"global_ratio"`
+	// ConnectionStatus is libtorrent's view of incoming connectivity:
+	// "connected", "firewalled" (no peer has reached the listen port yet,
+	// which after a start takes a while to clear) or "disconnected".
+	ConnectionStatus string `json:"connection_status"`
 }
 
 // Prefs is the subset of app/preferences the dashboard shows: the three
-// peer-discovery mechanisms private trackers forbid.
+// peer-discovery mechanisms private trackers forbid, and the listen port
+// incoming peers must reach.
 type Prefs struct {
-	DHT bool `json:"dht"`
-	PeX bool `json:"pex"`
-	LSD bool `json:"lsd"`
+	DHT        bool `json:"dht"`
+	PeX        bool `json:"pex"`
+	LSD        bool `json:"lsd"`
+	ListenPort int  `json:"listen_port"`
 }
 
 // Preferences reads the client's settings.

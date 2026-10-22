@@ -728,6 +728,7 @@ func qbtPortFor(b *store.Box, confPort int) int {
 func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot) {
 	port := p.qbtPort(snap)
 	qs := QbtState{Enabled: true, Installed: snap.Qbt.BinaryPresent, ProcessUp: snap.Qbt.Running, Port: port, Version: st.Qbt.Version,
+		FirewalledSince: carriedFirewalledSince(st.Qbt, snap.Qbt.Running), ListenPort: st.Qbt.ListenPort,
 		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: clip(snap.Qbt.SubnetList, 1024), ConfUser: clip(snap.Qbt.Username, 64),
 		HasCreds:      p.box.QbtUser != "" || p.box.QbtPass != "",
 		BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0, PMSSManaged: snap.Qbt.PMSSManaged}
@@ -787,9 +788,14 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	// so they are shown per box; another small request per poll.
 	if pr, err := cli.Preferences(actx); err == nil {
 		qs.Discovery = Discovery{Known: true, DHT: pr.DHT, PeX: pr.PeX, LSD: pr.LSD}
+		if pr.ListenPort > 0 && pr.ListenPort <= 65535 {
+			qs.ListenPort = pr.ListenPort
+		}
 	}
 	qs.Reachable = true
 	ss := md.ServerState
+	qs.Connection = connectionStatus(ss.ConnectionStatus)
+	qs.FirewalledSince = firewalledSince(st.Qbt.FirewalledSince, qs.Connection, time.Now())
 	if f, err := strconv.ParseFloat(strings.TrimSpace(ss.GlobalRatio), 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) && f >= 0 && f < 1e9 {
 		qs.GlobalRatio = f // qBittorrent sends "∞" for undefined, which parses as 0 here
 	}
@@ -830,6 +836,41 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		return a.Name < b.Name
 	})
 	st.Qbt = qs
+}
+
+// connectionStatus keeps only the three values libtorrent reports.
+func connectionStatus(s string) string {
+	switch s {
+	case "connected", "firewalled", "disconnected":
+		return s
+	}
+	return ""
+}
+
+// carriedFirewalledSince is the FirewalledSince a poll starts from: the
+// previous value while the client process is still up, so a Web API
+// failure (a login hold, a timeout, a port check that refused) does not
+// restart the ten-minute clock and clear an alert the moment the API
+// answers again; nothing once the process is gone, since a fresh process
+// starts its own clock.
+func carriedFirewalledSince(prev QbtState, processUp bool) string {
+	if !processUp {
+		return ""
+	}
+	return prev.FirewalledSince
+}
+
+// firewalledSince carries the time the client was first seen not
+// connected: kept while it stays firewalled or disconnected, cleared when
+// it is connected or the status is unknown.
+func firewalledSince(prev, conn string, now time.Time) string {
+	if conn != "firewalled" && conn != "disconnected" {
+		return ""
+	}
+	if _, err := time.Parse(time.RFC3339, prev); err == nil {
+		return prev
+	}
+	return now.UTC().Format(time.RFC3339)
 }
 
 // qbtNeedsCreds returns a reason to skip the Web API when the config shows
