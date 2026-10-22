@@ -284,8 +284,14 @@ These are the design decisions that came out of it.
   read on a poll is kept rather than resolved and re-raised. Retries back off
   to every ten minutes, with "retry now" to reconnect at once.
 - **Web surface.** No authentication by default and bound to loopback: use
-  `-auth`, and put it behind a reverse proxy with TLS before exposing it
-  further. Requests whose Host header is not a listen address, localhost or an
+  `-auth` with a long random password, and put it behind a reverse proxy
+  with TLS (and its own authentication or rate limiting) before exposing it
+  further. The built-in throttle on wrong passwords is per client address,
+  which behind a proxy is the proxy's, so it is deliberately a brake on
+  presented wrong credentials only: the right password is never refused
+  (a stranger cannot lock you out of a proxied instance), a request with
+  no credential just gets the login prompt, and a guesser who ignores the
+  429s is not slowed, which is why the proxy and the password matter. Requests whose Host header is not a listen address, localhost or an
   `-allowed-hosts` entry are refused (on a wildcard bind, whose addresses
   cannot be listed, any IP address is served as well); every mutating request
   must carry the `X-PMSS-Request` header the page sends (a form cannot), pass
