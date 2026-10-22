@@ -639,7 +639,8 @@ function ovAutostartRows(b, q) {
       ${ovAutostartRow(b, q)}` : '';
 }
 function ovWebuiAuthRow(q) {
-  return q.enabled ? `<div><span>webui auth</span><span class="muted">${q.local_bypass ? 'localhost bypass on' : q.subnet_bypass ? `subnet bypass (${esc(q.subnet_list || '')})` : 'login required'}${q.has_creds ? ' · credentials set' : ''}${q.conf_user ? ` · user ${esc(q.conf_user)}` : ''}${q.auth_hold ? ' · <span class="warn" title="A login was rejected. To avoid qBittorrent banning the box\'s loopback IP, no further attempts are made until you re-enter the password under edit or restart the client.">login suspended</span>' : ''}</span></div>` : '';
+  const bypass = q.local_bypass ? 'localhost bypass on' : q.subnet_bypass ? `subnet bypass on (${esc(q.subnet_list || '')})` : '';
+  return q.enabled ? `<div><span>webui auth</span><span class="muted">${bypass ? `<span class="bad" title="qBittorrent accepts WebUI requests from the box's loopback without a password. On a shared host every other tenant can reach that port: turn the bypass off in qBittorrent and give the dashboard the WebUI login instead.">${bypass} — unsafe on a shared host</span>` : 'login required'}${q.has_creds ? ' · credentials set' : ''}${q.conf_user ? ` · user ${esc(q.conf_user)}` : ''}${q.auth_hold ? ' · <span class="warn" title="A login was rejected. To avoid qBittorrent banning the box\'s loopback IP, no further attempts are made until you re-enter the password under edit or restart the client.">login suspended</span>' : ''}</span></div>` : '';
 }
 function ovTorrentsRow(q) {
   return q.enabled ? `<div><span>torrents</span><span>${q.total} total · ${q.seeding} seeding · ratio ${q.global_ratio ? q.global_ratio.toFixed(2) : '—'}</span></div>` : '';
@@ -996,7 +997,7 @@ function tabServices(b) {
   </div>
   <div class="hint" style="margin-top:8px">Everything the account runs on the shared host, as its own uid sees it (other tenants' processes are hidden by PMSS). CPU is the share of one core since the previous poll. Watch an application to be alerted when it is not running; a watched application that is down stays listed.</div>
   <div class="table proc-table" style="overflow:hidden;margin-top:14px">
-    <div class="thead-tools"><div style="font-size:12px"><b>processes</b> <span class="muted">· largest first${procs.length < all.length ? ` · showing ${procs.length} of ${all.length}` : ''}</span></div></div>
+    <div class="thead-tools"><div style="font-size:12px"><b>processes</b> <span class="muted">· largest first${A.procs > all.length ? ` · the ${all.length} using the most memory of ${A.procs}` : ''}${procs.length < all.length ? ` · showing ${procs.length} of ${all.length}` : ''}</span></div></div>
     <div style="overflow:auto">
       <div class="trow head"><span>pid</span><span>name</span><span>application</span><span>cpu</span><span>rss</span><span>up for</span><span>command</span></div>
       ${procs.length === 0 ? `<div class="trow"><span class="muted">${A.ok ? 'nothing matches' : '—'}</span></div>` : procs.map((p) => `<div class="trow"><span class="num muted">${p.pid}</span><span class="ellip" title="${esc(p.name)}">${esc(p.name)}</span><span class="ellip muted">${esc(appName(A, p.app))}</span><span class="num">${p.cpu_known ? p.cpu_pct.toFixed(1) + '%' : '—'}</span><span class="num">${fmtBytes(p.rss, 1)}</span><span class="muted">${fmtDur(p.elapsed_sec)}</span><span class="ellip muted" title="${esc(p.args || '')}">${esc(p.args || '')}</span></div>`).join('')}

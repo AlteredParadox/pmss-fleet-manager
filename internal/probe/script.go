@@ -51,19 +51,7 @@ scratch="${XDG_RUNTIME_DIR:-/run/user/$uid}"
 # A probe killed at its deadline mid-bounded leaves its scratch file; sweep
 # old ones (not a concurrent probe's) rather than letting them pile up.
 find "$scratch" -maxdepth 1 -type f -name '.pmss-probe.*' -mmin +2 -delete 2>/dev/null
-bounded(){
-  secs=$1; shift
-  # The scratch file lives in the tenant's own runtime dir or home, never
-  # in shared /tmp where a co-tenant could plant a guessable name. The
-  # runtime dir is tmpfs and outside the home quota, so the live quota
-  # reading survives the box being full.
-  f=$(mktemp "$scratch/.pmss-probe.XXXXXX" 2>/dev/null) || return 0
-  ( "$@" >"$f" 2>/dev/null ) & bp=$!
-  i=0; while [ $i -lt $((secs*5)) ] && kill -0 $bp 2>/dev/null; do sleep 0.2; i=$((i+1)); done
-  kill -9 $bp 2>/dev/null
-  cat "$f" 2>/dev/null; rm -f "$f"
-}
-sec uid; echo "$uid"
+` + boundedShell + `sec uid; echo "$uid"
 sec user; echo "$user"
 sec hostname; timeout 5 hostname -f 2>/dev/null || hostname
 sec now; date +%s
@@ -171,6 +159,32 @@ sec listen_pids
 // autostart keeps it and the probe does not count it. Both use this
 // pattern; run it under LC_ALL=C.
 const QbtCronPattern = `"^[[:space:]]*(@[a-z]+|[^#@[:space:]]+([[:space:]]+[^[:space:]]+){4})[[:space:]]+(sleep[[:space:]]+[0-9]+[[:space:]]*;[[:space:]]*)?[\"']?([\$]HOME|[\$][{]HOME[}]|~|/[^[:space:]\"';&|]*)/bin/qbt-start[\"']?([[:space:]]*[0-9]*[<>]{1,2}&?[[:space:]]*[^[:space:];&|<>]*)*[[:space:]]*\$"`
+
+// boundedShell is the probe's bounded() helper. The command runs under a
+// per-command lock (flock, where present) in the tenant's scratch dir: a
+// run from an earlier probe that is stuck in the kernel (a hung filesystem
+// under df or quota cannot act on SIGKILL) still holds the lock, so this
+// probe skips the command, and the section is empty, instead of adding
+// another unkillable process to the slice every poll. The lock is the
+// exec'd command's own fd, so it is released exactly when that returns.
+const boundedShell = `bounded(){
+  secs=$1; shift
+  # The scratch file lives in the tenant's own runtime dir or home, never
+  # in shared /tmp where a co-tenant could plant a guessable name. The
+  # runtime dir is tmpfs and outside the home quota, so the live quota
+  # reading survives the box being full.
+  f=$(mktemp "$scratch/.pmss-probe.XXXXXX" 2>/dev/null) || return 0
+  lock="$scratch/.pmss-probe-lock.$(basename "$1")"
+  if command -v flock >/dev/null 2>&1; then
+    ( exec 9>"$lock" && flock -n 9 && exec "$@" >"$f" 2>/dev/null ) & bp=$!
+  else
+    ( "$@" >"$f" 2>/dev/null ) & bp=$!
+  fi
+  i=0; while [ $i -lt $((secs*5)) ] && kill -0 $bp 2>/dev/null; do sleep 0.2; i=$((i+1)); done
+  kill -9 $bp 2>/dev/null
+  cat "$f" 2>/dev/null; rm -f "$f"
+}
+`
 
 // ListenScript prints the account's uid and the listening sockets in the
 // same form as the probe's listen section, for a live ownership re-check

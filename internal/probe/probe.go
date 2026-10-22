@@ -619,8 +619,8 @@ func parseListenPIDs(raw string) map[int][]int {
 	return out
 }
 
-// Sections splits untagged probe output into named sections (tests and
-// diagnostics). Production runs use SectionsTagged.
+// Sections splits untagged probe output into named sections. Test support:
+// production runs use SectionsTagged.
 func Sections(raw []byte) map[string]string { return SectionsTagged(raw, "") }
 
 // SectionsTagged splits raw probe output into named sections. A header is a
@@ -666,7 +666,8 @@ func sectionsTagged(raw []byte, tag string) (map[string]string, bool) {
 	return out, sc.Err() == nil
 }
 
-// Parse turns untagged probe output into a Snapshot (tests and diagnostics).
+// Parse turns untagged probe output into a Snapshot. Test support: production
+// runs use ParseTagged.
 func Parse(raw []byte, now time.Time) (*Snapshot, error) { return ParseTagged(raw, "", now) }
 
 // ParseTagged turns raw probe output produced by ScriptWithTag(tag) into a

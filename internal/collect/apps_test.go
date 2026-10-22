@@ -356,3 +356,30 @@ func TestValidAppKeyNonASCII(t *testing.T) {
 		t.Fatal("longer than the classifier ever produces")
 	}
 }
+
+// A WebUI hold is scoped to the SSH endpoint: two accounts on one host with
+// the same WebUI credentials are two guards, and a moved box is a new one.
+func TestDetectGuardScopedToEndpoint(t *testing.T) {
+	a := &store.Box{Host: "H.example", Port: 22, User: "alice", QbtUser: "admin", QbtPass: "pw"}
+	b := &store.Box{Host: "h.example", Port: 22, User: "bob", QbtUser: "admin", QbtPass: "pw"}
+	if detectKey(a) == detectKey(b) {
+		t.Fatal("different accounts must not share a hold")
+	}
+	same := &store.Box{Host: "h.example", Port: 22, User: "alice", QbtUser: "admin", QbtPass: "pw"}
+	if detectKey(a) != detectKey(same) {
+		t.Fatal("host case must not matter")
+	}
+	moved := &store.Box{Host: "h.example", Port: 2222, User: "alice", QbtUser: "admin", QbtPass: "pw"}
+	if detectKey(a) == detectKey(moved) || AuthEndpoint(a) == AuthEndpoint(moved) {
+		t.Fatal("another SSH port is another endpoint")
+	}
+	p := &poller{box: a}
+	if !authEndpointChanged(p, moved) || authEndpointChanged(p, same) {
+		t.Fatal("authEndpointChanged")
+	}
+	port := *same
+	port.QbtPort = 9000
+	if !authEndpointChanged(p, &port) {
+		t.Fatal("a WebUI port edit must drop the hold")
+	}
+}

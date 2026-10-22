@@ -106,9 +106,17 @@ func (m *Manager) SetSettings(s store.Settings) {
 	if prev.PMAPIKey != s.PMAPIKey && m.ctx != nil {
 		// The cached feed belongs to the old key: drop it first, so a
 		// failed sync for the new key cannot leave the old account's
-		// services, costs and renewal dates on the boxes.
+		// services, costs and renewal dates on the boxes. A removed key
+		// needs nothing more (SyncServices would only forget again); a new
+		// one is fetched by a goroutine the shutdown wait group tracks.
 		m.forgetServices(m.ctx)
-		go m.SyncServices(m.ctx)
+		if s.PMAPIKey != "" && m.ctx.Err() == nil {
+			m.wg.Add(1)
+			go func() {
+				defer m.wg.Done()
+				_ = m.SyncServices(m.ctx)
+			}()
+		}
 	}
 	if prev.PollIntervalSec == s.PollIntervalSec {
 		return // thresholds and keys are read on the next poll anyway
@@ -218,8 +226,8 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	st.NextPoll, st.Backoff = time.Time{}, false
 	var auth qbt.AuthState
 	authKnown := false
-	if _, err := m.st.GetCache(m.ctx, b.ID, authCacheKind, &auth); err == nil {
-		authKnown = true
+	if _, err := m.st.GetCache(m.ctx, b.ID, authCacheKind, &auth); err == nil && auth.Endpoint == AuthEndpoint(b) {
+		authKnown = true // a hold recorded for another endpoint (the box was moved) does not apply
 	}
 	if !b.Enabled {
 		st.Status, st.StatusReason, st.Failures = "disabled", "", 0 // nothing to retry; the reason belonged to the last poll
@@ -234,7 +242,7 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	}
 	// A login the add/edit wizard already saw rejected must not be retried
 	// by the first poll; seed before the run loop can start.
-	if ds, ok := detectGuardState(b.Host, b.QbtUser, b.QbtPass); ok {
+	if ds, ok := detectGuardState(b); ok {
 		p.guard.Restore(ds)
 	}
 	m.pollers[b.ID] = p
@@ -371,13 +379,14 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 		}
 		return err
 	}
-	if b.QbtPass != "" {
-		// A password was typed in: treat it as an explicit request to try
-		// again, even if it is the same one the hold was recorded for.
-		// After stopAndWait, so the old poller's last record() cannot
-		// write the hold back; the wizard's memory of it is dropped too.
+	if b.QbtPass != "" || authEndpointChanged(p, fresh) {
+		// A password was typed in (an explicit request to try again, even
+		// with the same one the hold was recorded for), or the endpoint
+		// the hold belongs to changed (host, port, account or WebUI port):
+		// drop the hold. After stopAndWait, so the old poller's last
+		// record() cannot write it back; the wizard's memory of it goes too.
 		_ = m.st.SetCache(sctx, b.ID, authCacheKind, qbt.AuthState{})
-		detectGuard(fresh.Host, fresh.QbtUser, fresh.QbtPass).Clear()
+		detectGuard(fresh).Clear()
 	}
 	// boxMu serialises edits and removals, so this only guards against a
 	// RemoveBox whose DB delete failed after the in-memory removal.
@@ -393,6 +402,15 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 		m.Publish(Event{Type: "state", BoxID: fresh.ID, State: &sum})
 	}
 	return nil
+}
+
+// authEndpointChanged reports whether an edit moved the WebUI the hold was
+// recorded for: a different SSH endpoint or a different WebUI port.
+func authEndpointChanged(p *poller, fresh *store.Box) bool {
+	if p == nil {
+		return false
+	}
+	return AuthEndpoint(p.box) != AuthEndpoint(fresh) || p.box.QbtPort != fresh.QbtPort
 }
 
 // RemoveBox stops polling and deletes the box, its alerts and its cache.
@@ -459,7 +477,7 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		out, err = p.qbtRestart(ctx)
 		if err == nil {
 			p.guard.Clear() // a fresh qbittorrent-nox has a fresh failed-login counter
-			detectGuard(p.box.Host, p.box.QbtUser, p.box.QbtPass).Clear()
+			detectGuard(p.box).Clear()
 		}
 	case "autostart":
 		out, err = p.qbtAutostart(ctx)

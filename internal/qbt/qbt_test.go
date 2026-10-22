@@ -548,3 +548,45 @@ func TestSuccessNotSharedAcrossClients(t *testing.T) {
 		t.Fatalf("two clients need two sessions; logins = %d", n)
 	}
 }
+
+// Logins that end without an answer spend a budget; once it is gone the
+// guard holds like a rejection, and a seen outcome resets it.
+func TestAmbiguousLoginBudget(t *testing.T) {
+	g := &AuthGuard{}
+	for i := 1; i < ambiguousBudget; i++ {
+		g.noteAmbiguous("k")
+		if _, held := g.Blocked("k"); held {
+			t.Fatalf("held after %d ambiguous attempts", i)
+		}
+	}
+	g.noteAmbiguous("k")
+	if err, held := g.Blocked("k"); !held || err != ErrAmbiguous {
+		t.Fatalf("budget spent: %v %v", err, held)
+	}
+	st := g.State()
+	if st.Ambiguous != ambiguousBudget || st.Error != ErrAmbiguous.Error() {
+		t.Fatalf("state: %+v", st)
+	}
+	if _, held := g.Blocked("other"); held { // other credentials end the hold, as for a rejection
+		t.Fatal("other credentials are not held")
+	}
+	g2 := &AuthGuard{}
+	g2.Restore(st)
+	if err, held := g2.Blocked("k"); !held || err != ErrAmbiguous {
+		t.Fatalf("restored: %v %v", err, held)
+	}
+	g2.Clear()
+	if _, held := g2.Blocked("k"); held {
+		t.Fatal("cleared")
+	}
+	// Transport failure during login counts as ambiguous.
+	c := New(func(ctx context.Context) (net.Conn, error) { return nil, errors.New("reset") }, "127.0.0.1:8080", "admin", "secret")
+	for i := 0; i < ambiguousBudget; i++ {
+		if err := c.Login(context.Background()); err == nil {
+			t.Fatal("login must fail")
+		}
+	}
+	if err, held := c.AuthBlocked(); !held || err != ErrAmbiguous {
+		t.Fatalf("after %d failed transports: %v %v", ambiguousBudget, err, held)
+	}
+}

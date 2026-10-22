@@ -32,6 +32,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # Only vMAJOR.MINOR.PATCH publishes: metadata-action derives the 1.2.3
+      # and 1.2 image tags from it, and `latest` must never follow a tag
+      # like v1.2.3-rc1 or a typo.
+      - name: Validate the tag
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH"; exit 1; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -95,8 +102,10 @@ jobs:
   # tag push, with the same event guard as `publish`. Cross-compiled in the
   # build stage, so no QEMU. GITHUB_TOKEN is enough for ghcr.io: the package
   # is created under the repository's owner and linked to the repository.
+  # After the binary matrix: the image is pushed with the version and
+  # `latest` tags, so it must not exist for a release whose binaries failed.
   image:
-    needs: test
+    needs: [test, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read

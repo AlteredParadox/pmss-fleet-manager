@@ -269,7 +269,9 @@ func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, er
 	}
 	ictx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	out, stderr, err := cli.Run(ictx, "QBT_URL="+shellQuote(downloadURL)+" QBT_SHA256="+shellQuote(digest)+" sh", strings.NewReader(installScript))
+	// The URL (which may carry a token for a private build) and the digest
+	// travel in the script on stdin, never on the command line /proc shows.
+	out, stderr, err := cli.Run(ictx, "sh", strings.NewReader("QBT_URL="+shellQuote(downloadURL)+"\nQBT_SHA256="+shellQuote(digest)+"\n"+installScript))
 	text := strings.TrimSpace(note + string(out) + "\n" + string(stderr))
 	if err != nil {
 		return text, fmt.Errorf("install failed: %s", firstLine(strings.TrimPrefix(text, note), err))
@@ -308,12 +310,18 @@ func (p *poller) qbtRestart(ctx context.Context) (string, error) {
 		return text, fmt.Errorf("restart failed: %s", firstLine(text, err))
 	}
 	cmd := p.startCommand()
-	_, stderr, err = cli.Run(rctx, cmd, nil)
+	_, stderr, err = cli.Run(rctx, startViaStdin, strings.NewReader(cmd+"\n"))
 	if err != nil {
 		return text, fmt.Errorf("stopped, but start command failed: %v %s", err, strings.TrimSpace(string(stderr)))
 	}
 	return text + "\nstarted with: " + cmd, nil
 }
+
+// startViaStdin is the SSH command that runs the start command read from
+// stdin in the account's login shell: the command (which may carry a
+// token) then never appears in /proc/<pid>/cmdline, where other tenants
+// could read it on a host without process hiding.
+const startViaStdin = `"${SHELL:-sh}" -s`
 
 // startCommand picks the configured start command, else ~/bin/qbt-start when
 // the probe saw it, else a plain daemonised launch.

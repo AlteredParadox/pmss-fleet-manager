@@ -19,6 +19,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"pmss-fleet-manager/internal/collect"
 	"pmss-fleet-manager/internal/store"
@@ -572,5 +574,54 @@ func TestReadLogValidation(t *testing.T) {
 	}
 	if code, _ := do(t, s, "POST", "/api/boxes/999999/logs/read", `{"path":".logs/x.log"}`, hdr); code != 404 {
 		t.Fatalf("missing box: %d", code)
+	}
+}
+
+func TestAuthThrottleAndSSECap(t *testing.T) {
+	s, _ := newTestServerWith(t, "me:secret", "")
+	bad := map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("me:wrong"))}
+	good := map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("me:secret"))}
+	for i := 0; i < authFreeTries; i++ {
+		if code, _ := do(t, s, "GET", "/api/state", "", bad); code != 401 {
+			t.Fatalf("attempt %d: %d, want 401", i+1, code)
+		}
+	}
+	if code, _ := do(t, s, "GET", "/api/state", "", bad); code != 429 {
+		t.Fatalf("past the free tries: %d, want 429", code)
+	}
+	if code, _ := do(t, s, "GET", "/api/state", "", good); code != 429 {
+		t.Fatalf("a throttled address is throttled even with the right password: %d", code)
+	}
+	s.authMu.Lock()
+	for _, f := range s.authFails {
+		f.until = time.Time{} // the wait elapsed
+	}
+	s.authMu.Unlock()
+	if code, _ := do(t, s, "GET", "/api/state", "", good); code != 200 {
+		t.Fatalf("after the wait: %d", code)
+	}
+	if code, _ := do(t, s, "GET", "/api/state", "", bad); code != 401 {
+		t.Fatal("a success resets the count")
+	}
+	// Event streams are capped.
+	for i := 0; i < maxSSEStreams; i++ {
+		s.sseSlots <- struct{}{}
+	}
+	if code, _ := do(t, s, "GET", "/api/events", "", good); code != 503 {
+		t.Fatalf("over the cap: %d, want 503", code)
+	}
+	<-s.sseSlots
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest("GET", "/api/events", nil).WithContext(ctx)
+	req.Host = "dash.local:8080"
+	req.Header.Set("Authorization", good["Authorization"])
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { s.ServeHTTP(rr, req); close(done) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+	if rr.Code != 200 || len(s.sseSlots) != maxSSEStreams-1 {
+		t.Fatalf("stream: code %d slots %d", rr.Code, len(s.sseSlots))
 	}
 }
