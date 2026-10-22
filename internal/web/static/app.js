@@ -1209,8 +1209,8 @@ function tabHost(b) {
       <div class="note">${esc(h.home_fs_type || '')} · ${fmtBytes(h.home_avail, 1)} free for everyone</div></div>
     <div class="panel"><div class="tile-label">host cpu</div>
       <div class="tile-value">${h.cpu_ok ? fmtPct(h.cpu_busy_pct) : '—'} <small>busy${h.ncpu ? ` · ${h.ncpu} cores` : ''}${h.cpu_ok ? ` · iowait ${fmtPct(h.cpu_iowait_pct)}${h.cpu_steal_pct >= 0.5 ? ` · steal ${fmtPct(h.cpu_steal_pct)}` : ''}` : ''}</small></div>
-      <div class="meter thick stack" title="busy (every tenant's cpu time, steal included) and, lighter, iowait: cpus waiting on the disks"><i class="${levelClass(h.cpu_ok ? h.cpu_busy_pct : 0, 100)}" style="width:${h.cpu_ok ? Math.min(100, h.cpu_busy_pct) : 0}%"></i><i class="dim" style="width:${h.cpu_ok ? Math.min(100 - Math.min(100, h.cpu_busy_pct), h.cpu_iowait_pct) : 0}%"></i></div>
-      <div class="note">${h.cpu_ok ? `you ${fmtPctFine(b.cpu.host_pct)} of it` : 'measured from the second poll on'} · load ${h.load1?.toFixed(2) ?? '—'} / ${h.load5?.toFixed(2) ?? '—'} / ${h.load15?.toFixed(2) ?? '—'} · a busy neighbour shows up here, not in your own cpu meter</div></div>
+      <div class="meter thick split" title="busy (every tenant's cpu time, steal included) and, lighter, iowait: cpus waiting on the disks"><i class="${levelClass(h.cpu_ok ? h.cpu_busy_pct : 0, 100)}" style="width:${h.cpu_ok ? Math.min(100, h.cpu_busy_pct) : 0}%"></i><i class="dim" style="width:${h.cpu_ok ? Math.min(100 - Math.min(100, h.cpu_busy_pct), h.cpu_iowait_pct) : 0}%"></i></div>
+      <div class="note">${h.cpu_ok ? `you ${b.cpu.ok && b.cpu.host_cpus ? fmtPctFine(b.cpu.host_pct) : '—'} of it` : 'measured from the second poll on'} · load ${h.load1?.toFixed(2) ?? '—'} / ${h.load5?.toFixed(2) ?? '—'} / ${h.load15?.toFixed(2) ?? '—'} · a busy neighbour shows up here, not in your own cpu meter</div></div>
   </div>`;
 }
 
