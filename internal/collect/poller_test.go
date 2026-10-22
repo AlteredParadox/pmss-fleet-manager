@@ -17,11 +17,104 @@
 package collect
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"pmss-fleet-manager/internal/probe"
+	"pmss-fleet-manager/internal/qbt"
+	"pmss-fleet-manager/internal/store"
 )
+
+// fakeWebUI is a qBittorrent Web API that accepts admin/secret and reports
+// the given connection status.
+func fakeWebUI(t *testing.T, connection string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.FormValue("username") == "admin" && r.FormValue("password") == "secret" {
+			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "x"})
+			w.Write([]byte("Ok."))
+			return
+		}
+		w.Write([]byte("Fails."))
+	})
+	mux.HandleFunc("/api/v2/app/version", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("v5.3.0")) })
+	mux.HandleFunc("/api/v2/app/preferences", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"dht":false,"pex":false,"lsd":false,"listen_port":51413}`))
+	})
+	mux.HandleFunc("/api/v2/sync/maindata", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"server_state":{"dl_info_speed":0,"up_info_speed":0,"global_ratio":"1.0","connection_status":"` + connection + `"},"torrents":{}}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// pollQbtFixture is a poller whose WebUI dialer reaches srv instead of an
+// SSH tunnel, with the latest-release lookup pre-seeded so no network
+// request is made.
+func pollQbtFixture(t *testing.T, srv *httptest.Server) (*poller, *probe.Snapshot) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.latest.version, m.latest.at = "v5.3.0", time.Now()
+	const port = 8089
+	p := newPoller(m, &store.Box{ID: 1, Name: "x", User: "u", QbtEnabled: true, QbtPort: port, QbtUser: "admin", QbtPass: "secret"})
+	addr := srv.Listener.Addr().String()
+	p.dialTCP = func(string) qbt.Dialer {
+		return func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }
+	}
+	snap := &probe.Snapshot{UID: 1001, ListenersKnown: true, Listeners: map[int]int{port: 1001},
+		Qbt: probe.QbtInfo{BinaryPresent: true, Running: true, ConfFound: true, ConfPort: port}}
+	return p, snap
+}
+
+// The real pollQbt success path: a client restarted since the previous
+// poll that still reports firewalled gets a fresh ten-minute clock; without
+// a restart the old clock stands (fred review on PR 87). Reverting the
+// production line to continue from st.Qbt.FirewalledSince fails this.
+func TestPollQbtRestartResetsFirewalledClock(t *testing.T) {
+	p, snap := pollQbtFixture(t, fakeWebUI(t, "firewalled"))
+	old := time.Now().Add(-20 * time.Minute).UTC().Format(time.RFC3339)
+	ctx := context.Background()
+
+	p.qbtRestarted = true
+	st := BoxState{Qbt: QbtState{FirewalledSince: old}}
+	p.pollQbt(ctx, &st, snap)
+	if !st.Qbt.Reachable || st.Qbt.Connection != "firewalled" || st.Qbt.ListenPort != 51413 {
+		t.Fatalf("fixture: %+v", st.Qbt)
+	}
+	since, err := time.Parse(time.RFC3339, st.Qbt.FirewalledSince)
+	if err != nil || time.Since(since) > time.Minute {
+		t.Fatalf("restarted client must get a fresh clock, got %q", st.Qbt.FirewalledSince)
+	}
+
+	p.qbtRestarted = false
+	st = BoxState{Qbt: QbtState{FirewalledSince: old}}
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.FirewalledSince != old {
+		t.Fatalf("no restart must keep the old clock, got %q", st.Qbt.FirewalledSince)
+	}
+
+	// Connected clears it either way.
+	p2, snap2 := pollQbtFixture(t, fakeWebUI(t, "connected"))
+	st = BoxState{Qbt: QbtState{FirewalledSince: old}}
+	p2.pollQbt(ctx, &st, snap2)
+	if st.Qbt.Connection != "connected" || st.Qbt.FirewalledSince != "" {
+		t.Fatalf("connected: %+v", st.Qbt)
+	}
+}
 
 func TestResolveQbtVersion(t *testing.T) {
 	bin := probe.QbtInfo{BinaryPresent: true, BinaryStat: "100 1", BinaryVersion: "v5.2.4"}

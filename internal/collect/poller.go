@@ -67,6 +67,10 @@ type poller struct {
 	// client up is noticed (see carriedFirewalledSince).
 	qbtProcKey   string
 	qbtRestarted bool
+	// dialTCP builds the dialer the WebUI client uses; nil means the SSH
+	// tunnel (sshDialTCP). Tests point it at a fake WebUI so the real
+	// pollQbt orchestration runs without a box.
+	dialTCP func(addr string) qbt.Dialer
 
 	duMu      sync.Mutex
 	duRunning bool
@@ -760,7 +764,11 @@ func (p *poller) qbtClient(port int) *qbt.Client {
 		p.qbt.Close()
 	}
 	hp := fmt.Sprintf("127.0.0.1:%d", port)
-	p.qbt = qbt.NewWithGuard(p.sshDialTCP(hp), hp, p.box.QbtUser, p.box.QbtPass, p.guard)
+	dial := p.sshDialTCP
+	if p.dialTCP != nil {
+		dial = p.dialTCP
+	}
+	p.qbt = qbt.NewWithGuard(dial(hp), hp, p.box.QbtUser, p.box.QbtPass, p.guard)
 	p.qbtP = port
 	return p.qbt
 }
