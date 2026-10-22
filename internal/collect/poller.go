@@ -89,14 +89,14 @@ type poller struct {
 	cancel context.CancelFunc
 
 	actionMu sync.Mutex
-	actionAt time.Time            // last stop/restart, see QbtAction
+	actionAt time.Time // last stop/restart, see QbtAction
 	// restartAt is when a stop/restart action last SUCCEEDED and has not
 	// yet been seen by a poll: the first readable process poll started
 	// after it treats whatever client is up as a new process, which
 	// matters when the poller has no identity baseline yet (a fresh
 	// poller after a dashboard start or a box edit).
 	restartAt time.Time
-	discWant map[string]discWrite // per-key SetDiscovery writes, see noteDiscovery
+	discWant  map[string]discWrite // per-key SetDiscovery writes, see noteDiscovery
 }
 
 // discWrite is one value SetDiscovery wrote and when.
