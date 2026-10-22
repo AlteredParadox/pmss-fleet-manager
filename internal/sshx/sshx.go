@@ -345,38 +345,108 @@ func (c *cappedWriter) snapshot() []byte {
 	return append([]byte(nil), c.w.Bytes()...)
 }
 
-// Run executes cmd on the remote with optional stdin and returns stdout/stderr.
-// The session is torn down when ctx ends.
-func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
+// graceWait is how long an operation whose context ended gets to finish
+// on its own before the transport is declared wedged. A healthy peer
+// answers a channel open, a keepalive or a session close within it, so a
+// caller's cancel (a browser navigating away) costs nothing; a peer or
+// path that has stopped answering does not, and the connection is closed
+// so the operation returns instead of waiting on it forever. A variable
+// so tests can shorten it.
+var graceWait = 2 * time.Second
+
+// errNotConnected is returned by every operation on a closed client.
+var errNotConnected = errors.New("ssh: not connected")
+
+// transport returns the live connection, or nil once closed.
+func (c *Client) transport() *ssh.Client {
 	c.mu.Lock()
-	cli := c.cli
+	defer c.mu.Unlock()
+	return c.cli
+}
+
+// wedged drops cli as the client's transport and closes it, which fails
+// every operation pending on it: the one reliable way to unblock an
+// x/crypto/ssh request whose reply never comes. Other channels on the
+// shared connection fail too; the poller reconnects at its next use. The
+// lock is not held across Close (which writes to the possibly dead peer).
+func (c *Client) wedged(cli *ssh.Client) {
+	c.mu.Lock()
+	if c.cli == cli {
+		c.cli = nil
+	}
 	c.mu.Unlock()
+	cli.Close()
+}
+
+// await waits for an operation that runs on cli to signal done. When ctx
+// ends first, the operation is settled (see settle) and ctx.Err() is
+// returned; else nil.
+func (c *Client) await(ctx context.Context, cli *ssh.Client, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return c.settle(ctx, cli, done)
+	}
+}
+
+// settle ends an operation whose context has already ended: it gets
+// graceWait to finish on its own; if it does not, the transport is wedged
+// (see wedged) and the operation, now failing, is joined. The join is
+// itself bounded, so a library that did not unblock could at worst leak
+// the one goroutine, never hang the caller. Always returns ctx.Err(): the
+// caller established that the context won, and an operation that finishes
+// during the grace (because it was killed, or just in time) is still the
+// cancelled one, never a success with a complete result.
+func (c *Client) settle(ctx context.Context, cli *ssh.Client, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return ctx.Err() // finished within the grace: the transport is fine
+	case <-time.After(graceWait):
+	}
+	c.wedged(cli)
+	select {
+	case <-done:
+	case <-time.After(graceWait):
+	}
+	return ctx.Err()
+}
+
+// Run executes cmd on the remote with optional stdin and returns stdout/stderr.
+// The session is torn down when ctx ends; a transport that does not let it
+// be torn down is closed (see await).
+func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
+	cli := c.transport()
 	if cli == nil {
-		return nil, nil, errors.New("ssh: not connected")
+		return nil, nil, errNotConnected
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err // nothing started: the transport stays as it is
 	}
 	// NewSession blocks until the peer answers the channel open; bound it
 	// by ctx too, or a connection that died after the keepalive hangs the
 	// poll for the TCP retransmit timeout.
-	type sessRes struct {
-		s   *ssh.Session
-		err error
-	}
-	sch := make(chan sessRes, 1)
-	go func() { s, err := cli.NewSession(); sch <- sessRes{s, err} }()
-	var sess *ssh.Session
-	select {
-	case <-ctx.Done():
-		go func() { // release the session if it does arrive later
-			if r := <-sch; r.s != nil {
-				r.s.Close()
+	var (
+		sess    *ssh.Session
+		sessErr error
+	)
+	opened := make(chan struct{})
+	go func() {
+		sess, sessErr = cli.NewSession()
+		close(opened)
+	}()
+	if err := c.await(ctx, cli, opened); err != nil {
+		select {
+		case <-opened:
+			if sess != nil {
+				go sess.Close() // arrived within the grace, after the caller gave up; the close is a write that may block too
 			}
-		}()
-		return nil, nil, ctx.Err()
-	case r := <-sch:
-		if r.err != nil {
-			return nil, nil, r.err
+		default: // left behind on a closed transport; it fails on its own
 		}
-		sess = r.s
+		return nil, nil, err
+	}
+	if sessErr != nil {
+		return nil, nil, sessErr
 	}
 	defer sess.Close()
 	// A compromised box could stream without end inside the deadline; the
@@ -387,24 +457,30 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 	if stdin != nil {
 		sess.Stdin = stdin
 	}
-	done := make(chan error, 1)
-	go func() { done <- sess.Run(cmd) }()
+	var runErr error
+	done := make(chan struct{})
+	go func() {
+		runErr = sess.Run(cmd)
+		close(done)
+	}()
 	select {
+	case <-done:
+		return out.snapshot(), errb.snapshot(), runErr
 	case <-ctx.Done():
+	}
+	// Ask the command to stop. Both writes go to the peer and would block
+	// on a wedged transport themselves, so they run aside; settle handles
+	// the transport if the session does not end within the grace, and
+	// reports the cancellation whether or not the session ended meanwhile
+	// (a command killed by us is not a command that completed).
+	go func() {
 		_ = sess.Signal(ssh.SIGKILL)
 		sess.Close()
-		// Let the session's stdout/stderr copiers finish before the
-		// buffers are read (bounded: a dead peer must not hold us).
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			// Gave up on the copiers; snapshot() copies under the lock
-			// they write under, so a late write cannot tear the result.
-		}
-		return out.snapshot(), errb.snapshot(), ctx.Err()
-	case err := <-done:
-		return out.snapshot(), errb.snapshot(), err
-	}
+	}()
+	err := c.settle(ctx, cli, done)
+	// snapshot() copies under the lock the copiers write under, so a late
+	// write cannot tear the result.
+	return out.snapshot(), errb.snapshot(), err
 }
 
 // DialUnix opens a stream to a unix socket on the remote host.
@@ -417,45 +493,69 @@ func (c *Client) DialTCP(ctx context.Context, addr string) (net.Conn, error) {
 	return c.dial(ctx, "tcp", addr)
 }
 
+// dial opens a direct-tcpip or direct-streamlocal channel; the peer's
+// answer is awaited like a session open (ssh.Client.DialContext would
+// leave its goroutine behind on a wedged transport).
 func (c *Client) dial(ctx context.Context, network, addr string) (net.Conn, error) {
-	c.mu.Lock()
-	cli := c.cli
-	c.mu.Unlock()
+	cli := c.transport()
 	if cli == nil {
-		return nil, errors.New("ssh: not connected")
+		return nil, errNotConnected
 	}
-	return cli.DialContext(ctx, network, addr)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var (
+		conn    net.Conn
+		dialErr error
+	)
+	done := make(chan struct{})
+	go func() {
+		conn, dialErr = cli.Dial(network, addr)
+		close(done)
+	}()
+	if err := c.await(ctx, cli, done); err != nil {
+		select {
+		case <-done:
+			if conn != nil {
+				go conn.Close() // a channel close is a write that may block too
+			}
+		default:
+		}
+		return nil, err
+	}
+	return conn, dialErr
 }
 
 // Ping sends a keepalive request and reports whether the connection answered.
 func (c *Client) Ping(ctx context.Context) error {
-	c.mu.Lock()
-	cli := c.cli
-	c.mu.Unlock()
+	cli := c.transport()
 	if cli == nil {
-		return errors.New("ssh: not connected")
+		return errNotConnected
 	}
-	done := make(chan error, 1)
-	go func() {
-		_, _, err := cli.SendRequest("keepalive@openssh.com", true, nil)
-		done <- err
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-done:
+	if err := ctx.Err(); err != nil {
 		return err
 	}
+	var pingErr error
+	done := make(chan struct{})
+	go func() {
+		_, _, pingErr = cli.SendRequest("keepalive@openssh.com", true, nil)
+		close(done)
+	}()
+	if err := c.await(ctx, cli, done); err != nil {
+		return err
+	}
+	return pingErr
 }
 
-// Close tears the connection down.
+// Close tears the connection down. The lock is released before the close
+// itself, which may write to a dead peer.
 func (c *Client) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cli == nil {
+	cli := c.cli
+	c.cli = nil
+	c.mu.Unlock()
+	if cli == nil {
 		return nil
 	}
-	err := c.cli.Close()
-	c.cli = nil
-	return err
+	return cli.Close()
 }
