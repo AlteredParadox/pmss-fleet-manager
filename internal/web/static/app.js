@@ -157,6 +157,7 @@ function route() {
     S.tab = parts[2] || 'overview';
     if (S.detail && S.detail.id !== S.selId) S.detail = null; // never show one box's page under another's URL
     void loadDetail(S.selId);
+    if (S.tab === 'logs') rescanLogsIfStale(); // a direct or reloaded #/box/<id>/logs never passes the tab click
   } else if (S.view === 'edit') {
     S.selId = Number(parts[1]) || null;
     void startEdit(S.selId);
