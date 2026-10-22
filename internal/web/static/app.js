@@ -1554,7 +1554,7 @@ async function logAction(a, act) {
   if (a === 'log:file') V = { kind: 'file', key: act.dataset.path, label: act.dataset.path };
   else if (a === 'log:ctr') V = { kind: 'ctr', key: act.dataset.cid, label: `container ${act.dataset.name || act.dataset.cid.slice(0, 12)}` };
   else if (a !== 'log:refresh' || !V) return;
-  V = { ...V, busy: true, err: '' };
+  V = { ...V, busy: true, err: '', text: null, scrolled: false }; // a (re)read opens at its end again, like tail
   S.logView = V; S.filter = ''; render();
   try {
     const r = V.kind === 'file'

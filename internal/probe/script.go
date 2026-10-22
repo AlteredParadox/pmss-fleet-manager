@@ -230,7 +230,7 @@ const logsListShell = `(cd "$home" 2>/dev/null && for d in ` + logDirsShell + `;
 done
 for f in ` + logFilesShell + `; do
   [ -f "$f" ] && stat -c '%Y'"$(printf '\t')"'%s'"$(printf '\t')"'%n' "$f" 2>/dev/null
-done)
+done; :)
 `
 
 // LogTailScript prints the last lines of one log file under the home. The
