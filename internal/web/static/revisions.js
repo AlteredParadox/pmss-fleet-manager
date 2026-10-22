@@ -29,7 +29,7 @@
 (() => {
 'use strict';
 
-const revOf = (x) => (x && x.rev) || 0;
+const revOf = (x) => x?.rev || 0;
 
 // acceptSnapshot merges a snapshot into the list. One taken before the
 // newest already merged is refused outright (it could put back a box
@@ -51,7 +51,8 @@ function acceptSnapshot(S, boxes, rev) {
   }
   for (const cur of mine.values()) if (revOf(cur) > rev) { out.push(cur); kept = true; }
   for (const [id, r] of S.removed) if (r <= rev) S.removed.delete(id); // the snapshot already lacks it
-  S.boxes = out.sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
+  out.sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
+  S.boxes = out;
   S.snapRev = rev;
   return { accepted: true, kept };
 }
