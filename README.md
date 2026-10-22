@@ -377,7 +377,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.5.0 is the current release. The code was written against five real Pulsed
+1.5.1 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -388,6 +388,18 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.5.1**
+
+- The WebUI connection check works again on socket-table-privacy hosts
+  after the PMSS update of 2026-10-22, which made `/etc/seedbox` root-only
+  on some of them: the opt-in marker file the check looked for is out of a
+  tenant's reach there, so every connection was refused as "could not
+  inspect the box's socket table". The policy is now also recognised by its
+  signature (the kernel's socket tables present but denied, `ss` still
+  listing listeners and reporting no other socket); an incomplete
+  signature still refuses. The same update made the PMSS version file
+  root-only, so that field stays blank until Pulsed Media reopens it. (#99)
 
 **1.5.0** closes the remaining findings of the external review of 1.4.0
 (twenty-three in all; the cheap ones shipped in 1.4.0) and clears Sonar's
