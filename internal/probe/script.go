@@ -226,9 +226,14 @@ echo "uid $uid"
 // sides, from /proc/net/tcp{,6} (hex) or, where those are root-only, from
 // ss -Htnp (dec; uid is ours for our own processes' sockets, else x).
 // "privacy" marks a box that hides non-listening sockets by policy
-// (Pulsed Media's opt-in marker file): the caller falls back to the
-// listener check there. Any other failure to inspect prints "failed <rc>"
-// and the caller refuses: a gate that cannot run must not pass.
+// (Pulsed Media's socket-table privacy, ADR 0068): the caller falls back
+// to the listener check there. The policy is recognised by its opt-in
+// marker file, or, since the PMSS update of 2026-10-22 made /etc/seedbox
+// itself root-only on some hosts, by its signature: the kernel's tables
+// present but denied to this account while ss still lists listeners and
+// reports no non-listening socket at all. Any other failure to inspect
+// prints "failed <rc>" and the caller refuses: a gate that cannot run
+// must not pass.
 func EstablishedScript(port int) string {
 	return "#!/bin/sh\nLC_ALL=C; export LC_ALL\nport=" + strconv.Itoa(port) + "\n" +
 		`uid=$(id -u)
@@ -241,11 +246,23 @@ if [ -n "$rows" ] && [ "${rows##*seen }" != "0" ]; then
   echo "base hex"; printf '%s\n' "$rows"
 else
   out=$(timeout 10 ss -Htnp 2>/dev/null); rc=$?
-  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
-    if [ -e "$marker" ]; then echo "privacy"; else echo "failed $rc"; fi
-  else
+  if [ "$rc" -ne 0 ]; then
+    echo "failed $rc"
+  elif [ -n "$out" ]; then
     echo "base dec"
     printf '%s\n' "$out" | awk -v uid="$uid" -v port="$port" '{o="x"; if ($6 ~ /^users:\(\(/) o=uid; m=split($4,a,":"); lp=a[m]; la=substr($4,1,length($4)-length(lp)-1); sub(/%.*/,"",la); m=split($5,b,":"); rp=b[m]; ra=substr($5,1,length($5)-length(rp)-1); sub(/%.*/,"",ra); if (rp==port) print "c", lp, o, $1, ra; if (lp==port) print "s", rp, o, $1, la}'
+  else
+    # ss ran and listed no non-listening socket at all, not even this
+    # account's own tunnel: the privacy policy, if its whole signature
+    # shows (the marker, or the kernel's tables present but denied to us
+    # while ss can still list listeners, which proves ss works and the
+    # filter lets LISTEN through). Anything else is a failure.
+    first=${tables%% *}
+    if [ -e "$marker" ] || { [ -e "$first" ] && ! [ -r "$first" ] && [ -n "$(timeout 10 ss -Hltnp 2>/dev/null)" ]; }; then
+      echo "privacy"
+    else
+      echo "failed $rc"
+    fi
   fi
 fi
 echo end
