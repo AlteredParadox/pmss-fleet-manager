@@ -181,6 +181,10 @@ async function loadState() {
     const d = await api('GET', BASE + '/api/state');
     if (d.instance && S.instance && d.instance !== S.instance) { location.reload(); return; } // server was rebuilt: pick up new JS/CSS
     S.instance = d.instance || S.instance;
+    // Loads overlap (a resync, a settings event and a services event can
+    // all be in flight): one taken before a snapshot that already landed
+    // is superseded and must not put back a box removed between the two.
+    if ((d.rev || 0) < S.snapRev) return true;
     S.version = d.version; S.sourceUrl = d.source_url;
     const kept = mergeSnapshot(d.boxes || [], d.rev || 0);
     S.totals = d.totals || {};
@@ -199,8 +203,9 @@ async function loadState() {
 // overwrite the other: a box is taken from the snapshot unless the list
 // already holds a newer revision of it, a box only in the list stays if it
 // appeared after the snapshot, and a box only in the snapshot is dropped if
-// its removal was already seen. Returns whether the stream had already
-// moved the list past the snapshot (so its totals are stale too).
+// its removal was already seen. The caller rejects a snapshot older than
+// the last one merged. Returns whether the stream had already moved the
+// list past the snapshot (so its totals are stale too).
 function mergeSnapshot(boxes, rev) {
   const mine = new Map(S.boxes.map((b) => [b.id, b]));
   const out = [];

@@ -207,3 +207,34 @@ func TestCommitAfterRemoveStoresNothing(t *testing.T) {
 		t.Fatalf("removed box is back: %+v", states)
 	}
 }
+
+// Removing a box deletes its alerts with it; the removed event goes out
+// in revision order (before the row delete), so a second tab learns the
+// corrected alert count from an alerts event after the delete has landed.
+func TestRemoveBoxNotifiesAlertsAfterDelete(t *testing.T) {
+	ctx := context.Background()
+	m, boxes := revTestManager(t, 1)
+	if _, err := m.st.RaiseAlert(ctx, boxes[0].ID, "k", "bad", "t"); err != nil {
+		t.Fatal(err)
+	}
+	ch, cancel := m.Bus().Subscribe()
+	defer cancel()
+	if err := m.RemoveBox(ctx, boxes[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	var got []Event
+	for len(got) < 2 {
+		select {
+		case ev := <-ch:
+			got = append(got, ev)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("after removal: %+v", got)
+		}
+	}
+	if got[0].Type != "removed" || got[0].Unacked != 1 {
+		t.Fatalf("first event: %+v", got[0])
+	}
+	if got[1].Type != "alerts" || got[1].Unacked != 0 {
+		t.Fatalf("second event must report the cascaded alerts: %+v", got[1])
+	}
+}

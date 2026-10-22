@@ -495,7 +495,13 @@ func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 	// manager's context so a closed browser cannot leave the row behind.
 	sctx, scancel := context.WithTimeout(m.ctx, 30*time.Second)
 	defer scancel()
-	return m.st.DeleteBox(sctx, id)
+	if err := m.st.DeleteBox(sctx, id); err != nil {
+		return err
+	}
+	// The removed event counted the box's alerts before the delete
+	// cascaded them away: tell every tab the count and list changed.
+	m.Publish(Event{Type: "alerts"})
+	return nil
 }
 
 // Refresh asks one poller to poll now.
