@@ -74,6 +74,13 @@ func put(t *testing.T, h http.Handler, st *store.Store, id int64, body string, h
 
 func do(t *testing.T, h http.Handler, method, path, body string, hdr map[string]string) (int, string) {
 	t.Helper()
+	code, rr := doRec(t, h, method, path, body, hdr)
+	return code, rr.Body.String()
+}
+
+// doRec is do with the whole recorded response, for header checks.
+func doRec(t *testing.T, h http.Handler, method, path, body string, hdr map[string]string) (int, *httptest.ResponseRecorder) {
+	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Host = "dash.local:8080"
 	if method != "GET" {
@@ -88,7 +95,7 @@ func do(t *testing.T, h http.Handler, method, path, body string, hdr map[string]
 	}
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	return rr.Code, rr.Body.String()
+	return rr.Code, rr
 }
 
 func TestAlertAckFlow(t *testing.T) {
@@ -577,9 +584,11 @@ func TestReadLogValidation(t *testing.T) {
 			t.Fatalf("%s: code %d %s", body, code, out)
 		}
 	}
-	// A well-formed path the box never listed is refused before any SSH.
+	// A well-formed path is refused before any SSH while no probe of the
+	// box has listed its logs (409, like a disabled box); the listed-path
+	// check itself is tested in collect.
 	code, out := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/logs/read", id), `{"path":".logs/x.log"}`, hdr)
-	if code != 502 || !strings.Contains(out, "not one of the log files found") {
+	if code != 409 || !strings.Contains(out, "not been probed") {
 		t.Fatalf("unlisted path: %d %s", code, out)
 	}
 	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/containers/zz/logs", id), "", hdr); code != 400 {
@@ -590,31 +599,67 @@ func TestReadLogValidation(t *testing.T) {
 	}
 }
 
+// The basic-auth throttle slows presented wrong credentials per address
+// and never the right one, so a shared address (every client behind a
+// reverse proxy) cannot be locked out by a stranger; a request with no
+// credential gets the challenge and is not counted (GPT audit 2026-10-22
+// finding 3, with its availability-over-throttling trade-off).
 func TestAuthThrottleAndSSECap(t *testing.T) {
 	s, _ := newTestServerWith(t, "me:secret", "")
 	bad := map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("me:wrong"))}
 	good := map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("me:secret"))}
+	challenge := func(code int, rr *httptest.ResponseRecorder) {
+		t.Helper()
+		if code != 401 || !strings.HasPrefix(rr.Header().Get("WWW-Authenticate"), "Basic ") {
+			t.Fatalf("code %d, WWW-Authenticate %q; want the challenge", code, rr.Header().Get("WWW-Authenticate"))
+		}
+	}
 	for i := 0; i < authFreeTries; i++ {
 		if code, _ := do(t, s, "GET", "/api/state", "", bad); code != 401 {
 			t.Fatalf("attempt %d: %d, want 401", i+1, code)
 		}
 	}
+	code, rr := doRec(t, s, "GET", "/api/state", "", bad)
+	if code != 429 || rr.Header().Get("Retry-After") != "30" {
+		t.Fatalf("past the free tries: %d Retry-After %q, want 429 and 30", code, rr.Header().Get("Retry-After"))
+	}
+	// Before the wait is over: no credential is still the challenge, the
+	// wrong one is still 429, the right one gets in and clears the budget.
+	code, rr = doRec(t, s, "GET", "/api/state", "", nil)
+	challenge(code, rr)
 	if code, _ := do(t, s, "GET", "/api/state", "", bad); code != 429 {
-		t.Fatalf("past the free tries: %d, want 429", code)
+		t.Fatalf("wrong credential during the wait: %d, want 429", code)
 	}
-	if code, _ := do(t, s, "GET", "/api/state", "", good); code != 429 {
-		t.Fatalf("a throttled address is throttled even with the right password: %d", code)
-	}
-	s.authMu.Lock()
-	for _, f := range s.authFails {
-		f.until = time.Time{} // the wait elapsed
-	}
-	s.authMu.Unlock()
 	if code, _ := do(t, s, "GET", "/api/state", "", good); code != 200 {
-		t.Fatalf("after the wait: %d", code)
+		t.Fatalf("the right credential during the wait: %d, want 200", code)
 	}
 	if code, _ := do(t, s, "GET", "/api/state", "", bad); code != 401 {
-		t.Fatal("a success resets the count")
+		t.Fatal("a success clears the budget")
+	}
+	// Six wrong ones in a row from a proxy's address, then the user.
+	for i := 0; i <= authFreeTries; i++ {
+		do(t, s, "GET", "/api/state", "", bad)
+	}
+	if code, _ := do(t, s, "GET", "/api/state", "", good); code != 200 {
+		t.Fatalf("locked out behind a shared address: %d", code)
+	}
+	// Uncounted challenges never start a wait.
+	for i := 0; i < 3*authFreeTries; i++ {
+		code, rr = doRec(t, s, "GET", "/api/state", "", nil)
+		challenge(code, rr)
+	}
+	if code, _ := do(t, s, "GET", "/api/state", "", bad); code != 401 {
+		t.Fatalf("after uncounted challenges one wrong credential is a plain 401, got %d", code)
+	}
+	// The wait is the remaining time rounded up to whole seconds.
+	s.authMu.Lock()
+	for _, f := range s.authFails {
+		f.count, f.until = authFreeTries+1, time.Now().Add(1500*time.Millisecond)
+	}
+	s.authMu.Unlock()
+	code, rr = doRec(t, s, "GET", "/api/state", "", bad)
+	if code != 429 || rr.Header().Get("Retry-After") != "2" {
+		t.Fatalf("remaining wait: %d Retry-After %q, want 429 and 2", code, rr.Header().Get("Retry-After"))
 	}
 	// Event streams are capped.
 	for i := 0; i < maxSSEStreams; i++ {
@@ -628,7 +673,7 @@ func TestAuthThrottleAndSSECap(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/events", nil).WithContext(ctx)
 	req.Host = "dash.local:8080"
 	req.Header.Set("Authorization", good["Authorization"])
-	rr := httptest.NewRecorder()
+	rr = httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() { s.ServeHTTP(rr, req); close(done) }()
 	time.Sleep(50 * time.Millisecond)

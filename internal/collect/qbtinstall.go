@@ -261,6 +261,9 @@ func (p *poller) pmssManagedQbt() bool {
 }
 
 func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, error) {
+	if _, err := p.readyState(); err != nil {
+		return "", err // the panel-managed check below needs a probe of this machine
+	}
 	if p.pmssManagedQbt() {
 		return "", errPMSSManagedQbt
 	}
@@ -292,6 +295,9 @@ func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, er
 }
 
 func (p *poller) qbtAutostart(ctx context.Context) (string, error) {
+	if _, err := p.readyState(); err != nil {
+		return "", err
+	}
 	if p.pmssManagedQbt() {
 		return "", errPMSSManagedQbt
 	}
@@ -310,6 +316,9 @@ func (p *poller) qbtAutostart(ctx context.Context) (string, error) {
 }
 
 func (p *poller) qbtRestart(ctx context.Context) (string, error) {
+	if _, err := p.readyState(); err != nil {
+		return "", err
+	}
 	cli, err := p.conn(ctx)
 	if err != nil {
 		return "", err

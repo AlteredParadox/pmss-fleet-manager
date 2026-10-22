@@ -643,6 +643,24 @@ func (s *Store) ResolveAlert(ctx context.Context, boxID int64, key string) error
 	return err
 }
 
+// ResolveBoxAlerts resolves every active alert of a box except the given
+// keys, and reports how many it resolved. Used when a record moves to
+// another machine: the old machine's alerts are not the new one's.
+func (s *Store) ResolveBoxAlerts(ctx context.Context, boxID int64, except ...string) (int64, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	q := `UPDATE alerts SET active=0, resolved_at=?, updated_at=? WHERE box_id=? AND active=1`
+	args := []any{now, now, boxID}
+	for _, k := range except {
+		q += ` AND key<>?`
+		args = append(args, k)
+	}
+	res, err := s.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ListAlerts returns alerts, newest first, active before resolved.
 func (s *Store) ListAlerts(ctx context.Context, limit int) ([]Alert, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, box_id, key, severity, title, active, acked, created_at, updated_at, resolved_at
@@ -704,6 +722,16 @@ func (s *Store) SetCache(ctx context.Context, boxID int64, kind string, v any) e
 	_, err = s.db.ExecContext(ctx, `INSERT INTO box_cache (box_id, kind, json, at) VALUES (?,?,?,?)
 		ON CONFLICT(box_id, kind) DO UPDATE SET json=excluded.json, at=excluded.at`, boxID, kind, string(b), time.Now().UTC().Format(time.RFC3339))
 	return err
+}
+
+// DeleteCache drops the given cached kinds of a box.
+func (s *Store) DeleteCache(ctx context.Context, boxID int64, kinds ...string) error {
+	for _, k := range kinds {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM box_cache WHERE box_id=? AND kind=?`, boxID, k); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetCache loads a cached blob into v and returns when it was written.

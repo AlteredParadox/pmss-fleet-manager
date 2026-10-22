@@ -106,12 +106,19 @@ const (
 	authThrottleMax = 10 * time.Minute
 )
 
-// authThrottled reports whether a failed-auth client must wait, and
-// records a failure or a success. Keyed by the connection's address, so
-// behind a reverse proxy it is one shared budget, which is what an
-// internet-facing deployment without the recommended proxy-side limiting
-// needs most.
-func (s *Server) authThrottled(addr string, failed bool) bool {
+// authThrottled records a presented credential's outcome for the client's
+// address and returns how long a failed one must wait (zero: not throttled).
+// Keyed by the connection's address, so behind a reverse proxy every client
+// shares one budget. A valid credential is never throttled and clears the
+// budget: the alternative, refusing the right password during the wait,
+// lets anyone on the internet lock the one real user out of a proxied
+// instance for good with a request per wait. The cost is that a guesser
+// who ignores the 429s is only slowed by the round trip, so the throttle
+// is a brake on naive tools, not a substitute for a strong password and
+// proxy-side authentication (see the README). Requests that present no
+// credential at all are answered with the challenge before this and never
+// counted, or a browser behind a throttled address could not even prompt.
+func (s *Server) authThrottled(addr string, failed bool) time.Duration {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
@@ -121,14 +128,14 @@ func (s *Server) authThrottled(addr string, failed bool) bool {
 	if s.authFails == nil || len(s.authFails) > 4096 {
 		s.authFails = map[string]*authFail{}
 	}
+	if !failed {
+		delete(s.authFails, host)
+		return 0
+	}
 	f := s.authFails[host]
 	now := time.Now()
 	if f != nil && now.Before(f.until) {
-		return true // the wait applies to every attempt, right password included: that is what slows guessing
-	}
-	if !failed {
-		delete(s.authFails, host)
-		return false
+		return f.until.Sub(now) // a failure during the wait does not lengthen it
 	}
 	if f == nil {
 		f = &authFail{}
@@ -136,10 +143,11 @@ func (s *Server) authThrottled(addr string, failed bool) bool {
 	}
 	f.count++
 	if f.count > authFreeTries {
-		f.until = now.Add(min(time.Duration(f.count-authFreeTries)*authThrottle, authThrottleMax))
-		return true
+		wait := min(time.Duration(f.count-authFreeTries)*authThrottle, authThrottleMax)
+		f.until = now.Add(wait)
+		return wait
 	}
-	return false
+	return 0
 }
 
 // SetAllowedHosts restricts served Host headers to the given hostnames
@@ -310,8 +318,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.auth != "" && !s.isPublicPath(r.URL.Path) {
 		u, p, ok := r.BasicAuth()
-		good := ok && subtle.ConstantTimeCompare([]byte(u+":"+p), []byte(s.auth)) == 1
-		if s.authThrottled(r.RemoteAddr, !good) {
+		if !ok {
+			// No credential presented (a fresh browser, a probe): the
+			// challenge, and nothing counted against the address.
+			w.Header().Set("WWW-Authenticate", `Basic realm="pmss-fleet-manager"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		good := subtle.ConstantTimeCompare([]byte(u+":"+p), []byte(s.auth)) == 1
+		if wait := s.authThrottled(r.RemoteAddr, !good); wait > 0 {
+			w.Header().Set("Retry-After", strconv.FormatInt(int64((wait+time.Second-1)/time.Second), 10)) // whole seconds, rounded up
 			http.Error(w, "too many failed logins from this address; try again later", http.StatusTooManyRequests)
 			return
 		}
@@ -855,12 +871,13 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 }
 
 // actionCode maps a box action's failure to a status: the box is missing
-// (404), its polling is off (409), or the box itself did not cooperate (502).
+// (404), its polling is off or it has not been probed yet (409), or the
+// box itself did not cooperate (502).
 func actionCode(err error) int {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return 404
-	case errors.Is(err, collect.ErrDisabled):
+	case errors.Is(err, collect.ErrDisabled), errors.Is(err, collect.ErrNotReady):
 		return 409
 	}
 	return 502

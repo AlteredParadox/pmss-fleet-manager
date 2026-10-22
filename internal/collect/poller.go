@@ -54,6 +54,7 @@ type poller struct {
 	qbt   *qbt.Client
 	qbtP  int
 	dk    *dockerx.Client
+	dkUID int            // the UID dk was dialled for
 	guard *qbt.AuthGuard // outlives p.qbt; see qbt.AuthGuard
 
 	prevCPU   int64
@@ -85,7 +86,9 @@ type poller struct {
 	duMu      sync.Mutex
 	duRunning bool
 	duForce   bool
-	lastDu    time.Time
+	lastDu    time.Time      // when a measurement last completed
+	duRetryAt time.Time      // earliest automatic attempt after a failed one (see duRetry)
+	duWG      sync.WaitGroup // the runDu goroutine; stopAndWait joins it
 
 	wakeCh chan struct{}
 	stopCh chan struct{}
@@ -220,6 +223,9 @@ func (p *poller) storeFix(start time.Time, keepDirs bool) func(s, stored *BoxSta
 		// toggle that landed while this poll was in flight wins.
 		s.Apps.Watched = stored.Apps.Watched
 		s.Apps.markWatched()
+		// Readiness is the generation's, not the poll's: a failed poll
+		// that started before the probe that set it must not unset it.
+		s.Ready = s.Ready || stored.Ready
 	}
 }
 
@@ -274,6 +280,36 @@ func (p *poller) stopAndWait() {
 		<-p.doneCh
 	}
 	p.closeConns()
+	// The du worker checks for cancellation once after its command returns;
+	// one that passed the check is writing. Wait for it (closing the
+	// connection has ended its command), so the replacement poller of an
+	// edit never races it for the cache or the live state.
+	p.duWG.Wait()
+}
+
+// generation is the box's current generation (see generation in state.go):
+// the host key is read under the lock, since conn pins it.
+func (p *poller) generation() string {
+	return generation(p.box.Host, p.box.Port, p.box.User, fingerprintOrEmpty(p.hostKey()))
+}
+
+// sameGeneration reports whether a measurement taken under gen is this
+// box's (see sameGeneration in state.go).
+func (p *poller) sameGeneration(gen string) bool {
+	b := *p.box
+	b.HostKey = p.hostKey()
+	return sameGeneration(gen, &b)
+}
+
+// readyState returns the live state once a complete probe of the current
+// generation has filled it (BoxState.Ready); until then an action that
+// would use the UID, a container ID or the log list gets ErrNotReady.
+func (p *poller) readyState() (BoxState, error) {
+	st, ok := p.m.State(p.box.ID)
+	if !ok || !st.Ready {
+		return BoxState{}, ErrNotReady
+	}
+	return st, nil
 }
 
 // stopped reports whether this poller was retired by an edit or removal;
@@ -532,6 +568,9 @@ func (p *poller) poll(ctx context.Context) {
 	}
 	p.qbtBinStat, p.qbtBinVersion, snap.Qbt.BinaryVersion = resolveQbtVersion(p.qbtBinStat, p.qbtBinVersion, snap.Qbt)
 	p.apply(&st, snap)
+	if snap.UID > 0 {
+		st.Ready = true // the facts below are this generation's; actions may use them
+	}
 
 	if p.box.QbtEnabled {
 		p.pollQbt(ctx, &st, snap)
@@ -770,7 +809,10 @@ const LogTailLines = 300
 
 // readLog tails one of the log files the last probe listed.
 func (p *poller) readLog(ctx context.Context, path string) (string, error) {
-	st, _ := p.m.State(p.box.ID)
+	st, err := p.readyState()
+	if err != nil {
+		return "", err
+	}
 	if !st.Logs.has(path) {
 		return "", fmt.Errorf("%q is not one of the log files found on the box", path)
 	}
@@ -794,10 +836,16 @@ func (p *poller) containerLogs(ctx context.Context, cid string) (string, error) 
 	}
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
+	st, err := p.readyState()
+	if err != nil {
+		return "", err
+	}
+	if !st.Docker.has(cid) {
+		return "", errContainerUnknown
+	}
 	if _, err := p.conn(actx); err != nil {
 		return "", err
 	}
-	st, _ := p.m.State(p.box.ID)
 	if st.UID == 0 {
 		return "", ErrUnavailable
 	}
@@ -1135,11 +1183,18 @@ func qbtNeedsCreds(snap *probe.Snapshot, b *store.Box) string {
 	return "qBittorrent requires a WebUI login (localhost bypass is off in qBittorrent.conf) and no credentials are set for this box; add them under edit"
 }
 
+// dockerClient returns the client for the account's rootless daemon,
+// rebuilt when the UID differs from the one it was dialled for.
 func (p *poller) dockerClient(uid int) *dockerx.Client {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.dk != nil && p.dkUID != uid {
+		p.dk.Close()
+		p.dk = nil
+	}
 	if p.dk == nil {
 		p.dk = dockerx.New(p.sshDialUnix(fmt.Sprintf("/run/user/%d/docker.sock", uid)))
+		p.dkUID = uid
 	}
 	return p.dk
 }
@@ -1242,8 +1297,12 @@ func (p *poller) maybeDu(ctx context.Context, st *BoxState) {
 	// a du finishing mid-poll is overwritten by that poll's stale copy, so
 	// reload the cached result whenever the live state has none or the
 	// cache is newer.
+	// A result from another generation (the record moved, the process
+	// died before the row was dropped) is not this machine's. One without
+	// a generation predates the tag and cannot be placed either: it is
+	// dropped too, at the cost of one measurement after the upgrade.
 	var cached DirsState
-	if at, err := p.m.st.GetCache(ctx, p.box.ID, "du", &cached); err == nil && (len(st.Dirs.Entries) == 0 || at.After(st.Dirs.At)) {
+	if at, err := p.m.st.GetCache(ctx, p.box.ID, "du", &cached); err == nil && (len(st.Dirs.Entries) == 0 || at.After(st.Dirs.At)) && p.sameGeneration(cached.Gen) {
 		cached.At = at
 		cached.Enabled = p.box.DuEnabled
 		cached.Running = false
@@ -1270,14 +1329,20 @@ func (p *poller) maybeDu(ctx context.Context, st *BoxState) {
 	if p.lastDu.After(last) {
 		last = p.lastDu
 	}
-	if !p.duForce && time.Since(last) < time.Duration(hours)*time.Hour {
+	if !p.duForce && (time.Since(last) < time.Duration(hours)*time.Hour || time.Now().Before(p.duRetryAt)) {
 		return
 	}
 	p.duForce = false
 	p.duRunning = true
 	st.Dirs.Running = true
+	p.duWG.Add(1)
 	go p.runDu(ctx)
 }
+
+// duRetry spaces automatic attempts after a measurement that did not
+// complete (no connection, timeout, SSH drop): sooner than the configured
+// interval, which is for completed measurements, but not every poll.
+const duRetry = time.Hour
 
 // maxDuEntries bounds the per-box directory list kept in state and cache;
 // anything beyond the largest entries is summed under duRestName.
@@ -1325,30 +1390,49 @@ func capEntries(es []DirEntry) []DirEntry {
 }
 
 func (p *poller) runDu(ctx context.Context) {
-	defer func() {
-		p.duMu.Lock()
-		p.duRunning = false
-		p.lastDu = time.Now()
-		p.duMu.Unlock()
-		p.wake()
-	}()
+	defer p.duWG.Done()
 	p.mu.Lock()
 	cli := p.ssh
 	p.mu.Unlock()
 	if cli == nil {
+		p.duDone(false)
 		return
 	}
 	dctx, cancel := context.WithTimeout(ctx, duTimeout)
 	defer cancel()
 	out, _, err := cli.Run(dctx, "sh", strings.NewReader(probe.DuScript))
-	sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second) // the write outlives a retired poll; cancellation is checked below
-	defer scancel()
-	res := DirsState{Enabled: true, At: time.Now()}
 	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 		// Retired by an edit/removal/shutdown mid-run: leave the cache and
 		// the (new poller's) state alone; nothing was measured.
+		p.duDone(false)
 		return
 	}
+	p.duDone(p.finishDu(ctx, out, err))
+}
+
+// duDone records how a measurement ended: a completed one starts the
+// configured interval, any other waits duRetry before the next automatic
+// attempt (a failure is not a completed interval).
+func (p *poller) duDone(completed bool) {
+	p.duMu.Lock()
+	p.duRunning = false
+	if completed {
+		p.lastDu = time.Now()
+	} else {
+		p.duRetryAt = time.Now().Add(duRetry)
+	}
+	p.duMu.Unlock()
+	p.wake()
+}
+
+// finishDu turns the du command's output into the box's Dirs and reports
+// whether a measurement completed. The cache and the live state are only
+// written by the poller that is still the box's (checked under the
+// manager's lock for the state; the cache row carries the generation, so a
+// row from another machine is refused when read).
+func (p *poller) finishDu(ctx context.Context, out []byte, err error) bool {
+	sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second) // the write outlives a retired poll
+	defer scancel()
 	// du exits non-zero for unreadable entries but its output is still a
 	// full measurement; any other failure (timeout, SSH drop, closed
 	// session) means the per-directory lines stopped part-way.
@@ -1357,18 +1441,27 @@ func (p *poller) runDu(ctx context.Context) {
 	// An overrun stdout is never a measurement, whatever du's exit status
 	// (sshx.Run does not wrap the exit error into that case; checked here
 	// explicitly all the same).
-	interrupted := errors.Is(err, sshx.ErrOutputLimit) || err != nil && (len(out) == 0 || !finished)
-	if interrupted {
+	if errors.Is(err, sshx.ErrOutputLimit) || err != nil && (len(out) == 0 || !finished) {
 		// Interrupted (SSH drop, timeout, killed): du prints one line per
 		// directory as it goes, so partial output is NOT a measurement.
-		// Keep the last good one and only attach the error.
-		var prev DirsState
-		if at, gerr := p.m.st.GetCache(sctx, p.box.ID, "du", &prev); gerr == nil {
-			res.Entries, res.At = capEntries(prev.Entries), at
-		}
-		res.Error = describeErr(err)
-	} else {
-		res.Entries = foldDu(probe.ParseDu(out))
+		// The last good one stays in the cache untouched (its row time is
+		// its measurement time); only the live state learns of the error.
+		why := describeErr(err)
+		p.m.commit(p.box.ID, func(cur *BoxState) *BoxState {
+			if p.m.pollers[p.box.ID] != p { // fn runs under m.mu
+				return nil // retired meanwhile: the state is another generation's
+			}
+			cur.Dirs.Error, cur.Dirs.Running = why, false
+			return cur
+		}, commitOpts{})
+		return false
+	}
+	res := DirsState{Enabled: true, At: time.Now(), Gen: p.generation(), Entries: foldDu(probe.ParseDu(out))}
+	// stopAndWait joins this goroutine before an edit replaces the poller,
+	// and the generation tag refuses the row to any other machine; the
+	// check here only spares a pointless write after a removal.
+	if p.m.poller(p.box.ID) != p {
+		return true
 	}
 	if err := p.m.st.SetCache(sctx, p.box.ID, "du", res); err != nil {
 		p.m.log.Warn("cache du", "box", p.box.Name, "err", err)
@@ -1376,10 +1469,14 @@ func (p *poller) runDu(ctx context.Context) {
 	// Merge into the live state without waiting for the next poll (which
 	// reports it to the UI).
 	p.m.commit(p.box.ID, func(cur *BoxState) *BoxState {
+		if p.m.pollers[p.box.ID] != p { // fn runs under m.mu
+			return nil
+		}
 		res.Enabled = cur.Dirs.Enabled // an edit may have switched measurement off meanwhile
 		cur.Dirs = res
 		return cur
 	}, commitOpts{})
+	return true
 }
 
 func (p *poller) record(ctx context.Context, st *BoxState) {
@@ -1401,6 +1498,9 @@ func (p *poller) record(ctx context.Context, st *BoxState) {
 const authCacheKind = "qbt_auth"
 
 func (p *poller) qbtAction(ctx context.Context, action string) error {
+	if _, err := p.readyState(); err != nil {
+		return err // start runs the box's own start command; the rest send credentials
+	}
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 	switch action {
@@ -1439,11 +1539,14 @@ func (p *poller) qbtWebUI(ctx context.Context) (*qbt.Client, error) {
 	if !p.box.QbtEnabled {
 		return nil, errors.New("qBittorrent is not enabled for this box")
 	}
+	st, err := p.readyState()
+	if err != nil {
+		return nil, err
+	}
 	sshc, err := p.conn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	st, _ := p.m.State(p.box.ID)
 	if !st.Qbt.PortOK {
 		return nil, errors.New("the WebUI port has not been verified as owned by this account yet (see the client error on the overview); not sending credentials")
 	}
@@ -1498,16 +1601,25 @@ func (p *poller) addTorrents(ctx context.Context, req qbt.AddRequest) (qbt.AddRe
 	return cli.Add(actx, req)
 }
 
+// errContainerUnknown refuses a container ID the last poll did not list.
+var errContainerUnknown = errors.New("that container is not in the box's current container list; refresh and retry")
+
 func (p *poller) containerAction(ctx context.Context, cid, action string) error {
 	if !p.box.DockerEnabled {
 		return errors.New("docker is not enabled for this box")
+	}
+	st, err := p.readyState()
+	if err != nil {
+		return err
+	}
+	if !st.Docker.has(cid) {
+		return errContainerUnknown
 	}
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 	if _, err := p.conn(actx); err != nil {
 		return err
 	}
-	st, _ := p.m.State(p.box.ID)
 	if st.UID == 0 {
 		return ErrUnavailable
 	}
