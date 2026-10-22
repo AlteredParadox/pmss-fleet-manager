@@ -9,80 +9,49 @@ const src = readFileSync(new URL('./static/view.js', import.meta.url), 'utf8');
 vm.runInThisContext(src); // defines globalThis.pfmView, as the page's script tag does
 const V = globalThis.pfmView;
 
-const width = (html, nth) => Number(html.match(/width:([\d.]+)%/g)[nth].match(/[\d.]+/)[0]);
+const width = (html, nth = 0) => Number(html.match(/width:([\d.]+)%/g)[nth].match(/[\d.]+/)[0]);
 
-test('an unknown host share is a dash, never 0% (fred review on #110)', () => {
-  // A valid host reading and valid, nonzero quota-relative tenant usage, but
-  // no host core count: host_pct is then a zero-initialised field.
-  const cpu = { ok: true, pct: 37, host_pct: 0, quota_cpus: 2, host_cpus: 0 };
-  const host = { cpu_ok: true, cpu_busy_pct: 40 };
-  assert.equal(V.hostShare(cpu), null);
-  const out = V.ovCpuBar(cpu, host);
-  assert.match(out.html, /you — of the host/);
-  assert.doesNotMatch(out.html, /you 0/);
-  assert.equal(width(out.html, 0), 40);
-  assert.equal(width(out.html, 1), 0);
-  assert.equal(width(out.html, 2), 37, 'the quota meter under the host bar still shows usage against the quota');
-  assert.match(out.html, /37% of your 2\.0-core quota/);
-  assert.equal(out.caption, 'host 40% busy');
+test('an unknown host share is null, never 0 (fred review on #110)', () => {
+  // A valid tenant sample with nonzero quota-relative usage but no host core
+  // count: host_pct is then a zero-initialised field, not a measurement.
+  assert.equal(V.hostShare({ ok: true, pct: 37, host_pct: 0, quota_cpus: 2, host_cpus: 0 }), null);
   assert.equal(V.hostShare({ ok: false, host_cpus: 8, host_pct: 0 }), null, 'no tenant sample');
   assert.equal(V.hostShare(undefined), null);
-});
-
-test('a known share draws blue inside grey on one scale', () => {
-  const out = V.ovCpuBar({ ok: true, pct: 2.1, host_pct: 0.52, quota_cpus: 2, host_cpus: 8 }, { cpu_ok: true, cpu_busy_pct: 40 });
-  assert.match(out.html, /host 40% busy · you 0\.5% of the host/);
-  assert.equal(width(out.html, 0), 40);
-  assert.equal(width(out.html, 1), 1.3); // 0.52 of 40, so the blue part is 0.52% of the whole bar
-  assert.equal(width(out.html, 2), 2.1);
   assert.equal(V.hostShare({ ok: true, host_cpus: 8, host_pct: 0.52 }), 0.52);
 });
 
-test('without a host cpu reading the bar is the quota meter alone', () => {
-  const out = V.ovCpuBar({ ok: true, pct: 37, host_pct: 0.5, host_cpus: 8 }, { cpu_ok: false });
-  assert.match(out.html, /class="meter thick"/);
-  assert.doesNotMatch(out.html, /lvbar/);
-  assert.equal(width(out.html, 0), 37);
-  assert.equal(out.caption, '');
-  assert.equal(width(V.ovCpuBar({ ok: true, pct: 250 }, undefined).html, 0), 100, 'capped at the bar');
+test('ram share of the host needs both a cgroup sample and a host reading', () => {
+  assert.equal(V.ramHostShare({ ok: true, rss_bytes: 15, used_bytes: 40 }, { mem_total: 100, mem_avail: 40 }), 15);
+  assert.equal(V.ramHostShare({ ok: true, rss_bytes: 0, used_bytes: 30 }, { mem_total: 100 }), 30, 'charged memory when rss is unknown');
+  assert.equal(V.ramHostShare({ ok: false, rss_bytes: 0, used_bytes: 0 }, { mem_total: 100 }), null, 'zeros without a sample are not 0%');
+  assert.equal(V.ramHostShare({ ok: true, rss_bytes: 15 }, { mem_total: 0 }), null);
+  assert.equal(V.ramHostShare({ ok: true, rss_bytes: 15 }, undefined), null);
 });
 
-test('ram: host used in grey, your processes in blue, the limit meter under it in colour', () => {
-  const out = V.ovRamBar({ ok: true, pct: 96, rss_bytes: 15, used_bytes: 40 }, { mem_total: 100, mem_avail: 40 }, 'bad');
-  assert.equal(width(out.html, 0), 60);
-  assert.equal(width(out.html, 1), 25); // 15 of 60
-  assert.equal(width(out.html, 2), 96, 'against your limit, where the warning belongs');
-  assert.match(out.html, /class="meter quota" title="96% of your memory limit"><i class="bad"/);
-  assert.doesNotMatch(out.html, /lvbar[^]*class="bad"[^]*<\/i><\/i>/, 'the hairline inside the host bar stays plain blue');
-  assert.match(out.html, /host memory 60% used · your processes 15% of it/);
-  assert.equal(out.caption, 'host 60%');
-  const noRss = V.ovRamBar({ ok: true, pct: 10, rss_bytes: 0, used_bytes: 30 }, { mem_total: 100, mem_avail: 50 });
-  assert.equal(width(noRss.html, 1), 60, 'falls back to charged memory when rss is unknown');
-  const noHost = V.ovRamBar({ ok: true, pct: 42 }, { mem_total: 0 }, 'warn');
-  assert.match(noHost.html, /class="meter quota"/);
-  assert.doesNotMatch(noHost.html, /lvbar/);
-  assert.equal(width(noHost.html, 0), 42);
-  assert.match(noHost.html, /class="warn"/);
+test('the cpu meter is usage against the quota, empty and dashed when unknown', () => {
+  const ok = V.cpuQuotaMeter({ ok: true, pct: 37, quota_cpus: 2 });
+  assert.equal(width(ok), 37);
+  assert.match(ok, /title="37% of your 2\.0-core quota"/);
+  assert.match(ok, /class="meter thick"/);
+  assert.match(V.cpuQuotaMeter({ ok: true, pct: 12, quota_cpus: 0 }), /12% of your host cores/);
+  const unknown = V.cpuQuotaMeter({ ok: false, pct: 0, quota_cpus: 2 });
+  assert.equal(width(unknown), 0);
+  assert.match(unknown, /title="— of your 2\.0-core quota"/);
+  assert.equal(width(V.cpuQuotaMeter({ ok: true, pct: 250 })), 100, 'capped at the bar');
 });
 
-test('an unavailable ram sample is unknown, not 0% (Codex on #110)', () => {
-  // Host memory read fine, the cgroup memory sample missing: ram fields are zeros.
-  const out = V.ovRamBar({ ok: false, pct: 0, rss_bytes: 0, used_bytes: 0 }, { mem_total: 100, mem_avail: 40 }, '');
-  assert.match(out.html, /your processes — of it/);
-  assert.doesNotMatch(out.html, /0\.0%|0% of your memory limit/);
-  assert.match(out.html, /— of your memory limit/);
-  assert.equal(width(out.html, 0), 60, 'the host part is still a measurement');
-  assert.equal(width(out.html, 1), 0);
-  assert.equal(width(out.html, 2), 0);
-  const cpu = V.ovCpuBar({ ok: false, pct: 0, host_pct: 0, host_cpus: 8, quota_cpus: 2 }, { cpu_ok: true, cpu_busy_pct: 40 });
-  assert.match(cpu.html, /you — of the host/);
-  assert.match(cpu.html, /— of your 2\.0-core quota/);
+test('the ram meter is usage against the limit and keeps the near-limit colour', () => {
+  const bad = V.ramLimitMeter({ ok: true, pct: 96 }, 'bad');
+  assert.equal(width(bad), 96);
+  assert.match(bad, /class="meter" title="96% of your memory limit"><i class="bad"/);
+  const unknown = V.ramLimitMeter({ ok: false, pct: 0 }, '');
+  assert.equal(width(unknown), 0);
+  assert.match(unknown, /— of your memory limit/);
+  assert.doesNotMatch(unknown, /0% of your/);
 });
 
-test('youInHost clamps and escapes', () => {
-  const html = V.youInHost(30, 50, 'a "quoted" <title>', 'warn');
-  assert.equal(width(html, 1), 100, 'more than the host is drawn as all of it');
-  assert.match(html, /title="a &quot;quoted&quot; &lt;title&gt;"/);
-  assert.equal(width(V.youInHost(0, 5, 't'), 1), 0, 'no host usage, nothing to be inside of');
-  assert.equal(width(V.youInHost(-5, NaN, 't'), 0), 0);
+test('pctFine keeps a decimal under ten percent', () => {
+  assert.equal(V.pctFine(0.52), '0.5%');
+  assert.equal(V.pctFine(12.4), '12%');
+  assert.equal(V.pctFine(undefined), '0.0%');
 });

@@ -644,15 +644,15 @@ function ovBandwidthPanel(b) {
       <div class="note">${rateNote}${cap ? ` · throttled to ${cap} Mbit/s` : ''}</div></div>`;
 }
 function ovCpuRamPanel(b) {
-  // Bars in the "node vs. you" style (static/view.js): host in grey, you in blue.
+  // The bars are your usage against your own quota and limit (static/view.js);
+  // your share of the whole host is text only. The host tab has the host.
   const share = pfmView.hostShare(b.cpu);
-  const cpuBar = pfmView.ovCpuBar(b.cpu, b.host_sys);
-  const ramBar = pfmView.ovRamBar(b.ram, b.host_sys, levelClass(b.ram.pct, 95));
+  const ramShare = pfmView.ramHostShare(b.ram, b.host_sys);
   return `<div class="panel"><div class="tile-label">cpu / ram</div>
-      <div class="tile-value">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} <small>cpu${b.cpu.quota_cpus ? ` · of ${b.cpu.quota_cpus.toFixed(1)} cores` : b.cpu.host_cpus ? ` · of ${b.cpu.host_cpus} host cores` : ''}${share !== null && b.cpu.quota_cpus ? ` · ${fmtPctFine(share)} of the host` : ''}${cpuBar.caption ? ` · <span class="lvnode">${cpuBar.caption}</span>` : ''}</small></div>
-      ${cpuBar.html}
-      <div class="note" style="display:flex;justify-content:space-between;gap:8px"><span title="process memory (rss) against the slice limit; page cache is charged to the slice too but is reclaimed, not OOM-killed">ram ${b.ram.ok ? fmtPct(b.ram.pct) : '—'} · ${b.ram.rss_bytes ? `${fmtBytes(b.ram.rss_bytes, 1)} proc + ${fmtBytes(b.ram.cache_bytes, 1)} cache` : fmtBytes(b.ram.used_bytes, 1)} / ${b.ram.limit_bytes ? fmtBytes(b.ram.limit_bytes, 1) : '?'}${b.ram.last_oom && Date.now() - Date.parse(b.ram.last_oom) < 864e5 ? ` · <span class="bad" title="kernel OOM kill noticed ${esc(b.ram.last_oom)}">OOM kill</span>` : ''}</span><span>${ramBar.caption ? `<span class="lvnode">${ramBar.caption}</span>` : ''}${b.ram.pids ? `${ramBar.caption ? ' · ' : ''}${b.ram.pids} proc` : ''}</span></div>
-      <div style="margin-top:4px">${ramBar.html}</div></div>`;
+      <div class="tile-value">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} <small>cpu${b.cpu.quota_cpus ? ` · of ${b.cpu.quota_cpus.toFixed(1)} cores` : b.cpu.host_cpus ? ` · of ${b.cpu.host_cpus} host cores` : ''}${share !== null && b.cpu.quota_cpus ? ` · ${fmtPctFine(share)} of the host` : ''}</small></div>
+      ${pfmView.cpuQuotaMeter(b.cpu)}
+      <div class="note" style="display:flex;justify-content:space-between;gap:8px"><span title="process memory (rss) against the slice limit; page cache is charged to the slice too but is reclaimed, not OOM-killed">ram ${b.ram.ok ? fmtPct(b.ram.pct) : '—'} · ${b.ram.rss_bytes ? `${fmtBytes(b.ram.rss_bytes, 1)} proc + ${fmtBytes(b.ram.cache_bytes, 1)} cache` : fmtBytes(b.ram.used_bytes, 1)} / ${b.ram.limit_bytes ? fmtBytes(b.ram.limit_bytes, 1) : '?'}${b.ram.last_oom && Date.now() - Date.parse(b.ram.last_oom) < 864e5 ? ` · <span class="bad" title="kernel OOM kill noticed ${esc(b.ram.last_oom)}">OOM kill</span>` : ''}</span><span>${ramShare !== null ? `${fmtPctFine(ramShare)} of the host` : ''}${b.ram.pids ? `${ramShare !== null ? ' · ' : ''}${b.ram.pids} proc` : ''}</span></div>
+      <div style="margin-top:4px">${pfmView.ramLimitMeter(b.ram, levelClass(b.ram.pct, 95))}</div></div>`;
 }
 /* overview "box" panel rows */
 function ovHostStatusRows(b) {
