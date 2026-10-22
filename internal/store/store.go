@@ -166,7 +166,10 @@ func Open(path string) (*Store, error) {
 	if err := restrictModes(path, "", "-wal", "-shm"); err != nil {
 		return nil, err
 	}
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	// The path goes into a SQLite file URI, where ? starts the query, #
+	// a fragment and % an escape: a data directory containing one would
+	// open a different file from the one created and chmodded above.
+	dsn := "file:" + sqliteURIPath.Replace(path) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -183,6 +186,9 @@ func Open(path string) (*Store, error) {
 	}
 	return s, nil
 }
+
+// sqliteURIPath escapes the characters with a meaning in a SQLite file URI.
+var sqliteURIPath = strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 
 // restrictModes makes the database file and its existing sidecars
 // owner-only; a missing sidecar is fine, anything else is an error that

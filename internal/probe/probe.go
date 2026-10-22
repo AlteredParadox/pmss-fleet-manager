@@ -56,6 +56,10 @@ type Snapshot struct {
 	// account with no processes: sshd's session process is always there.
 	Procs      []ProcInfo
 	ProcsKnown bool
+	// ProcsTruncated is true when more processes were listed than Procs
+	// keeps (maxProcs): a process not in Procs may still be running, so
+	// nothing may be judged absent from this snapshot.
+	ProcsTruncated bool
 	// ArgsKnown is false when the command lines were not read this poll
 	// (the proc_args ps was cut by its timeout) although the process list
 	// was: an interpreter-run application (python3 bazarr.py) can then not
@@ -609,7 +613,7 @@ func parseProcStat(raw string) map[int]procStat {
 // comm possibly containing spaces), the proc_args section ("pid args") and
 // the proc_stat section, dropping the probe's own shell and its children
 // (ps, cut, awk).
-func parseProcs(procs, args, stat string, probePID int) (out []ProcInfo, known, argsKnown bool) {
+func parseProcs(procs, args, stat string, probePID int) (out []ProcInfo, known, argsKnown, truncated bool) {
 	stats := parseProcStat(stat)
 	// The args listing is complete only when its "end" marker arrived
 	// (procArgsShell): a listing cut by the ps timeout is ignored whole,
@@ -676,12 +680,13 @@ func parseProcs(procs, args, stat string, probePID int) (out []ProcInfo, known, 
 		if probePID > 0 && underPID(r.PID, probePID, ppidOf) {
 			continue
 		}
-		out = append(out, r)
 		if len(out) >= maxProcs {
+			truncated = true // the rest ran on the box too; only the list is cut
 			break
 		}
+		out = append(out, r)
 	}
-	return out, known, known && argsComplete
+	return out, known, known && argsComplete, truncated
 }
 
 // underPID reports whether pid is root or one of its descendants in the
@@ -804,7 +809,7 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 		SocketPresent: strings.TrimSpace(s["docker_sock"]) == "1",
 	}
 	probePID, _ := strconv.Atoi(strings.TrimSpace(s["probe_pid"]))
-	snap.Procs, snap.ProcsKnown, snap.ArgsKnown = parseProcs(s["procs"], s["proc_args"], s["proc_stat"], probePID)
+	snap.Procs, snap.ProcsKnown, snap.ArgsKnown, snap.ProcsTruncated = parseProcs(s["procs"], s["proc_args"], s["proc_stat"], probePID)
 	snap.ListenPIDs = parseListenPIDs(s["listen_pids"])
 	_, snap.LogsKnown = s["logs"]
 	snap.Logs = parseLogs(s["logs"])

@@ -479,7 +479,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	for i, st := range states {
 		sums[i] = st.Summary()
 	}
-	unacked, _ := s.st.CountUnacked(r.Context())
+	unacked, alertsRev := s.m.AlertsView(r.Context())
 	tot := totals(states)
 	svc := s.m.Services()
 	tot.MonthlyCostFleet = svc.MonthlyCost
@@ -491,6 +491,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"rev":            rev, // see collect.Manager.Snapshot: lets the client merge this with the events around it
 		"totals":         tot,
 		"alerts_unacked": unacked,
+		"alerts_rev":     alertsRev, // see collect.Manager.AlertsView: the count is kept by the highest revision seen
 		"settings":       s.m.Settings().Public(),
 		"instance":       s.instance,
 		"version":        s.Version(),

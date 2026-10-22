@@ -24,14 +24,22 @@ vet:
 
 # The frontend has no build step and no test runner, so the only thing
 # that catches a reference to an undefined name (a ReferenceError at
-# click time, invisible to `node --check`) is a linter. ESLint runs from
-# npx with the small committed config: no-undef, unreachable code,
-# duplicate keys. Needs node; skipped with a notice when npx is missing.
+# click time, invisible to `node --check`) is a linter. ESLint is the one
+# npm dependency, pinned with its whole tree by package-lock.json and
+# installed with `npm ci` (scripts off: nothing from the registry runs at
+# install), so CI and a release lint with exactly the code the lockfile
+# names. The small committed config checks no-undef, unreachable code and
+# duplicate keys. Needs node; without npm it is skipped with a notice
+# locally, but under CI that is a failure, never a weaker pass.
 jscheck:
 	node --check internal/web/static/app.js
 	node --check internal/web/static/revisions.js
 	node --test internal/web/revisions_test.mjs
-	@if command -v npx >/dev/null 2>&1; then npx --yes eslint@9 -c scripts/eslint.config.mjs internal/web/static/app.js internal/web/static/revisions.js internal/web/revisions_test.mjs; else echo "jscheck: npx not found, ESLint skipped"; fi
+	@if command -v npm >/dev/null 2>&1; then \
+		npm ci --ignore-scripts --no-audit --no-fund --silent && \
+		npm exec --no -- eslint -c scripts/eslint.config.mjs internal/web/static/app.js internal/web/static/revisions.js internal/web/revisions_test.mjs; \
+	elif [ -n "$$CI" ]; then echo "jscheck: npm not found and CI is set; ESLint is required here" >&2; exit 1; \
+	else echo "jscheck: npm not found, ESLint skipped"; fi
 
 # Regenerate the third-party notices from the modules actually linked in.
 notices:

@@ -38,6 +38,12 @@ jobs:
       - name: make vet
         run: make vet
 
+      # Node for `make jscheck`: the version is pinned here and the ESLint
+      # tree by package-lock.json, so the lint runs the same code everywhere.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
       # node --check + ESLint no-undef on the frontend: a reference to an
       # undefined helper is a ReferenceError at click time that no Go
       # test sees (the Edit route shipped broken that way once).

@@ -81,11 +81,17 @@ type Manager struct {
 	// while the event is built (the unacknowledged-alert count is a
 	// database read): commit takes it before releasing hooksMu, so the
 	// next box's store and alert evaluation proceed meanwhile.
-	pubMu  sync.Mutex
-	pmapi  *pmapi.Client
-	svcMu  sync.RWMutex
-	svc    servicesCache
-	syncMu sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
+	pubMu sync.Mutex
+	// alertMu serialises reading the unacknowledged count with taking the
+	// next alert revision and handing the event to the bus, so revisions
+	// and counts leave in one order; AlertsView reads both under it too.
+	// Lock order: pubMu before alertMu; nothing is taken under alertMu.
+	alertMu  sync.Mutex
+	alertRev uint64
+	pmapi    *pmapi.Client
+	svcMu    sync.RWMutex
+	svc      servicesCache
+	syncMu   sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -104,12 +110,36 @@ func New(st *store.Store, log *slog.Logger) *Manager {
 // Bus exposes the event bus.
 func (m *Manager) Bus() *Bus { return m.bus }
 
-// Publish sends an event with the current unacknowledged alert count attached.
+// Publish sends an event with the current unacknowledged alert count and
+// the next alert revision attached. Every read of the count, here and in
+// AlertsView, takes its own revision under one lock, so a higher revision
+// always carries a count read later: a client keeping the count with the
+// highest revision can never go back to an older one, and equal revisions
+// never occur. (Alert writes themselves happen outside the lock; a read
+// after a write sees it, and the write's own Publish follows anyway.) The
+// revision restarts with the process; a page that reconnects after a
+// restart reloads itself on the changed instance id before it could refuse
+// the low numbers.
 func (m *Manager) Publish(e Event) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	m.alertMu.Lock()
+	defer m.alertMu.Unlock()
 	e.Unacked, _ = m.st.CountUnacked(ctx)
+	m.alertRev++
+	e.AlertsRev = m.alertRev
 	m.bus.Publish(e)
+}
+
+// AlertsView returns the unacknowledged alert count under a fresh alert
+// revision (see Publish): a snapshot is ordered against events and against
+// other snapshots by it.
+func (m *Manager) AlertsView(ctx context.Context) (int, uint64) {
+	m.alertMu.Lock()
+	defer m.alertMu.Unlock()
+	n, _ := m.st.CountUnacked(ctx)
+	m.alertRev++
+	return n, m.alertRev
 }
 
 // Settings returns the current settings snapshot.

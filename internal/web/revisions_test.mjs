@@ -12,7 +12,7 @@ vm.runInThisContext(src); // defines globalThis.pfmRevisions, as the page's scri
 const R = globalThis.pfmRevisions;
 
 const box = (id, rev, name = `b${id}`) => ({ id, rev, name });
-const fresh = (boxes = [], snapRev = 0) => ({ boxes, snapRev, removed: new Map() });
+const fresh = (boxes = [], snapRev = 0) => ({ boxes, snapRev, removed: new Map(), alertsRev: 0, unacked: 0 });
 const ids = (S) => S.boxes.map((b) => b.id);
 
 test('a snapshot taken before the newest merged one is refused', () => {
@@ -83,4 +83,24 @@ test('a snapshot at the same revision as the last one is merged, not refused', (
   const S = fresh([box(1, 10)], 12);
   assert.equal(R.acceptSnapshot(S, [box(1, 10), box(2, 12)], 12).accepted, true);
   assert.deepEqual(ids(S), [1, 2]);
+});
+
+test('the alert badge keeps the count with the highest alert revision, from stream or snapshot', () => {
+  const S = fresh();
+  assert.equal(R.acceptAlerts(S, 2, 5), true);
+  assert.equal(S.unacked, 2);
+  // an older snapshot landing late
+  assert.equal(R.acceptAlerts(S, 7, 4), false);
+  assert.equal(S.unacked, 2);
+  // the same read delivered again (every server read has its own revision)
+  assert.equal(R.acceptAlerts(S, 1, 5), false);
+  assert.equal(S.unacked, 2);
+  // a later read after an acknowledgement, then the event announcing it
+  assert.equal(R.acceptAlerts(S, 1, 6), true);
+  assert.equal(S.unacked, 1);
+  assert.equal(R.acceptAlerts(S, 1, 7), false);
+  assert.equal(S.alertsRev, 7);
+  // a frame without a count (an old server) changes nothing
+  assert.equal(R.acceptAlerts(S, undefined, 9), false);
+  assert.equal(S.alertsRev, 7);
 });

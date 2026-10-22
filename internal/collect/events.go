@@ -25,6 +25,12 @@ type Event struct {
 	Rev     uint64    `json:"rev,omitempty"` // state and removed: the fleet-wide revision this change was made at
 	State   *BoxState `json:"state,omitempty"`
 	Unacked int       `json:"alerts_unacked"` // current unacknowledged alert count, on every event
+	// AlertsRev orders the counts: every event carries a higher one than
+	// the last, and a state snapshot carries the one its count was read
+	// under, so a client keeps the count with the highest revision whether
+	// it came by the stream or by a snapshot that landed late (see
+	// Manager.Publish and Manager.AlertsView).
+	AlertsRev uint64 `json:"alerts_rev"`
 }
 
 // Bus fans events out to subscribers; slow subscribers drop events.

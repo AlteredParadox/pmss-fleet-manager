@@ -22,10 +22,11 @@
    revision it was taken at. The stream and the snapshot request race each
    other and snapshot requests race one another, so nothing may blindly
    overwrite anything else. The functions below take the page's state
-   object, which they read and update through three fields:
-     boxes   the fleet list (each box has an id and a rev)
-     snapRev the revision of the newest snapshot merged so far
-     removed Map of box id -> revision of the removed event seen for it */
+   object, which they read and update through four fields:
+     boxes     the fleet list (each box has an id and a rev)
+     snapRev   the revision of the newest snapshot merged so far
+     removed   Map of box id -> revision of the removed event seen for it
+     alertsRev the alert revision the held unacknowledged count is at */
 (() => {
 'use strict';
 
@@ -84,5 +85,19 @@ function applyRemoved(S, e) {
   return true;
 }
 
-globalThis.pfmRevisions = { acceptSnapshot, newer, applyState, applyRemoved };
+// acceptAlerts keeps the unacknowledged alert count with the highest alert
+// revision seen, whether it arrived on an event or in a snapshot: the two
+// race each other and a snapshot request taken earlier can land later.
+// Every read on the server takes its own revision, so an equal one is the
+// same read delivered twice and is ignored. Reports whether the count
+// changed.
+function acceptAlerts(S, count, rev) {
+  if (typeof count !== 'number' || rev <= (S.alertsRev || 0)) return false;
+  S.alertsRev = rev;
+  if (S.unacked === count) return false;
+  S.unacked = count;
+  return true;
+}
+
+globalThis.pfmRevisions = { acceptSnapshot, newer, applyState, applyRemoved, acceptAlerts };
 })();

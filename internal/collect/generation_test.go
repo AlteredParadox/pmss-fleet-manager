@@ -19,13 +19,16 @@ package collect
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 )
 
@@ -369,5 +372,29 @@ func TestMaybeDuDropsUntaggedCache(t *testing.T) {
 		if len(st.Dirs.Entries) != c.want {
 			t.Errorf("gen %q: %d entries loaded, want %d", c.gen, len(st.Dirs.Entries), c.want)
 		}
+	}
+}
+
+// A du whose stdout overran the cap is an interrupted run even when du
+// itself exited 1 for an unreadable entry: the last good cache row stays,
+// the prefix is never parsed as a measurement (fred on PR 103).
+func TestFinishDuRejectsOverflowedOutput(t *testing.T) {
+	ctx := context.Background()
+	m, boxes := revTestManager(t, 1)
+	p := m.poller(boxes[0].ID)
+	old := DirsState{Entries: []DirEntry{{Name: "old", Bytes: 7}}, Gen: p.generation()}
+	if err := m.st.SetCache(ctx, boxes[0].ID, "du", old); err != nil {
+		t.Fatal(err)
+	}
+	overflow := fmt.Errorf("%w (16 MiB kept; the command then reported: Process exited with status 1)", sshx.ErrOutputLimit)
+	if p.finishDu(ctx, []byte("5\tprefix\n"), overflow) {
+		t.Fatal("an overflowed du counted as completed")
+	}
+	var cached DirsState
+	if _, err := m.st.GetCache(ctx, boxes[0].ID, "du", &cached); err != nil || len(cached.Entries) != 1 || cached.Entries[0].Name != "old" {
+		t.Fatalf("the overflowed du touched the cache: %v %+v", err, cached)
+	}
+	if s, _ := m.State(boxes[0].ID); !strings.Contains(s.Dirs.Error, "exceeded the limit") {
+		t.Fatalf("live state after the overflow: %+v", s.Dirs)
 	}
 }
