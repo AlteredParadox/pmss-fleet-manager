@@ -81,6 +81,10 @@ type Server struct {
 	// with an IP literal.
 	allowIPHosts bool
 
+	// beforeBoxUpdate, when set (tests only), runs after handleUpdateBox has
+	// read and validated the record and before the update: the window a
+	// concurrent edit races into.
+	beforeBoxUpdate func()
 	// sseSlots caps concurrent event streams (each holds a goroutine and a
 	// bus subscription); a browser needs one per tab.
 	sseSlots chan struct{}
@@ -797,6 +801,9 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 		QbtPass:        in.ClearQbtPass && in.QbtPass == "",
 		ForgetHostKey:  in.ForgetHostKey,
 		ReplaceHostKey: hostChanged,
+	}
+	if s.beforeBoxUpdate != nil {
+		s.beforeBoxUpdate()
 	}
 	if err := s.m.UpdateBox(r.Context(), b, clears); err != nil {
 		switch {

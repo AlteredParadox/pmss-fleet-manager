@@ -686,3 +686,32 @@ func TestStaleEditCannotRebindSecret(t *testing.T) {
 		t.Fatalf("pin stored meanwhile must survive: %+v", got)
 	}
 }
+
+// The deterministic barrier case: the competing edit lands after the
+// handler has read and validated the record (so the fast revision check
+// passed) and before its update. The store's compare-and-set must refuse
+// it with 409 and the competing edit's record must stand.
+func TestEditRacingAnotherEditIsRefused(t *testing.T) {
+	s, st := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","auth_method":"password","password":"P_A"}`, hdr)
+	boxes, _ := st.ListBoxes(context.Background())
+	id := boxes[0].ID
+	snap, _ := st.GetBox(context.Background(), id)
+	s.beforeBoxUpdate = func() {
+		// Tab A, moving the box with a new password, commits first.
+		other, _ := st.GetBox(context.Background(), id)
+		other.Host, other.Password = "b.example", "P_B"
+		if err := st.UpdateBox(context.Background(), other, store.Clears{ReplaceHostKey: true}); err != nil {
+			t.Error(err)
+		}
+	}
+	code, body := do(t, s, "PUT", fmt.Sprintf("/api/boxes/%d", id), fmt.Sprintf(`{"revision":%d,"name":"renamed","host":"a.example","user":"u","auth_method":"password"}`, snap.Revision), hdr)
+	if code != 409 || !strings.Contains(body, `"host":"b.example"`) {
+		t.Fatalf("racing edit: %d %s", code, body)
+	}
+	got, _ := st.GetBox(context.Background(), id)
+	if got.Host != "b.example" || got.Password != "P_B" || got.Name != "b" || got.Revision != snap.Revision+1 {
+		t.Fatalf("the committed edit must stand untouched: %+v", got)
+	}
+}
