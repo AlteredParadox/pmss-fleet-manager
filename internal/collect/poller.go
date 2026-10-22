@@ -58,6 +58,10 @@ type poller struct {
 	prevCPU   int64
 	prevCPUAt time.Time
 	procPrev  map[int]procSample // last poll's per-pid CPU readings, see appsFromSnapshot
+	// qbtBinStat/qbtBinVersion remember the installed binary's stat and the
+	// version it answered, so the probe can skip --version (which writes to
+	// the user's qBittorrent log) while the binary is unchanged.
+	qbtBinStat, qbtBinVersion string
 
 	duMu      sync.Mutex
 	duRunning bool
@@ -394,7 +398,7 @@ func (p *poller) poll(ctx context.Context) {
 	st.HostKeyFP = fingerprintOrEmpty(p.hostKey()) // after the dial: the first connect pins it
 	tag := probe.NewTag()
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)))
+	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWith(tag, p.qbtBinStat)))
 	cancel()
 	if err != nil && len(out) == 0 {
 		p.mu.Lock()
@@ -411,6 +415,7 @@ func (p *poller) poll(ctx context.Context) {
 		p.fail(ctx, &st, err, start)
 		return
 	}
+	p.qbtBinStat, p.qbtBinVersion, snap.Qbt.BinaryVersion = resolveQbtVersion(p.qbtBinStat, p.qbtBinVersion, snap.Qbt)
 	p.apply(&st, snap)
 
 	if p.box.QbtEnabled {
@@ -871,6 +876,24 @@ func firewalledSince(prev, conn string, now time.Time) string {
 		return prev
 	}
 	return now.UTC().Format(time.RFC3339)
+}
+
+// resolveQbtVersion keeps the installed binary's version across polls that
+// skipped the --version call. A fresh answer (the probe asked because the
+// binary's stat differed from seenStat, or nothing was cached) replaces
+// the cache; an unchanged binary reuses the cached answer; a changed
+// binary whose call failed, or a missing binary, yields nothing and the
+// next probe asks again.
+func resolveQbtVersion(seenStat, seenVersion string, q probe.QbtInfo) (stat, version, current string) {
+	switch {
+	case !q.BinaryPresent || q.BinaryStat == "":
+		return "", "", ""
+	case q.BinaryVersion != "":
+		return q.BinaryStat, q.BinaryVersion, q.BinaryVersion
+	case q.BinaryStat == seenStat && seenVersion != "":
+		return seenStat, seenVersion, seenVersion
+	}
+	return "", "", ""
 }
 
 // qbtNeedsCreds returns a reason to skip the Web API when the config shows

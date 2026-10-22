@@ -133,6 +133,27 @@ func TestSanitizeFloats(t *testing.T) {
 	}
 }
 
+func TestResolveQbtVersion(t *testing.T) {
+	bin := probe.QbtInfo{BinaryPresent: true, BinaryStat: "100 1", BinaryVersion: "v5.2.4"}
+	stat, ver, cur := resolveQbtVersion("", "", bin)
+	if stat != "100 1" || ver != "v5.2.4" || cur != "v5.2.4" {
+		t.Fatalf("fresh answer: %q %q %q", stat, ver, cur)
+	}
+	// Next poll: the probe skipped the call, the binary is unchanged.
+	skipped := probe.QbtInfo{BinaryPresent: true, BinaryStat: "100 1"}
+	if stat, ver, cur = resolveQbtVersion(stat, ver, skipped); cur != "v5.2.4" || stat != "100 1" {
+		t.Fatalf("unchanged: %q %q %q", stat, ver, cur)
+	}
+	// Binary replaced but --version failed: nothing, and the cache is dropped
+	// so the next probe asks again.
+	if stat, ver, cur = resolveQbtVersion(stat, ver, probe.QbtInfo{BinaryPresent: true, BinaryStat: "200 2"}); cur != "" || stat != "" || ver != "" {
+		t.Fatalf("changed, no answer: %q %q %q", stat, ver, cur)
+	}
+	if _, _, cur = resolveQbtVersion("100 1", "v5.2.4", probe.QbtInfo{}); cur != "" {
+		t.Fatalf("binary gone: %q", cur)
+	}
+}
+
 func TestFirewalledSince(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	if got := firewalledSince("", "firewalled", now); got != "2026-10-21T12:00:00Z" {

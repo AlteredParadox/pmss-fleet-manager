@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -83,6 +84,8 @@ WebUI\LocalHostAuth=false
 4242
 @@qbt_bin
 /home/ragnar/bin/qbittorrent-nox
+@@qbt_bin_stat
+30515200 1760500000 1760500001 4242
 @@qbt_cron
 2
 @@qbt_pmss
@@ -146,7 +149,7 @@ func TestParse(t *testing.T) {
 	if !snap.Account.OK || snap.Account.QuotaGiB != 2000 || !snap.Account.DockerEnabled {
 		t.Fatalf("account: %+v", snap.Account)
 	}
-	if !snap.Qbt.Running || snap.Qbt.ConfPort != 8089 || !snap.Qbt.LocalHostAuth || !snap.Qbt.BinaryPresent || snap.Qbt.CronEntries != 2 || !snap.Qbt.PMSSManaged {
+	if !snap.Qbt.Running || snap.Qbt.ConfPort != 8089 || !snap.Qbt.LocalHostAuth || !snap.Qbt.BinaryPresent || snap.Qbt.CronEntries != 2 || !snap.Qbt.PMSSManaged || snap.Qbt.BinaryStat != "30515200 1760500000 1760500001 4242" {
 		t.Fatalf("qbt: %+v", snap.Qbt)
 	}
 	if !snap.Docker.SocketPresent {
@@ -214,6 +217,73 @@ func TestQuotaHumanized(t *testing.T) {
 	}
 }
 
+// The version call runs only when the binary's stat differs from the one
+// the poller already has an answer for; a fake qbittorrent-nox records
+// each invocation.
+func TestQbtVersionSkippedWhileUnchanged(t *testing.T) {
+	home := t.TempDir()
+	os.Mkdir(home+"/bin", 0o700)
+	fake := "#!/bin/sh\necho run >> \"$HOME/calls\"\necho 'qBittorrent v5.2.4'\n"
+	os.WriteFile(home+"/bin/qbittorrent-nox", []byte(fake), 0o700)
+	t.Setenv("HOME", home)
+	st, err := os.Stat(home + "/bin/qbittorrent-nox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Skip("no Stat_t")
+	}
+	seen := fmt.Sprintf("%d %d %d %d", st.Size(), st.ModTime().Unix(), sys.Ctim.Sec, sys.Ino)
+	run := func(seenVal string) string {
+		cmd := exec.Command("sh")
+		cmd.Stdin = strings.NewReader("home=$HOME; PMSS_QBT_SEEN='" + seenVal + "'\n" + qbtVersionShell)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if got := run(""); got != "qBittorrent v5.2.4" {
+		t.Fatalf("first call: %q", got)
+	}
+	if got := run(seen); got != "" {
+		t.Fatalf("unchanged binary must skip the call, got %q", got)
+	}
+	if got := run("1 2 3 4"); got != "qBittorrent v5.2.4" {
+		t.Fatalf("changed binary: %q", got)
+	}
+	// A replacement that keeps size and mtime still changes ctime and inode.
+	os.WriteFile(home+"/bin/qbittorrent-nox.new", []byte(fake), 0o700)
+	os.Chtimes(home+"/bin/qbittorrent-nox.new", st.ModTime(), st.ModTime())
+	os.Rename(home+"/bin/qbittorrent-nox.new", home+"/bin/qbittorrent-nox")
+	if got := run(seen); got != "qBittorrent v5.2.4" {
+		t.Fatalf("timestamp-preserving replacement must be noticed, got %q", got)
+	}
+	// A symlinked binary: the key describes the target, so replacing the
+	// target under an unchanged link is noticed (fred review on PR 86).
+	os.Rename(home+"/bin/qbittorrent-nox", home+"/bin/qbt-real")
+	os.Symlink(home+"/bin/qbt-real", home+"/bin/qbittorrent-nox")
+	lst, _ := os.Stat(home + "/bin/qbt-real")
+	lsys := lst.Sys().(*syscall.Stat_t)
+	linkSeen := fmt.Sprintf("%d %d %d %d", lst.Size(), lst.ModTime().Unix(), lsys.Ctim.Sec, lsys.Ino)
+	if got := run(linkSeen); got != "" {
+		t.Fatalf("unchanged target behind a link must skip, got %q", got)
+	}
+	os.WriteFile(home+"/bin/qbt-real.new", []byte(fake), 0o700)
+	os.Rename(home+"/bin/qbt-real.new", home+"/bin/qbt-real")
+	if got := run(linkSeen); got != "qBittorrent v5.2.4" {
+		t.Fatalf("target replaced behind an unchanged link must be noticed, got %q", got)
+	}
+	calls, _ := os.ReadFile(home + "/calls")
+	if strings.Count(string(calls), "run") != 4 {
+		t.Fatalf("calls: %q", calls)
+	}
+	if s := ScriptWith("abc", "12 34'; rm -rf /"); !strings.HasPrefix(s, "PMSS_TAG='abc'\nPMSS_QBT_SEEN='12 34   '\n") {
+		t.Fatalf("seen must be digits and spaces only: %q", s[:60])
+	}
+}
+
 func TestShortCPU(t *testing.T) {
 	cases := map[string]string{
 		"Intel(R) N100": "N100",
@@ -278,7 +348,7 @@ func TestScriptWithTag(t *testing.T) {
 		t.Fatalf("bad tag %q", tag)
 	}
 	src := ScriptWithTag(tag)
-	if !strings.HasPrefix(src, "PMSS_TAG='"+tag+"'\n#!/bin/sh") {
+	if !strings.HasPrefix(src, "PMSS_TAG='"+tag+"'\nPMSS_QBT_SEEN=''\n#!/bin/sh") {
 		t.Fatalf("tag line missing: %q", src[:60])
 	}
 	if _, err := exec.LookPath("sh"); err != nil {

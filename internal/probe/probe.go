@@ -389,7 +389,8 @@ type QbtInfo struct {
 	SubnetBypass  bool   // WebUI\AuthSubnetWhitelistEnabled=true
 	SubnetList    string // WebUI\AuthSubnetWhitelist
 	Username      string
-	BinaryVersion string // "v5.2.3" from ~/bin/qbittorrent-nox --version
+	BinaryVersion string // "v5.2.3" from ~/bin/qbittorrent-nox --version; empty when the probe skipped the call (see ScriptWith)
+	BinaryStat    string // "size mtime ctime inode" of ~/bin/qbittorrent-nox, the key the poller caches BinaryVersion under
 	StartHelper   bool   // ~/bin/qbt-start exists
 	CronEntries   int    // crontab lines that run only bin/qbt-start (QbtCronPattern)
 	PMSSManaged   bool   // ~/.qbittorrentEnable: the PMSS panel runs and configures qBittorrent
@@ -947,6 +948,7 @@ func parseQbt(s map[string]string) QbtInfo {
 	q := QbtInfo{BinaryPresent: strings.TrimSpace(s["qbt_bin"]) != ""}
 	q.Running = len(strings.Fields(s["qbt_pid"])) > 0
 	q.BinaryVersion = qbtVersionString(s["qbt_bin_version"])
+	q.BinaryStat = strings.TrimSpace(s["qbt_bin_stat"])
 	q.StartHelper = strings.TrimSpace(s["qbt_start_helper"]) == "1"
 	q.CronEntries, _ = strconv.Atoi(strings.TrimSpace(s["qbt_cron"]))
 	q.PMSSManaged = strings.TrimSpace(s["qbt_pmss"]) == "1"

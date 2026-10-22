@@ -130,8 +130,9 @@ sec qbt_conf; grep -E '^WebUI\\(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|Au
 sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
 sec listen
 ` + listenShell + `sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
-sec qbt_bin_version; [ -x "$home/bin/qbittorrent-nox" ] && timeout 10 "$home/bin/qbittorrent-nox" --version </dev/null 2>/dev/null | head -n 1
-sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
+sec qbt_bin_stat; stat -L -c '%s %Y %Z %i' "$home/bin/qbittorrent-nox" 2>/dev/null
+sec qbt_bin_version
+` + qbtVersionShell + `sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + `
 sec qbt_pmss; [ -e "$home/.qbittorrentEnable" ] && echo 1 || echo 0
 sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
@@ -211,10 +212,38 @@ const listenViaSS = `timeout 10 ss -Hltnp 2>/dev/null | awk -v uid="$uid" '$1=="
 const listenPIDsShell = `timeout 10 ss -Hltnp 2>/dev/null | awk '$1=="LISTEN"{n=split($4,a,":"); p=a[n]; s=$0; while (match(s,/pid=[0-9]+/)) { print p, substr(s,RSTART+4,RLENGTH-4); s=substr(s,RSTART+RLENGTH) } }'
 `
 
+// qbtVersionShell asks the installed qbittorrent-nox for its version, but
+// only when the binary's identity (size, mtime, ctime, inode) differs from
+// PMSS_QBT_SEEN, the stat the poller last got an answer for. The ctime and
+// inode are there for a replacement that preserves size and mtime (a
+// timestamp-preserving copy): nothing a tenant runs can set a ctime, and
+// an atomic swap changes the inode. -L describes the executable behind a
+// symlink, not the link, so a target replaced under an unchanged link
+// counts as a change too. --version initialises the
+// application: it appends a "started … termination initiated" block to the
+// user's qBittorrent log on every call and rotates the log once that fills
+// up, so polling it every 30 s drowned the real log in probe noise.
+const qbtVersionShell = `if [ -x "$home/bin/qbittorrent-nox" ] && [ "$(stat -L -c '%s %Y %Z %i' "$home/bin/qbittorrent-nox" 2>/dev/null)" != "${PMSS_QBT_SEEN:-}" ]; then
+  timeout 10 "$home/bin/qbittorrent-nox" --version </dev/null 2>/dev/null | head -n 1
+fi
+`
+
 // ScriptWithTag returns Script with the section tag set on its first line.
 // The tag must be [A-Za-z0-9]+ (NewTag guarantees that); it is quoted anyway.
-func ScriptWithTag(tag string) string {
-	return "PMSS_TAG='" + strings.ReplaceAll(tag, "'", "") + "'\n" + Script
+// The version call runs unconditionally (no PMSS_QBT_SEEN).
+func ScriptWithTag(tag string) string { return ScriptWith(tag, "") }
+
+// ScriptWith is ScriptWithTag with the binary stat ("size mtime ctime
+// inode", as the qbt_bin_stat section printed it) the caller already holds a version for,
+// so the probe skips the --version call while the binary is unchanged.
+func ScriptWith(tag, qbtSeen string) string {
+	seen := strings.Map(func(r rune) rune {
+		if (r >= '0' && r <= '9') || r == ' ' {
+			return r
+		}
+		return -1
+	}, qbtSeen)
+	return "PMSS_TAG='" + strings.ReplaceAll(tag, "'", "") + "'\nPMSS_QBT_SEEN='" + seen + "'\n" + Script
 }
 
 // NewTag returns a random hex section tag for one probe run.
