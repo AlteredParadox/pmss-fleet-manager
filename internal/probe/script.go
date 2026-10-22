@@ -58,6 +58,7 @@ sec now; date +%s
 sec tz; date +%z
 sec uptime; cat /proc/uptime 2>/dev/null
 sec loadavg; cat /proc/loadavg 2>/dev/null
+sec stat; head -1 /proc/stat 2>/dev/null
 sec meminfo; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo 2>/dev/null
 # Inventory: what changes rarely (host identity, the installed client, the
 # crontab, the log catalogue). The poller asks for it on its first poll,

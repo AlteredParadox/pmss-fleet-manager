@@ -71,6 +71,8 @@ function fmtBps(bps) {
   return `${(n / KIB / KIB).toFixed(n < 10 * KIB * KIB ? 2 : 1)} MiB/s`;
 }
 function fmtPct(p) { return `${Math.round(Number(p) || 0)}%`; }
+// Small shares keep a decimal: a tenant's slice of a whole host is often under 1%.
+function fmtPctFine(p) { const n = Number(p) || 0; return `${n.toFixed(n < 10 ? 1 : 0)}%`; }
 const CUR = { EUR: '€', USD: '$', GBP: '£' };
 function fmtMoney(v, cur) { const n = Number(v) || 0; return `${CUR[cur] || (cur ? esc(cur) + ' ' : '')}${n.toFixed(2)}`; }
 function cycleShort(c) { return ({ monthly: 'mo', quarterly: 'qtr', 'semi-annually': '6 mo', annually: 'yr', biennially: '2 yr', triennially: '3 yr' })[String(c || '').toLowerCase()] || (c || ''); }
@@ -643,7 +645,7 @@ function ovBandwidthPanel(b) {
 }
 function ovCpuRamPanel(b) {
   return `<div class="panel"><div class="tile-label">cpu / ram</div>
-      <div class="tile-value">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} <small>cpu${b.cpu.quota_cpus ? ` · of ${b.cpu.quota_cpus.toFixed(1)} cores` : b.cpu.host_cpus ? ` · of ${b.cpu.host_cpus} host cores` : ''}</small></div>
+      <div class="tile-value">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} <small>cpu${b.cpu.quota_cpus ? ` · of ${b.cpu.quota_cpus.toFixed(1)} cores` : b.cpu.host_cpus ? ` · of ${b.cpu.host_cpus} host cores` : ''}${b.cpu.ok && b.cpu.quota_cpus && b.cpu.host_cpus ? ` · ${fmtPctFine(b.cpu.host_pct)} of the host` : ''}</small></div>
       <div class="meter thick"><i style="width:${Math.min(100, b.cpu.pct || 0)}%"></i></div>
       <div class="note" style="display:flex;justify-content:space-between;gap:8px"><span title="process memory (rss) against the slice limit; page cache is charged to the slice too but is reclaimed, not OOM-killed">ram ${b.ram.ok ? fmtPct(b.ram.pct) : '—'} · ${b.ram.rss_bytes ? `${fmtBytes(b.ram.rss_bytes, 1)} proc + ${fmtBytes(b.ram.cache_bytes, 1)} cache` : fmtBytes(b.ram.used_bytes, 1)} / ${b.ram.limit_bytes ? fmtBytes(b.ram.limit_bytes, 1) : '?'}${b.ram.last_oom && Date.now() - Date.parse(b.ram.last_oom) < 864e5 ? ` · <span class="bad" title="kernel OOM kill noticed ${esc(b.ram.last_oom)}">OOM kill</span>` : ''}</span><span>${b.ram.pids ? `${b.ram.pids} proc` : ''}</span></div>
       <div class="meter" style="margin-top:4px"><i class="${levelClass(b.ram.pct, 95)}" style="width:${Math.min(100, b.ram.pct || 0)}%"></i></div></div>`;
@@ -1205,10 +1207,10 @@ function tabHost(b) {
       <div class="tile-value">${fmtPct(homePct)} <small>used · ${fmtBytes(h.home_used, 1)} / ${fmtBytes(h.home_size, 1)}</small></div>
       <div class="meter thick"><i class="${levelClass(homePct, 95)}" style="width:${homePct}%"></i></div>
       <div class="note">${esc(h.home_fs_type || '')} · ${fmtBytes(h.home_avail, 1)} free for everyone</div></div>
-    <div class="panel"><div class="tile-label">host load</div>
-      <div class="tile-value">${h.load1?.toFixed(2) ?? '—'} <small>1 min${h.ncpu ? ` · ${(h.load1 / h.ncpu * 100).toFixed(0)}% of ${h.ncpu} cores` : ''}</small></div>
-      <div class="meter thick"><i class="${levelClass(h.ncpu ? h.load1 / h.ncpu * 100 : 0, 100)}" style="width:${h.ncpu ? Math.min(100, h.load1 / h.ncpu * 100) : 0}%"></i></div>
-      <div class="note">a busy neighbour shows up here, not in your own cpu meter</div></div>
+    <div class="panel"><div class="tile-label">host cpu</div>
+      <div class="tile-value">${h.cpu_ok ? fmtPct(h.cpu_busy_pct) : '—'} <small>busy${h.ncpu ? ` · ${h.ncpu} cores` : ''}${h.cpu_ok ? ` · iowait ${fmtPct(h.cpu_iowait_pct)}${h.cpu_steal_pct >= 0.5 ? ` · steal ${fmtPct(h.cpu_steal_pct)}` : ''}` : ''}</small></div>
+      <div class="meter thick stack" title="busy (every tenant's cpu time, steal included) and, lighter, iowait: cpus waiting on the disks"><i class="${levelClass(h.cpu_ok ? h.cpu_busy_pct : 0, 100)}" style="width:${h.cpu_ok ? Math.min(100, h.cpu_busy_pct) : 0}%"></i><i class="dim" style="width:${h.cpu_ok ? Math.min(100 - Math.min(100, h.cpu_busy_pct), h.cpu_iowait_pct) : 0}%"></i></div>
+      <div class="note">${h.cpu_ok ? `you ${fmtPctFine(b.cpu.host_pct)} of it` : 'measured from the second poll on'} · load ${h.load1?.toFixed(2) ?? '—'} / ${h.load5?.toFixed(2) ?? '—'} / ${h.load15?.toFixed(2) ?? '—'} · a busy neighbour shows up here, not in your own cpu meter</div></div>
   </div>`;
 }
 

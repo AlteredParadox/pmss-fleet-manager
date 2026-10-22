@@ -57,9 +57,11 @@ type poller struct {
 	dkUID int            // the UID dk was dialled for
 	guard *qbt.AuthGuard // outlives p.qbt; see qbt.AuthGuard
 
-	prevCPU   int64
-	prevCPUAt time.Time
-	procPrev  map[int]procSample // last poll's per-pid CPU readings, see appsFromSnapshot
+	prevCPU     int64
+	prevCPUAt   time.Time
+	prevTicks   probe.CPUTicks // last /proc/stat reading, for the host-wide busy figure
+	prevTicksAt time.Time
+	procPrev    map[int]procSample // last poll's per-pid CPU readings, see appsFromSnapshot
 	// qbtBinStat/qbtBinVersion remember the installed binary's stat and the
 	// version it answered, so the probe can skip --version (which writes to
 	// the user's qBittorrent log) while the binary is unchanged.
@@ -671,6 +673,29 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 	p.m.setStateWith(st, p.storeFix(start, true))
 }
 
+// applyHostCPU turns this poll's /proc/stat reading and the previous one
+// into host-wide busy, iowait and steal percentages of the interval, the
+// figures PMSS's own "node load vs. your share" panel uses, so the two
+// agree about the host. A first reading, or counters that went backwards
+// (a reboot), leave CPUOK false for this poll and become the new baseline.
+func (p *poller) applyHostCPU(st *BoxState, snap *probe.Snapshot) {
+	cur := snap.Host.CPUTicks
+	if !cur.Known {
+		return
+	}
+	prev := p.prevTicks
+	if prev.Known && snap.At.After(p.prevTicksAt) && cur.Total > prev.Total &&
+		cur.Busy >= prev.Busy && cur.IOWait >= prev.IOWait && cur.Steal >= prev.Steal {
+		dt := float64(cur.Total - prev.Total)
+		pctOf := func(d uint64) float64 { return math.Min(float64(d)/dt*100, 100) }
+		st.HostSys.CPUOK = true
+		st.HostSys.CPUBusyPct = pctOf(cur.Busy - prev.Busy)
+		st.HostSys.CPUIOWaitPct = pctOf(cur.IOWait - prev.IOWait)
+		st.HostSys.CPUStealPct = pctOf(cur.Steal - prev.Steal)
+	}
+	p.prevTicks, p.prevTicksAt = cur, snap.At
+}
+
 func classify(st *BoxState) (string, string) {
 	var reasons []string
 	if st.Account.Suspended {
@@ -763,6 +788,9 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 			}
 			st.CPU.OK = true
 			st.CPU.Pct = math.Min(cpus/denom*100, 100000) // a corrupt quota must not produce Inf
+			if snap.Host.NCPU > 0 {
+				st.CPU.HostPct = math.Min(cpus/float64(snap.Host.NCPU)*100, 100000)
+			}
 		}
 		p.prevCPU, p.prevCPUAt = c.CPUUsageNS, snap.At
 	}
@@ -775,6 +803,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 		HomeFSType: clip(snap.HomeFS.Type, 32), HomeSize: snap.HomeFS.Size, HomeUsed: snap.HomeFS.Used, HomeAvail: snap.HomeFS.Avail,
 		CPUModel: clip(h.CPUModel, 128), CPUShort: clip(h.CPUShort, 64), CPUFlags: clip(strings.Join(h.CPUFlags, " "), 2048),
 		GPUPresent: h.GPU.Present, GPUDevice: clip(h.GPU.Device, 128), GPUVendor: h.GPU.Vendor, GPUAccess: h.GPU.Accessible, HWEncode: hwEncodeLabel(h.GPU)}
+	p.applyHostCPU(st, snap)
 
 	a := snap.Account
 	st.Account = AccountState{OK: a.OK, QuotaGiB: a.QuotaGiB, RAMMiB: a.RAMMiB, DockerEnabled: a.DockerEnabled, Suspended: a.Suspended}

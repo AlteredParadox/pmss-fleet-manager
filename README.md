@@ -32,9 +32,9 @@ per-box tab.
 
 **Per box.**
 
-- Overview: disk, upload with limit/bonus/throttle state, bandwidth, CPU/RAM,
-  client, incoming connectivity and listen port, autostart status, plan and
-  billing.
+- Overview: disk, upload with limit/bonus/throttle state, bandwidth, CPU/RAM
+  (your slice against its quota and as a share of the whole host), client,
+  incoming connectivity and listen port, autostart status, plan and billing.
 - Traffic: daily upload/download bars for the rolling 30 days PMSS tracks.
 - Torrents: DHT / PeX / local peer discovery state in the header, each a
   toggle (and a card tag when any is on, for deciding where private-tracker

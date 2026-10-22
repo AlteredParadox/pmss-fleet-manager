@@ -406,6 +406,22 @@ type HostInfo struct {
 	CPUShort    string   // trimmed for tags, e.g. "N100", "Xeon E5-2680 v4"
 	CPUFlags    []string // subset: avx2, avx512f, sse4_2, aes
 	GPU         GPUInfo
+	CPUTicks    CPUTicks
+}
+
+// CPUTicks is the summary line of /proc/stat, every CPU of the host added
+// up, in USER_HZ ticks. The poller turns two readings into host-wide busy,
+// iowait and steal percentages the way PMSS's live-stats cron does (its ADR
+// 0126): busy is everything except idle and iowait, steal is inside busy,
+// and only the first eight fields count because the guest fields are
+// already inside user and nice.
+type CPUTicks struct {
+	Known  bool
+	Busy   uint64
+	Idle   uint64
+	IOWait uint64
+	Steal  uint64
+	Total  uint64
 }
 
 // GPUInfo describes the first DRM render node, which is what ffmpeg/Jellyfin
@@ -853,7 +869,39 @@ func parseHost(s map[string]string) HostInfo {
 	parseMeminfo(&h, s["meminfo"])
 	parseCPUInfo(&h, s)
 	h.GPU = parseDRI(s["dri"])
+	h.CPUTicks = parseStat(s["stat"])
 	return h
+}
+
+// maxTicks bounds one /proc/stat field: a real counter is far below it and
+// eight of them must still add up without wrapping.
+const maxTicks = 1 << 56
+
+// parseStat reads the "cpu" summary line of /proc/stat. Anything that is
+// not that line with at least user, nice, system and idle, or any field
+// that is not a plausible counter, leaves Known false.
+func parseStat(raw string) CPUTicks {
+	f := strings.Fields(raw)
+	if len(f) < 5 || f[0] != "cpu" {
+		return CPUTicks{}
+	}
+	var v [8]uint64
+	for i := range v {
+		if i+1 >= len(f) {
+			break
+		}
+		n, err := strconv.ParseUint(f[i+1], 10, 64)
+		if err != nil || n > maxTicks {
+			return CPUTicks{}
+		}
+		v[i] = n
+	}
+	t := CPUTicks{Known: true, Idle: v[3], IOWait: v[4], Steal: v[7]}
+	for _, n := range v {
+		t.Total += n
+	}
+	t.Busy = t.Total - t.Idle - t.IOWait
+	return t
 }
 
 // parseLoad fills uptime and the three load averages.
