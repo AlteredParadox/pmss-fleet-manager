@@ -59,7 +59,7 @@ function quotaMeter(pctOfLimit, title, cls = '') {
    never as 0%. */
 function ovCpuBar(cpu, host) {
   const c = cpu || {};
-  const quotaTitle = `${pct(c.pct)} of your ${c.quota_cpus ? `${Number(c.quota_cpus).toFixed(1)}-core quota` : 'host cores'}`;
+  const quotaTitle = `${c.ok ? pct(c.pct) : '—'} of your ${c.quota_cpus ? `${Number(c.quota_cpus).toFixed(1)}-core quota` : 'host cores'}`;
   if (!host || !host.cpu_ok) {
     return { html: `<div class="meter thick" title="${esc(quotaTitle)}"><i style="width:${Math.min(100, Number(c.pct) || 0)}%"></i></div>`, caption: '' };
   }
@@ -77,14 +77,16 @@ function ovCpuBar(cpu, host) {
    without a host memory reading that meter alone. */
 function ovRamBar(ram, host, cls = '') {
   const r = ram || {};
-  const limitTitle = `${pct(r.pct)} of your memory limit`;
+  // Without a cgroup memory sample (r.ok false) the fields are zero-initialised,
+  // not measurements: the slice is unknown, drawn empty and named with a dash.
+  const limitTitle = `${r.ok ? pct(r.pct) : '—'} of your memory limit`;
   if (!host || !(Number(host.mem_total) > 0)) {
-    return { html: quotaMeter(r.pct, limitTitle, cls), caption: '' };
+    return { html: quotaMeter(r.ok ? r.pct : 0, limitTitle, cls), caption: '' };
   }
   const hostPct = (1 - (Number(host.mem_avail) || 0) / host.mem_total) * 100;
-  const youPct = ((Number(r.rss_bytes) || Number(r.used_bytes) || 0) / host.mem_total) * 100;
+  const youPct = r.ok ? ((Number(r.rss_bytes) || Number(r.used_bytes) || 0) / host.mem_total) * 100 : null;
   return {
-    html: youInHost(hostPct, youPct, `host memory ${pct(hostPct)} used · your processes ${pctFine(youPct)} of it`) + quotaMeter(r.pct, limitTitle, cls),
+    html: youInHost(hostPct, youPct ?? 0, `host memory ${pct(hostPct)} used · your processes ${youPct === null ? '—' : pctFine(youPct)} of it`) + quotaMeter(r.ok ? r.pct : 0, limitTitle, cls),
     caption: `host ${pct(hostPct)}`,
   };
 }

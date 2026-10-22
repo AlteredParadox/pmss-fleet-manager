@@ -65,6 +65,20 @@ test('ram: host used in grey, your processes in blue, the limit meter under it i
   assert.match(noHost.html, /class="warn"/);
 });
 
+test('an unavailable ram sample is unknown, not 0% (Codex on #110)', () => {
+  // Host memory read fine, the cgroup memory sample missing: ram fields are zeros.
+  const out = V.ovRamBar({ ok: false, pct: 0, rss_bytes: 0, used_bytes: 0 }, { mem_total: 100, mem_avail: 40 }, '');
+  assert.match(out.html, /your processes — of it/);
+  assert.doesNotMatch(out.html, /0\.0%|0% of your memory limit/);
+  assert.match(out.html, /— of your memory limit/);
+  assert.equal(width(out.html, 0), 60, 'the host part is still a measurement');
+  assert.equal(width(out.html, 1), 0);
+  assert.equal(width(out.html, 2), 0);
+  const cpu = V.ovCpuBar({ ok: false, pct: 0, host_pct: 0, host_cpus: 8, quota_cpus: 2 }, { cpu_ok: true, cpu_busy_pct: 40 });
+  assert.match(cpu.html, /you — of the host/);
+  assert.match(cpu.html, /— of your 2\.0-core quota/);
+});
+
 test('youInHost clamps and escapes', () => {
   const html = V.youInHost(30, 50, 'a "quoted" <title>', 'warn');
   assert.equal(width(html, 1), 100, 'more than the host is drawn as all of it');
