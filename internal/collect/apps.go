@@ -18,9 +18,11 @@ package collect
 
 import (
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"pmss-fleet-manager/internal/probe"
 )
@@ -143,7 +145,7 @@ func inheritApps(procs []ProcView, ppid map[int]int) {
 	for pass := 0; pass < 3; pass++ { // parents usually precede children, but not always
 		for i := range procs {
 			p := &procs[i]
-			if !helpers[p.Name] && !strings.HasPrefix(p.App, "other:") {
+			if !helpers[p.Name] && !strings.HasPrefix(p.App, otherPrefix) {
 				continue
 			}
 			if j, ok := idx[ppid[p.PID]]; ok && inheritable(procs[j].App) {
@@ -162,19 +164,27 @@ var ruleByKey = func() map[string]*appRule {
 }()
 
 // classifyProc returns the rule for a process, or nil for an unknown one.
+// The command line decides for interpreters, and for any process whose comm
+// matched nothing (a renamed binary still says what it is).
 func classifyProc(comm, args string) *appRule {
-	largs := strings.ToLower(args)
-	// The command line decides for interpreters, and for any process whose
-	// comm matched nothing (a renamed binary still says what it is).
 	if !interpreters[comm] {
-		for i := range appRules {
-			for _, c := range appRules[i].comm {
-				if c == comm {
-					return &appRules[i]
-				}
-			}
+		if r := matchComm(comm); r != nil {
+			return r
 		}
 	}
+	return matchArgs(strings.ToLower(args))
+}
+
+func matchComm(comm string) *appRule {
+	for i := range appRules {
+		if slices.Contains(appRules[i].comm, comm) {
+			return &appRules[i]
+		}
+	}
+	return nil
+}
+
+func matchArgs(largs string) *appRule {
 	for i := range appRules {
 		for _, a := range appRules[i].args {
 			if a != "" && strings.Contains(largs, a) {
@@ -185,8 +195,11 @@ func classifyProc(comm, args string) *appRule {
 	return nil
 }
 
+// otherPrefix starts the key of an unclassified process.
+const otherPrefix = "other:"
+
 // otherKey names an unclassified process by its comm, or for an
-// interpreter by its script: "other:python3:myscript.py".
+// interpreter by its script: "other:python3 myscript.py".
 func otherKey(comm, args string) (key, name string) {
 	name = comm
 	if interpreters[comm] {
@@ -194,7 +207,7 @@ func otherKey(comm, args string) (key, name string) {
 			name = comm + " " + script
 		}
 	}
-	return "other:" + strings.ToLower(clip(name, 48)), clip(name, 48)
+	return otherPrefix + strings.ToLower(clip(name, 48)), clip(name, 48)
 }
 
 // scriptName picks the first argument that looks like a script, jar or
@@ -220,22 +233,23 @@ func AppName(key string) string {
 	if r, ok := ruleByKey[key]; ok {
 		return r.name
 	}
-	if n, ok := strings.CutPrefix(key, "other:"); ok {
+	if n, ok := strings.CutPrefix(key, otherPrefix); ok {
 		return n
 	}
 	return key
 }
 
 // ValidAppKey accepts the keys the classifier produces: a rule key, or
-// "other:" plus a clipped process name (any printable text).
+// "other:" plus a clipped process name (any printable text, up to 48 runes,
+// so the bound is in runes: a non-ASCII name is longer in bytes).
 func ValidAppKey(k string) bool {
-	if k == "" || len(k) > 64 {
+	if k == "" || utf8.RuneCountInString(k) > 64 {
 		return false
 	}
 	if _, ok := ruleByKey[k]; ok {
 		return true
 	}
-	n, ok := strings.CutPrefix(k, "other:")
+	n, ok := strings.CutPrefix(k, otherPrefix)
 	if !ok || n == "" || n != strings.ToLower(n) {
 		return false
 	}
@@ -271,66 +285,57 @@ func sameProcess(s procSample, p probe.ProcInfo, wall float64) bool {
 // rate, anything else is reported with CPUKnown false. watched is the
 // box's watch list; a watched app that is not running is listed as such.
 func appsFromSnapshot(snap *probe.Snapshot, user string, prev map[int]procSample, watched []string) (AppsState, map[int]procSample) {
-	st := AppsState{OK: snap.ProcsKnown, At: snap.At, Watched: append([]string(nil), watched...)}
-	if st.Watched == nil {
-		st.Watched = []string{}
-	}
+	st := AppsState{OK: snap.ProcsKnown, At: snap.At, Watched: append([]string{}, watched...)}
 	next := make(map[int]procSample, len(snap.Procs))
 	if !snap.ProcsKnown {
 		return st, next
 	}
-	byPID := map[int]int{} // pid -> index into st.Processes
-	ppid := map[int]int{}
+	ppid := make(map[int]int, len(snap.Procs))
 	for _, p := range snap.Procs {
 		ppid[p.PID] = p.PPID
-		pv := ProcView{PID: p.PID, Name: clip(p.Comm, 64), Args: clip(p.Args, 400), RSS: p.RSS, ElapsedSec: p.ElapsedSec}
-		if s, ok := prev[p.PID]; ok && snap.At.After(s.at) {
-			wall := snap.At.Sub(s.at).Seconds()
-			if wall > 0 && sameProcess(s, p, wall) && p.CPUSec >= s.cpuSec {
-				pv.CPUPct = (p.CPUSec - s.cpuSec) / wall * 100
-				pv.CPUKnown = true
-			}
-		}
 		next[p.PID] = procSample{cpuSec: p.CPUSec, start: p.StartTick, elapsed: p.ElapsedSec, at: snap.At}
-		if r := classifyProc(p.Comm, p.Args); r != nil {
-			pv.App = r.key
-		} else {
-			pv.App, _ = otherKey(p.Comm, p.Args)
-		}
-		byPID[p.PID] = len(st.Processes)
-		st.Processes = append(st.Processes, pv)
-		st.Procs++
+		st.Processes = append(st.Processes, procView(p, prev, snap.At))
 		st.RSS += p.RSS
 	}
+	st.Procs = len(st.Processes)
 	inheritApps(st.Processes, ppid)
-	// Ports: a port held by several of our pids (a parent and its forked
-	// children) belongs to whichever app those pids are in; list it once.
-	portsByApp := map[string]map[int]bool{}
-	for port, pids := range snap.ListenPIDs {
-		for _, pid := range pids {
-			if i, ok := byPID[pid]; ok {
-				k := st.Processes[i].App
-				if portsByApp[k] == nil {
-					portsByApp[k] = map[int]bool{}
-				}
-				portsByApp[k][port] = true
-			}
+	apps := groupApps(st.Processes, user)
+	attachPorts(apps, st.Processes, snap.ListenPIDs)
+	st.Apps = sortedApps(apps)
+	st.markWatched()
+	sort.SliceStable(st.Processes, func(i, j int) bool { return st.Processes[i].RSS > st.Processes[j].RSS })
+	if len(st.Processes) > maxProcViews {
+		st.Processes = st.Processes[:maxProcViews]
+	}
+	return st, next
+}
+
+// procView builds one process's view: clipped strings, the CPU rate
+// against the previous sample of the same process, and its app key.
+func procView(p probe.ProcInfo, prev map[int]procSample, at time.Time) ProcView {
+	pv := ProcView{PID: p.PID, Name: clip(p.Comm, 64), Args: clip(p.Args, 400), RSS: p.RSS, ElapsedSec: p.ElapsedSec}
+	if s, ok := prev[p.PID]; ok && at.After(s.at) {
+		wall := at.Sub(s.at).Seconds()
+		if wall > 0 && sameProcess(s, p, wall) && p.CPUSec >= s.cpuSec {
+			pv.CPUPct = (p.CPUSec - s.cpuSec) / wall * 100
+			pv.CPUKnown = true
 		}
 	}
+	if r := classifyProc(p.Comm, p.Args); r != nil {
+		pv.App = r.key
+	} else {
+		pv.App, _ = otherKey(p.Comm, p.Args)
+	}
+	return pv
+}
+
+// groupApps sums the processes into one AppView per app key.
+func groupApps(procs []ProcView, user string) map[string]*AppView {
 	apps := map[string]*AppView{}
-	for _, pv := range st.Processes {
+	for _, pv := range procs {
 		a := apps[pv.App]
 		if a == nil {
-			a = &AppView{Key: pv.App, Running: true}
-			if r, ok := ruleByKey[pv.App]; ok {
-				a.Name, a.Category = r.name, r.category
-				if r.webPath != "" && user != "" {
-					a.WebPath = strings.ReplaceAll(r.webPath, "{u}", user)
-				}
-			} else {
-				_, a.Name = otherKey(pv.Name, pv.Args)
-				a.Category = "other"
-			}
+			a = newAppView(pv, user)
 			apps[pv.App] = a
 		}
 		a.Procs++
@@ -341,25 +346,59 @@ func appsFromSnapshot(snap *probe.Snapshot, user string, prev map[int]procSample
 		}
 		a.UptimeSec = max(a.UptimeSec, pv.ElapsedSec)
 	}
-	for k, ports := range portsByApp {
-		for port := range ports {
+	return apps
+}
+
+// newAppView names a running app from its rule, or after its first process.
+func newAppView(pv ProcView, user string) *AppView {
+	a := &AppView{Key: pv.App, Running: true}
+	r, ok := ruleByKey[pv.App]
+	if !ok {
+		_, a.Name = otherKey(pv.Name, pv.Args)
+		a.Category = "other"
+		return a
+	}
+	a.Name, a.Category = r.name, r.category
+	if r.webPath != "" && user != "" {
+		a.WebPath = strings.ReplaceAll(r.webPath, "{u}", user)
+	}
+	return a
+}
+
+// attachPorts lists each app's listening ports once: a port held by several
+// of our pids (a parent and its forked children) belongs to their app.
+func attachPorts(apps map[string]*AppView, procs []ProcView, listenPIDs map[int][]int) {
+	appOf := make(map[int]string, len(procs))
+	for _, pv := range procs {
+		appOf[pv.PID] = pv.App
+	}
+	seen := map[string]map[int]bool{}
+	for port, pids := range listenPIDs {
+		for _, pid := range pids {
+			k, ok := appOf[pid]
+			if !ok || seen[k][port] {
+				continue
+			}
+			if seen[k] == nil {
+				seen[k] = map[int]bool{}
+			}
+			seen[k][port] = true
 			apps[k].Ports = append(apps[k].Ports, port)
 		}
-		sort.Ints(apps[k].Ports)
 	}
-	for _, k := range st.Watched {
-		if a, ok := apps[k]; ok {
-			a.Watched = true
-			continue
-		}
-		apps[k] = &AppView{Key: k, Name: AppName(k), Category: categoryOf(k), Watched: true}
-	}
-	st.Apps = make([]AppView, 0, len(apps))
 	for _, a := range apps {
-		st.Apps = append(st.Apps, *a)
+		sort.Ints(a.Ports)
 	}
-	sort.Slice(st.Apps, func(i, j int) bool {
-		a, b := st.Apps[i], st.Apps[j]
+}
+
+// sortedApps orders the views: running first, then by category, memory, name.
+func sortedApps(apps map[string]*AppView) []AppView {
+	out := make([]AppView, 0, len(apps))
+	for _, a := range apps {
+		out = append(out, *a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
 		if a.Running != b.Running {
 			return a.Running // running apps first; a watched app that is down stands out at the end
 		}
@@ -371,11 +410,7 @@ func appsFromSnapshot(snap *probe.Snapshot, user string, prev map[int]procSample
 		}
 		return a.Name < b.Name
 	})
-	sort.SliceStable(st.Processes, func(i, j int) bool { return st.Processes[i].RSS > st.Processes[j].RSS })
-	if len(st.Processes) > maxProcViews {
-		st.Processes = st.Processes[:maxProcViews]
-	}
-	return st, next
+	return out
 }
 
 // maxProcViews bounds the per-box process list served to the UI.
@@ -409,27 +444,27 @@ func categoryRank(c string) int {
 }
 
 // markWatched recomputes the Watched flags of a state's apps from its watch
-// list and adds rows for watched apps that are not running.
+// list and adds rows for watched apps that are not running. It builds new
+// slices: a state is copied shallowly when it is stored or served, so the
+// slices behind it may be shared with readers and are never written to.
 func (a *AppsState) markWatched() {
-	want := map[string]bool{}
+	want := make(map[string]bool, len(a.Watched))
 	for _, k := range a.Watched {
 		want[k] = true
 	}
-	seen := map[string]bool{}
-	for i := range a.Apps {
-		a.Apps[i].Watched = want[a.Apps[i].Key]
-		seen[a.Apps[i].Key] = true
-	}
-	kept := a.Apps[:0]
+	out := make([]AppView, 0, len(a.Apps)+len(want))
+	seen := make(map[string]bool, len(a.Apps))
 	for _, v := range a.Apps {
-		if v.Running || want[v.Key] {
-			kept = append(kept, v) // an unwatched, not-running placeholder row has no reason to stay
+		v.Watched = want[v.Key]
+		seen[v.Key] = true
+		if v.Running || v.Watched {
+			out = append(out, v) // an unwatched, not-running placeholder row has no reason to stay
 		}
 	}
-	a.Apps = kept
-	for k := range want {
+	for _, k := range a.Watched {
 		if !seen[k] {
-			a.Apps = append(a.Apps, AppView{Key: k, Name: AppName(k), Category: categoryOf(k), Watched: true})
+			out = append(out, AppView{Key: k, Name: AppName(k), Category: categoryOf(k), Watched: true})
 		}
 	}
+	a.Apps = out
 }
