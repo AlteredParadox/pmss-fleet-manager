@@ -163,6 +163,9 @@ func NormalizeBasePath(p string) (string, error) {
 	return p, nil
 }
 
+// boxRoute is the per-box API prefix.
+const boxRoute = "/api/boxes/{id}"
+
 func (s *Server) routes() {
 	bp := s.basePath
 	mux := s.mux
@@ -170,19 +173,19 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET "+bp+"/api/events", s.handleEvents)
 	mux.HandleFunc("GET "+bp+"/api/boxes", s.handleListBoxes)
 	mux.HandleFunc("POST "+bp+"/api/boxes", s.handleCreateBox)
-	mux.HandleFunc("GET "+bp+"/api/boxes/{id}", s.handleGetBox)
+	mux.HandleFunc("GET "+bp+boxRoute, s.handleGetBox)
 	mux.HandleFunc("GET "+bp+"/api/torrents", s.handleTorrents)
-	mux.HandleFunc("PUT "+bp+"/api/boxes/{id}", s.handleUpdateBox)
-	mux.HandleFunc("DELETE "+bp+"/api/boxes/{id}", s.handleDeleteBox)
-	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
-	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/refresh", s.handleRefresh)
-	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/du", s.handleDu)
-	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/qbt/{action}", s.handleQbtAction)
-	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
-	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
-	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/qbt/discovery", s.handleSetDiscovery)
-	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/containers/{cid}/{action}", s.handleContainerAction)
-	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/apps/watch", s.handleAppWatch)
+	mux.HandleFunc("PUT "+bp+boxRoute, s.handleUpdateBox)
+	mux.HandleFunc("DELETE "+bp+boxRoute, s.handleDeleteBox)
+	mux.HandleFunc("POST "+bp+boxRoute+"/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
+	mux.HandleFunc("POST "+bp+boxRoute+"/refresh", s.handleRefresh)
+	mux.HandleFunc("POST "+bp+boxRoute+"/du", s.handleDu)
+	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/{action}", s.handleQbtAction)
+	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
+	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
+	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/discovery", s.handleSetDiscovery)
+	mux.HandleFunc("POST "+bp+boxRoute+"/containers/{cid}/{action}", s.handleContainerAction)
+	mux.HandleFunc("POST "+bp+boxRoute+"/apps/watch", s.handleAppWatch)
 	mux.HandleFunc("POST "+bp+"/api/detect", s.handleDetect)
 	mux.HandleFunc("GET "+bp+"/api/alerts", s.handleAlerts)
 	mux.HandleFunc("POST "+bp+"/api/alerts/ack-all", s.handleAckAll)
@@ -673,11 +676,11 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 	// Secrets: a blank field keeps the saved one, so clearing is explicit.
 	// The SSH password is dropped when the box no longer authenticates with
 	// one; the WebUI password on request, unless a new one was typed.
-	clear := store.Clears{
+	clears := store.Clears{
 		Password: in.AuthMethod == "key" || in.AuthMethod == "agent",
 		QbtPass:  in.ClearQbtPass && in.QbtPass == "",
 	}
-	if err := s.m.UpdateBox(r.Context(), b, clear); err != nil {
+	if err := s.m.UpdateBox(r.Context(), b, clears); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeErr(w, 404, err)
 			return

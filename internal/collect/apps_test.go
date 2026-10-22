@@ -17,10 +17,19 @@
 package collect
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"pmss-fleet-manager/internal/probe"
+	"pmss-fleet-manager/internal/store"
 )
 
 func TestClassifyProc(t *testing.T) {
@@ -174,5 +183,116 @@ func TestMarkWatched(t *testing.T) {
 	}
 	if !got["radarr"].Watched || !got["jellyfin"].Watched || got["jellyfin"].Running || got["jellyfin"].Name != "Jellyfin" {
 		t.Fatalf("marks: %+v", got)
+	}
+}
+
+// Twenty toggles of different keys at once must all land, in the store and
+// in the served state, and readers holding shallow copies of the state must
+// not see a slice being rewritten underneath them (run with -race).
+func TestSetAppWatchConcurrent(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	b := &store.Box{Name: "x", Host: "h.example", User: "u", Port: 22, Enabled: false}
+	if err := m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	// A running app in the state, so toggles rewrite a non-empty list.
+	m.mutateState(b.ID, func(s *BoxState) {
+		s.Apps = AppsState{OK: true, Apps: []AppView{{Key: "radarr", Name: "Radarr", Running: true}}, Watched: []string{}}
+	})
+	keys := make([]string, 20)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("other:app%02d", i)
+	}
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	readers.Add(1)
+	go func() { // a concurrent reader, like the fleet view and SSE
+		defer readers.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for _, s := range m.States() {
+				for _, a := range s.Apps.Apps {
+					_ = a.Watched
+				}
+			}
+		}
+	}()
+	var wg sync.WaitGroup
+	for _, k := range keys {
+		wg.Add(1)
+		go func(k string) {
+			defer wg.Done()
+			if err := m.SetAppWatch(ctx, b.ID, k, true); err != nil {
+				t.Error(err)
+			}
+		}(k)
+	}
+	wg.Wait()
+	close(stop)
+	readers.Wait()
+	saved, _ := st.GetBox(ctx, b.ID)
+	if !slices.Equal(saved.AppsWatch, slices.Sorted(slices.Values(keys))) {
+		t.Fatalf("lost toggles: %d of %d saved: %v", len(saved.AppsWatch), len(keys), saved.AppsWatch)
+	}
+	s, _ := m.State(b.ID)
+	if !slices.Equal(s.Apps.Watched, saved.AppsWatch) || len(s.Apps.Apps) != len(keys)+1 {
+		t.Fatalf("state: %v %d apps", s.Apps.Watched, len(s.Apps.Apps))
+	}
+	// Unwatching half of them concurrently with watching the rest again.
+	wg = sync.WaitGroup{}
+	for i, k := range keys {
+		wg.Add(1)
+		go func(k string, on bool) {
+			defer wg.Done()
+			if err := m.SetAppWatch(ctx, b.ID, k, on); err != nil {
+				t.Error(err)
+			}
+		}(k, i%2 == 0)
+	}
+	wg.Wait()
+	saved, _ = st.GetBox(ctx, b.ID)
+	if len(saved.AppsWatch) != 10 {
+		t.Fatalf("after mixed toggles: %v", saved.AppsWatch)
+	}
+}
+
+// markWatched must leave the slices a shallow copy shares with the stored
+// state untouched.
+func TestMarkWatchedCopies(t *testing.T) {
+	orig := AppsState{OK: true, Apps: []AppView{{Key: "radarr", Running: true}, {Key: "sonarr", Watched: true}}, Watched: []string{"sonarr"}}
+	cp := orig // what mutateState and States() hand out
+	cp.Watched = []string{"radarr", "jellyfin"}
+	cp.markWatched()
+	if orig.Apps[0].Watched || !orig.Apps[1].Watched || orig.Apps[1].Key != "sonarr" || len(orig.Apps) != 2 {
+		t.Fatalf("original mutated: %+v", orig.Apps)
+	}
+	if len(cp.Apps) != 2 || cp.Apps[0].Key != "radarr" || !cp.Apps[0].Watched || cp.Apps[1].Key != "jellyfin" {
+		t.Fatalf("copy: %+v", cp.Apps)
+	}
+}
+
+func TestValidAppKeyNonASCII(t *testing.T) {
+	// A 48-rune non-ASCII process name: 6 + 48 runes, well over 64 bytes.
+	name := strings.Repeat("ö", 48)
+	k, _ := otherKey(name, "")
+	if !ValidAppKey(k) {
+		t.Fatalf("classifier key %q (%d bytes) must be accepted", k, len(k))
+	}
+	if ValidAppKey(otherPrefix + strings.Repeat("ö", 60)) {
+		t.Fatal("longer than the classifier ever produces")
 	}
 }

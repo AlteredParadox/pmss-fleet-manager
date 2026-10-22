@@ -55,11 +55,15 @@ type Manager struct {
 	hooks  []Hook
 	latest latestRelease
 
-	boxMu  sync.Mutex // serialises AddBox/UpdateBox/RemoveBox
-	pmapi  *pmapi.Client
-	svcMu  sync.RWMutex
-	svc    servicesCache
-	syncMu sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
+	boxMu sync.Mutex // serialises AddBox/UpdateBox/RemoveBox
+	// watchMu serialises SetAppWatch's read-modify-write of a box's watch
+	// list: two toggles at once would otherwise each save a list missing
+	// the other's change.
+	watchMu sync.Mutex
+	pmapi   *pmapi.Client
+	svcMu   sync.RWMutex
+	svc     servicesCache
+	syncMu  sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -320,10 +324,10 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 }
 
 // UpdateBox persists changes and restarts the poller with fresh connections.
-func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clear store.Clears) error {
+func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clears) error {
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
-	if err := m.st.UpdateBox(ctx, b, clear); err != nil {
+	if err := m.st.UpdateBox(ctx, b, clears); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -497,6 +501,8 @@ func (m *Manager) SetAppWatch(ctx context.Context, id int64, key string, on bool
 	if p == nil {
 		return store.ErrNotFound
 	}
+	m.watchMu.Lock()
+	defer m.watchMu.Unlock()
 	st, ok := m.State(id)
 	if !ok {
 		return store.ErrNotFound

@@ -217,15 +217,36 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
-	return s.addColumn("boxes", "apps_watch", "TEXT NOT NULL DEFAULT ''")
+	return s.ensureAppsWatchColumn()
 }
 
-// addColumn adds a column to a table unless it already exists (SQLite has
-// no ADD COLUMN IF NOT EXISTS). Names are constants from migrate.
-func (s *Store) addColumn(table, col, decl string) error {
-	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+// Columns added after 1.3.1; SQLite has no ADD COLUMN IF NOT EXISTS, so the
+// table is inspected first. Both statements are constants.
+const (
+	boxesColumnsSQL    = "PRAGMA table_info(boxes)"
+	addAppsWatchColSQL = "ALTER TABLE boxes ADD COLUMN apps_watch TEXT NOT NULL DEFAULT ''"
+)
+
+// ensureAppsWatchColumn adds boxes.apps_watch to a database from before it existed.
+func (s *Store) ensureAppsWatchColumn() error {
+	has, err := s.hasBoxesColumn("apps_watch")
 	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := s.db.Exec(addAppsWatchColSQL); err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+	return nil
+}
+
+// hasBoxesColumn reports whether the boxes table has the named column.
+func (s *Store) hasBoxesColumn(col string) (bool, error) {
+	rows, err := s.db.Query(boxesColumnsSQL)
+	if err != nil {
+		return false, fmt.Errorf("migrate: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -233,19 +254,16 @@ func (s *Store) addColumn(table, col, decl string) error {
 		var name, typ string
 		var dflt any
 		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
-			return fmt.Errorf("migrate: %w", err)
+			return false, fmt.Errorf("migrate: %w", err)
 		}
 		if name == col {
-			return nil
+			return true, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("migrate: %w", err)
+		return false, fmt.Errorf("migrate: %w", err)
 	}
-	if _, err := s.db.Exec("ALTER TABLE " + table + " ADD COLUMN " + col + " " + decl); err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	return nil
+	return false, nil
 }
 
 // SetAppsWatch replaces a box's watch list (see Box.AppsWatch).
@@ -359,21 +377,21 @@ type Clears struct {
 // outcome is clear, keep (blank field) or replace, so an edit and the
 // removal of a password it implies land together or not at all. A missing
 // row is ErrNotFound.
-func (s *Store) UpdateBox(ctx context.Context, b *Box, clear Clears) error {
+func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	now := time.Now().UTC()
 	b.UpdatedAt = now
-	if clear.Password {
+	if clears.Password {
 		b.Password = ""
 	}
-	if clear.QbtPass {
+	if clears.QbtPass {
 		b.QbtPass = ""
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
 		password=CASE WHEN ? THEN '' WHEN ?='' THEN password ELSE ? END, host_key=?, type=?, plan=?, datacenter=?, renewal=?,
 		qbt_enabled=?, qbt_port=?, qbt_user=?, qbt_pass=CASE WHEN ? THEN '' WHEN ?='' THEN qbt_pass ELSE ? END, qbt_start_cmd=?,
 		docker_enabled=?, du_enabled=?, enabled=?, updated_at=? WHERE id=?`,
-		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clear.Password, b.Password, b.Password, b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
-		b.QbtEnabled, b.QbtPort, b.QbtUser, clear.QbtPass, b.QbtPass, b.QbtPass, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
+		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clears.Password, b.Password, b.Password, b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
+		b.QbtEnabled, b.QbtPort, b.QbtUser, clears.QbtPass, b.QbtPass, b.QbtPass, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
 		now.Format(time.RFC3339), b.ID)
 	if err != nil {
 		return err
