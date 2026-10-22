@@ -134,6 +134,15 @@ func TestWantApps(t *testing.T) {
 		t.Fatalf("no alert without a readable process list: %+v", got)
 	}
 	s.Apps.OK = true
+	// Processes read but their command lines cut: Bazarr runs as python3
+	// and cannot be told from any other python3, so no verdict this poll.
+	if got := wantApps(&s); len(got) != 0 {
+		t.Fatalf("no alert without the command lines: %+v", got)
+	}
+	if recheckable(&s, "app:jellyfin") {
+		t.Error("command lines not read: must not resolve the alert either")
+	}
+	s.Apps.ArgsKnown = true
 	got := wantApps(&s)
 	if len(got) != 1 || got[0].key != "app:jellyfin" || got[0].sev != "warn" || got[0].title != "seed-01 — Jellyfin is not running" {
 		t.Fatalf("alerts: %+v", got)
@@ -169,7 +178,7 @@ func TestEvaluateSkipsUnpolled(t *testing.T) {
 	e := New(st, store.DefaultSettings, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	s := &collect.BoxState{ID: b.ID, Name: "x", Status: "online", Unpolled: true}
 	s.Qbt.Enabled, s.Docker.Enabled = true, true // Reachable false, as resetVolatile leaves them
-	s.Apps.OK, s.Apps.Watched, s.Apps.Apps = true, []string{"radarr"}, []collect.AppView{{Key: "radarr", Name: "Radarr", Watched: true}}
+	s.Apps.OK, s.Apps.ArgsKnown, s.Apps.Watched, s.Apps.Apps = true, true, []string{"radarr"}, []collect.AppView{{Key: "radarr", Name: "Radarr", Watched: true}}
 	e.Evaluate(ctx, s)
 	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); len(keys) != 0 {
 		t.Fatalf("unpolled state raised %v", keys)

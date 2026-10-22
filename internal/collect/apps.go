@@ -65,6 +65,10 @@ type AppView struct {
 // grouped into applications.
 type AppsState struct {
 	OK      bool      `json:"ok"` // ps listed the account's processes this poll
+	// ArgsKnown is false when the command lines were not read although the
+	// processes were: interpreter-run apps are then unclassifiable, so no
+	// app alert is raised or resolved on this poll (see Reliable).
+	ArgsKnown bool `json:"args_known"`
 	At      time.Time `json:"at"`
 	Procs   int       `json:"procs"` // process count
 	RSS     int64     `json:"rss"`   // summed resident memory
@@ -303,7 +307,7 @@ func sameProcess(s procSample, p probe.ProcInfo, wall float64) bool {
 // rate, anything else is reported with CPUKnown false. watched is the
 // box's watch list; a watched app that is not running is listed as such.
 func appsFromSnapshot(snap *probe.Snapshot, user string, prev map[int]procSample, watched []string) (AppsState, map[int]procSample) {
-	st := AppsState{OK: snap.ProcsKnown, At: snap.At, Watched: append([]string{}, watched...)}
+	st := AppsState{OK: snap.ProcsKnown, ArgsKnown: snap.ArgsKnown, At: snap.At, Watched: append([]string{}, watched...)}
 	next := make(map[int]procSample, len(snap.Procs))
 	if !snap.ProcsKnown {
 		return st, next
@@ -462,6 +466,11 @@ func categoryRank(c string) int {
 	}
 	return 7 // shell last: the sessions are the dashboard's own
 }
+
+// Reliable reports whether this poll's classification can be trusted for
+// an "app not running" verdict: the process list AND the command lines
+// were read.
+func (a AppsState) Reliable() bool { return a.OK && a.ArgsKnown }
 
 // markWatched recomputes the Watched flags of a state's apps from its watch
 // list and adds rows for watched apps that are not running. It builds new

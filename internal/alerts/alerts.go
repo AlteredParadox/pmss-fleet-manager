@@ -70,7 +70,7 @@ func recheckable(s *collect.BoxState, k string) bool {
 		return s.Qbt.Reachable || !s.Qbt.Enabled
 	case strings.HasPrefix(k, "app:"):
 		// Unwatching is a deliberate "nothing to check" too.
-		return s.Apps.OK || unwatchedApp(s, k)
+		return s.Apps.Reliable() || unwatchedApp(s, k)
 	}
 	return true
 }
@@ -177,8 +177,8 @@ func wantProbeRules(s *collect.BoxState, set store.Settings) []want {
 // running, when the process list could be read this poll.
 func wantApps(s *collect.BoxState) []want {
 	var active []want
-	if !s.Apps.OK {
-		return nil
+	if !s.Apps.Reliable() {
+		return nil // process list or command lines not read: a watched interpreter app may merely be unclassified
 	}
 	for _, a := range s.Apps.Apps {
 		if a.Watched && !a.Running {

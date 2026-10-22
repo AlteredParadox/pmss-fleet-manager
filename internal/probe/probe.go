@@ -56,6 +56,11 @@ type Snapshot struct {
 	// account with no processes: sshd's session process is always there.
 	Procs      []ProcInfo
 	ProcsKnown bool
+	// ArgsKnown is false when the command lines were not read this poll
+	// (the proc_args ps was cut by its timeout) although the process list
+	// was: an interpreter-run application (python3 bazarr.py) can then not
+	// be told from any other python3, so app classification is incomplete.
+	ArgsKnown bool
 	// Logs lists the log files found in the catalogued places under the
 	// home (see logDirs); LogsKnown is false when the section is missing.
 	Logs      []LogFile
@@ -517,7 +522,7 @@ func parseProcStat(raw string) map[int]procStat {
 // comm possibly containing spaces), the proc_args section ("pid args") and
 // the proc_stat section, dropping the probe's own shell and its children
 // (ps, cut, awk).
-func parseProcs(procs, args, stat string, probePID int) ([]ProcInfo, bool) {
+func parseProcs(procs, args, stat string, probePID int) (out []ProcInfo, known, argsKnown bool) {
 	stats := parseProcStat(stat)
 	argv := map[int]string{}
 	for _, line := range strings.Split(args, "\n") {
@@ -530,7 +535,6 @@ func parseProcs(procs, args, stat string, probePID int) ([]ProcInfo, bool) {
 		}
 	}
 	var rows []ProcInfo
-	known := false
 	for _, line := range strings.Split(procs, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 6 {
@@ -567,7 +571,7 @@ func parseProcs(procs, args, stat string, probePID int) ([]ProcInfo, bool) {
 	for _, r := range rows {
 		ppidOf[r.PID] = r.PPID
 	}
-	out := make([]ProcInfo, 0, len(rows))
+	out = make([]ProcInfo, 0, len(rows))
 	for _, r := range rows {
 		if probePID > 0 && underPID(r.PID, probePID, ppidOf) {
 			continue
@@ -577,7 +581,10 @@ func parseProcs(procs, args, stat string, probePID int) ([]ProcInfo, bool) {
 			break
 		}
 	}
-	return out, known
+	// Every process has a command line row (ps prints [comm] for an empty
+	// one), so a readable process list with no args rows means the args
+	// listing was cut.
+	return out, known, known && len(argv) > 0
 }
 
 // underPID reports whether pid is root or one of its descendants in the
@@ -694,7 +701,7 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 		SocketPresent: strings.TrimSpace(s["docker_sock"]) == "1",
 	}
 	probePID, _ := strconv.Atoi(strings.TrimSpace(s["probe_pid"]))
-	snap.Procs, snap.ProcsKnown = parseProcs(s["procs"], s["proc_args"], s["proc_stat"], probePID)
+	snap.Procs, snap.ProcsKnown, snap.ArgsKnown = parseProcs(s["procs"], s["proc_args"], s["proc_stat"], probePID)
 	snap.ListenPIDs = parseListenPIDs(s["listen_pids"])
 	_, snap.LogsKnown = s["logs"]
 	snap.Logs = parseLogs(s["logs"])

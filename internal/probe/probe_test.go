@@ -165,7 +165,7 @@ func TestParse(t *testing.T) {
 	}
 	// The probe's own shell (777) and its child ps (778) are dropped; the
 	// rest keep their args, and a comm with a space survives.
-	if !snap.ProcsKnown || len(snap.Procs) != 4 {
+	if !snap.ProcsKnown || !snap.ArgsKnown || len(snap.Procs) != 4 {
 		t.Fatalf("procs: %+v", snap.Procs)
 	}
 	// CPU comes from /proc stat ticks where present (6172.5 s), ps's whole
@@ -297,14 +297,19 @@ func runSh(t *testing.T, script string) (string, string, int) {
 }
 
 func TestParseProcsHostileAndMissing(t *testing.T) {
-	procs, known := parseProcs("", "", "", 0)
-	if known || len(procs) != 0 {
+	procs, known, argsKnown := parseProcs("", "", "", 0)
+	if known || argsKnown || len(procs) != 0 {
 		t.Fatalf("empty ps must be unknown, got %v %v", known, procs)
 	}
 	raw := "1 0 -5 nan -1 bad\n2 0 99999999999999 1e99 5 huge\nx y z\n3 0 10 1 1 ok"
-	procs, known = parseProcs(raw, "3 cmd with args\nnotanumber args", "0\n3 100 100 5", 0) // CLK_TCK 0: stat ignored
-	if !known || len(procs) != 3 {
+	procs, known, argsKnown = parseProcs(raw, "3 cmd with args\nnotanumber args", "0\n3 100 100 5", 0) // CLK_TCK 0: stat ignored
+	if !known || !argsKnown || len(procs) != 3 {
 		t.Fatalf("procs: %+v", procs)
+	}
+	// A readable process list with a cut (empty) args listing: the
+	// processes are known, their command lines are not.
+	if _, known, argsKnown := parseProcs("3 0 10 1 1 python3", "", "", 0); !known || argsKnown {
+		t.Fatalf("args cut: known %v argsKnown %v", known, argsKnown)
 	}
 	if procs[0].RSS != 0 || procs[0].CPUSec != 0 || procs[0].ElapsedSec != 0 {
 		t.Fatalf("negative/nan values must clamp to 0: %+v", procs[0])
@@ -325,7 +330,7 @@ func TestParseProcsHostileAndMissing(t *testing.T) {
 	}
 	// The probe's whole tree is dropped: timeout wraps ps, so ps is a grandchild.
 	tree := "777 1 100 0 1 sh\n778 777 100 0 1 timeout\n779 778 100 0 1 ps\n780 779 100 0 1 cat\n900 1 100 0 1 radarr"
-	if procs, _ := parseProcs(tree, "", "", 777); len(procs) != 1 || procs[0].Comm != "radarr" {
+	if procs, _, _ := parseProcs(tree, "", "", 777); len(procs) != 1 || procs[0].Comm != "radarr" {
 		t.Fatalf("probe tree exclusion: %+v", procs)
 	}
 	if got := parseListenPIDs("80 1\n70000 2\nabc 3\n80 1\n81"); len(got) != 1 || len(got[80]) != 1 {

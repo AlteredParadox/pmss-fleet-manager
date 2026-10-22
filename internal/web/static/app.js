@@ -976,7 +976,9 @@ function tabServices(b) {
   const all = A.processes || [];
   const procs = all.filter((p) => !f || p.name.toLowerCase().includes(f) || (p.args || '').toLowerCase().includes(f) || appName(A, p.app).toLowerCase().includes(f)).slice(0, 200);
   const why = { offline: ' (box unreachable)', pending: ' yet', disabled: ' (polling is disabled)' }[b.status] || ' (ps printed nothing on the box)';
-  const note = A.ok ? `${A.procs} process${A.procs === 1 ? '' : 'es'} · ${fmtBytes(A.rss, 1)} resident` : `<span class="warn">process list not read${why}</span>`;
+  const reliable = A.ok && A.args_known;
+  const note = !A.ok ? `<span class="warn">process list not read${why}</span>`
+    : `${A.procs} process${A.procs === 1 ? '' : 'es'} · ${fmtBytes(A.rss, 1)} resident${A.args_known ? '' : ' · <span class="warn" title="the command-line listing was cut this poll: applications run by an interpreter (python, mono, dotnet, node, java, php) cannot be told apart, so no app alert is raised or resolved">command lines not read</span>'}`;
   return `<div class="table app-table" style="overflow:hidden">
     <div class="thead-tools">
       <div style="font-size:12px"><b>services</b> <span class="muted">· ${note}</span></div>
@@ -984,7 +986,7 @@ function tabServices(b) {
     </div>
     <div style="overflow:auto">
       <div class="trow head"><span>application</span><span>kind</span><span>state</span><span>cpu</span><span>memory</span><span>up for</span><span title="listening TCP ports held by its processes">ports</span><span>link</span><span title="raise an alert when this application is not running">watch</span></div>
-      ${apps.length === 0 ? `<div class="trow"><span class="muted">${A.ok ? 'nothing matches' : '—'}</span></div>` : apps.map((a) => appRow(b, a, A.ok)).join('')}
+      ${apps.length === 0 ? `<div class="trow"><span class="muted">${A.ok ? 'nothing matches' : '—'}</span></div>` : apps.map((a) => appRow(b, a, reliable)).join('')}
     </div>
   </div>
   <div class="hint" style="margin-top:8px">Everything the account runs on the shared host, as its own uid sees it (other tenants' processes are hidden by PMSS). CPU is the share of one core since the previous poll. Watch an application to be alerted when it is not running; a watched application that is down stays listed.</div>
@@ -996,9 +998,9 @@ function tabServices(b) {
     </div>
   </div>`;
 }
-// known is false when the process list could not be read this poll: a
-// watched app's row is then listed (the list is the user's) but its state
-// is unknown, not "not running".
+// known is false when the process list or the command lines could not be
+// read this poll: a watched app's row is then listed (the list is the
+// user's) but its state is unknown, not "not running".
 function appRow(b, a, known) {
   const url = appUrl(b, a);
   const state = a.running ? `running · ${a.procs} proc${a.procs === 1 ? '' : 's'}` : known ? 'not running' : 'unknown';
