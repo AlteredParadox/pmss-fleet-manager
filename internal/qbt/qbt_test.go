@@ -638,3 +638,48 @@ func TestAmbiguousLoginBudget(t *testing.T) {
 		t.Fatalf("restored: %v %v", err, held)
 	}
 }
+
+// The ambiguous signal is per request: another request's traffic on the
+// same client while a login fails before writing must not charge the
+// budget.
+func TestAmbiguousSignalIsPerRequest(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() { // answers nothing, ever: every request times out
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					if _, err := conn.Read(buf); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	addr := ln.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:8080", "admin", "secret")
+	// A concurrent non-login request that is still writing/waiting.
+	bg, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+	go func() { _, _ = c.Version(bg) }()
+	time.Sleep(50 * time.Millisecond)
+	// Logins cancelled before they can be sent: a pre-cancelled context.
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 2*ambiguousBudget; i++ {
+		if err := c.Login(done); err == nil {
+			t.Fatal("login must fail")
+		}
+	}
+	if _, held := c.AuthBlocked(); held {
+		t.Fatal("logins that never wrote must not be charged, whatever other requests did")
+	}
+}

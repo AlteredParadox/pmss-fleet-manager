@@ -30,6 +30,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
@@ -52,8 +53,6 @@ type Client struct {
 	cookie string // session cookie header value, set by Login
 
 	guard *AuthGuard
-	// writes counts bytes written on this client's connections (see login).
-	writes atomic.Int64
 }
 
 // banRetryAfter is the hold after qBittorrent reports the IP banned: its
@@ -220,21 +219,6 @@ func (g *AuthGuard) Restore(s AuthState) {
 	g.fail(err, s.Until, s.Key)
 }
 
-// countingConn counts the bytes written on a transport connection, so a
-// login can tell "failed before anything was sent" from "sent, no answer".
-type countingConn struct {
-	net.Conn
-	writes *atomic.Int64
-}
-
-func (c *countingConn) Write(b []byte) (int, error) {
-	n, err := c.Conn.Write(b)
-	if n > 0 {
-		c.writes.Add(int64(n))
-	}
-	return n, err
-}
-
 // New builds a client with its own guard. Test support: the poller uses
 // NewWithGuard so the hold outlives the client. hostport is what qBittorrent
 // should see in the Host header (its host-header validation accepts localhost/127.0.0.1 by default),
@@ -250,24 +234,15 @@ func NewWithGuard(dial Dialer, hostport, user, pass string, g *AuthGuard) *Clien
 	if g == nil {
 		g = &AuthGuard{}
 	}
-	c := &Client{user: user, pass: pass, guard: g}
 	tr := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			conn, err := dial(ctx)
-			if err != nil {
-				return nil, err
-			}
-			return &countingConn{Conn: conn, writes: &c.writes}, nil
-		},
+		DialContext:     func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
 		MaxIdleConns:    2,
 		IdleConnTimeout: 60 * time.Second,
 	}
 	if hostport == "" {
 		hostport = "127.0.0.1"
 	}
-	c.http = &http.Client{Transport: tr, Timeout: 30 * time.Second}
-	c.base = "http://" + hostport
-	return c
+	return &Client{http: &http.Client{Transport: tr, Timeout: 30 * time.Second}, base: "http://" + hostport, user: user, pass: pass, guard: g}
 }
 
 // Close releases idle connections.
@@ -388,15 +363,18 @@ func (c *Client) login(ctx context.Context) error {
 		return err
 	}
 	form := url.Values{"username": {c.user}, "password": {c.pass}}
-	sent := c.writes.Load()
+	// Per-request write evidence: WroteHeaders fires for THIS request once
+	// its headers are on the wire, after which the body with the
+	// credentials follows. A dial failure, or a request cancelled before
+	// that, sent nothing qBittorrent could count and must not spend the
+	// ambiguous budget, or a briefly unreachable box would lock valid
+	// credentials; and another request's traffic on the shared transport
+	// cannot be mistaken for this one's.
+	var sent atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteHeaders: func() { sent.Store(true) }})
 	code, body, resp, err := c.doResp(ctx, http.MethodPost, "/api/v2/auth/login", form)
 	if err != nil {
-		// No answer. Only when bytes went out during this attempt may
-		// qBittorrent have seen (and counted) the credentials; a dial
-		// failure or a request cancelled before the write is a plain
-		// transport error and must not spend the ambiguous budget, or a
-		// box that is briefly unreachable would lock valid credentials.
-		if c.writes.Load() > sent {
+		if sent.Load() {
 			c.guard.noteAmbiguous(c.credsKey())
 		}
 		return err
