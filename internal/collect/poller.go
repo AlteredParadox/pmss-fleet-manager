@@ -728,6 +728,7 @@ func qbtPortFor(b *store.Box, confPort int) int {
 func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot) {
 	port := p.qbtPort(snap)
 	qs := QbtState{Enabled: true, Installed: snap.Qbt.BinaryPresent, ProcessUp: snap.Qbt.Running, Port: port, Version: st.Qbt.Version,
+		FirewalledSince: carriedFirewalledSince(st.Qbt, snap.Qbt.Running), ListenPort: st.Qbt.ListenPort,
 		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: clip(snap.Qbt.SubnetList, 1024), ConfUser: clip(snap.Qbt.Username, 64),
 		HasCreds:      p.box.QbtUser != "" || p.box.QbtPass != "",
 		BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, CronInstalled: snap.Qbt.CronEntries > 0, PMSSManaged: snap.Qbt.PMSSManaged}
@@ -844,6 +845,19 @@ func connectionStatus(s string) string {
 		return s
 	}
 	return ""
+}
+
+// carriedFirewalledSince is the FirewalledSince a poll starts from: the
+// previous value while the client process is still up, so a Web API
+// failure (a login hold, a timeout, a port check that refused) does not
+// restart the ten-minute clock and clear an alert the moment the API
+// answers again; nothing once the process is gone, since a fresh process
+// starts its own clock.
+func carriedFirewalledSince(prev QbtState, processUp bool) string {
+	if !processUp {
+		return ""
+	}
+	return prev.FirewalledSince
 }
 
 // firewalledSince carries the time the client was first seen not
