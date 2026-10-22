@@ -787,9 +787,14 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	// so they are shown per box; another small request per poll.
 	if pr, err := cli.Preferences(actx); err == nil {
 		qs.Discovery = Discovery{Known: true, DHT: pr.DHT, PeX: pr.PeX, LSD: pr.LSD}
+		if pr.ListenPort > 0 && pr.ListenPort <= 65535 {
+			qs.ListenPort = pr.ListenPort
+		}
 	}
 	qs.Reachable = true
 	ss := md.ServerState
+	qs.Connection = connectionStatus(ss.ConnectionStatus)
+	qs.FirewalledSince = firewalledSince(st.Qbt.FirewalledSince, qs.Connection, time.Now())
 	if f, err := strconv.ParseFloat(strings.TrimSpace(ss.GlobalRatio), 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) && f >= 0 && f < 1e9 {
 		qs.GlobalRatio = f // qBittorrent sends "∞" for undefined, which parses as 0 here
 	}
@@ -830,6 +835,28 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		return a.Name < b.Name
 	})
 	st.Qbt = qs
+}
+
+// connectionStatus keeps only the three values libtorrent reports.
+func connectionStatus(s string) string {
+	switch s {
+	case "connected", "firewalled", "disconnected":
+		return s
+	}
+	return ""
+}
+
+// firewalledSince carries the time the client was first seen not
+// connected: kept while it stays firewalled or disconnected, cleared when
+// it is connected or the status is unknown.
+func firewalledSince(prev, conn string, now time.Time) string {
+	if conn != "firewalled" && conn != "disconnected" {
+		return ""
+	}
+	if _, err := time.Parse(time.RFC3339, prev); err == nil {
+		return prev
+	}
+	return now.UTC().Format(time.RFC3339)
 }
 
 // qbtNeedsCreds returns a reason to skip the Web API when the config shows

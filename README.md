@@ -33,7 +33,8 @@ per-box tab.
 **Per box.**
 
 - Overview: disk, upload with limit/bonus/throttle state, bandwidth, CPU/RAM,
-  client and autostart status, plan and billing.
+  client, incoming connectivity and listen port, autostart status, plan and
+  billing.
 - Traffic: daily upload/download bars for the rolling 30 days PMSS tracks.
 - Torrents: DHT / PeX / local peer discovery state in the header, each a
   toggle (and a card tag when any is on, for deciding where private-tracker
@@ -78,7 +79,9 @@ the Pulsed Media panel, PMSS runs and configures it itself: the dashboard
 still monitors it, but refuses to install or autostart a build of its own.
 
 **Alerts.** Unreachable box, suspended account, disk at threshold or over
-quota, traffic at threshold, throttled, qBittorrent or Docker down, container
+quota, traffic at threshold, throttled, qBittorrent or Docker down,
+qBittorrent without incoming connectivity (firewalled or disconnected) for
+more than ten minutes, container
 exited non-zero, a watched application not running, process memory near the
 slice limit, a kernel OOM kill in
 the slice, renewal within N days or overdue (counted in calendar days of the

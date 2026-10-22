@@ -133,6 +133,30 @@ func TestSanitizeFloats(t *testing.T) {
 	}
 }
 
+func TestFirewalledSince(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	if got := firewalledSince("", "firewalled", now); got != "2026-10-21T12:00:00Z" {
+		t.Fatalf("first sighting: %q", got)
+	}
+	if got := firewalledSince("2026-10-21T11:00:00Z", "firewalled", now); got != "2026-10-21T11:00:00Z" {
+		t.Fatalf("kept: %q", got)
+	}
+	if got := firewalledSince("2026-10-21T11:00:00Z", "disconnected", now); got != "2026-10-21T11:00:00Z" {
+		t.Fatalf("disconnected keeps it: %q", got)
+	}
+	if got := firewalledSince("garbage", "firewalled", now); got != "2026-10-21T12:00:00Z" {
+		t.Fatalf("unparsable previous value restarts the clock: %q", got)
+	}
+	for _, c := range []string{"connected", ""} {
+		if got := firewalledSince("2026-10-21T11:00:00Z", c, now); got != "" {
+			t.Fatalf("%q must clear: %q", c, got)
+		}
+	}
+	if connectionStatus("Connected") != "" || connectionStatus("firewalled") != "firewalled" {
+		t.Fatal("connectionStatus")
+	}
+}
+
 func TestRetryInterval(t *testing.T) {
 	base := 30 * time.Second
 	for failures, want := range map[int]time.Duration{0: base, 1: base, 4: base, 5: 60 * time.Second, 6: 2 * time.Minute, 7: 4 * time.Minute, 8: 8 * time.Minute, 9: 10 * time.Minute, 50: 10 * time.Minute} {

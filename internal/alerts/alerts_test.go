@@ -85,6 +85,41 @@ func TestDaysUntilDate(t *testing.T) {
 	}
 }
 
+func TestWantQbtConnection(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	s := collect.BoxState{Name: "seed-01"}
+	s.Qbt.Enabled, s.Qbt.Reachable, s.Qbt.Connection, s.Qbt.ListenPort = true, true, "firewalled", 51413
+	s.Qbt.FirewalledSince = now.Add(-5 * time.Minute).Format(time.RFC3339)
+	if got := wantQbtConnection(&s, now); len(got) != 0 {
+		t.Fatalf("inside the grace period: %+v", got)
+	}
+	s.Qbt.FirewalledSince = now.Add(-15 * time.Minute).Format(time.RFC3339)
+	got := wantQbtConnection(&s, now)
+	if len(got) != 1 || got[0].key != "qbt-conn" || got[0].title != "seed-01 — qBittorrent: no peer has reached listen port 51413 (firewalled) for 15m; check the port in qBittorrent against the one Pulsed Media assigned" {
+		t.Fatalf("alert: %+v", got)
+	}
+	s.Qbt.Connection = "disconnected"
+	s.Qbt.FirewalledSince = now.Add(-90 * time.Minute).Format(time.RFC3339)
+	if got := wantQbtConnection(&s, now); len(got) != 1 || got[0].title != "seed-01 — qBittorrent: libtorrent reports no network connection for 1h 30m; check the port in qBittorrent against the one Pulsed Media assigned" {
+		t.Fatalf("disconnected: %+v", got)
+	}
+	s.Qbt.Connection = "connected"
+	if got := wantQbtConnection(&s, now); len(got) != 0 {
+		t.Fatalf("connected: %+v", got)
+	}
+	s.Qbt.Connection, s.Qbt.Reachable = "firewalled", false
+	if got := wantQbtConnection(&s, now); len(got) != 0 {
+		t.Fatalf("unreachable client has no connection status: %+v", got)
+	}
+	if recheckable(&s, "qbt-conn") {
+		t.Error("unreachable: must not resolve")
+	}
+	s.Qbt.Enabled = false
+	if !recheckable(&s, "qbt-conn") {
+		t.Error("monitoring off: must resolve")
+	}
+}
+
 func TestWantApps(t *testing.T) {
 	s := collect.BoxState{Name: "seed-01"}
 	s.Apps.Watched = []string{"radarr", "jellyfin"}

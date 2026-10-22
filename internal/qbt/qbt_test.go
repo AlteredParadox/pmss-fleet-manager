@@ -60,10 +60,10 @@ func TestClientFlow(t *testing.T) {
 		w.Write([]byte("v5.1.0"))
 	}))
 	mux.HandleFunc("/api/v2/sync/maindata", auth(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"server_state":{"dl_info_speed":100,"up_info_speed":2000,"global_ratio":"4.21"},"torrents":{"abc":{"name":"x","state":"uploading","size":10,"uploaded":30,"downloaded":10,"num_seeds":2,"num_complete":-1,"num_leechs":3,"num_incomplete":40}}}`))
+		w.Write([]byte(`{"server_state":{"dl_info_speed":100,"up_info_speed":2000,"global_ratio":"4.21","connection_status":"firewalled"},"torrents":{"abc":{"name":"x","state":"uploading","size":10,"uploaded":30,"downloaded":10,"num_seeds":2,"num_complete":-1,"num_leechs":3,"num_incomplete":40}}}`))
 	}))
 	mux.HandleFunc("/api/v2/app/preferences", auth(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"dht":true,"pex":false,"lsd":true,"max_ratio":2}`))
+		w.Write([]byte(`{"dht":true,"pex":false,"lsd":true,"max_ratio":2,"listen_port":51413}`))
 	}))
 	var setPrefs string
 	mux.HandleFunc("/api/v2/app/setPreferences", auth(func(w http.ResponseWriter, r *http.Request) { setPrefs = r.FormValue("json") }))
@@ -82,13 +82,13 @@ func TestClientFlow(t *testing.T) {
 		t.Fatalf("version %q %v", v, err)
 	}
 	md, err := c.MainData(ctx)
-	if err != nil || md.ServerState.UPInfoSpeed != 2000 || md.Torrents["abc"].Hash != "abc" {
+	if err != nil || md.ServerState.UPInfoSpeed != 2000 || md.ServerState.ConnectionStatus != "firewalled" || md.Torrents["abc"].Hash != "abc" {
 		t.Fatalf("maindata %+v %v", md, err)
 	}
 	if tr := md.Torrents["abc"]; tr.Uploaded != 30 || tr.Downloaded != 10 || tr.Seeds != 2 || tr.SeedsSwarm != -1 || tr.Peers != 3 || tr.PeersSwarm != 40 {
 		t.Fatalf("transfer/swarm fields %+v", tr)
 	}
-	if pr, err := c.Preferences(ctx); err != nil || !pr.DHT || pr.PeX || !pr.LSD {
+	if pr, err := c.Preferences(ctx); err != nil || !pr.DHT || pr.PeX || !pr.LSD || pr.ListenPort != 51413 {
 		t.Fatalf("preferences %+v %v", pr, err)
 	}
 	if err := c.SetPreferences(ctx, map[string]any{"dht": false}); err != nil || setPrefs != `{"dht":false}` {

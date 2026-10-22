@@ -596,6 +596,15 @@ function ovClientRows(q) {
   return `<div><span>client</span><span>${q.enabled ? `qBittorrent ${esc(q.version || '')}${q.reachable ? '' : ' <span class="warn">(not responding)</span>'}` : (q.installed ? 'qbittorrent-nox present, monitoring off' : '—')}${q.pmss_managed ? ' · <span class="muted" title="qBittorrent is switched on in the Pulsed Media panel: PMSS runs, restarts and configures it, so install and autostart here are off">panel-managed</span>' : ''}</span></div>
       ${q.enabled && !q.reachable && q.error ? `<div><span>client error</span><span class="warn" style="text-align:right">${esc(q.error)}</span></div>` : ''}`;
 }
+// Incoming connectivity as libtorrent reports it, with the listen port peers
+// must reach; "firewalled" right after a start is normal until a peer dials in.
+function ovConnectionRow(q) {
+  if (!q.enabled || !q.reachable || !q.connection) return '';
+  const port = q.listen_port ? ` · listen port ${q.listen_port}` : '';
+  if (q.connection === 'connected') return `<div><span>connection</span><span>incoming OK${port}</span></div>`;
+  const since = q.firewalled_since ? ` since ${fmtAgo(q.firewalled_since)}` : '';
+  return `<div><span>connection</span><span class="warn" title="${q.connection === 'firewalled' ? 'no peer has connected inbound yet: expected for a few minutes after a start, otherwise the listen port is wrong or not the one Pulsed Media assigned' : 'libtorrent reports no network connection'}">${q.connection === 'firewalled' ? 'firewalled' : 'disconnected'}${since}${port}</span></div>`;
+}
 function ovBinaryRow(q) {
   return `<div><span>binary</span><span>${q.binary_version ? esc(q.binary_version) : (q.installed ? 'present' : 'not installed')}${q.latest_version ? ` <span class="muted">· latest ${esc(q.latest_version)}</span>` : ''}${q.update_available ? ' · <span class="warn">update available</span>' : ''}${q.restart_needed ? ' · <span class="warn">restart to apply</span>' : ''}</span></div>`;
 }
@@ -635,6 +644,7 @@ function ovBoxPanel(b, q) {
   return `<div class="panel rows"><div class="tile-label">box</div>
       ${ovHostStatusRows(b)}
       ${ovClientRows(q)}
+      ${ovConnectionRow(q)}
       ${ovAutostartRows(b, q)}
       ${ovWebuiAuthRow(q)}
       ${ovTorrentsRow(q)}
@@ -725,7 +735,7 @@ function tabTorrents(b) {
   const shown = list.slice(0, 300);
   return `<div class="table tor-table" style="overflow:hidden">
     <div class="thead-tools">
-      <div style="font-size:12px"><b>qBittorrent ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${discoveryNote(q, b)}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
+      <div style="font-size:12px"><b>qBittorrent ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${discoveryNote(q, b)}${connectionNote(q)}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
       <div class="actions">
         <input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">
         <button class="small" data-act="qbt:pause" data-confirm="Pause all torrents on ${esc(b.name)}?">pause all</button>
@@ -833,6 +843,11 @@ function discoveryTag(q) {
 // Torrents header: every mechanism with its state, so "all off" is visible
 // too. Each is a toggle; enabling asks first, since that is the direction
 // that breaks private-tracker rules.
+// " · firewalled" in the torrents header while incoming connectivity is missing.
+function connectionNote(q) {
+  if (!q.reachable || !q.connection || q.connection === 'connected') return '';
+  return ` · <span class="warn" title="no incoming connections${q.listen_port ? ` on listen port ${q.listen_port}` : ''}${q.firewalled_since ? ` since ${fmtAgo(q.firewalled_since)}` : ''}">${esc(q.connection)}</span>`;
+}
 function discoveryNote(q, b) {
   if (!q.discovery?.known) return q.reachable ? ' · <span class="muted">discovery settings not read</span>' : '';
   return ' · ' + DISCOVERY.map(([k, l]) => {

@@ -66,6 +66,8 @@ func recheckable(s *collect.BoxState, k string) bool {
 		// Monitoring switched off for the box is a deliberate "nothing to
 		// check", like a disabled box: the alert must not be stranded.
 		return s.Docker.Reachable || !s.Docker.Enabled
+	case k == "qbt-conn":
+		return s.Qbt.Reachable || !s.Qbt.Enabled
 	case strings.HasPrefix(k, "app:"):
 		// Unwatching is a deliberate "nothing to check" too.
 		return s.Apps.OK || !slices.Contains(s.Apps.Watched, strings.TrimPrefix(k, "app:"))
@@ -197,7 +199,45 @@ func wantQbt(s *collect.BoxState) []want {
 		}
 		active = append(active, want{"qbt", "warn", msg})
 	}
+	active = append(active, wantQbtConnection(s, time.Now())...)
 	return active
+}
+
+// firewalledGrace is how long a client may report no incoming connectivity
+// before it is an alert: after a start libtorrent says "firewalled" until
+// the first peer dials in, which on a quiet box takes minutes.
+const firewalledGrace = 10 * time.Minute
+
+// wantQbtConnection raises the alert for a reachable client that has had no
+// incoming connectivity for longer than the grace period: a wrong or
+// unforwarded listen port is the usual cause, and it silently halves what
+// the box can seed to.
+func wantQbtConnection(s *collect.BoxState, now time.Time) []want {
+	if !s.Qbt.Enabled || !s.Qbt.Reachable || (s.Qbt.Connection != "firewalled" && s.Qbt.Connection != "disconnected") {
+		return nil
+	}
+	since, err := time.Parse(time.RFC3339, s.Qbt.FirewalledSince)
+	if err != nil || now.Sub(since) < firewalledGrace {
+		return nil
+	}
+	port := "its listen port"
+	if s.Qbt.ListenPort > 0 {
+		port = fmt.Sprintf("listen port %d", s.Qbt.ListenPort)
+	}
+	what := "no peer has reached " + port + " (firewalled)"
+	if s.Qbt.Connection == "disconnected" {
+		what = "libtorrent reports no network connection"
+	}
+	return []want{{"qbt-conn", "warn", fmt.Sprintf("%s — qBittorrent: %s for %s; check the port in qBittorrent against the one Pulsed Media assigned", s.Name, what, humanSince(now.Sub(since)))}}
+}
+
+// humanSince renders a duration as "12m" or "3h 05m".
+func humanSince(d time.Duration) string {
+	d = d.Round(time.Minute)
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh %02dm", int(d.Hours()), int(d.Minutes())%60)
 }
 
 // wantDocker raises the alerts for an unreachable rootless docker and for
