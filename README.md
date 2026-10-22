@@ -193,6 +193,12 @@ removes the saved SSH password; a checkbox removes the saved WebUI password.
 Over the API, an edit (`PUT /api/boxes/{id}`) must carry the record's
 `revision` as `GET` returned it; a stale one is refused with 409 and the
 current record, which the edit form reloads into itself.
+An edit that moves the box to another host, port or account, or forgets
+the pinned host key, starts it over as a new machine: nothing the old one
+reported is carried or restored, its alerts except the renewal one are
+resolved, and actions on it (qBittorrent, WebUI, containers, log reads)
+answer 409 until the first complete probe; the page greys those buttons
+meanwhile and `GET` shows the box's `ready` flag.
 The pinned host key belongs to the host and port: it is kept while they are
 unchanged, cleared when they change or when you tick "forget the pinned SSH
 host key", and a key the wizard saw never replaces an existing pin. Because
@@ -383,7 +389,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.5.1 is the current release. The code was written against five real Pulsed
+1.6.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -394,6 +400,49 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.6.0** closes the fourth external review (of 1.5.1; fourteen findings,
+two accepted as they stand, one deferred until Pulsed Media exposes a
+tenant's own sockets on privacy hosts). The minor bump is for the API
+additions: every box carries `ready`, false until its first complete probe,
+and its qBittorrent, WebUI, container and log actions answer 409 until then
+(refresh, directory scan and watch changes are not gated); every event and `/api/state`
+carry `alerts_rev`; and the JavaScript lint is pinned by a Node manifest and
+lockfile, so `make jscheck` needs `npm` where it finds it.
+
+- **A moved box starts fresh.** A box's identity is its SSH host, port,
+  account and pinned host key. An edit that keeps them carries the live
+  state over; one that changes them starts the poller from the record alone,
+  drops the old machine's cached state and directory sizes, and resolves its
+  alerts except the renewal one. Cached rows carry that identity and are
+  refused across it, so a crash in the middle of a move cannot bring the old
+  machine's data back. Actions that use probed facts wait for the first
+  probe (409, greyed in the page), the Docker client follows the probed account, and the directory
+  scan is joined on stop, keeps the last good result when interrupted and
+  retries an hour later. (#101)
+- **The right password is never locked out.** A request with no credential
+  gets the challenge and is not counted; a wrong one is throttled as before,
+  now with `Retry-After`; the right one is never refused and clears the
+  budget. Behind a reverse proxy every client shares the proxy's address, so
+  refusing it let a stranger lock the one real user out with one wrong
+  password per wait. The trade-off (a guesser who ignores the 429s is no
+  longer slowed) is stated under *Security and hardening*. (#102)
+- **A wedged SSH transport is closed, not waited on.** Every blocking SSH
+  operation (command start and wait, keepalive, tunnel dial) gives an ended
+  context two seconds to finish, then drops the connection and joins; the
+  poller reconnects on its next ping. Before, a peer that stopped answering
+  could keep goroutines parked on it indefinitely. Tested against an
+  in-process SSH server behind a proxy that stops forwarding. (#104)
+- The small batch (#103): every event and snapshot carry an alert revision
+  and the page keeps the highest, so a late response cannot restore a stale
+  badge; state, services and alerts loads are sequenced per resource; the
+  settings form sends only the fields you touched; a command whose stdout hit
+  the 16 MiB cap is an error whatever its exit status, so a cut directory
+  listing is never a short measurement; a process list cut at 2 000 entries
+  neither raises nor resolves app alerts; `%`, `?` and `#` in the data path
+  work; a box without `flock` skips the bounded `df`/`quota` helpers instead
+  of failing the probe; ESLint is pinned by `package-lock.json` (10.13.0
+  after #105) and runs on Node 24 in CI.
 
 **1.5.1**
 
