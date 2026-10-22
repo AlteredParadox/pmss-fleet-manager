@@ -67,6 +67,7 @@ type poller struct {
 	// client up is noticed (see carriedFirewalledSince).
 	qbtProcKey   string
 	qbtRestarted bool
+	pollStart    time.Time // when the current poll began (dashboard clock), for takeRestartBefore
 	// dialTCP builds the dialer the WebUI client uses; nil means the SSH
 	// tunnel (sshDialTCP). Tests point it at a fake WebUI so the real
 	// pollQbt orchestration runs without a box.
@@ -89,6 +90,12 @@ type poller struct {
 
 	actionMu sync.Mutex
 	actionAt time.Time            // last stop/restart, see QbtAction
+	// restartAt is when a stop/restart action last SUCCEEDED and has not
+	// yet been seen by a poll: the first readable process poll started
+	// after it treats whatever client is up as a new process, which
+	// matters when the poller has no identity baseline yet (a fresh
+	// poller after a dashboard start or a box edit).
+	restartAt time.Time
 	discWant map[string]discWrite // per-key SetDiscovery writes, see noteDiscovery
 }
 
@@ -102,6 +109,26 @@ func (p *poller) noteAction() {
 	p.actionMu.Lock()
 	p.actionAt = time.Now()
 	p.actionMu.Unlock()
+}
+
+// noteRestartDone records a stop/restart that succeeded (see restartAt).
+func (p *poller) noteRestartDone() {
+	p.actionMu.Lock()
+	p.restartAt = time.Now()
+	p.actionMu.Unlock()
+}
+
+// takeRestartBefore consumes a recorded successful restart if it happened
+// before pollStart, i.e. the poll that started then observed the box
+// after it. A later restart stays recorded for the next poll.
+func (p *poller) takeRestartBefore(pollStart time.Time) bool {
+	p.actionMu.Lock()
+	defer p.actionMu.Unlock()
+	if p.restartAt.IsZero() || !p.restartAt.Before(pollStart) {
+		return false
+	}
+	p.restartAt = time.Time{}
+	return true
 }
 
 // actionSince reports whether a stop/restart happened after t.
@@ -396,6 +423,7 @@ func (p *poller) safePoll(ctx context.Context) {
 
 func (p *poller) poll(ctx context.Context) {
 	start := time.Now()
+	p.pollStart = start
 	st, _ := p.m.State(p.box.ID)
 	st.LastPoll = start
 
@@ -636,6 +664,13 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 
 	st.Apps, p.procPrev = appsFromSnapshot(snap, p.box.User, p.procPrev, st.Apps.Watched)
 	p.qbtRestarted, p.qbtProcKey = trackQbtProcess(p.qbtProcKey, snap)
+	// A stop/restart the dashboard completed before this poll started:
+	// whatever client this poll found is a new process, baseline or not.
+	// Consumed only by a readable list that shows a client, so an
+	// unreadable or client-less poll leaves it for the next one.
+	if snap.ProcsKnown && p.qbtProcKey != "" && p.takeRestartBefore(p.pollStart) {
+		p.qbtRestarted = true
+	}
 
 	st.Logs = LogsState{OK: snap.LogsKnown}
 	for _, f := range snap.Logs {

@@ -468,6 +468,9 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 		// already running, so it does not prove a fresh process.
 		err = p.qbtAction(ctx, action)
 	}
+	if err == nil && (action == "restart" || action == "stop") {
+		p.noteRestartDone() // the client that is up at the next poll is a new one (see restartAt)
+	}
 	if action == "restart" || action == "stop" {
 		// The port may be free until the client is back, whether or not
 		// the action reported success (a restart can stop the client and
@@ -479,10 +482,10 @@ func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (strin
 			p.noteAction() // under the store lock: a poll's store is either before both or after both
 			s.Qbt.PortOK, s.Qbt.Reachable = false, false
 			// FirewalledSince is deliberately left alone: the action may have
-			// failed before touching the client, and a client that did stop
-			// or come back as a new process is noticed by the next poll
-			// (process gone, or a changed pid/start tick), which starts the
-			// new ten-minute clock then.
+			// failed before touching the client. A client that did stop or
+			// come back as a new process is noticed by the next poll
+			// (process gone, a changed pid/start tick, or the successful
+			// action recorded above), which starts the new clock then.
 		})
 	}
 	p.wake()

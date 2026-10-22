@@ -237,6 +237,28 @@ func TestTrackQbtProcessAndRestartReset(t *testing.T) {
 	}
 }
 
+// A successful stop/restart is remembered until a poll that started after
+// it has seen a client; a poll that began before the action does not
+// consume it (its snapshot predates the restart).
+func TestTakeRestartBefore(t *testing.T) {
+	p := &poller{}
+	if p.takeRestartBefore(time.Now()) {
+		t.Fatal("nothing recorded")
+	}
+	before := time.Now().Add(-time.Second)
+	p.noteRestartDone()
+	if p.takeRestartBefore(before) {
+		t.Fatal("a poll started before the action must not consume it")
+	}
+	after := time.Now().Add(time.Second)
+	if !p.takeRestartBefore(after) {
+		t.Fatal("a poll started after the action must consume it")
+	}
+	if p.takeRestartBefore(after) {
+		t.Fatal("consumed once")
+	}
+}
+
 func TestQbtProcKey(t *testing.T) {
 	procs := []probe.ProcInfo{{PID: 20, Comm: "sshd"}, {PID: 42, StartTick: 900, Comm: "qbittorrent-nox"}, {PID: 7, StartTick: 100, Comm: "qbittorrent-nox"}}
 	if k, known := qbtProcKey(procs); k != "42:900,7:100" || !known {
