@@ -57,9 +57,10 @@ func main() {
 	basePath := flag.String("base-path", os.Getenv("PMSS_BASE_PATH"), "URL path prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged (e.g. /fleet)")
 	logLevel := flag.String("log", envOr("PMSS_LOG", "info"), "log level: debug, info, warn, error")
 	flag.Parse()
-	if *auth == "" {
+	if !flagGiven("auth") {
 		// Read after parsing, not as the flag's default: -h and a flag
 		// typo print defaults, and a credential must not land in a log.
+		// An explicit -auth= still wins over the environment.
 		*auth = os.Getenv("PMSS_AUTH")
 	}
 
@@ -202,6 +203,17 @@ func allowedHostList(addrs []string, extra string) (hosts []string, wildcard boo
 		}
 	}
 	return hosts, wildcard
+}
+
+// flagGiven reports whether name was passed on the command line.
+func flagGiven(name string) bool {
+	given := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			given = true
+		}
+	})
+	return given
 }
 
 func envOr(k, def string) string {
