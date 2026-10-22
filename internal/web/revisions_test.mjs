@@ -92,13 +92,15 @@ test('the alert badge keeps the count with the highest alert revision, from stre
   // an older snapshot landing late
   assert.equal(R.acceptAlerts(S, 7, 4), false);
   assert.equal(S.unacked, 2);
-  // a snapshot read under the same revision after a change the next event has yet to announce
-  assert.equal(R.acceptAlerts(S, 1, 5), true);
+  // the same read delivered again (every server read has its own revision)
+  assert.equal(R.acceptAlerts(S, 1, 5), false);
+  assert.equal(S.unacked, 2);
+  // a later read after an acknowledgement, then the event announcing it
+  assert.equal(R.acceptAlerts(S, 1, 6), true);
   assert.equal(S.unacked, 1);
-  // the event announcing it: same count, nothing changed
-  assert.equal(R.acceptAlerts(S, 1, 6), false);
-  assert.equal(S.alertsRev, 6);
+  assert.equal(R.acceptAlerts(S, 1, 7), false);
+  assert.equal(S.alertsRev, 7);
   // a frame without a count (an old server) changes nothing
   assert.equal(R.acceptAlerts(S, undefined, 9), false);
-  assert.equal(S.alertsRev, 6);
+  assert.equal(S.alertsRev, 7);
 });

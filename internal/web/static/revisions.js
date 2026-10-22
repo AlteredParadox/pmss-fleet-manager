@@ -87,12 +87,12 @@ function applyRemoved(S, e) {
 
 // acceptAlerts keeps the unacknowledged alert count with the highest alert
 // revision seen, whether it arrived on an event or in a snapshot: the two
-// race each other and a snapshot request taken earlier can land later. An
-// equal revision is taken too (a snapshot reads the count under the same
-// revision as the last event, possibly after a change the next event has
-// yet to announce). Reports whether the count changed.
+// race each other and a snapshot request taken earlier can land later.
+// Every read on the server takes its own revision, so an equal one is the
+// same read delivered twice and is ignored. Reports whether the count
+// changed.
 function acceptAlerts(S, count, rev) {
-  if (typeof count !== 'number' || rev < (S.alertsRev || 0)) return false;
+  if (typeof count !== 'number' || rev <= (S.alertsRev || 0)) return false;
   S.alertsRev = rev;
   if (S.unacked === count) return false;
   S.unacked = count;

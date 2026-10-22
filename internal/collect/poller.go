@@ -1354,7 +1354,10 @@ func (p *poller) runDu(ctx context.Context) {
 	// session) means the per-directory lines stopped part-way.
 	var exitErr *ssh.ExitError
 	finished := errors.As(err, &exitErr) && exitErr.ExitStatus() < 128 // du's own status 1 (unreadable entries); >128 = killed
-	interrupted := err != nil && (len(out) == 0 || !finished)
+	// An overrun stdout is never a measurement, whatever du's exit status
+	// (sshx.Run does not wrap the exit error into that case; checked here
+	// explicitly all the same).
+	interrupted := errors.Is(err, sshx.ErrOutputLimit) || err != nil && (len(out) == 0 || !finished)
 	if interrupted {
 		// Interrupted (SSH drop, timeout, killed): du prints one line per
 		// directory as it goes, so partial output is NOT a measurement.

@@ -417,11 +417,23 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 		}
 		return out.snapshot(), errb.snapshot(), ctx.Err()
 	case err := <-done:
-		if err == nil && out.overflowed() {
-			err = fmt.Errorf("%w (%d MiB kept)", ErrOutputLimit, maxOutput>>20)
-		}
-		return out.snapshot(), errb.snapshot(), err
+		return out.snapshot(), errb.snapshot(), runResult(err, out.overflowed())
 	}
+}
+
+// runResult is Run's error: an overflowed stdout takes precedence over the
+// command's own exit status (a du that exits 1 for an unreadable entry and
+// also overran the cap is incomplete, not finished), and the exit error is
+// named in the message but not wrapped, so no errors.As finds an
+// ssh.ExitError in an incomplete result.
+func runResult(err error, overflowed bool) error {
+	if !overflowed {
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("%w (%d MiB kept; the command then reported: %v)", ErrOutputLimit, maxOutput>>20, err)
+	}
+	return fmt.Errorf("%w (%d MiB kept)", ErrOutputLimit, maxOutput>>20)
 }
 
 // DialUnix opens a stream to a unix socket on the remote host.

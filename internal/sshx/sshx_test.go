@@ -16,7 +16,12 @@
 
 package sshx
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"golang.org/x/crypto/ssh"
+)
 
 // The output cap keeps a prefix and remembers that it dropped the rest, so
 // Run can report an incomplete result instead of a short one (GPT audit
@@ -39,5 +44,26 @@ func TestCappedWriterRecordsOverflow(t *testing.T) {
 	}
 	if _, err := c.Write(nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// An overflowed stdout outranks the command's exit status, and the result
+// does not carry the exit error for errors.As to find: a du that exited 1
+// for an unreadable entry after overrunning the cap is incomplete (fred on
+// PR 103).
+func TestRunResultOverflowOutranksExitStatus(t *testing.T) {
+	exit := &ssh.ExitError{}
+	if err := runResult(exit, false); err != exit {
+		t.Fatalf("no overflow: %v", err)
+	}
+	if err := runResult(nil, false); err != nil {
+		t.Fatalf("clean: %v", err)
+	}
+	for _, under := range []error{nil, exit, errors.New("session closed")} {
+		err := runResult(under, true)
+		var ee *ssh.ExitError
+		if !errors.Is(err, ErrOutputLimit) || errors.As(err, &ee) {
+			t.Fatalf("overflow with %v: %v (want ErrOutputLimit and no ExitError)", under, err)
+		}
 	}
 }

@@ -106,11 +106,15 @@ func New(st *store.Store, log *slog.Logger) *Manager {
 func (m *Manager) Bus() *Bus { return m.bus }
 
 // Publish sends an event with the current unacknowledged alert count and
-// the next alert revision attached. The count is read, the revision taken
-// and the event handed to the bus under one lock, so no event carries an
-// older count under a higher revision. The revision restarts with the
-// process; a page that reconnects after a restart reloads itself on the
-// changed instance id before it could refuse the low numbers.
+// the next alert revision attached. Every read of the count, here and in
+// AlertsView, takes its own revision under one lock, so a higher revision
+// always carries a count read later: a client keeping the count with the
+// highest revision can never go back to an older one, and equal revisions
+// never occur. (Alert writes themselves happen outside the lock; a read
+// after a write sees it, and the write's own Publish follows anyway.) The
+// revision restarts with the process; a page that reconnects after a
+// restart reloads itself on the changed instance id before it could refuse
+// the low numbers.
 func (m *Manager) Publish(e Event) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -122,13 +126,14 @@ func (m *Manager) Publish(e Event) {
 	m.bus.Publish(e)
 }
 
-// AlertsView returns the unacknowledged alert count with the alert
-// revision it is current at: no event with a lower revision carries a
-// newer count, and every later change publishes a higher one.
+// AlertsView returns the unacknowledged alert count under a fresh alert
+// revision (see Publish): a snapshot is ordered against events and against
+// other snapshots by it.
 func (m *Manager) AlertsView(ctx context.Context) (int, uint64) {
 	m.alertMu.Lock()
 	defer m.alertMu.Unlock()
 	n, _ := m.st.CountUnacked(ctx)
+	m.alertRev++
 	return n, m.alertRev
 }
 

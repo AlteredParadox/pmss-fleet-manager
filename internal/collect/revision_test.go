@@ -239,11 +239,11 @@ func TestRemoveBoxNotifiesAlertsAfterDelete(t *testing.T) {
 	}
 }
 
-// Every event carries a higher alert revision than the last, with the
-// count read under that revision, and AlertsView reports the count with
-// the revision it is current at: a client keeping the highest-revision
-// count can never regress to an older one, however the stream and a late
-// snapshot interleave (GPT audit 2026-10-22 finding 4).
+// Every event and every snapshot read carries a higher alert revision
+// than the last, with the count read under that revision, so a client
+// keeping the highest-revision count can never regress to an older one,
+// however the stream and late snapshots interleave (GPT audit 2026-10-22
+// finding 4; Codex on PR 103 for the snapshot reads taking their own).
 func TestAlertRevisionOrdersCounts(t *testing.T) {
 	ctx := context.Background()
 	m, boxes := revTestManager(t, 1)
@@ -263,21 +263,22 @@ func TestAlertRevisionOrdersCounts(t *testing.T) {
 	}
 	m.Publish(Event{Type: "alerts"})
 	ev := next()
-	n, rev := m.AlertsView(ctx)
-	if ev.Unacked != 1 || ev.AlertsRev == 0 || n != 1 || rev != ev.AlertsRev {
+	n, rev := m.AlertsView(ctx) // a read after the event: its own, higher revision
+	if ev.Unacked != 1 || ev.AlertsRev == 0 || n != 1 || rev != ev.AlertsRev+1 {
 		t.Fatalf("after raise: event %+v view %d@%d", ev, n, rev)
 	}
-	// A change not yet announced: the view reads the new count under the
-	// same revision; the announcement then carries a higher one.
+	// A read before a change and a read after it: the later read has the
+	// higher revision, so the earlier one cannot restore its count if it
+	// lands last; the announcement is higher still.
 	if err := m.st.AckAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n, r := m.AlertsView(ctx); n != 0 || r != rev {
-		t.Fatalf("after ack, before publish: %d@%d, want 0@%d", n, r, rev)
+	if n, r := m.AlertsView(ctx); n != 0 || r != rev+1 {
+		t.Fatalf("after ack, before publish: %d@%d, want 0@%d", n, r, rev+1)
 	}
 	m.Publish(Event{Type: "alerts"})
-	if ev = next(); ev.Unacked != 0 || ev.AlertsRev != rev+1 {
-		t.Fatalf("after publish: %+v, want 0@%d", ev, rev+1)
+	if ev = next(); ev.Unacked != 0 || ev.AlertsRev != rev+2 {
+		t.Fatalf("after publish: %+v, want 0@%d", ev, rev+2)
 	}
 	// Concurrent publishers: revisions on the bus are strictly increasing.
 	var wg sync.WaitGroup
