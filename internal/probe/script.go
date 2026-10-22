@@ -135,7 +135,24 @@ sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + `
 sec qbt_pmss; [ -e "$home/.qbittorrentEnable" ] && echo 1 || echo 0
 sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
-sec end
+sec probe_pid; echo $$
+# The account's own processes (hidepid=2 hides everyone else's anyway):
+# fixed numeric columns first, then comm, which may hold spaces. times is
+# cumulative CPU seconds; the poller turns two samples into a rate. The
+# command lines come separately and clipped: argv is the process's own text.
+sec procs; ps -ww -u "$uid" -o pid=,ppid=,rss=,times=,etimes=,comm= 2>/dev/null
+sec proc_args; ps -ww -u "$uid" -o pid=,args= 2>/dev/null | cut -c1-400
+# CPU in clock ticks (10 ms) and the start tick from /proc/<pid>/stat: ps
+# rounds CPU to whole seconds, useless over a 30 s poll, and the start tick
+# tells a reused pid from the same process. comm sits in parentheses and
+# may hold spaces or parentheses, so the fields are counted from the last ')'.
+sec proc_stat; getconf CLK_TCK 2>/dev/null
+ps -u "$uid" -o pid= 2>/dev/null | awk '{print "/proc/"$1"/stat"}' | xargs cat 2>/dev/null | awk '{i=match($0,/\)[^)]*$/); if (i==0) next; n=split(substr($0,i+2),f," "); if (n<20) next; print $1, f[12], f[13], f[20]}'
+sec listen_pids
+# Which of our own processes hold which listening port: ss resolves pids
+# only for sockets whose /proc/<pid>/fd it can read, i.e. our own, so a
+# co-tenant's listener never appears here. Display only (never a gate).
+` + listenPIDsShell + `sec end
 `
 
 // QbtCronPattern is the grep -E pattern, as one double-quoted sh word, for a
@@ -188,6 +205,11 @@ if [ -n "$l" ]; then printf '%s\n' "$l"; else echo "via ss"; ` + listenViaSS + `
 // the last colon of Local (a %interface suffix dropped); a Process column
 // that starts with users:(( is one of our own sockets.
 const listenViaSS = `timeout 10 ss -Hltnp 2>/dev/null | awk -v uid="$uid" '$1=="LISTEN"{n=split($4,a,":"); p=a[n]; ad=substr($4,1,length($4)-length(p)-1); sub(/%.*/,"",ad); o="x"; if ($6 ~ /^users:\(\(/) o=uid; print "d", p, o, ad}'`
+
+// listenPIDsShell prints "<port> <pid>" for every listening TCP socket ss
+// can attribute to one of our processes (its users:((...,pid=N,...)) column).
+const listenPIDsShell = `timeout 10 ss -Hltnp 2>/dev/null | awk '$1=="LISTEN"{n=split($4,a,":"); p=a[n]; s=$0; while (match(s,/pid=[0-9]+/)) { print p, substr(s,RSTART+4,RLENGTH-4); s=substr(s,RSTART+RLENGTH) } }'
+`
 
 // ScriptWithTag returns Script with the section tag set on its first line.
 // The tag must be [A-Za-z0-9]+ (NewTag guarantees that); it is quoted anyway.

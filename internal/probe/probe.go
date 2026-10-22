@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,16 @@ type Snapshot struct {
 	Account AccountInfo
 	Qbt     QbtInfo
 	Docker  DockerInfo
+
+	// Procs are the account's own processes, the probe's own shell and its
+	// children left out. ProcsKnown is false when ps printed nothing (a
+	// box without procps, or ps failing), which is different from an
+	// account with no processes: sshd's session process is always there.
+	Procs      []ProcInfo
+	ProcsKnown bool
+	// ListenPIDs maps a listening TCP port to the pids of our processes
+	// that hold it, from ss -tlnp. Display only: PortOwner stays the gate.
+	ListenPIDs map[int][]int
 
 	// Listeners maps a listening TCP port to the uid that owns the socket,
 	// from /proc/net/tcp{,6} or, where PMSS has made those root-only, from
@@ -389,6 +400,134 @@ type DockerInfo struct {
 	SocketPresent bool
 }
 
+// ProcInfo is one of the account's processes as ps reported it.
+type ProcInfo struct {
+	PID        int
+	PPID       int
+	RSS        int64   // bytes
+	CPUSec     float64 // cumulative CPU time (10 ms resolution from /proc/<pid>/stat, else ps's whole seconds)
+	StartTick  int64   // start time in clock ticks since boot (0 = unknown); identifies the process across polls
+	ElapsedSec int64   // since the process started
+	Comm       string  // the kernel's 15-byte name
+	Args       string  // command line, clipped on the box
+}
+
+// maxProcs bounds the process list kept from one probe: PMSS caps a slice
+// at 4096 tasks, and a fork bomb's worth of rows must not bloat the state.
+const maxProcs = 2000
+
+// procStat is one process's /proc/<pid>/stat reading: CPU seconds and start tick.
+type procStat struct {
+	cpuSec float64
+	start  int64
+}
+
+// parseProcStat reads the proc_stat section: CLK_TCK on the first line,
+// then "pid utime stime starttime" in ticks per process.
+func parseProcStat(raw string) map[int]procStat {
+	out := map[int]procStat{}
+	lines := strings.Split(raw, "\n")
+	if len(lines) == 0 {
+		return out
+	}
+	hz, err := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
+	if err != nil || hz <= 0 || hz > 1e6 {
+		return out // without the tick rate the numbers mean nothing
+	}
+	for _, line := range lines[1:] {
+		f := strings.Fields(line)
+		if len(f) != 4 {
+			continue
+		}
+		pid, e1 := strconv.Atoi(f[0])
+		ut, e2 := strconv.ParseInt(f[1], 10, 64)
+		st, e3 := strconv.ParseInt(f[2], 10, 64)
+		start, e4 := strconv.ParseInt(f[3], 10, 64)
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || pid <= 0 || ut < 0 || st < 0 || start <= 0 || ut > 1<<50 || st > 1<<50 {
+			continue
+		}
+		out[pid] = procStat{cpuSec: float64(ut+st) / hz, start: start}
+	}
+	return out
+}
+
+// parseProcs reads the procs section ("pid ppid rss times etimes comm",
+// comm possibly containing spaces), the proc_args section ("pid args") and
+// the proc_stat section, dropping the probe's own shell and its children
+// (ps, cut, awk).
+func parseProcs(procs, args, stat string, probePID int) ([]ProcInfo, bool) {
+	stats := parseProcStat(stat)
+	argv := map[int]string{}
+	for _, line := range strings.Split(args, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		if pid, err := strconv.Atoi(f[0]); err == nil && pid > 0 {
+			argv[pid] = strings.Join(f[1:], " ")
+		}
+	}
+	var out []ProcInfo
+	known := false
+	for _, line := range strings.Split(procs, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 6 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(f[0])
+		ppid, err2 := strconv.Atoi(f[1])
+		rss, err3 := strconv.ParseInt(f[2], 10, 64)
+		cpu, err4 := strconv.ParseFloat(f[3], 64)
+		el, err5 := strconv.ParseInt(f[4], 10, 64)
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || pid <= 0 {
+			continue
+		}
+		known = true
+		if probePID > 0 && (pid == probePID || ppid == probePID) {
+			continue
+		}
+		if rss < 0 || rss > 1<<40 { // KiB; a forged value must not skew totals
+			rss = 0
+		}
+		if cpu < 0 || math.IsNaN(cpu) || math.IsInf(cpu, 0) || cpu > 1e10 {
+			cpu = 0
+		}
+		if el < 0 || el > 1e10 {
+			el = 0
+		}
+		pi := ProcInfo{PID: pid, PPID: ppid, RSS: rss * 1024, CPUSec: cpu, ElapsedSec: el,
+			Comm: strings.Join(f[5:], " "), Args: argv[pid]}
+		if ps, ok := stats[pid]; ok {
+			pi.CPUSec, pi.StartTick = ps.cpuSec, ps.start
+		}
+		out = append(out, pi)
+		if len(out) >= maxProcs {
+			break
+		}
+	}
+	return out, known
+}
+
+// parseListenPIDs reads "<port> <pid>" lines from the listen_pids section.
+func parseListenPIDs(raw string) map[int][]int {
+	out := map[int][]int{}
+	for _, line := range strings.Split(raw, "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		port, err1 := strconv.Atoi(f[0])
+		pid, err2 := strconv.Atoi(f[1])
+		if err1 != nil || err2 != nil || port <= 0 || port > 65535 || pid <= 0 {
+			continue
+		}
+		if !slices.Contains(out[port], pid) {
+			out[port] = append(out[port], pid)
+		}
+	}
+	return out
+}
+
 // Sections splits untagged probe output into named sections (tests and
 // diagnostics). Production runs use SectionsTagged.
 func Sections(raw []byte) map[string]string { return SectionsTagged(raw, "") }
@@ -470,6 +609,9 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap.Docker = DockerInfo{
 		SocketPresent: strings.TrimSpace(s["docker_sock"]) == "1",
 	}
+	probePID, _ := strconv.Atoi(strings.TrimSpace(s["probe_pid"]))
+	snap.Procs, snap.ProcsKnown = parseProcs(s["procs"], s["proc_args"], s["proc_stat"], probePID)
+	snap.ListenPIDs = parseListenPIDs(s["listen_pids"])
 	return snap, nil
 }
 

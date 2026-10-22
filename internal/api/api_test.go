@@ -486,3 +486,47 @@ func TestTotalsActiveServicesOnce(t *testing.T) {
 		t.Fatalf("next renewal = %q; the cancelled service's old due date must not win", tt.NextRenew)
 	}
 }
+
+func TestAppWatch(t *testing.T) {
+	s, st := newTestServer(t)
+	ctx := context.Background()
+	b := &store.Box{Name: "x", Host: "h.example", User: "u", Port: 22, Enabled: false}
+	if err := st.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.m.AddBox(ctx, &store.Box{Name: "y", Host: "y.example", User: "u", Port: 22, Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	boxes, _ := st.ListBoxes(ctx)
+	id := boxes[1].ID // the one the manager knows
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	for _, body := range []string{`{"key":"Radarr","on":true}`, `{"key":"","on":true}`, `{"key":"radarr","on":true,"x":1}`} {
+		if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/apps/watch", id), body, hdr); code != 400 {
+			t.Fatalf("%s: code %d", body, code)
+		}
+	}
+	if code, out := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/apps/watch", id), `{"key":"radarr","on":true}`, hdr); code != 200 {
+		t.Fatalf("watch: %d %s", code, out)
+	}
+	if code, out := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/apps/watch", id), `{"key":"other:bot.py","on":true}`, hdr); code != 200 {
+		t.Fatalf("watch: %d %s", code, out)
+	}
+	got, _ := st.GetBox(ctx, id)
+	if !slices.Equal(got.AppsWatch, []string{"other:bot.py", "radarr"}) {
+		t.Fatalf("persisted: %v", got.AppsWatch)
+	}
+	state, _ := s.m.State(id)
+	if !slices.Equal(state.Apps.Watched, got.AppsWatch) || len(state.Apps.Apps) != 2 || state.Apps.Apps[0].Running {
+		t.Fatalf("state: %+v", state.Apps)
+	}
+	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/apps/watch", id), `{"key":"radarr","on":false}`, hdr); code != 200 {
+		t.Fatalf("unwatch: %d", code)
+	}
+	got, _ = st.GetBox(ctx, id)
+	if !slices.Equal(got.AppsWatch, []string{"other:bot.py"}) {
+		t.Fatalf("after unwatch: %v", got.AppsWatch)
+	}
+	if code, _ := do(t, s, "POST", "/api/boxes/999999/apps/watch", `{"key":"radarr","on":true}`, hdr); code != 404 {
+		t.Fatalf("missing box: %d", code)
+	}
+}

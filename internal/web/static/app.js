@@ -483,7 +483,7 @@ function viewBox() {
   const tabs = [['overview', 'overview'], ['traffic', 'traffic']];
   if (b.qbt.enabled || b.qbt.installed) tabs.push(['torrents', 'torrents']);
   if (b.docker.enabled || b.docker.socket_up) tabs.push(['containers', 'containers']);
-  tabs.push(['storage', 'storage'], ['host', 'host']);
+  tabs.push(['services', 'services'], ['storage', 'storage'], ['host', 'host']);
   if (!tabs.some(([k]) => k === S.tab)) S.tab = 'overview';
   const renewDays = daysUntil(renewalOf(b));
   let body = '';
@@ -491,6 +491,7 @@ function viewBox() {
     case 'traffic': body = tabTraffic(b); break;
     case 'torrents': body = tabTorrents(b); break;
     case 'containers': body = tabContainers(b); break;
+    case 'services': body = tabServices(b); break;
     case 'storage': body = tabStorage(b); break;
     case 'host': body = tabHost(b); break;
     default: body = tabOverview(b, renewDays);
@@ -616,6 +617,16 @@ function ovTorrentsRow(q) {
 function ovDockerRow(b) {
   return b.docker.enabled ? `<div><span>containers</span><span>${b.docker.running} running${b.docker.stopped ? ` · ${b.docker.stopped} stopped` : ''}</span></div>` : '';
 }
+// The detected applications in one line: everything but the sessions and
+// the user's systemd, then whatever is watched and down.
+function ovServicesRow(b) {
+  const A = b.apps || {};
+  if (!A.ok) return '';
+  const up = (A.apps || []).filter((a) => a.running && a.category !== 'shell').map((a) => esc(a.name));
+  const down = (A.apps || []).filter((a) => a.watched && !a.running).map((a) => `<span class="bad">${esc(a.name)} down</span>`);
+  const list = up.slice(0, 6).join(', ') + (up.length > 6 ? ` +${up.length - 6}` : '');
+  return `<div><span>services</span><span>${[list, ...down].filter(Boolean).join(' · ') || '—'} <span class="muted">· ${A.procs} proc${A.procs === 1 ? '' : 's'}</span></span></div>`;
+}
 function ovHostAccountRows(b) {
   return `<div><span>account</span><span>${b.account.ok ? `${b.account.quota_gib} GiB · ${b.account.ram_mib} MiB RAM${b.account.docker_enabled ? ' · docker' : ''}${b.account.suspended ? ' · <span class="bad">suspended</span>' : ''}` : '—'}</span></div>
       ${b.host_key_fp ? `<div><span>host key</span><span class="muted" title="${esc(b.host_key_fp)}">${esc(b.host_key_fp.slice(0, 22))}…</span></div>` : ''}`;
@@ -628,6 +639,7 @@ function ovBoxPanel(b, q) {
       ${ovWebuiAuthRow(q)}
       ${ovTorrentsRow(q)}
       ${ovDockerRow(b)}
+      ${ovServicesRow(b)}
       ${ovHostAccountRows(b)}
     </div>`;
 }
@@ -921,6 +933,49 @@ function tabContainers(b) {
       </div>`;
       }).join('')}
     </div>
+  </div>`;
+}
+/* ----- services: the account's own processes grouped into applications ----- */
+function appUrl(b, a) { return a.web_path ? `https://${b.hostname || b.host}${a.web_path}` : ''; }
+function appName(A, key) { const a = (A.apps || []).find((x) => x.key === key); return a ? a.name : key.replace(/^other:/, ''); }
+function tabServices(b) {
+  const A = b.apps || {};
+  const f = S.filter.trim().toLowerCase();
+  const apps = (A.apps || []).filter((a) => !f || a.name.toLowerCase().includes(f) || a.category.includes(f) || a.key.includes(f));
+  const all = A.processes || [];
+  const procs = all.filter((p) => !f || p.name.toLowerCase().includes(f) || (p.args || '').toLowerCase().includes(f) || appName(A, p.app).toLowerCase().includes(f)).slice(0, 200);
+  const note = A.ok ? `${A.procs} process${A.procs === 1 ? '' : 'es'} · ${fmtBytes(A.rss, 1)} resident` : `<span class="warn">process list not read${b.status === 'offline' ? ' (box unreachable)' : b.status === 'pending' ? ' yet' : ' (ps printed nothing on the box)'}</span>`;
+  return `<div class="table app-table" style="overflow:hidden">
+    <div class="thead-tools">
+      <div style="font-size:12px"><b>services</b> <span class="muted">· ${note}</span></div>
+      <div class="actions"><input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}"></div>
+    </div>
+    <div style="overflow:auto">
+      <div class="trow head"><span>application</span><span>kind</span><span>state</span><span>cpu</span><span>memory</span><span>up for</span><span title="listening TCP ports held by its processes">ports</span><span>link</span><span title="raise an alert when this application is not running">watch</span></div>
+      ${apps.length === 0 ? `<div class="trow"><span class="muted">${A.ok ? 'nothing matches' : '—'}</span></div>` : apps.map((a) => appRow(b, a)).join('')}
+    </div>
+  </div>
+  <div class="hint" style="margin-top:8px">Everything the account runs on the shared host, as its own uid sees it (other tenants' processes are hidden by PMSS). CPU is the share of one core since the previous poll. Watch an application to be alerted when it is not running; a watched application that is down stays listed.</div>
+  <div class="table proc-table" style="overflow:hidden;margin-top:14px">
+    <div class="thead-tools"><div style="font-size:12px"><b>processes</b> <span class="muted">· largest first${procs.length < all.length ? ` · showing ${procs.length} of ${all.length}` : ''}</span></div></div>
+    <div style="overflow:auto">
+      <div class="trow head"><span>pid</span><span>name</span><span>application</span><span>cpu</span><span>rss</span><span>up for</span><span>command</span></div>
+      ${procs.length === 0 ? `<div class="trow"><span class="muted">${A.ok ? 'nothing matches' : '—'}</span></div>` : procs.map((p) => `<div class="trow"><span class="num muted">${p.pid}</span><span class="ellip" title="${esc(p.name)}">${esc(p.name)}</span><span class="ellip muted">${esc(appName(A, p.app))}</span><span class="num">${p.cpu_known ? p.cpu_pct.toFixed(1) + '%' : '—'}</span><span class="num">${fmtBytes(p.rss, 1)}</span><span class="muted">${fmtDur(p.elapsed_sec)}</span><span class="ellip muted" title="${esc(p.args || '')}">${esc(p.args || '')}</span></div>`).join('')}
+    </div>
+  </div>`;
+}
+function appRow(b, a) {
+  const url = appUrl(b, a);
+  return `<div class="trow">
+    <div class="ellip" title="${esc(a.key)}"><span class="led ${a.running ? 'online' : 'offline'}" style="width:6px;height:6px;margin-right:8px"></span>${esc(a.name)}</div>
+    <span><span class="tag">${esc(a.category)}</span></span>
+    <span class="${a.running ? '' : 'bad'}">${a.running ? `running · ${a.procs} proc${a.procs === 1 ? '' : 's'}` : 'not running'}</span>
+    <span class="num">${a.cpu_known ? a.cpu_pct.toFixed(1) + '%' : '—'}</span>
+    <span class="num">${a.running ? fmtBytes(a.rss, 1) : '—'}</span>
+    <span class="muted">${a.running ? fmtDur(a.uptime_sec) : '—'}</span>
+    <span class="num muted ellip">${(a.ports || []).join(', ') || '—'}</span>
+    <span>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener" title="${esc(url)}">open ↗</a>` : '—'}</span>
+    <span><button class="small ${a.watched ? 'good' : ''}" data-act="app:watch" data-key="${esc(a.key)}" data-on="${a.watched ? '1' : ''}" title="${a.watched ? 'watched: an alert is raised when it is not running; click to stop watching' : 'alert when this application is not running'}">${a.watched ? 'watching' : 'watch'}</button></span>
   </div>`;
 }
 function tabStorage(b) {
@@ -1427,6 +1482,13 @@ async function torAddAction(a) {
     render();
   }
 }
+async function appWatchAction(act) {
+  const on = !act.dataset.on;
+  act.disabled = true;
+  await api('POST', `${BASE}/api/boxes/${S.selId}/apps/watch`, { key: act.dataset.key, on });
+  toast(on ? 'watching: an alert is raised when it is not running' : 'no longer watched', 'ok');
+  await loadDetail(S.selId);
+}
 async function containerAction(a, act) {
   act.disabled = true; await api('POST', `${BASE}/api/boxes/${S.selId}/containers/${act.dataset.cid}/${a.slice(4)}`); toast(`container ${a.slice(4)} ok`, 'ok');
 }
@@ -1475,6 +1537,7 @@ async function runAction(a, act) {
   else if (a.startsWith('tor-add:')) await torAddAction(a);
   else if (a.startsWith('disc:')) await discoveryAction(a, act);
   else if (a.startsWith('ctr:')) await containerAction(a, act);
+  else if (a === 'app:watch') await appWatchAction(act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
   else if (a.startsWith('settings:')) await settingsAction(a);
   else if (a.startsWith('svc:')) await servicesAction(a, act);

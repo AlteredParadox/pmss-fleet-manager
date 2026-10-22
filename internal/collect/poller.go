@@ -57,6 +57,7 @@ type poller struct {
 
 	prevCPU   int64
 	prevCPUAt time.Time
+	procPrev  map[int]procSample // last poll's per-pid CPU readings, see appsFromSnapshot
 
 	duMu      sync.Mutex
 	duRunning bool
@@ -166,6 +167,10 @@ func (p *poller) storeFix(start time.Time, keepDirs bool) func(s, stored *BoxSta
 		if keepDirs || stored.Dirs.At.After(s.Dirs.At) {
 			s.Dirs = stored.Dirs
 		}
+		// The watch list is edited through the store, never by a poll: a
+		// toggle that landed while this poll was in flight wins.
+		s.Apps.Watched = stored.Apps.Watched
+		s.Apps.markWatched()
 	}
 }
 
@@ -614,6 +619,8 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 
 	a := snap.Account
 	st.Account = AccountState{OK: a.OK, QuotaGiB: a.QuotaGiB, RAMMiB: a.RAMMiB, DockerEnabled: a.DockerEnabled, Suspended: a.Suspended}
+
+	st.Apps, p.procPrev = appsFromSnapshot(snap, p.box.User, p.procPrev, st.Apps.Watched)
 }
 
 // hwEncodeLabel summarises hardware encoding availability for tags.

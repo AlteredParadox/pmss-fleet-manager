@@ -182,6 +182,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
 	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/qbt/discovery", s.handleSetDiscovery)
 	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/containers/{cid}/{action}", s.handleContainerAction)
+	mux.HandleFunc("POST "+bp+"/api/boxes/{id}/apps/watch", s.handleAppWatch)
 	mux.HandleFunc("POST "+bp+"/api/detect", s.handleDetect)
 	mux.HandleFunc("GET "+bp+"/api/alerts", s.handleAlerts)
 	mux.HandleFunc("POST "+bp+"/api/alerts/ack-all", s.handleAckAll)
@@ -1021,6 +1022,35 @@ func (s *Server) handleContainerAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+// handleAppWatch takes {"key": "<app key>", "on": bool} and adds the app to
+// or removes it from the box's watch list.
+func (s *Server) handleAppWatch(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	var in struct {
+		Key string `json:"key"`
+		On  bool   `json:"on"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		writeErr(w, 400, fmt.Errorf("bad body: %v", err))
+		return
+	}
+	if !collect.ValidAppKey(in.Key) {
+		writeErr(w, 400, errors.New("invalid app key"))
+		return
+	}
+	if err := s.m.SetAppWatch(r.Context(), id, in.Key, in.On); err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (s *Server) handleDetect(w http.ResponseWriter, r *http.Request) {

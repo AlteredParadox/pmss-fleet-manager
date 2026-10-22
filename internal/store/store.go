@@ -61,6 +61,10 @@ type Box struct {
 	DockerEnabled bool `json:"docker_enabled"`
 	DuEnabled     bool `json:"du_enabled"`
 	Enabled       bool `json:"enabled"`
+	// AppsWatch lists the detected applications (collect.AppView keys) that
+	// raise an alert when they are not running. Edited only through
+	// SetAppsWatch, so a box edit never touches it.
+	AppsWatch []string `json:"apps_watch"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -213,11 +217,58 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	return s.addColumn("boxes", "apps_watch", "TEXT NOT NULL DEFAULT ''")
+}
+
+// addColumn adds a column to a table unless it already exists (SQLite has
+// no ADD COLUMN IF NOT EXISTS). Names are constants from migrate.
+func (s *Store) addColumn(table, col, decl string) error {
+	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+		if name == col {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if _, err := s.db.Exec("ALTER TABLE " + table + " ADD COLUMN " + col + " " + decl); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	return nil
+}
+
+// SetAppsWatch replaces a box's watch list (see Box.AppsWatch).
+func (s *Store) SetAppsWatch(ctx context.Context, id int64, keys []string) error {
+	if keys == nil {
+		keys = []string{}
+	}
+	b, err := json.Marshal(keys)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET apps_watch=? WHERE id=?`, string(b), id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
 	return nil
 }
 
 const boxCols = `id, name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
-	qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at`
+	qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at, apps_watch`
 
 // The box queries are constants: nothing from a request is ever spliced in.
 const (
@@ -227,12 +278,16 @@ const (
 
 func scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 	var b Box
-	var created, updated string
+	var created, updated, watch string
 	err := row.Scan(&b.ID, &b.Name, &b.Host, &b.Port, &b.User, &b.AuthMethod, &b.KeyPath, &b.Password, &b.HostKey,
 		&b.Type, &b.Plan, &b.Datacenter, &b.Renewal, &b.QbtEnabled, &b.QbtPort, &b.QbtUser, &b.QbtPass, &b.QbtStartCmd,
-		&b.DockerEnabled, &b.DuEnabled, &b.Enabled, &created, &updated)
+		&b.DockerEnabled, &b.DuEnabled, &b.Enabled, &created, &updated, &watch)
 	if err != nil {
 		return nil, err
+	}
+	b.AppsWatch = []string{}
+	if watch != "" {
+		_ = json.Unmarshal([]byte(watch), &b.AppsWatch) // an unreadable list is an empty one
 	}
 	b.CreatedAt, _ = time.Parse(time.RFC3339, created)
 	b.HasPassword, b.HasQbtPass = b.Password != "", b.QbtPass != ""

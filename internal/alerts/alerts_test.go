@@ -84,3 +84,29 @@ func TestDaysUntilDate(t *testing.T) {
 		t.Error("garbage date accepted")
 	}
 }
+
+func TestWantApps(t *testing.T) {
+	s := collect.BoxState{Name: "seed-01"}
+	s.Apps.Watched = []string{"radarr", "jellyfin"}
+	s.Apps.Apps = []collect.AppView{{Key: "radarr", Name: "Radarr", Running: true, Watched: true}, {Key: "jellyfin", Name: "Jellyfin", Watched: true}, {Key: "sonarr", Name: "Sonarr"}}
+	if got := wantApps(&s); len(got) != 0 {
+		t.Fatalf("no alert without a readable process list: %+v", got)
+	}
+	s.Apps.OK = true
+	got := wantApps(&s)
+	if len(got) != 1 || got[0].key != "app:jellyfin" || got[0].sev != "warn" || got[0].title != "seed-01 — Jellyfin is not running" {
+		t.Fatalf("alerts: %+v", got)
+	}
+	// Resolvable only when the list was read this poll, or the app was unwatched.
+	s.Apps.OK = false
+	if recheckable(&s, "app:jellyfin") {
+		t.Error("unreadable process list must not resolve the alert")
+	}
+	if !recheckable(&s, "app:sonarr") {
+		t.Error("an unwatched app's alert must resolve")
+	}
+	s.Apps.OK = true
+	if !recheckable(&s, "app:jellyfin") {
+		t.Error("read this poll: resolvable")
+	}
+}

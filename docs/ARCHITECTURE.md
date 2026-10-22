@@ -26,6 +26,7 @@ browser  <-- HTTP/JSON + SSE -->  pmss-fleet-manager  <-- SSH -->  box (tenant s
 | torrents | qBittorrent Web API over SSH tunnel (`sync/maindata`, `app/version`) | user-installed `~/bin/qbittorrent-nox`; port from `~/.config/qBittorrent/qBittorrent.conf` or box setting. Writes on request: `torrents/stop|start|pause|resume|delete|add`, `app/shutdown` |
 | DHT / PeX / LSD | `app/preferences` every poll; `app/setPreferences` on toggle | only the three booleans are read or written |
 | containers | Docker Engine API on `/run/user/<uid>/docker.sock` over SSH | rootless dockerd |
+| own processes / applications | `ps -u <uid>` (pid, ppid, rss, cumulative CPU seconds, age, comm; args separately, clipped), `ss -tlnp` for port -> own pid | hidepid=2 means only the account's processes are visible anyway; the probe's own shell and children are dropped; `internal/collect/apps.go` groups them into apps by comm/args and derives CPU% from two samples of the same pid; the watch list lives in `boxes.apps_watch` and is edited only through its own endpoint |
 | usage by directory | `du` on top-level home entries, low priority, every few hours | optional, heavy; the 500 largest entries are kept, the rest summed into one |
 | plan / price / renewal / PM usage | Pulsed Media customer API `https://pulsedmedia.com/remote/pmapi-feed.php` (`X-API-Key`) | optional; synced every 6 h and on demand; cached in the settings table; matched to boxes by host+user, then unique host, then unique user. Manual plan / renewal on a box override it; datacenter is manual only |
 

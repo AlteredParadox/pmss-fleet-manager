@@ -71,6 +71,7 @@ type BoxState struct {
 	Qbt     QbtState     `json:"qbt"`
 	Docker  DockerState  `json:"docker"`
 	Dirs    DirsState    `json:"dirs"`
+	Apps    AppsState    `json:"apps"`
 }
 
 // DiskState is the user quota view.
@@ -304,6 +305,8 @@ func (s *BoxState) adoptIdentity(from BoxState) {
 	s.Name, s.Host, s.Port, s.User, s.Type = from.Name, from.Host, from.Port, from.User, from.Type
 	s.Plan, s.Datacenter, s.Renewal, s.Enabled, s.HostKeyFP = from.Plan, from.Datacenter, from.Renewal, from.Enabled, from.HostKeyFP
 	s.Qbt.Enabled, s.Docker.Enabled, s.Dirs.Enabled = from.Qbt.Enabled, from.Docker.Enabled, from.Dirs.Enabled
+	s.Apps.Watched = from.Apps.Watched
+	s.Apps.markWatched()
 }
 
 // resetVolatile clears what only a fresh poll by the current poller may
@@ -370,6 +373,7 @@ func (s BoxState) Summary() BoxState {
 	c.Docker.Containers = nil
 	c.Dirs.Entries = nil
 	c.Traffic.Daily = nil
+	c.Apps.Processes = nil
 	return c
 }
 
@@ -381,6 +385,7 @@ func fromBox(b *store.Box) BoxState {
 		Qbt:       QbtState{Enabled: b.QbtEnabled, Port: b.QbtPort},
 		Docker:    DockerState{Enabled: b.DockerEnabled},
 		Dirs:      DirsState{Enabled: b.DuEnabled},
+		Apps:      AppsState{Watched: append([]string{}, b.AppsWatch...)},
 		HostKeyFP: fingerprintOrEmpty(b.HostKey),
 	}
 }

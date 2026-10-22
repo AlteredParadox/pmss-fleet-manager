@@ -241,3 +241,54 @@ func TestOpenUnwritableDirIsPermissionError(t *testing.T) {
 		t.Fatalf("Open with an uncreatable subdir: %v, want fs.ErrPermission", err)
 	}
 }
+
+func TestAppsWatchColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "w.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	b := &Box{Name: "x", Host: "h", User: "u", Port: 22, Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetBox(ctx, b.ID)
+	if got.AppsWatch == nil || len(got.AppsWatch) != 0 {
+		t.Fatalf("default watch list must be empty, not nil: %#v", got.AppsWatch)
+	}
+	if err := s.SetAppsWatch(ctx, b.ID, []string{"radarr", "other:bot.py"}); err != nil {
+		t.Fatal(err)
+	}
+	// A box edit must not touch the list.
+	got, _ = s.GetBox(ctx, b.ID)
+	got.Plan = "p"
+	got.AppsWatch = nil
+	if err := s.UpdateBox(ctx, got, Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetBox(ctx, b.ID)
+	if len(got.AppsWatch) != 2 || got.AppsWatch[0] != "radarr" {
+		t.Fatalf("watch list: %v", got.AppsWatch)
+	}
+	if err := s.SetAppsWatch(ctx, 999, nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing box: %v", err)
+	}
+	if err := s.SetAppsWatch(ctx, b.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetBox(ctx, b.ID)
+	if len(got.AppsWatch) != 0 {
+		t.Fatalf("cleared: %v", got.AppsWatch)
+	}
+	// Reopening runs the migration again: the column must not be re-added.
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetBox(ctx, b.ID); err != nil {
+		t.Fatal(err)
+	}
+}

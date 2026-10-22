@@ -89,6 +89,29 @@ WebUI\LocalHostAuth=false
 1
 @@docker_sock
 1
+@@probe_pid
+777
+@@procs
+    777       1  1200        0       1 sh
+    778     777   900        0       0 ps
+   4242       1 812340     6172  438873 qbittorrent-nox
+   5001       1 212000      300   86400 Radarr
+   5002    5001   100        1       1 sleep
+   5003       1  5000        2    3600 rtorrent main
+@@proc_args
+777 sh
+778 ps -ww -u 1001 -o pid=,ppid=,rss=,times=,etimes=,comm=
+4242 /home/ragnar/bin/qbittorrent-nox -d
+5001 /home/ragnar/.bin/Radarr/Radarr -nobrowser -data=/home/ragnar/.config/Radarr
+5003 rtorrent main
+@@proc_stat
+100
+4242 500000 117250 1234567
+5001 30000 100 99
+@@listen_pids
+8089 4242
+8089 4242
+7878 5001
 @@end
 `
 
@@ -128,6 +151,52 @@ func TestParse(t *testing.T) {
 	}
 	if !snap.Docker.SocketPresent {
 		t.Fatalf("docker: %+v", snap.Docker)
+	}
+	// The probe's own shell (777) and its child ps (778) are dropped; the
+	// rest keep their args, and a comm with a space survives.
+	if !snap.ProcsKnown || len(snap.Procs) != 4 {
+		t.Fatalf("procs: %+v", snap.Procs)
+	}
+	// CPU comes from /proc stat ticks where present (6172.5 s), ps's whole
+	// seconds otherwise; the start tick identifies the process.
+	if q := snap.Procs[0]; q.PID != 4242 || q.Comm != "qbittorrent-nox" || q.RSS != 812340*1024 || q.CPUSec != 6172.5 || q.StartTick != 1234567 || q.ElapsedSec != 438873 || q.Args != "/home/ragnar/bin/qbittorrent-nox -d" {
+		t.Fatalf("qbt proc: %+v", q)
+	}
+	if r := snap.Procs[3]; r.Comm != "rtorrent main" || r.PPID != 1 || r.CPUSec != 2 || r.StartTick != 0 {
+		t.Fatalf("rtorrent proc: %+v", r)
+	}
+	if got := snap.ListenPIDs[8089]; len(got) != 1 || got[0] != 4242 {
+		t.Fatalf("listen pids (deduplicated): %v", snap.ListenPIDs)
+	}
+	if got := snap.ListenPIDs[7878]; len(got) != 1 || got[0] != 5001 {
+		t.Fatalf("listen pids: %v", snap.ListenPIDs)
+	}
+}
+
+func TestParseProcsHostileAndMissing(t *testing.T) {
+	procs, known := parseProcs("", "", "", 0)
+	if known || len(procs) != 0 {
+		t.Fatalf("empty ps must be unknown, got %v %v", known, procs)
+	}
+	raw := "1 0 -5 nan -1 bad\n2 0 99999999999999 1e99 5 huge\nx y z\n3 0 10 1 1 ok"
+	procs, known = parseProcs(raw, "3 cmd with args\nnotanumber args", "0\n3 100 100 5", 0) // CLK_TCK 0: stat ignored
+	if !known || len(procs) != 3 {
+		t.Fatalf("procs: %+v", procs)
+	}
+	if procs[0].RSS != 0 || procs[0].CPUSec != 0 || procs[0].ElapsedSec != 0 {
+		t.Fatalf("negative/nan values must clamp to 0: %+v", procs[0])
+	}
+	if procs[1].RSS != 0 || procs[1].CPUSec != 0 {
+		t.Fatalf("absurd values must clamp to 0: %+v", procs[1])
+	}
+	if procs[2].Args != "cmd with args" || procs[2].CPUSec != 1 || procs[2].StartTick != 0 {
+		t.Fatalf("args / stat fallback: %+v", procs[2])
+	}
+	if st := parseProcStat("100\n3 100 50 7\n4 -1 0 7\n5 1 1\nx"); len(st) != 1 || st[3].cpuSec != 1.5 || st[3].start != 7 {
+		t.Fatalf("proc stat: %+v", st)
+	}
+	if got := parseListenPIDs("80 1\n70000 2\nabc 3\n80 1\n81"); len(got) != 1 || len(got[80]) != 1 {
+		t.Fatalf("listen pids: %v", got)
 	}
 }
 
