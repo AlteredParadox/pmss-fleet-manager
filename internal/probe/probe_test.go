@@ -260,8 +260,23 @@ func TestQbtVersionSkippedWhileUnchanged(t *testing.T) {
 	if got := run(seen); got != "qBittorrent v5.2.4" {
 		t.Fatalf("timestamp-preserving replacement must be noticed, got %q", got)
 	}
+	// A symlinked binary: the key describes the target, so replacing the
+	// target under an unchanged link is noticed (fred review on PR 86).
+	os.Rename(home+"/bin/qbittorrent-nox", home+"/bin/qbt-real")
+	os.Symlink(home+"/bin/qbt-real", home+"/bin/qbittorrent-nox")
+	lst, _ := os.Stat(home + "/bin/qbt-real")
+	lsys := lst.Sys().(*syscall.Stat_t)
+	linkSeen := fmt.Sprintf("%d %d %d %d", lst.Size(), lst.ModTime().Unix(), lsys.Ctim.Sec, lsys.Ino)
+	if got := run(linkSeen); got != "" {
+		t.Fatalf("unchanged target behind a link must skip, got %q", got)
+	}
+	os.WriteFile(home+"/bin/qbt-real.new", []byte(fake), 0o700)
+	os.Rename(home+"/bin/qbt-real.new", home+"/bin/qbt-real")
+	if got := run(linkSeen); got != "qBittorrent v5.2.4" {
+		t.Fatalf("target replaced behind an unchanged link must be noticed, got %q", got)
+	}
 	calls, _ := os.ReadFile(home + "/calls")
-	if strings.Count(string(calls), "run") != 3 {
+	if strings.Count(string(calls), "run") != 4 {
 		t.Fatalf("calls: %q", calls)
 	}
 	if s := ScriptWith("abc", "12 34'; rm -rf /"); !strings.HasPrefix(s, "PMSS_TAG='abc'\nPMSS_QBT_SEEN='12 34   '\n") {
