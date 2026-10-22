@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -51,6 +52,8 @@ type Client struct {
 	cookie string // session cookie header value, set by Login
 
 	guard *AuthGuard
+	// writes counts bytes written on this client's connections (see login).
+	writes atomic.Int64
 }
 
 // banRetryAfter is the hold after qBittorrent reports the IP banned: its
@@ -104,8 +107,11 @@ type AuthState struct {
 	Until time.Time `json:"until,omitempty"`
 	Key   string    `json:"key,omitempty"`
 	// Ambiguous counts logins whose outcome was never seen (the connection
-	// failed after the credentials may have been sent); see ErrAmbiguous.
-	Ambiguous int `json:"ambiguous,omitempty"`
+	// failed after the credentials were sent) for AmbiguousKey; see
+	// ErrAmbiguous. Kept apart from Key: a ban hold has no key (it is the
+	// IP that is banned) and must not become credential-scoped on restore.
+	Ambiguous    int    `json:"ambiguous,omitempty"`
+	AmbiguousKey string `json:"ambiguous_key,omitempty"`
 	// Endpoint is the SSH endpoint the hold was recorded for (set by the
 	// poller); a restore ignores a hold recorded for another one.
 	Endpoint string `json:"endpoint,omitempty"`
@@ -187,7 +193,7 @@ func (g *AuthGuard) State() AuthState {
 		s.Error = g.err.Error()
 	}
 	if g.ambiguous > 0 {
-		s.Ambiguous, s.Key = g.ambiguous, g.ambKey
+		s.Ambiguous, s.AmbiguousKey = g.ambiguous, g.ambKey
 	}
 	return s
 }
@@ -196,7 +202,7 @@ func (g *AuthGuard) State() AuthState {
 func (g *AuthGuard) Restore(s AuthState) {
 	if s.Ambiguous > 0 {
 		g.mu.Lock()
-		g.ambiguous, g.ambKey = s.Ambiguous, s.Key
+		g.ambiguous, g.ambKey = s.Ambiguous, s.AmbiguousKey
 		g.mu.Unlock()
 	}
 	if s.Error == "" {
@@ -214,6 +220,21 @@ func (g *AuthGuard) Restore(s AuthState) {
 	g.fail(err, s.Until, s.Key)
 }
 
+// countingConn counts the bytes written on a transport connection, so a
+// login can tell "failed before anything was sent" from "sent, no answer".
+type countingConn struct {
+	net.Conn
+	writes *atomic.Int64
+}
+
+func (c *countingConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if n > 0 {
+		c.writes.Add(int64(n))
+	}
+	return n, err
+}
+
 // New builds a client with its own guard. Test support: the poller uses
 // NewWithGuard so the hold outlives the client. hostport is what qBittorrent
 // should see in the Host header (its host-header validation accepts localhost/127.0.0.1 by default),
@@ -229,15 +250,24 @@ func NewWithGuard(dial Dialer, hostport, user, pass string, g *AuthGuard) *Clien
 	if g == nil {
 		g = &AuthGuard{}
 	}
+	c := &Client{user: user, pass: pass, guard: g}
 	tr := &http.Transport{
-		DialContext:     func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			conn, err := dial(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return &countingConn{Conn: conn, writes: &c.writes}, nil
+		},
 		MaxIdleConns:    2,
 		IdleConnTimeout: 60 * time.Second,
 	}
 	if hostport == "" {
 		hostport = "127.0.0.1"
 	}
-	return &Client{http: &http.Client{Transport: tr, Timeout: 30 * time.Second}, base: "http://" + hostport, user: user, pass: pass, guard: g}
+	c.http = &http.Client{Transport: tr, Timeout: 30 * time.Second}
+	c.base = "http://" + hostport
+	return c
 }
 
 // Close releases idle connections.
@@ -358,11 +388,17 @@ func (c *Client) login(ctx context.Context) error {
 		return err
 	}
 	form := url.Values{"username": {c.user}, "password": {c.pass}}
+	sent := c.writes.Load()
 	code, body, resp, err := c.doResp(ctx, http.MethodPost, "/api/v2/auth/login", form)
 	if err != nil {
-		// No answer: qBittorrent may still have counted a rejection. Spend
-		// one of the ambiguous-attempt budget rather than retry forever.
-		c.guard.noteAmbiguous(c.credsKey())
+		// No answer. Only when bytes went out during this attempt may
+		// qBittorrent have seen (and counted) the credentials; a dial
+		// failure or a request cancelled before the write is a plain
+		// transport error and must not spend the ambiguous budget, or a
+		// box that is briefly unreachable would lock valid credentials.
+		if c.writes.Load() > sent {
+			c.guard.noteAmbiguous(c.credsKey())
+		}
 		return err
 	}
 	if code == http.StatusForbidden && strings.Contains(strings.ToLower(string(body)), "banned") {

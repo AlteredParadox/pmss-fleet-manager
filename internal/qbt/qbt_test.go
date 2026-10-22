@@ -564,8 +564,22 @@ func TestAmbiguousLoginBudget(t *testing.T) {
 		t.Fatalf("budget spent: %v %v", err, held)
 	}
 	st := g.State()
-	if st.Ambiguous != ambiguousBudget || st.Error != ErrAmbiguous.Error() {
+	if st.Ambiguous != ambiguousBudget || st.AmbiguousKey != "k" || st.Error != ErrAmbiguous.Error() {
 		t.Fatalf("state: %+v", st)
+	}
+	// A ban hold has no key (the IP is banned): the ambiguous count must
+	// not make it credential-scoped through State/Restore.
+	gb := &AuthGuard{}
+	gb.noteAmbiguous("k")
+	gb.fail(ErrBanned, time.Now().Add(time.Hour), "")
+	sb := gb.State()
+	if sb.Key != "" || sb.AmbiguousKey != "k" || sb.Ambiguous != 1 {
+		t.Fatalf("ban state: %+v", sb)
+	}
+	gr := &AuthGuard{}
+	gr.Restore(sb)
+	if _, held := gr.Blocked("other"); !held {
+		t.Fatal("a restored ban must hold for every credential")
 	}
 	if _, held := g.Blocked("other"); held { // other credentials end the hold, as for a rejection
 		t.Fatal("other credentials are not held")
@@ -579,14 +593,48 @@ func TestAmbiguousLoginBudget(t *testing.T) {
 	if _, held := g2.Blocked("k"); held {
 		t.Fatal("cleared")
 	}
-	// Transport failure during login counts as ambiguous.
+	// A dial failure sends nothing: it must not spend the budget, however
+	// often it repeats, or a briefly unreachable box locks valid credentials.
 	c := New(func(ctx context.Context) (net.Conn, error) { return nil, errors.New("reset") }, "127.0.0.1:8080", "admin", "secret")
-	for i := 0; i < ambiguousBudget; i++ {
+	for i := 0; i < 2*ambiguousBudget; i++ {
 		if err := c.Login(context.Background()); err == nil {
 			t.Fatal("login must fail")
 		}
 	}
-	if err, held := c.AuthBlocked(); !held || err != ErrAmbiguous {
-		t.Fatalf("after %d failed transports: %v %v", ambiguousBudget, err, held)
+	if _, held := c.AuthBlocked(); held {
+		t.Fatal("dial failures must not be charged as ambiguous")
+	}
+	// A server that reads the credentials and drops the connection is the
+	// ambiguous case: charged, and the hold survives State/Restore.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 4096)
+			conn.Read(buf)
+			conn.Close()
+		}
+	}()
+	addr := ln.Addr().String()
+	c2 := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }, "127.0.0.1:8080", "admin", "secret")
+	for i := 0; i < ambiguousBudget; i++ {
+		if err := c2.Login(context.Background()); err == nil {
+			t.Fatal("login must fail")
+		}
+	}
+	if err, held := c2.AuthBlocked(); !held || err != ErrAmbiguous {
+		t.Fatalf("after %d dropped answers: %v %v", ambiguousBudget, err, held)
+	}
+	g3 := &AuthGuard{}
+	g3.Restore(c2.guard.State())
+	if err, held := g3.Blocked(CredsKey("admin", "secret")); !held || err != ErrAmbiguous {
+		t.Fatalf("restored: %v %v", err, held)
 	}
 }

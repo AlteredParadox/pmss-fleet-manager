@@ -224,11 +224,7 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	// at once. The failure count stays: it feeds the offline/degraded
 	// decision, and a box down for hours must not dip to "degraded".
 	st.NextPoll, st.Backoff = time.Time{}, false
-	var auth qbt.AuthState
-	authKnown := false
-	if _, err := m.st.GetCache(m.ctx, b.ID, authCacheKind, &auth); err == nil && auth.Endpoint == AuthEndpoint(b) {
-		authKnown = true // a hold recorded for another endpoint (the box was moved) does not apply
-	}
+	auth, authKnown := m.restoredAuth(b)
 	if !b.Enabled {
 		st.Status, st.StatusReason, st.Failures = "disabled", "", 0 // nothing to retry; the reason belonged to the last poll
 	}
@@ -258,6 +254,17 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 		// disabled status now so open alerts for this box resolve.
 		m.runHooks(st)
 	}
+}
+
+// restoredAuth loads the persisted WebUI hold for a box, if it was recorded
+// for the box's current SSH endpoint (one recorded before a move does not
+// apply).
+func (m *Manager) restoredAuth(b *store.Box) (qbt.AuthState, bool) {
+	var auth qbt.AuthState
+	if _, err := m.st.GetCache(m.ctx, b.ID, authCacheKind, &auth); err != nil || auth.Endpoint != AuthEndpoint(b) {
+		return qbt.AuthState{}, false
+	}
+	return auth, true
 }
 
 // runHooks evaluates the hooks on a copy of a state outside any lock.

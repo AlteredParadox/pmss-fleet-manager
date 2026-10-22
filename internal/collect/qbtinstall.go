@@ -55,10 +55,7 @@ tmp="$HOME/bin/.qbittorrent-nox.new.$$"
 # redirecting to http. wget has no size option either: the subshell's
 # file-size limit (ulimit -f, 512-byte blocks under dash = 200 MiB) stops a
 # runaway download as it is written.
-if command -v curl >/dev/null 2>&1; then curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp" "$url"; rc=$?
-elif command -v wget >/dev/null 2>&1; then (ulimit -f 409600; exec wget -q -O "$tmp" "$url"); rc=$?
-else echo "neither curl nor wget available"; exit 1; fi
-[ "$rc" -eq 0 ] && [ -s "$tmp" ] || { echo "download failed (exit $rc)"; rm -f "$tmp"; exit 1; }
+` + downloadShell + `[ "$rc" -eq 0 ] && [ -s "$tmp" ] || { echo "download failed (exit $rc)"; rm -f "$tmp"; exit 1; }
 # The static build is ~30 MB; anything far above that is not it.
 size=$(wc -c < "$tmp")
 [ "$size" -le 209715200 ] || { echo "downloaded file is too large to be qbittorrent-nox ($size bytes)"; rm -f "$tmp"; exit 1; }
@@ -74,6 +71,21 @@ mv -f "$tmp" "$HOME/bin/qbittorrent-nox" || { rm -f "$tmp"; exit 1; }
 echo "installed: $new"
 echo "previous: ${old:-none}"
 `
+
+// downloadShell fetches $url into $tmp. The URL goes to the downloader on
+// ITS stdin (curl's config file, wget's URL list), never on its command
+// line: a custom URL may carry a private-build token, and on a host
+// without process hiding another tenant could read it from
+// /proc/<pid>/cmdline for the whole download. safeURL admits neither a
+// double quote nor a backslash, so the curl config line needs no escaping.
+const (
+	curlDownload  = `printf 'url = "%s"\n' "$url" | curl -fsSL -K - --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp"; rc=$?`
+	wgetDownload  = `(ulimit -f 409600; printf '%s\n' "$url" | wget -q -i - -O "$tmp"); rc=$?`
+	downloadShell = `if command -v curl >/dev/null 2>&1; then ` + curlDownload + `
+elif command -v wget >/dev/null 2>&1; then ` + wgetDownload + `
+else echo "neither curl nor wget available"; exit 1; fi
+`
+)
 
 // qbtStartHelper is the user's standard launcher, written to ~/bin/qbt-start.
 const qbtStartHelper = `#!/bin/bash
