@@ -1035,12 +1035,17 @@ func TestEstablishedOwner(t *testing.T) {
 	}
 }
 
-// The script's decisions when /proc/net/tcp is unreadable: a failing or
-// silent ss is a failure (refuse) unless the box carries the privacy
-// marker (fallback); a working ss yields decimal rows.
+// The script's decisions when /proc/net/tcp is unreadable: a failing ss is
+// a failure (refuse); a silent ss is the privacy fallback only when the
+// policy shows itself, by its marker or by its signature (the table
+// present but denied, ss still listing listeners), and a failure
+// otherwise; a working ss yields decimal rows.
 func TestEstablishedScriptFallbacks(t *testing.T) {
 	bin := t.TempDir()
-	run := func(ss string, marker bool) string {
+	const absent, denied, readable = "no-such-table", "denied-table", "readable-table"
+	os.WriteFile(bin+"/"+denied, nil, 0)
+	os.WriteFile(bin+"/"+readable, nil, 0o600)
+	run := func(ss string, marker bool, table string) string {
 		os.WriteFile(bin+"/ss", []byte(ss), 0o700)
 		m := bin + "/absent"
 		if marker {
@@ -1049,21 +1054,44 @@ func TestEstablishedScriptFallbacks(t *testing.T) {
 		}
 		cmd := exec.Command("sh")
 		cmd.Stdin = strings.NewReader(EstablishedScript(8089))
-		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "PMSS_TCP_TABLES="+bin+"/no-such-table", "PMSS_PRIVACY_MARKER="+m)
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "PMSS_TCP_TABLES="+bin+"/"+table, "PMSS_PRIVACY_MARKER="+m)
 		out, _ := cmd.Output()
 		return string(out)
 	}
-	if out := run("#!/bin/sh\nexit 255\n", false); !strings.Contains(out, "failed 255") {
+	// ss that lists listeners (-l) but no other socket, as the privacy
+	// filter leaves it; and one that lists nothing at all.
+	silentButListeners := "#!/bin/sh\ncase \"$*\" in *l*) echo 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))';; esac\nexit 0\n"
+	silent := "#!/bin/sh\nexit 0\n"
+	if out := run("#!/bin/sh\nexit 255\n", false, denied); !strings.Contains(out, "failed 255") {
 		t.Fatalf("ss failing must report a failure: %q", out)
 	}
-	if out := run("#!/bin/sh\nexit 0\n", false); !strings.Contains(out, "failed 0") {
-		t.Fatalf("ss printing nothing without the marker is a failure: %q", out)
+	if out := run(silent, false, absent); !strings.Contains(out, "failed 0") {
+		t.Fatalf("ss printing nothing, no marker, no table at all: a failure: %q", out)
 	}
-	if out := run("#!/bin/sh\nexit 0\n", true); !strings.Contains(out, "privacy") || strings.Contains(out, "failed") {
+	if out := run(silent, true, absent); !strings.Contains(out, "privacy") || strings.Contains(out, "failed") {
 		t.Fatalf("ss printing nothing with the marker is the privacy fallback: %q", out)
 	}
+	if os.Getuid() != 0 { // root reads a mode-0 file, so the signature cannot be staged as root
+		// The marker out of reach (PMSS 2026-10-22 made /etc/seedbox
+		// root-only on some hosts) but the signature complete: privacy.
+		if out := run(silentButListeners, false, denied); !strings.Contains(out, "privacy") || strings.Contains(out, "failed") {
+			t.Fatalf("denied table + listeners visible + no other socket is the privacy policy: %q", out)
+		}
+		// Signature incomplete: ss lists nothing at all (broken), or the
+		// table is readable (so its emptiness was real and ss should have
+		// had rows), or the table does not exist: all failures.
+		if out := run(silent, false, denied); !strings.Contains(out, "failed 0") {
+			t.Fatalf("ss listing no listeners either is a failure: %q", out)
+		}
+		if out := run(silentButListeners, false, readable); !strings.Contains(out, "failed 0") {
+			t.Fatalf("a readable table is not the privacy policy: %q", out)
+		}
+		if out := run(silentButListeners, false, absent); !strings.Contains(out, "failed 0") {
+			t.Fatalf("no table at all is not the privacy policy: %q", out)
+		}
+	}
 	fake := "#!/bin/sh\necho 'ESTAB 0 0 127.0.0.1:41000 127.0.0.1:8089 users:((\"sshd\",pid=1,fd=9))'\necho 'FIN-WAIT-2 0 0 127.0.0.1:8089 127.0.0.1:41000'\n"
-	out := run(fake, false)
+	out := run(fake, false, denied)
 	if !strings.Contains(out, "base dec") || !strings.Contains(out, "c 41000 "+strconv.Itoa(os.Getuid())+" ESTAB 127.0.0.1") || !strings.Contains(out, "s 41000 x FIN-WAIT-2 127.0.0.1") {
 		t.Fatalf("ss rows: %q", out)
 	}
