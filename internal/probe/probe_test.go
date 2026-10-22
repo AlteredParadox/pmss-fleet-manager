@@ -17,6 +17,8 @@
 package probe
 
 import (
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"net"
 	"os"
@@ -243,6 +245,15 @@ func TestParseLogs(t *testing.T) {
 	}
 	if _, stderr, code := runSh(t, LogTailScript("missing.log", 3)); code != 5 || !strings.Contains(stderr, "not a regular file") {
 		t.Fatalf("missing: code %d err %q", code, stderr)
+	}
+	// A gzip-rotated copy is decompressed on the box, never served as bytes.
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	zw.Write([]byte("a\nb\nc\nd\n"))
+	zw.Close()
+	os.WriteFile(dir+"/old.log.2.gz", gz.Bytes(), 0o600)
+	if out, _, code := runSh(t, LogTailScript("old.log.2.gz", 2)); code != 0 || out != "c\nd\n" {
+		t.Fatalf("gz tail: code %d out %q", code, out)
 	}
 }
 

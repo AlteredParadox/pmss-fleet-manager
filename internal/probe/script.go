@@ -226,7 +226,7 @@ const (
 // Only a listing: the tab fetches one file on demand (see LogTailScript).
 const logsListShell = `(cd "$home" 2>/dev/null && for d in ` + logDirsShell + `; do
   [ -d "$d" ] || continue
-  find "$d" -maxdepth 1 -type f \( -name '*.log' -o -name '*.log.*' -o -name '*.txt' \) -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -rn | head -n 40
+  find "$d" -maxdepth 1 -type f \( -name '*.log' -o -name '*.log.*' -o -name '*.txt' \) ! -name '*.xz' ! -name '*.bz2' ! -name '*.zst' ! -name '*.zip' -printf '%T@\t%s\t%p\n' 2>/dev/null | sort -rn | head -n 40
 done
 for f in ` + logFilesShell + `; do
   [ -f "$f" ] && stat -c '%Y'"$(printf '\t')"'%s'"$(printf '\t')"'%n' "$f" 2>/dev/null
@@ -236,15 +236,21 @@ done; :)
 // LogTailScript prints the last lines of one log file under the home. The
 // path (already ValidLogPath-checked) is embedded single-quoted, so it never
 // reaches a command line that /proc exposes, and is checked again on the
-// box: relative, no ".." component, a regular file. The byte cap keeps a
-// file of enormous lines from flooding the response.
+// box: relative, no ".." component, a regular file. A gzip-rotated copy is
+// decompressed on the box into the same line and byte caps, so however
+// large it inflates, only the tail travels; the caps also bound a file of
+// enormous lines.
 func LogTailScript(path string, lines int) string {
 	q := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+	n := strconv.Itoa(lines)
 	return "#!/bin/sh\nLC_ALL=C; export LC_ALL\np=" + q + "\n" +
 		`cd "${HOME:-~}" || exit 3
 case "$p" in ''|/*|..|../*|*/../*|*/..) echo "refused path" >&2; exit 4;; esac
 [ -f "$p" ] || { echo "not a regular file" >&2; exit 5; }
-tail -n ` + strconv.Itoa(lines) + ` -- "$p" 2>/dev/null | tail -c 262144
+case "$p" in
+  *.gz) gzip -dc -- "$p" 2>/dev/null | tail -n ` + n + ` | tail -c 262144;;
+  *) tail -n ` + n + ` -- "$p" 2>/dev/null | tail -c 262144;;
+esac
 `
 }
 
