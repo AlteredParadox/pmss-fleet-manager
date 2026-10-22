@@ -1215,7 +1215,12 @@ function tabHost(b) {
 }
 
 /* "node vs. you": PMSS's own live-stats rings (five-minute samples, 24 h),
-   summarised server-side exactly as its panel does; this only draws them. */
+   summarised server-side exactly as its panel does; this only draws them.
+   The share cell and the trend drawing follow PMSS's etc/skel/www/statsLive.php
+   (pmssStatsLiveCell, pmssStatsLiveSvg): Copyright (C) MagnaCapax / the PMSS
+   Team, GPL-3.0-only, https://github.com/MagnaCapax/PMSS. GPLv3 section 13
+   permits combining that work with this AGPL program; these three functions
+   remain under GPL-3.0, the rest of this file under the licence at the top. */
 function liveCell(p, unit) {
   const f = (v) => unit === '%' ? fmtPctFine(v) : `${(Number(v) || 0).toFixed(v < 10 ? 1 : 0)} Mbit/s`;
   const nodeW = unit === '%' ? Math.min(100, p.node) : 100;

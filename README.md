@@ -362,6 +362,17 @@ working on that feature.
 pmss-fleet-manager is free software under the **GNU Affero General Public
 License v3 or later** ([`LICENSE`](LICENSE)).
 
+**Derived code.** The host tab's "node vs. you · 24 h" panel is a port of
+the same panel in [PMSS](https://github.com/MagnaCapax/PMSS)
+(`etc/skel/www/statsLive.php`, its ADR 0126), so that the two agree: the
+averaging arithmetic in `internal/collect/live.go` and the share cell and
+trend drawing in `app.js` follow that file closely. That code is Copyright
+MagnaCapax / the PMSS Team, GPL-3.0-only; GPLv3 §13 permits combining it
+with this AGPL program, and the derived parts stay under GPL-3.0 (noted in
+their file headers; `THIRD_PARTY_LICENSES.md` carries the credit and the
+full GPL-3.0 text from `licenses/GPL-3.0.txt`). The host cpu figures
+use the same `/proc/stat` accounting as PMSS's live-stats cron.
+
 The AGPL's §13 obligation is to offer the Corresponding Source to everyone who
 interacts with the program *over a network*, so these three routes are
 deliberately served **without basic auth**, since a login wall would defeat
