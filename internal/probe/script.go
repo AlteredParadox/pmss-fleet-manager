@@ -142,8 +142,8 @@ sec logs
 # fixed numeric columns first, then comm, which may hold spaces. times is
 # cumulative CPU seconds; the poller turns two samples into a rate. The
 # command lines come separately and clipped: argv is the process's own text.
-sec procs; timeout 10 ps -ww -u "$uid" -o pid=,ppid=,rss=,times=,etimes=,comm= 2>/dev/null
-sec proc_args; timeout 10 ps -ww -u "$uid" -o pid=,args= 2>/dev/null | cut -c1-400
+sec procs
+` + procsShell + `sec proc_args; timeout 10 ps -ww -u "$uid" -o pid=,args= 2>/dev/null | cut -c1-400
 # The ps calls carry a timeout: reading a cmdline takes the target's mmap
 # lock, and a process stuck in D state on a dead mount would otherwise hold
 # the whole probe past its deadline (a cut section degrades to "unknown").
@@ -260,6 +260,13 @@ case "$p" in
 esac
 `
 }
+
+// procsShell lists the account's processes, but only when ps finished:
+// a listing cut by the timeout would pass as complete (the parser calls
+// it known as soon as one row parses) and every watched app missing from
+// the cut tail would be reported as not running.
+const procsShell = `o=$(timeout 10 ps -ww -u "$uid" -o pid=,ppid=,rss=,times=,etimes=,comm= 2>/dev/null) && [ -n "$o" ] && printf '%s\n' "$o"
+`
 
 // listenPIDsShell prints "<port> <pid>" for every listening TCP socket ss
 // can attribute to one of our processes (its users:((...,pid=N,...)) column).

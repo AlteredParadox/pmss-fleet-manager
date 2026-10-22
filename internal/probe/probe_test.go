@@ -749,6 +749,28 @@ func TestHostnameField(t *testing.T) {
 
 // ~/.qbittorrentEnable is PMSS's marker for a panel-managed qBittorrent; a
 // missing section (an older probe) reads as not managed.
+// A ps cut by its timeout prints nothing, so the parser reports the list
+// as unknown rather than as a complete listing missing its tail.
+func TestProcsShellDropsTimedOutListing(t *testing.T) {
+	bin := t.TempDir()
+	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 0 1 0 1 partial'\nexit 124\n"), 0o700)
+	os.WriteFile(bin+"/timeout", []byte("#!/bin/sh\nshift\nexec \"$@\"\n"), 0o700)
+	run := func() string {
+		cmd := exec.Command("sh")
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+		cmd.Stdin = strings.NewReader("uid=1\n" + procsShell)
+		out, _ := cmd.Output()
+		return string(out)
+	}
+	if out := run(); out != "" {
+		t.Fatalf("timed-out ps must print nothing, got %q", out)
+	}
+	os.WriteFile(bin+"/ps", []byte("#!/bin/sh\necho '1 0 1 0 1 whole'\n"), 0o700)
+	if out := run(); out != "1 0 1 0 1 whole\n" {
+		t.Fatalf("completed ps: %q", out)
+	}
+}
+
 // The cached binary stat is echoed back to the box every poll: only a
 // stat-shaped line is kept (round 20).
 func TestParseQbtBinaryStatShape(t *testing.T) {

@@ -631,11 +631,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	st.Account = AccountState{OK: a.OK, QuotaGiB: a.QuotaGiB, RAMMiB: a.RAMMiB, DockerEnabled: a.DockerEnabled, Suspended: a.Suspended}
 
 	st.Apps, p.procPrev = appsFromSnapshot(snap, p.box.User, p.procPrev, st.Apps.Watched)
-	key := qbtProcKey(snap.Procs)
-	p.qbtRestarted = key != "" && p.qbtProcKey != "" && key != p.qbtProcKey
-	if key != "" || !snap.ProcsKnown {
-		p.qbtProcKey = key // an unreadable process list keeps the last identity rather than forgetting it
-	}
+	p.qbtRestarted, p.qbtProcKey = trackQbtProcess(p.qbtProcKey, snap)
 
 	st.Logs = LogsState{OK: snap.LogsKnown}
 	for _, f := range snap.Logs {
@@ -858,7 +854,9 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	qs.Reachable = true
 	ss := md.ServerState
 	qs.Connection = connectionStatus(ss.ConnectionStatus)
-	qs.FirewalledSince = firewalledSince(st.Qbt.FirewalledSince, qs.Connection, time.Now())
+	// From qs's own carried value, not st.Qbt's: the carry already dropped
+	// it when the process was gone or restarted (fred review on PR 87).
+	qs.FirewalledSince = firewalledSince(qs.FirewalledSince, qs.Connection, time.Now())
 	if f, err := strconv.ParseFloat(strings.TrimSpace(ss.GlobalRatio), 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) && f >= 0 && f < 1e9 {
 		qs.GlobalRatio = f // qBittorrent sends "∞" for undefined, which parses as 0 here
 	}
@@ -921,6 +919,19 @@ func carriedFirewalledSince(prev QbtState, processUp, restarted bool) string {
 		return ""
 	}
 	return prev.FirewalledSince
+}
+
+// trackQbtProcess compares the running qbittorrent-nox process identity
+// with the one from the previous readable poll: restarted is true when
+// both are known and differ. An unreadable process list keeps the last
+// identity rather than forgetting it, so a restart that happens before the
+// next readable poll is still noticed.
+func trackQbtProcess(prevKey string, snap *probe.Snapshot) (restarted bool, key string) {
+	if !snap.ProcsKnown {
+		return false, prevKey
+	}
+	key = qbtProcKey(snap.Procs)
+	return key != "" && prevKey != "" && key != prevKey, key
 }
 
 // qbtProcKey names the qbittorrent-nox processes in a process list by pid

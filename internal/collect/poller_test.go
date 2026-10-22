@@ -105,6 +105,39 @@ func TestFirewalledSinceSurvivesAPIFailure(t *testing.T) {
 	}
 }
 
+// A restart seen across an unreadable poll is still noticed, and the
+// successful API path keeps the reset (fred review / Codex on PR 87).
+func TestTrackQbtProcessAndRestartReset(t *testing.T) {
+	up := func(tick int64) *probe.Snapshot {
+		return &probe.Snapshot{ProcsKnown: true, Procs: []probe.ProcInfo{{PID: 42, StartTick: tick, Comm: "qbittorrent-nox"}}}
+	}
+	restarted, key := trackQbtProcess("", up(100))
+	if restarted || key != "42:100" {
+		t.Fatalf("first: %v %q", restarted, key)
+	}
+	restarted, key = trackQbtProcess(key, &probe.Snapshot{}) // ps printed nothing this poll
+	if restarted || key != "42:100" {
+		t.Fatalf("unreadable list must keep the identity: %v %q", restarted, key)
+	}
+	restarted, key = trackQbtProcess(key, up(900))
+	if !restarted || key != "42:900" {
+		t.Fatalf("restart after an unreadable poll: %v %q", restarted, key)
+	}
+	restarted, key = trackQbtProcess(key, &probe.Snapshot{ProcsKnown: true})
+	if restarted || key != "" {
+		t.Fatalf("no client in a readable list forgets the identity: %v %q", restarted, key)
+	}
+	// pollQbt's success path: the carried value (reset by the restart) is
+	// what the clock continues from, so the new client gets its grace.
+	t0 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	prev := QbtState{FirewalledSince: t0.Add(-20 * time.Minute).Format(time.RFC3339)}
+	qs := QbtState{FirewalledSince: carriedFirewalledSince(prev, true, true)}
+	qs.FirewalledSince = firewalledSince(qs.FirewalledSince, "firewalled", t0)
+	if qs.FirewalledSince != "2026-10-21T12:00:00Z" {
+		t.Fatalf("restart reset overwritten: %q", qs.FirewalledSince)
+	}
+}
+
 func TestQbtProcKey(t *testing.T) {
 	procs := []probe.ProcInfo{{PID: 20, Comm: "sshd"}, {PID: 42, StartTick: 900, Comm: "qbittorrent-nox"}, {PID: 7, StartTick: 100, Comm: "qbittorrent-nox"}}
 	if k := qbtProcKey(procs); k != "42:900,7:100" {
