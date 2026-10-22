@@ -643,12 +643,26 @@ function ovBandwidthPanel(b) {
       ${cap ? `<div class="meter thick" title="upload vs. the ${cap} Mbit/s it is throttled to"><i style="width:${Math.min(100, (b.rates.up_bps / (cap * 1e6)) * 100)}%"></i></div>` : ''}
       <div class="note">${rateNote}${cap ? ` · throttled to ${cap} Mbit/s` : ''}</div></div>`;
 }
+/* A bar in the "node vs. you" style: the host's usage of the whole machine in
+   grey, your slice inside it in blue, both on the same 0-100 scale; `cls`
+   colours your part (warn/bad). Overview only: the host tab keeps its own tiles. */
+function youInHost(hostPct, youPct, title, cls = '') {
+  const host = Math.min(100, Math.max(0, Number(hostPct) || 0));
+  const you = Math.min(100, Math.max(0, Number(youPct) || 0));
+  return `<div class="lvbar" title="${esc(title)}"><i style="width:${host}%"><i class="${cls}" style="width:${host > 0 ? Math.min(100, you / host * 100) : 0}%"></i></i></div>`;
+}
 function ovCpuRamPanel(b) {
+  const h = b.host_sys || {};
+  const hostMem = h.mem_total ? (1 - h.mem_avail / h.mem_total) * 100 : 0;
+  const youMem = h.mem_total ? (b.ram.rss_bytes || b.ram.used_bytes || 0) / h.mem_total * 100 : 0;
+  const cpuBar = h.cpu_ok
+    ? youInHost(h.cpu_busy_pct, b.cpu.ok ? b.cpu.host_pct : 0, `host ${fmtPct(h.cpu_busy_pct)} busy · you ${b.cpu.ok ? fmtPctFine(b.cpu.host_pct) : '—'} of the host`)
+    : `<div class="meter thick"><i style="width:${Math.min(100, b.cpu.pct || 0)}%"></i></div>`;
   return `<div class="panel"><div class="tile-label">cpu / ram</div>
-      <div class="tile-value">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} <small>cpu${b.cpu.quota_cpus ? ` · of ${b.cpu.quota_cpus.toFixed(1)} cores` : b.cpu.host_cpus ? ` · of ${b.cpu.host_cpus} host cores` : ''}${b.cpu.ok && b.cpu.quota_cpus && b.cpu.host_cpus ? ` · ${fmtPctFine(b.cpu.host_pct)} of the host` : ''}</small></div>
-      <div class="meter thick"><i style="width:${Math.min(100, b.cpu.pct || 0)}%"></i></div>
-      <div class="note" style="display:flex;justify-content:space-between;gap:8px"><span title="process memory (rss) against the slice limit; page cache is charged to the slice too but is reclaimed, not OOM-killed">ram ${b.ram.ok ? fmtPct(b.ram.pct) : '—'} · ${b.ram.rss_bytes ? `${fmtBytes(b.ram.rss_bytes, 1)} proc + ${fmtBytes(b.ram.cache_bytes, 1)} cache` : fmtBytes(b.ram.used_bytes, 1)} / ${b.ram.limit_bytes ? fmtBytes(b.ram.limit_bytes, 1) : '?'}${b.ram.last_oom && Date.now() - Date.parse(b.ram.last_oom) < 864e5 ? ` · <span class="bad" title="kernel OOM kill noticed ${esc(b.ram.last_oom)}">OOM kill</span>` : ''}</span><span>${b.ram.pids ? `${b.ram.pids} proc` : ''}</span></div>
-      <div class="meter" style="margin-top:4px"><i class="${levelClass(b.ram.pct, 95)}" style="width:${Math.min(100, b.ram.pct || 0)}%"></i></div></div>`;
+      <div class="tile-value">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} <small>cpu${b.cpu.quota_cpus ? ` · of ${b.cpu.quota_cpus.toFixed(1)} cores` : b.cpu.host_cpus ? ` · of ${b.cpu.host_cpus} host cores` : ''}${b.cpu.ok && b.cpu.quota_cpus && b.cpu.host_cpus ? ` · ${fmtPctFine(b.cpu.host_pct)} of the host` : ''}${h.cpu_ok ? ` · <span class="lvnode">host ${fmtPct(h.cpu_busy_pct)} busy</span>` : ''}</small></div>
+      ${cpuBar}
+      <div class="note" style="display:flex;justify-content:space-between;gap:8px"><span title="process memory (rss) against the slice limit; page cache is charged to the slice too but is reclaimed, not OOM-killed">ram ${b.ram.ok ? fmtPct(b.ram.pct) : '—'} · ${b.ram.rss_bytes ? `${fmtBytes(b.ram.rss_bytes, 1)} proc + ${fmtBytes(b.ram.cache_bytes, 1)} cache` : fmtBytes(b.ram.used_bytes, 1)} / ${b.ram.limit_bytes ? fmtBytes(b.ram.limit_bytes, 1) : '?'}${b.ram.last_oom && Date.now() - Date.parse(b.ram.last_oom) < 864e5 ? ` · <span class="bad" title="kernel OOM kill noticed ${esc(b.ram.last_oom)}">OOM kill</span>` : ''}</span><span>${h.mem_total ? `<span class="lvnode">host ${fmtPct(hostMem)}</span>` : ''}${b.ram.pids ? ` · ${b.ram.pids} proc` : ''}</span></div>
+      <div style="margin-top:4px">${h.mem_total ? youInHost(hostMem, youMem, `host memory ${fmtPct(hostMem)} used · your processes ${fmtPctFine(youMem)} of it`, levelClass(b.ram.pct, 95)) : `<div class="meter"><i class="${levelClass(b.ram.pct, 95)}" style="width:${Math.min(100, b.ram.pct || 0)}%"></i></div>`}</div></div>`;
 }
 /* overview "box" panel rows */
 function ovHostStatusRows(b) {
