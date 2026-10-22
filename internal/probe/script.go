@@ -138,7 +138,11 @@ sec qbt_bin_version
 ` + qbtVersionShell + `sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + `
 sec logs
-` + logsListShell + `fi
+` + logsListShell + `# PMSS's live-stats rings (its ADR 0126): node sums for everyone, this
+# account's own samples for its owner. About 40 KB each; a forged file is cut.
+sec live_node; head -c 262144 /var/lib/pmss/public/node-live.json 2>/dev/null
+sec live_user; head -c 262144 "/var/lib/pmss/live/$user.json" 2>/dev/null
+fi
 sec probe_pid; echo $$
 # The account's own processes (hidepid=2 hides everyone else's anyway):
 # fixed numeric columns first, then comm, which may hold spaces. times is

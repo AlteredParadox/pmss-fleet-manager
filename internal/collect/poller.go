@@ -827,6 +827,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 		p.mu.Unlock()
 	}
 
+	st.Live = liveView(snap.Live, snap.LiveKnown)
 	st.Logs = LogsState{OK: snap.LogsKnown, At: p.invAt}
 	for _, f := range snap.Logs {
 		st.Logs.Files = append(st.Logs.Files, LogFileView{Path: f.Path, Size: f.Size, MTime: f.MTime})

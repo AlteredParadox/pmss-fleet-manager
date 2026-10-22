@@ -89,6 +89,7 @@ type BoxState struct {
 	Dirs    DirsState    `json:"dirs"`
 	Apps    AppsState    `json:"apps"`
 	Logs    LogsState    `json:"logs"`
+	Live    LiveState    `json:"live"`
 }
 
 // LogFileView is one log file found under the home.

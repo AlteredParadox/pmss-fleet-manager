@@ -69,6 +69,11 @@ type Snapshot struct {
 	// home (see logDirs); LogsKnown is false when the section is missing.
 	Logs      []LogFile
 	LogsKnown bool
+	// Live are PMSS's live-stats rings and LiveKnown whether the node ring
+	// was there (an inventory section; absent on hosts without that PMSS
+	// release).
+	Live      LiveRings
+	LiveKnown bool
 	// Inventory is true when the probe ran its inventory sections (host
 	// identity, the installed client, the crontab, the log catalogue; see
 	// Script): the poller asks for them every quarter hour and carries the
@@ -829,6 +834,7 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap.ListenPIDs = parseListenPIDs(s["listen_pids"])
 	_, snap.LogsKnown = s["logs"]
 	snap.Logs = parseLogs(s["logs"])
+	snap.Live, snap.LiveKnown = parseLiveRings(s["live_node"], s["live_user"], now)
 	_, snap.Inventory = s["inventory"]
 	return snap, nil
 }
@@ -847,6 +853,8 @@ func (s *Snapshot) CarryInventory(prev *Snapshot) {
 	q.BinaryPresent, q.BinaryVersion, q.BinaryStat = pq.BinaryPresent, pq.BinaryVersion, pq.BinaryStat
 	q.StartHelper, q.CronEntries = pq.StartHelper, pq.CronEntries // PMSSManaged is read every poll
 	s.Logs, s.LogsKnown = append([]LogFile(nil), prev.Logs...), prev.LogsKnown
+	s.Live = LiveRings{Node: append([]LiveNodeSample(nil), prev.Live.Node...), User: append([]LiveUserSample(nil), prev.Live.User...)}
+	s.LiveKnown = prev.LiveKnown
 }
 
 // InventoryOnly returns a copy of s holding just what CarryInventory

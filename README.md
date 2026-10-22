@@ -36,6 +36,9 @@ per-box tab.
   (your slice against its quota and as a share of the whole host), client,
   incoming connectivity and listen port, autostart status, plan and billing.
 - Traffic: daily upload/download bars for the rolling 30 days PMSS tracks.
+- Host: the shared machine's cpu (busy, iowait, steal), memory and `/home`,
+  and PMSS's own 24-hour "node vs. you" statistics (15 min / 1 h / 24 h
+  averages and a trend, computed as its panel computes them).
 - Torrents: DHT / PeX / local peer discovery state in the header, each a
   toggle (and a card tag when any is on, for deciding where private-tracker
   torrents may go);
