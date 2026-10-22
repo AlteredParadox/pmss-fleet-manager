@@ -120,6 +120,7 @@ button.disc:hover{color:var(--text)}
 .meter>i{display:block;height:100%;background:var(--accent);border-radius:2px}
 .meter.thick{height:6px}
 .meter>i.warn{background:var(--warn)}.meter>i.bad{background:var(--bad)}.meter>i.dim{background:var(--dim)}
+.meter.split{display:flex;gap:0}.meter.split>i{border-radius:0}
 .kv{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:4px}
 .kv b{font-weight:400;color:var(--text)}
 .card-foot{display:grid;grid-template-columns:1.35fr 1fr 1fr;gap:8px;font-size:11px;border-top:1px solid var(--line);padding-top:10px}

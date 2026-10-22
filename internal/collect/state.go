@@ -163,7 +163,8 @@ type RateState struct {
 // CPUState is the slice's CPU accounting.
 type CPUState struct {
 	OK        bool    `json:"ok"`
-	Pct       float64 `json:"pct"` // of the user's quota if set, else of all host CPUs
+	Pct       float64 `json:"pct"`      // of the user's quota if set, else of all host CPUs
+	HostPct   float64 `json:"host_pct"` // the same usage as a share of every host core; 0 when the core count is unknown
 	QuotaCPUs float64 `json:"quota_cpus"`
 	HostCPUs  int     `json:"host_cpus"`
 }
@@ -184,28 +185,32 @@ type RAMState struct {
 
 // HostState is shared-host information.
 type HostState struct {
-	UptimeSec   float64 `json:"uptime_sec"`
-	Load1       float64 `json:"load1"`
-	Load5       float64 `json:"load5"`
-	Load15      float64 `json:"load15"`
-	MemTotal    int64   `json:"mem_total"`
-	MemAvail    int64   `json:"mem_avail"`
-	NCPU        int     `json:"ncpu"`
-	Kernel      string  `json:"kernel,omitempty"`
-	Debian      string  `json:"debian,omitempty"`
-	PMSSVersion string  `json:"pmss_version,omitempty"`
-	HomeFSType  string  `json:"home_fs_type,omitempty"`
-	HomeSize    int64   `json:"home_size"`
-	HomeUsed    int64   `json:"home_used"`
-	HomeAvail   int64   `json:"home_avail"`
-	CPUModel    string  `json:"cpu_model,omitempty"`
-	CPUShort    string  `json:"cpu_short,omitempty"`
-	CPUFlags    string  `json:"cpu_flags,omitempty"`
-	GPUPresent  bool    `json:"gpu_present"`
-	GPUDevice   string  `json:"gpu_device,omitempty"`
-	GPUVendor   string  `json:"gpu_vendor,omitempty"`
-	GPUAccess   bool    `json:"gpu_access"`
-	HWEncode    string  `json:"hw_encode,omitempty"` // short human label for tags: "QSV", "VAAPI", "NVENC", "GPU no access", ""
+	UptimeSec    float64 `json:"uptime_sec"`
+	Load1        float64 `json:"load1"`
+	Load5        float64 `json:"load5"`
+	Load15       float64 `json:"load15"`
+	CPUOK        bool    `json:"cpu_ok"`         // two /proc/stat readings framed this poll
+	CPUBusyPct   float64 `json:"cpu_busy_pct"`   // every tenant's cpu time: all but idle and iowait
+	CPUIOWaitPct float64 `json:"cpu_iowait_pct"` // cpus waiting on the disks, outside busy
+	CPUStealPct  float64 `json:"cpu_steal_pct"`  // time the hypervisor took, inside busy
+	MemTotal     int64   `json:"mem_total"`
+	MemAvail     int64   `json:"mem_avail"`
+	NCPU         int     `json:"ncpu"`
+	Kernel       string  `json:"kernel,omitempty"`
+	Debian       string  `json:"debian,omitempty"`
+	PMSSVersion  string  `json:"pmss_version,omitempty"`
+	HomeFSType   string  `json:"home_fs_type,omitempty"`
+	HomeSize     int64   `json:"home_size"`
+	HomeUsed     int64   `json:"home_used"`
+	HomeAvail    int64   `json:"home_avail"`
+	CPUModel     string  `json:"cpu_model,omitempty"`
+	CPUShort     string  `json:"cpu_short,omitempty"`
+	CPUFlags     string  `json:"cpu_flags,omitempty"`
+	GPUPresent   bool    `json:"gpu_present"`
+	GPUDevice    string  `json:"gpu_device,omitempty"`
+	GPUVendor    string  `json:"gpu_vendor,omitempty"`
+	GPUAccess    bool    `json:"gpu_access"`
+	HWEncode     string  `json:"hw_encode,omitempty"` // short human label for tags: "QSV", "VAAPI", "NVENC", "GPU no access", ""
 }
 
 // AccountState mirrors the PMSS account config.

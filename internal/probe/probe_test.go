@@ -1137,3 +1137,22 @@ func TestBoundedSkipsWithoutFlock(t *testing.T) {
 		t.Fatalf("without flock: %q %v (want the command skipped and status 0)", out, err)
 	}
 }
+
+func TestParseStat(t *testing.T) {
+	// pm5 on 2026-10-22: idle 1%, iowait 38%; the two guest fields are ignored.
+	tk := parseStat("cpu  39752744 922511 72506445 2609519 82162714 0 19085988 0 5 7\n")
+	if !tk.Known || tk.Idle != 2609519 || tk.IOWait != 82162714 || tk.Steal != 0 {
+		t.Fatalf("ticks = %+v", tk)
+	}
+	if want := uint64(39752744 + 922511 + 72506445 + 2609519 + 82162714 + 19085988); tk.Total != want || tk.Busy != want-2609519-82162714 {
+		t.Fatalf("total %d busy %d, want %d / %d", tk.Total, tk.Busy, want, want-2609519-82162714)
+	}
+	if tk := parseStat("cpu 10 0 20 30"); !tk.Known || tk.Total != 60 || tk.Busy != 30 || tk.Steal != 0 {
+		t.Fatalf("four-field kernel: %+v", tk) // user nice system idle is the oldest shape
+	}
+	for _, raw := range []string{"", "cpu 10 0 20", "cpu0 10 0 20 30 40", "cpu 10 x 20 30", "cpu 10 0 20 -3", "cpu 99999999999999999999 0 0 0", "intr 5 6 7 8"} {
+		if tk := parseStat(raw); tk.Known {
+			t.Errorf("%q parsed as %+v", raw, tk)
+		}
+	}
+}
