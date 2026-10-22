@@ -1071,7 +1071,11 @@ function rescanLogsIfStale() {
   const last = logsRescanAt.get(b.id) || 0;
   if (Date.now() - at < LOGS_STALE_MS || Date.now() - last < LOGS_STALE_MS) return;
   logsRescanAt.set(b.id, Date.now());
-  api('POST', `${BASE}/api/boxes/${b.id}/refresh`).catch(() => {});
+  // The id reaches this from the URL hash on a direct route (via Number(),
+  // so it is numeric or null and the lookup above has already matched it
+  // to a box the server listed); encoded anyway so the taint rules see a
+  // sanitised path segment.
+  api('POST', `${BASE}/api/boxes/${encodeURIComponent(b.id)}/refresh`).catch(() => {});
 }
 function logViewer(V) {
   if (!V) return `<div class="empty" style="border:0">pick a log on the left: the last ${300} lines are fetched from the box each time, nothing is streamed or stored.</div>`;
