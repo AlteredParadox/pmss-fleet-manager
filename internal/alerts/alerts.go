@@ -70,9 +70,16 @@ func recheckable(s *collect.BoxState, k string) bool {
 		return s.Qbt.Reachable || !s.Qbt.Enabled
 	case strings.HasPrefix(k, "app:"):
 		// Unwatching is a deliberate "nothing to check" too.
-		return s.Apps.OK || !slices.Contains(s.Apps.Watched, strings.TrimPrefix(k, "app:"))
+		return s.Apps.OK || unwatchedApp(s, k)
 	}
 	return true
+}
+
+// unwatchedApp reports whether k is an app alert whose app is no longer
+// on the watch list.
+func unwatchedApp(s *collect.BoxState, k string) bool {
+	key, ok := strings.CutPrefix(k, "app:")
+	return ok && !slices.Contains(s.Apps.Watched, key)
 }
 
 // Evaluate is a collect.Hook.
@@ -352,8 +359,11 @@ func (e *Evaluator) resolveStale(ctx context.Context, s *collect.BoxState, keys 
 		if wanted[k] {
 			continue
 		}
-		// Only auto-resolve conditions we could actually re-check this poll.
-		if !probeOK && k != "unreachable" && k != "renewal" {
+		// Only auto-resolve conditions we could actually re-check this poll,
+		// plus the ones that need no probe: the box's reachability, its
+		// renewal date, and an app alert the user unwatched (the watch
+		// list is edited here, not read from the box).
+		if !probeOK && k != "unreachable" && k != "renewal" && !unwatchedApp(s, k) {
 			continue
 		}
 		if !recheckable(s, k) {

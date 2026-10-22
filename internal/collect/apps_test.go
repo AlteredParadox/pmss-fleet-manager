@@ -283,6 +283,17 @@ func TestMarkWatchedCopies(t *testing.T) {
 	if len(cp.Apps) != 2 || cp.Apps[0].Key != "radarr" || !cp.Apps[0].Watched || cp.Apps[1].Key != "jellyfin" {
 		t.Fatalf("copy: %+v", cp.Apps)
 	}
+	// Placeholder rows for down apps sort by category like any other row,
+	// not in watch-list order.
+	a := AppsState{OK: true, Apps: []AppView{{Key: "lighttpd", Category: "web", Running: true}}, Watched: []string{"rclone", "sonarr", "deluge"}}
+	a.markWatched()
+	got := []string{}
+	for _, v := range a.Apps {
+		got = append(got, v.Key)
+	}
+	if want := []string{"lighttpd", "deluge", "sonarr", "rclone"}; !slices.Equal(got, want) {
+		t.Fatalf("order: %v, want %v", got, want)
+	}
 }
 
 func TestValidAppKeyNonASCII(t *testing.T) {
