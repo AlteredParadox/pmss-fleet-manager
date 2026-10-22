@@ -261,18 +261,35 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", csp)
 	if strings.HasPrefix(r.URL.Path, s.basePath+"/api/") && r.Method != http.MethodGet {
-		// Same-origin check against CSRF from other sites in the browser.
-		if origin := r.Header.Get("Origin"); origin != "" {
-			if !sameOrigin(origin, r.Host) {
-				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
-				return
-			}
-		} else if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
-			http.Error(w, "cross-site request rejected", http.StatusForbidden)
+		if err := csrfCheck(r); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
 	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// MutationHeader must be present on every mutating API request. An HTML
+// form cannot set a custom header and a cross-origin script would need a
+// CORS preflight the server never grants, so this stops CSRF on its own,
+// including from a plain-http page on the dashboard's own hostname, which
+// the scheme-agnostic Origin check below cannot tell apart from the page.
+const MutationHeader = "X-PMSS-Request"
+
+// csrfCheck applies the three independent CSRF guards to a mutating
+// request: the custom header, Sec-Fetch-Site (checked whenever a browser
+// sends it, not only when Origin is absent) and the Origin host.
+func csrfCheck(r *http.Request) error {
+	if r.Header.Get(MutationHeader) == "" {
+		return errors.New("missing " + MutationHeader + " header: mutating requests are accepted from the dashboard page only")
+	}
+	if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
+		return errors.New("cross-site request rejected")
+	}
+	if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r.Host) {
+		return errors.New("cross-origin request rejected")
+	}
+	return nil
 }
 
 // sameOrigin accepts an Origin of this host over http or https. The

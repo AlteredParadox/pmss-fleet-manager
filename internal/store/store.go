@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -153,9 +154,12 @@ func Open(path string) (*Store, error) {
 	}
 	f.Close()
 	// Existing files from an older build or an unclean stop: fix their modes
-	// before SQLite reuses them (and again after, for ones created now).
-	for _, side := range []string{"", "-wal", "-shm"} {
-		_ = os.Chmod(path+side, 0o600)
+	// before SQLite reuses them (and again after, for ones created now). A
+	// chmod that fails leaves plaintext secrets readable by other local
+	// users, so it is fatal rather than logged: a bind-mounted database
+	// owned by another uid is exactly the case that must not start.
+	if err := restrictModes(path, "", "-wal", "-shm"); err != nil {
+		return nil, err
 	}
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
@@ -168,10 +172,25 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	for _, side := range []string{"-wal", "-shm"} {
-		_ = os.Chmod(path+side, 0o600)
+	if err := restrictModes(path, "-wal", "-shm"); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return s, nil
+}
+
+// restrictModes makes the database file and its existing sidecars
+// owner-only; a missing sidecar is fine, anything else is an error that
+// names the file.
+func restrictModes(path string, sides ...string) error {
+	for _, side := range sides {
+		err := os.Chmod(path+side, 0o600)
+		if err == nil || errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		return fmt.Errorf("cannot make %s owner-only (%w): the database holds box passwords and the API key, fix its ownership or permissions", path+side, err)
+	}
+	return nil
 }
 
 // Close closes the database.
@@ -405,9 +424,15 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 // SetHostKey pins a key seen while dialling host:port onto the box, only if
 // the record still names that endpoint and has no pin: an edit that moved
 // the box meanwhile must not end up pinned to the old host's key.
-func (s *Store) SetHostKey(ctx context.Context, id int64, host string, port int, key string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE boxes SET host_key=? WHERE id=? AND lower(host)=lower(?) AND port=? AND host_key=''`, key, id, host, port)
-	return err
+// It reports whether a row was pinned: none when the box was edited to
+// another endpoint meanwhile or already holds a pin.
+func (s *Store) SetHostKey(ctx context.Context, id int64, host string, port int, key string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET host_key=? WHERE id=? AND lower(host)=lower(?) AND port=? AND host_key=''`, key, id, host, port)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // DeleteBox removes a box and its alerts and cache.
@@ -511,15 +536,29 @@ func (s *Store) SetValue(ctx context.Context, key, value string) error {
 // It returns true when a new alert row was created.
 func (s *Store) RaiseAlert(ctx context.Context, boxID int64, key, severity, title string) (bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	// The CASE reads the stored severity: SET expressions see the old row.
+	// Update an active row only when something material changes (title,
+	// severity, or an escalation un-acknowledging it), so an unchanged
+	// alert costs no write per poll and a change is reported to the
+	// caller, which announces it. The CASE reads the stored severity: SET
+	// expressions see the old row.
+	rank := severityRank(severity)
 	res, err := s.db.ExecContext(ctx, `UPDATE alerts SET title=?, severity=?,
 		acked=CASE WHEN ? > (CASE severity WHEN 'bad' THEN 2 WHEN 'warn' THEN 1 ELSE 0 END) THEN 0 ELSE acked END,
-		updated_at=? WHERE box_id=? AND key=? AND active=1`, title, severity, severityRank(severity), now, boxID, key)
+		updated_at=? WHERE box_id=? AND key=? AND active=1
+		AND (title<>? OR severity<>? OR (acked=1 AND ? > (CASE severity WHEN 'bad' THEN 2 WHEN 'warn' THEN 1 ELSE 0 END)))`,
+		title, severity, rank, now, boxID, key, title, severity, rank)
 	if err != nil {
 		return false, err
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
-		return false, nil
+		return true, nil // changed
+	}
+	var active int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM alerts WHERE box_id=? AND key=? AND active=1`, boxID, key).Scan(&active); err != nil {
+		return false, err
+	}
+	if active > 0 {
+		return false, nil // unchanged
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO alerts (box_id, key, severity, title, active, acked, created_at, updated_at) VALUES (?,?,?,?,1,0,?,?)`,
 		boxID, key, severity, title, now, now)
@@ -528,6 +567,10 @@ func (s *Store) RaiseAlert(ctx context.Context, boxID int64, key, severity, titl
 	}
 	return err == nil, err
 }
+
+// RaiseAlert's result is "changed": a new row, or an active row whose
+// title or severity changed (or that an escalation un-acknowledged). An
+// unchanged active alert is a no-op and reports false.
 
 // severityRank orders alert severities; it must match the CASE in RaiseAlert.
 func severityRank(severity string) int {

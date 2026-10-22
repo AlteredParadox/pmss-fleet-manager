@@ -61,7 +61,14 @@ func do(t *testing.T, h http.Handler, method, path, body string, hdr map[string]
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Host = "dash.local:8080"
+	if method != "GET" {
+		req.Header.Set(MutationHeader, "1") // what the page sends; a test passes "" in hdr to drop it
+	}
 	for k, v := range hdr {
+		if v == "" {
+			req.Header.Del(k)
+			continue
+		}
 		req.Header.Set(k, v)
 	}
 	rr := httptest.NewRecorder()
@@ -105,6 +112,16 @@ func TestAlertAckFlow(t *testing.T) {
 	code, _ = do(t, srv, "POST", "/api/alerts/1/ack", "", map[string]string{"Origin": "https://dash.local:8080"})
 	if code == 403 {
 		t.Fatal("https origin on this host must pass")
+	}
+	// The custom header is required on its own: a form post from a page on
+	// the dashboard's hostname over plain http carries a matching Origin
+	// host but can set no header.
+	if code, _ = do(t, srv, "POST", "/api/alerts/1/ack", "", map[string]string{"Origin": "http://dash.local:8080", MutationHeader: ""}); code != 403 {
+		t.Fatalf("without the mutation header: %d, want 403", code)
+	}
+	// Sec-Fetch-Site is honoured even when Origin is present and matches.
+	if code, _ = do(t, srv, "POST", "/api/alerts/1/ack", "", map[string]string{"Origin": "http://dash.local:8080", "Sec-Fetch-Site": "cross-site"}); code != 403 {
+		t.Fatalf("cross-site with matching Origin: %d, want 403", code)
 	}
 	code, _ = do(t, srv, "POST", "/api/alerts/1/ack", "", map[string]string{"Origin": "http://evil.example"})
 	if code != 403 {

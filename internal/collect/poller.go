@@ -354,13 +354,39 @@ func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
 		return nil, errStopped
 	}
 	if p.box.HostKey == "" && cli.HostKey() != "" {
-		p.box.HostKey = cli.HostKey()
-		if err := p.m.st.SetHostKey(ctx, p.box.ID, p.box.Host, p.box.Port, cli.HostKey()); err != nil {
-			p.m.log.Warn("pin host key", "box", p.box.Name, "err", err)
+		// First contact: the pin must be on disk before any work runs over
+		// this connection, or a restart would trust whatever answers next
+		// time. Not on the caller's context: an action's request going away
+		// must not be what loses the pin.
+		if err := p.persistPin(ctx, cli.HostKey()); err != nil {
+			cli.Close()
+			return nil, err
 		}
+		p.box.HostKey = cli.HostKey()
 	}
 	p.ssh = cli
 	return cli, nil
+}
+
+// persistPin writes a first-contact host key for this box's endpoint and
+// confirms it is what the record now holds (the wizard may have pinned the
+// same key a moment earlier; a different one, or an endpoint edited
+// meanwhile, refuses).
+func (p *poller) persistPin(ctx context.Context, key string) error {
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	pinned, err := p.m.st.SetHostKey(sctx, p.box.ID, p.box.Host, p.box.Port, key)
+	if err != nil {
+		return fmt.Errorf("could not persist the host key pin for %s (%w); not working on an unpinned connection", p.box.Host, err)
+	}
+	if pinned {
+		return nil
+	}
+	b, err := p.m.st.GetBox(sctx, p.box.ID)
+	if err != nil || b.HostKey != key {
+		return fmt.Errorf("the host key pin for %s was not stored (the box was edited or pinned to another key meanwhile); retry the action", p.box.Host)
+	}
+	return nil
 }
 
 func sshConfig(b *store.Box) sshx.Config {

@@ -17,10 +17,12 @@
 package pmapi
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +50,31 @@ func TestParse(t *testing.T) {
 	}
 	if f.Services[1].Monthly() != 0 || f.Services[1].Username() != "" {
 		t.Fatalf("free service should normalise to 0")
+	}
+	// Not a feed: an error envelope, a bare object, a wrong-typed member.
+	for _, body := range []string{`{}`, `{"error":"rate limited"}`, `{"services":"nope"}`, `[]`, `{"client_id":1}`} {
+		if _, err := Parse([]byte(body)); err == nil {
+			t.Errorf("%s must not parse as an account", body)
+		}
+	}
+	// The real "no services": an explicit empty list or null.
+	for _, body := range []string{`{"client_id":1,"currency":"EUR","services":[]}`, `{"client_id":1,"services":null}`} {
+		if f, err := Parse([]byte(body)); err != nil || len(f.Services) != 0 {
+			t.Errorf("%s: %v %+v", body, err, f)
+		}
+	}
+}
+
+func TestFetchRefusesOversizeBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"services":[`))
+		w.Write(bytes.Repeat([]byte(`{"id":1},`), (maxFeedBytes/9)+1))
+		w.Write([]byte(`{"id":1}]}`))
+	}))
+	defer srv.Close()
+	c := &Client{URL: srv.URL}
+	if _, _, err := c.Fetch(context.Background(), "k"); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("oversize feed: %v", err)
 	}
 }
 

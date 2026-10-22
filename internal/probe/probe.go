@@ -686,7 +686,12 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap.User = strings.TrimSpace(s["user"])
 	snap.Hostname = hostnameField(strings.TrimSpace(s["hostname"]))
 	if ts, err := strconv.ParseInt(strings.TrimSpace(s["now"]), 10, 64); err == nil && ts > 0 {
-		snap.At = time.Unix(ts, 0)
+		// The box's clock, within a year of ours: a forged or broken epoch
+		// would otherwise become a time encoding/json refuses, taking the
+		// fleet endpoint down with it.
+		if t := time.Unix(ts, 0); t.Sub(now).Abs() < 366*24*time.Hour {
+			snap.At = t
+		}
 	}
 	snap.Location = parseTZ(strings.TrimSpace(s["tz"]))
 	snap.Host = parseHost(s)

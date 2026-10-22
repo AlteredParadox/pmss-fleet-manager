@@ -188,9 +188,12 @@ func (c *Client) Fetch(ctx context.Context, key string) (*Feed, []byte, error) {
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(body) > maxFeedBytes {
+		return nil, nil, fmt.Errorf("feed larger than %d MiB; refusing to parse it", maxFeedBytes>>20)
 	}
 	switch {
 	case resp.StatusCode == 401 || resp.StatusCode == 403:
@@ -202,8 +205,25 @@ func (c *Client) Fetch(ctx context.Context, key string) (*Feed, []byte, error) {
 	return f, body, err
 }
 
-// Parse decodes a feed body.
+// maxFeedBytes bounds one feed response.
+const maxFeedBytes = 4 << 20
+
+// Parse decodes a feed body. A syntactically valid JSON object that is not
+// a feed (an error envelope, `{}` from a proxy) must not become an empty
+// account that replaces the last good feed and resolves its renewal
+// alerts: the services member has to be present (an explicit empty list or
+// null is the real "no services"), and an error member is an error.
 func Parse(body []byte) (*Feed, error) {
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("parse feed: %w (%s)", err, firstLine(body))
+	}
+	if e, ok := env["error"]; ok && string(e) != "null" {
+		return nil, fmt.Errorf("feed reports an error: %s", firstLine(e))
+	}
+	if _, ok := env["services"]; !ok {
+		return nil, fmt.Errorf("feed has no services member (%s)", firstLine(body))
+	}
 	var f Feed
 	if err := json.Unmarshal(body, &f); err != nil {
 		return nil, fmt.Errorf("parse feed: %w (%s)", err, firstLine(body))
