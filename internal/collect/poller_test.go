@@ -222,6 +222,12 @@ func TestTrackQbtProcessAndRestartReset(t *testing.T) {
 	if !restarted || key != "42:900" {
 		t.Fatalf("restart after an unreadable poll: %v %q", restarted, key)
 	}
+	// The pid section still saw the client but the listing did not (it
+	// exited in between): inconsistent, so the baseline is kept.
+	restarted, key = trackQbtProcess(key, &probe.Snapshot{ProcsKnown: true, Qbt: probe.QbtInfo{Running: true}})
+	if restarted || key != "42:900" {
+		t.Fatalf("inconsistent snapshot must keep the identity: %v %q", restarted, key)
+	}
 	restarted, key = trackQbtProcess(key, &probe.Snapshot{ProcsKnown: true})
 	if restarted || key != "" {
 		t.Fatalf("no client in a readable list forgets the identity: %v %q", restarted, key)

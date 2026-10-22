@@ -977,6 +977,12 @@ func trackQbtProcess(prevKey string, snap *probe.Snapshot) (restarted bool, key 
 	if !known {
 		return false, prevKey // a client without a start tick this poll is not evidence of a replacement
 	}
+	if key == "" && snap.Qbt.Running {
+		// The pid section (taken earlier in the probe) saw a client that the
+		// process listing no longer shows: an inconsistent snapshot, not an
+		// absence. Keep the baseline so the replacement is still noticed.
+		return false, prevKey
+	}
 	return key != "" && prevKey != "" && key != prevKey, key
 }
 
