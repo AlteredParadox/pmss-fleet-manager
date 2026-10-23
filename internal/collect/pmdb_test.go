@@ -640,4 +640,3 @@ func TestSyncPMDBCallerCancelIsNotAFailure(t *testing.T) {
 		t.Fatalf("second run: %+v", v)
 	}
 }
-
