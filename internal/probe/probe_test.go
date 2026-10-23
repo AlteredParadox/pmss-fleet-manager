@@ -1218,6 +1218,22 @@ func TestParseLiveRings(t *testing.T) {
 	}
 }
 
+// Through the section parser: the model name's GHz is the clock when the
+// box exposes no base frequency, and the base frequency wins when it does.
+func TestParseHostClock(t *testing.T) {
+	h := parseHost(Sections([]byte("@@cpu_model\n Intel(R) Xeon(R) CPU E5-2630 0 @ 2.30GHz\n@@cpu_mhz\n\n@@end\n")))
+	if h.CPUMHz != 2300 || h.CPUModel != "Intel(R) Xeon(R) CPU E5-2630 0 @ 2.30GHz" {
+		t.Fatalf("model fallback: %+v", h)
+	}
+	h = parseHost(Sections([]byte("@@cpu_model\n Intel(R) Xeon(R) CPU E5-2630 0 @ 2.30GHz\n@@cpu_mhz\n2100\n@@end\n")))
+	if h.CPUMHz != 2100 {
+		t.Fatalf("base frequency should win: %+v", h)
+	}
+	if h = parseHost(Sections([]byte("@@cpu_model\n Intel(R) N100\n@@end\n"))); h.CPUMHz != 0 {
+		t.Fatalf("unknown clock: %+v", h)
+	}
+}
+
 func TestNominalMHz(t *testing.T) {
 	for _, c := range []struct {
 		base, model string

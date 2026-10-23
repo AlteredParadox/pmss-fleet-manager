@@ -971,8 +971,8 @@ func nominalMHz(base, model string) int {
 // parseCPUInfo fills the core count, model name (raw and short) and flags.
 func parseCPUInfo(h *HostInfo, s map[string]string) {
 	h.NCPU, _ = strconv.Atoi(strings.TrimSpace(s["ncpu"]))
-	h.CPUMHz = nominalMHz(s["cpu_mhz"], h.CPUModel)
 	h.CPUModel = strings.Join(strings.Fields(s["cpu_model"]), " ")
+	h.CPUMHz = nominalMHz(s["cpu_mhz"], h.CPUModel) // after the model: it is the fallback
 	h.CPUShort = ShortCPU(h.CPUModel)
 	h.CPUFlags = strings.Fields(s["cpu_flags"])
 }
