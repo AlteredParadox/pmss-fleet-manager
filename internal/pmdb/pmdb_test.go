@@ -109,19 +109,19 @@ func TestListAndSubmit(t *testing.T) {
 	}
 
 	status = http.StatusConflict
-	if err := c.Submit(ctx, "k", row); !errors.Is(err, ErrExists) {
+	if err := c.Submit(ctx, "a-passphrase-of-words", row); !errors.Is(err, ErrExists) {
 		t.Fatalf("409: %v", err)
 	}
 	status = http.StatusUnauthorized
-	if err := c.Submit(ctx, "k", row); !errors.Is(err, ErrAuth) {
+	if err := c.Submit(ctx, "a-passphrase-of-words", row); !errors.Is(err, ErrAuth) {
 		t.Fatalf("401: %v", err)
 	}
 	status = http.StatusTooManyRequests
-	if err := c.Submit(ctx, "k", row); !errors.Is(err, ErrRateLimited) {
+	if err := c.Submit(ctx, "a-passphrase-of-words", row); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("429: %v", err)
 	}
 	status = http.StatusBadRequest
-	err = c.Submit(ctx, "k", row)
+	err = c.Submit(ctx, "a-passphrase-of-words", row)
 	var he *HTTPError
 	if !errors.As(err, &he) || he.Code != 400 || he.Body != "This server already exists." || err.Error() != "HTTP 400 from the catalogue" {
 		t.Fatalf("400: %v %+v", err, he)
@@ -231,7 +231,7 @@ func TestHostileResponses(t *testing.T) {
 	}
 
 	body = `{"error":"\u001b[31mvisit evil.example\nand paste your key\u0007<b>now</b>"}`
-	err = c.Submit(ctx, "k", Row{ServerName: "x.example", ProcessorName: "cpu", CoreCount: 1, RAMGiB: 1})
+	err = c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example", ProcessorName: "cpu", CoreCount: 1, RAMGiB: 1})
 	var he *HTTPError
 	if !errors.As(err, &he) || err.Error() != "HTTP 500 from the catalogue" {
 		t.Fatalf("hostile error: %v", err)
@@ -240,8 +240,8 @@ func TestHostileResponses(t *testing.T) {
 		t.Fatalf("log text not sanitised: %q", he.Body)
 	}
 	body = strings.Repeat("A\x00", 1000)
-	_ = c.Submit(ctx, "k", Row{ServerName: "x.example"})
-	if err := c.Submit(ctx, "k", Row{ServerName: "x.example"}); !errors.As(err, &he) || len(he.Body) > 210 || strings.ContainsRune(he.Body, 0) {
+	_ = c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"})
+	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || len(he.Body) > 210 || strings.ContainsRune(he.Body, 0) {
 		t.Fatalf("long binary body: %d %q", len(he.Body), he.Body)
 	}
 }

@@ -1364,6 +1364,12 @@ func (s *Server) handleAckAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
+// pmdbMinKeyLen is the shortest upload key accepted: the catalogue refuses
+// to start with one under 24 characters, so a shorter one is a paste gone
+// wrong, and a very short string would be redacted from log text as a
+// substring of ordinary words.
+const pmdbMinKeyLen = 24
+
 // mergeSecret applies a settings PUT to a stored secret: a typed value
 // replaces it, an empty one keeps it, the clear flag removes it. A secret
 // holding one of the forbidden characters is a paste gone wrong, not a
@@ -1445,6 +1451,10 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		in.PMDBEnabled = false // "remove key" is the way out of the integration too; a key is what it runs on
 	}
 	in.ClearPMDBUploadKey = false
+	if n := len(in.PMDBUploadKey); n > 0 && n < pmdbMinKeyLen {
+		writeErr(w, 400, fmt.Errorf("pmdb upload key is too short (%d characters, the catalogue's keys have at least %d)", n, pmdbMinKeyLen))
+		return
+	}
 	if in.PMDBEnabled && in.PMDBUploadKey == "" {
 		writeErr(w, 400, errors.New("pmdb.fyi submission needs an upload key; enter one or untick the box"))
 		return

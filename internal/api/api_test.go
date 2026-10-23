@@ -846,17 +846,20 @@ func TestSettingsPMDB(t *testing.T) {
 	if code != 400 || !strings.Contains(body, "upload key") {
 		t.Fatalf("enable without a key: %d %s", code, body)
 	}
-	code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_enabled":true,"pmdb_upload_key":" some words here "}`, nil)
-	if code != 200 || strings.Contains(body, "some words") || !strings.Contains(body, `"has_pmdb_upload_key":true`) || !strings.Contains(body, `"pmdb_enabled":true`) {
+	code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_enabled":true,"pmdb_upload_key":" some words that make a passphrase "}`, nil)
+	if code != 200 || strings.Contains(body, "passphrase") || !strings.Contains(body, `"has_pmdb_upload_key":true`) || !strings.Contains(body, `"pmdb_enabled":true`) {
 		t.Fatalf("enable: %d %s", code, body)
 	}
-	if code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_upload_key":"bad\nkey"}`, nil); code != 400 {
+	if code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_upload_key":"bad\nkey but long enough to pass"}`, nil); code != 400 {
 		t.Fatalf("key with a line break: %d %s", code, body)
 	}
-	if got := srv.m.Settings(); got.PMDBUploadKey != "some words here" || !got.PMDBEnabled {
+	if code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_upload_key":"short"}`, nil); code != 400 || !strings.Contains(body, "too short") {
+		t.Fatalf("short key: %d %s", code, body)
+	}
+	if got := srv.m.Settings(); got.PMDBUploadKey != "some words that make a passphrase" || !got.PMDBEnabled {
 		t.Fatalf("stored: %+v", got)
 	}
-	if code, _ = do(t, srv, "PUT", "/api/settings", `{"theme":"light"}`, nil); code != 200 || srv.m.Settings().PMDBUploadKey != "some words here" {
+	if code, _ = do(t, srv, "PUT", "/api/settings", `{"theme":"light"}`, nil); code != 200 || srv.m.Settings().PMDBUploadKey != "some words that make a passphrase" {
 		t.Fatalf("key not kept: %d", code)
 	}
 	// An empty key on a later save keeps the stored one; the flag removes

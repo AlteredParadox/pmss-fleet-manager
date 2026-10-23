@@ -86,13 +86,16 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d from the catalogue", e.Code) }
 
+// redacted stands in for the upload key wherever a response echoed it.
+const redacted = "[upload key]"
+
 // httpErr builds an HTTPError. The catalogue saw the key on a submission
 // and can echo it in the body: every occurrence (plain or URL-encoded) is
 // redacted before the text can reach a log.
 func httpErr(code int, body []byte, key string) error {
 	text := safeText(body)
-	if len(key) >= 8 { // one pass, so the replacement text is never rescanned; a shorter key is not a pmdb key
-		text = strings.NewReplacer(key, "[upload key]", url.QueryEscape(key), "[upload key]", url.PathEscape(key), "[upload key]").Replace(text)
+	if key != "" { // one pass, so the replacement text is never rescanned
+		text = strings.NewReplacer(key, redacted, url.QueryEscape(key), redacted, url.PathEscape(key), redacted).Replace(text)
 	}
 	return &HTTPError{Code: code, Body: text}
 }
