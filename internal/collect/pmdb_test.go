@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"pmss-fleet-manager/internal/store"
 )
@@ -350,6 +351,11 @@ func TestSyncPMDBNeverReflectsKey(t *testing.T) {
 	mode := "redirect"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/servers" {
+			if mode == "listbody" { // the catalogue knows the shared key and can echo it on any response
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"`+key+`"}`)
+				return
+			}
 			_, _ = io.WriteString(w, `[]`)
 			return
 		}
@@ -384,7 +390,7 @@ func TestSyncPMDBNeverReflectsKey(t *testing.T) {
 	s := m.Settings()
 	s.PMDBEnabled, s.PMDBUploadKey = true, key
 	m.SetSettings(s)
-	for _, mode = range []string{"redirect", "body"} {
+	for _, mode = range []string{"redirect", "body", "listbody"} {
 		m.resetPMDB()
 		m.SyncPMDB(ctx)
 		view, _ := json.Marshal(m.PMDB())
@@ -394,8 +400,161 @@ func TestSyncPMDBNeverReflectsKey(t *testing.T) {
 		if strings.Contains(logs.String(), key) {
 			t.Fatalf("%s: key in the log: %s", mode, logs.String())
 		}
+		if mode == "listbody" {
+			if v := m.PMDB(); v.Error == "" || len(v.Hosts) != 0 {
+				t.Fatalf("listbody: standing: %+v", v)
+			}
+			continue
+		}
 		if h := m.PMDB().Hosts; len(h) != 1 || h[0].Status != "error" || h[0].Detail == "" {
 			t.Fatalf("%s: standing: %+v", mode, h)
 		}
+	}
+}
+
+// After a rate limit, every run is held for a while, not just the one host
+// that was refused: the limit is per address. A run under a tiny total
+// budget against a slow catalogue ends without posting and holds too.
+func TestSyncPMDBHolds(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var posts, lists int
+	slow := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path == "/api/servers" {
+			lists++
+			if slow {
+				mu.Unlock()
+				time.Sleep(300 * time.Millisecond)
+				mu.Lock()
+			}
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		posts++
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmdb.URL = srv.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	hw := HostState{CPUModel: "Intel(R) N100", NCPU: 4, MemTotal: 32 << 30, HomeSize: 60 << 40}
+	for i, host := range []string{"odin.pulsedmedia.com", "thor.pulsedmedia.com"} {
+		b := &store.Box{Name: string(rune('a' + i)), Host: "h" + string(rune('a'+i)) + ".example", User: "u", Port: 22, Enabled: false}
+		if err := m.AddBox(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		m.mutateState(b.ID, func(s *BoxState) { s.Ready, s.Hostname, s.HostSys = true, host, hw })
+	}
+	s := m.Settings()
+	s.PMDBEnabled, s.PMDBUploadKey = true, "a-passphrase-of-words"
+	m.SetSettings(s)
+	m.SyncPMDB(ctx)
+	m.SyncPMDB(ctx) // held: no second list fetch, no second post
+	mu.Lock()
+	p, l := posts, lists
+	mu.Unlock()
+	if p != 1 || l != 1 {
+		t.Fatalf("after a 429: posts=%d lists=%d; want 1 and 1", p, l)
+	}
+	if v := m.PMDB(); !strings.Contains(v.Error, "rate-limiting") {
+		t.Fatalf("hold not shown: %+v", v)
+	}
+	// A new key lifts the hold; a slow catalogue under a tiny budget posts
+	// nothing and is held as a service failure.
+	s.PMDBUploadKey = "another-passphrase-of-words"
+	m.SetSettings(s)
+	prev := pmdbRunBudget
+	pmdbRunBudget = 50 * time.Millisecond
+	defer func() { pmdbRunBudget = prev }()
+	mu.Lock()
+	slow = true
+	mu.Unlock()
+	m.SyncPMDB(ctx)
+	mu.Lock()
+	p, l = posts, lists
+	mu.Unlock()
+	if p != 1 || l != 2 {
+		t.Fatalf("slow run: posts=%d lists=%d; want 1 and 2", p, l)
+	}
+	if v := m.PMDB(); !strings.Contains(v.Error, "catalogue list") {
+		t.Fatalf("budget failure not shown: %+v", v)
+	}
+	m.SyncPMDB(ctx) // held after the service failure: no third fetch
+	mu.Lock()
+	l = lists
+	mu.Unlock()
+	if l != 2 {
+		t.Fatalf("not held after a service failure: lists=%d", l)
+	}
+}
+
+// A box removed while the list was fetching is not submitted from stale
+// facts.
+func TestSyncPMDBRevalidatesAfterFetch(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var posts int
+	listArrived, release := make(chan struct{}, 1), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/servers" {
+			select {
+			case listArrived <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		mu.Lock()
+		posts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmdb.URL = srv.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	b := &store.Box{Name: "a", Host: "ha.example", User: "u", Port: 22, Enabled: false}
+	if err := m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	m.mutateState(b.ID, func(s *BoxState) {
+		s.Ready, s.Hostname, s.HostSys = true, "odin.pulsedmedia.com", HostState{CPUModel: "Intel(R) N100", NCPU: 4, MemTotal: 32 << 30, HomeSize: 60 << 40}
+	})
+	s := m.Settings()
+	s.PMDBEnabled, s.PMDBUploadKey = true, "a-passphrase-of-words"
+	m.SetSettings(s)
+	done := make(chan struct{})
+	go func() { m.SyncPMDB(ctx); close(done) }()
+	<-listArrived
+	if err := m.RemoveBox(ctx, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	<-done
+	mu.Lock()
+	n := posts
+	mu.Unlock()
+	if n != 0 || len(m.PMDB().Hosts) != 0 {
+		t.Fatalf("removed box submitted: posts=%d hosts=%+v", n, m.PMDB().Hosts)
 	}
 }

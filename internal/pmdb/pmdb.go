@@ -20,14 +20,15 @@
 // host hostname on POST /api/servers/raw with a shared upload key.
 //
 // Everything the catalogue sends back is untrusted: it is a third-party
-// service that could be compromised or replaced. A response is bounded in
-// size, read only for the one fact needed (which hostnames exist, as
-// DNS-shaped names), an error body never reaches the page (the UI sees
-// the status code; the body of the keyless list fetch goes to the log
-// stripped to printable ASCII and clipped, the body of a submission
-// nowhere), transport errors are fixed messages, and redirects are
-// refused. The only thing the catalogue's
-// answer decides is whether a host is submitted, once.
+// service that could be compromised or replaced, and it knows the shared
+// upload key. So: a response is bounded in bytes, rows and header size;
+// the list is read for the one fact needed (which DNS-shaped hostnames
+// exist), streamed row by row with a hard row cap; no text from any
+// response is ever kept, logged or shown (an error is a fixed message or a
+// status code); transport failures are fixed messages too, because Go's
+// own text carries the URL and any Location the server sent; redirects are
+// refused. The only thing the catalogue's answer decides is whether a host
+// is submitted, once.
 package pmdb
 
 import (
@@ -39,6 +40,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -73,38 +75,49 @@ var (
 	ErrAuth = errors.New("upload key refused")
 	// ErrRateLimited is a 429: too many uploads from this address.
 	ErrRateLimited = errors.New("upload rate limit reached")
+	// ErrRedirect: the catalogue answered with a redirect, which is never
+	// followed (the key travels in an Authorization header, and the
+	// catalogue has one fixed URL).
+	ErrRedirect = errors.New("the catalogue redirected; refusing to follow")
+	// ErrTimeout: no complete answer within the deadline.
+	ErrTimeout = errors.New("the catalogue did not answer in time")
+	// ErrUnreachable: the request failed below HTTP (DNS, TCP, TLS, a
+	// broken response, oversized headers).
+	ErrUnreachable = errors.New("the catalogue could not be reached")
+	// ErrTooLarge: the response exceeded its byte or row cap.
+	ErrTooLarge = errors.New("the catalogue's response is larger than allowed; refusing to read it")
+	// ErrNotAList: the list body is not a JSON array.
+	ErrNotAList = errors.New("the catalogue list is not a JSON array")
+
+	errRedirect = errors.New("redirect")
 )
 
-// HTTPError is an unexpected status. Error() names only the code, which is
-// what the page shows. Body is the catalogue's message made safe for a log
-// line (printable ASCII, clipped), and it is kept only for the keyless
-// list fetch: a response to a submission answered a request that carried
-// the upload key, which the service could echo back in any encoding it
-// likes, so nothing from such a response is kept at all. Body is never
-// shown to a person in the dashboard.
-type HTTPError struct {
-	Code int
-	Body string
-}
+// HTTPError is an unexpected status. It carries the code and nothing else:
+// the body of any response from the catalogue is untrusted text that could
+// hold the upload key the catalogue knows, in any encoding, so none of it
+// is kept (see the package comment).
+type HTTPError struct{ Code int }
 
 func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d from the catalogue", e.Code) }
-
-// httpErr builds an HTTPError; the body is kept only when the request
-// carried no secret (see HTTPError).
-func httpErr(code int, body []byte, carriedKey bool) error {
-	if carriedKey {
-		return &HTTPError{Code: code}
-	}
-	return &HTTPError{Code: code, Body: safeText(body)}
-}
 
 // Client is one catalogue endpoint. URL overrides BaseURL (for tests).
 type Client struct {
 	URL string
+
+	once sync.Once
+	hc   *http.Client
 }
 
-// maxBodyBytes bounds one response: the whole table is a few hundred rows.
-const maxBodyBytes = 4 << 20
+// Limits. The whole table is a few hundred rows; a real response is a few
+// hundred KiB at most.
+const (
+	maxListBytes      = 4 << 20  // the list body
+	maxSubmitBytes    = 64 << 10 // a submission's answer, which is never read for content
+	maxListRows       = 10000    // elements of the list array, decoded one at a time
+	maxHeaderBytes    = 64 << 10 // response headers (Go's default allows ~10 MiB)
+	requestTimeout    = 30 * time.Second
+	responseHeaderCap = requestTimeout
+)
 
 func (c *Client) base() string {
 	if c.URL != "" {
@@ -113,45 +126,40 @@ func (c *Client) base() string {
 	return BaseURL
 }
 
-var (
-	// ErrRedirect: the catalogue answered with a redirect, which is never
-	// followed (the key travels in an Authorization header, and the
-	// catalogue has one fixed URL).
-	ErrRedirect = errors.New("the catalogue redirected; refusing to follow")
-	// ErrTimeout: no complete answer within the deadline.
-	ErrTimeout = errors.New("the catalogue did not answer in time")
-	// ErrUnreachable: the request failed below HTTP (DNS, TCP, TLS, a
-	// broken response).
-	ErrUnreachable = errors.New("the catalogue could not be reached")
-	// ErrTooLarge: the response exceeded maxBodyBytes.
-	ErrTooLarge = errors.New("the catalogue's response is larger than allowed; refusing to read it")
-
-	errRedirect = errors.New("redirect")
-)
-
 func noRedirect(*http.Request, []*http.Request) error { return errRedirect }
 
-// do sends one request and returns the status and the bounded body. A
-// transport failure comes back as one of the fixed errors above and
-// nothing else: Go's own error text carries the request URL and, for a
-// refused or malformed redirect, the Location the server sent, which a
-// hostile catalogue can fill with anything it saw, the upload key
+// client is the one HTTP client, with its own transport: header size
+// capped, redirects refused, one request deadline.
+func (c *Client) client() *http.Client {
+	c.once.Do(func() {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.MaxResponseHeaderBytes = maxHeaderBytes
+		tr.ResponseHeaderTimeout = responseHeaderCap
+		c.hc = &http.Client{Transport: tr, Timeout: requestTimeout, CheckRedirect: noRedirect}
+	})
+	return c.hc
+}
+
+// do sends one request and returns the status and the body bounded to
+// limit bytes. A transport failure comes back as one of the fixed errors
+// and nothing else: Go's own error text carries the request URL and, for
+// a refused or malformed redirect, the Location the server sent, which a
+// hostile catalogue can fill with anything it knows, the upload key
 // included. That text is dropped here, before it can reach a log, a
 // state or the page.
-func (c *Client) do(ctx context.Context, req *http.Request) (int, []byte, error) {
-	hc := &http.Client{Timeout: 30 * time.Second, CheckRedirect: noRedirect}
+func (c *Client) do(ctx context.Context, req *http.Request, limit int64) (int, []byte, error) {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "pmss-fleet-manager")
-	resp, err := hc.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return 0, nil, classify(ctx, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return resp.StatusCode, nil, classify(ctx, err)
 	}
-	if len(body) > maxBodyBytes {
+	if int64(len(body)) > limit {
 		return resp.StatusCode, nil, ErrTooLarge
 	}
 	return resp.StatusCode, body, nil
@@ -175,27 +183,40 @@ func classify(ctx context.Context, err error) error {
 }
 
 // List returns the hostnames in the catalogue, normalised the way the
-// catalogue keys them (see Normalize). No key is needed.
+// catalogue keys them (see Normalize). No key is needed. The array is
+// streamed element by element, at most maxListRows of them, so a body
+// made of millions of tiny elements costs the bytes it is and no more.
 func (c *Client) List(ctx context.Context) (map[string]bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base()+"/api/servers", nil)
 	if err != nil {
 		return nil, err
 	}
-	code, body, err := c.do(ctx, req)
+	code, body, err := c.do(ctx, req, maxListBytes)
 	if err != nil {
 		return nil, err
 	}
 	if code != http.StatusOK {
-		return nil, httpErr(code, body, false)
+		return nil, &HTTPError{Code: code}
 	}
-	var rows []json.RawMessage
-	if err := json.Unmarshal(body, &rows); err != nil || rows == nil {
-		// null is not an empty catalogue: treating it as one would submit
-		// every host, so only a real array counts.
-		return nil, errors.New("the catalogue list is not a JSON array")
+	return parseList(body)
+}
+
+func parseList(body []byte) (map[string]bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	// null is not an empty catalogue: treating it as one would submit every
+	// host, so only a real array counts.
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('[') {
+		return nil, ErrNotAList
 	}
-	out := make(map[string]bool, len(rows))
-	for _, raw := range rows {
+	out := map[string]bool{}
+	for n := 0; dec.More(); n++ {
+		if n >= maxListRows {
+			return nil, ErrTooLarge
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, ErrNotAList
+		}
 		// A row that is not an object with a string name is skipped, not
 		// fatal: one odd row must not hide every other host.
 		var r listed
@@ -203,15 +224,22 @@ func (c *Client) List(ctx context.Context) (map[string]bool, error) {
 		if json.Unmarshal(raw, &r) != nil || json.Unmarshal(r.ServerName, &name) != nil {
 			continue
 		}
-		if n, ok := Normalize(name); ok {
-			out[n] = true
+		if h, ok := Normalize(name); ok {
+			out[h] = true
 		}
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim(']') {
+		return nil, ErrNotAList
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, ErrNotAList // trailing bytes after the array: not the document it claims to be
 	}
 	return out, nil
 }
 
 // Submit adds one host. A host already listed is ErrExists; the catalogue
-// is never asked to replace a row.
+// is never asked to replace a row. The answer's body is never read for
+// content; only the status counts.
 func (c *Client) Submit(ctx context.Context, key string, row Row) error {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -227,7 +255,7 @@ func (c *Client) Submit(ctx context.Context, key string, row Row) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	code, resp, err := c.do(ctx, req)
+	code, _, err := c.do(ctx, req, maxSubmitBytes)
 	if err != nil {
 		return err
 	}
@@ -241,7 +269,7 @@ func (c *Client) Submit(ctx context.Context, key string, row Row) error {
 	case http.StatusTooManyRequests:
 		return fmt.Errorf("%w (HTTP %d)", ErrRateLimited, code)
 	}
-	return httpErr(code, resp, true)
+	return &HTTPError{Code: code}
 }
 
 // Normalize keys a hostname the way the catalogue does: lower-case, no
@@ -263,30 +291,4 @@ func Normalize(h string) (string, bool) {
 		}
 	}
 	return h, true
-}
-
-// safeText makes a response body fit for one log line: the catalogue's
-// error member if the body is its {"error": "..."} envelope, else the body
-// itself, reduced to printable ASCII (no control characters, no escape
-// sequences, nothing a terminal or log viewer would interpret) and clipped.
-func safeText(b []byte) string {
-	var env struct {
-		Error string `json:"error"`
-	}
-	if json.Unmarshal(b, &env) == nil && env.Error != "" {
-		b = []byte(env.Error)
-	}
-	var sb strings.Builder
-	for _, c := range b {
-		if sb.Len() >= 200 {
-			sb.WriteString("…")
-			break
-		}
-		if c >= 0x20 && c < 0x7f {
-			sb.WriteByte(c)
-		} else if c == '\n' || c == '\t' {
-			sb.WriteByte(' ')
-		}
-	}
-	return strings.TrimSpace(sb.String())
 }

@@ -120,7 +120,8 @@ each of your boxes runs on in the public list and submits the ones that are
 missing, from the facts the probe already reads: hostname, CPU model, core
 count, nominal clock, RAM, swap, home filesystem size and whether an Intel GPU
 is present. Nothing about your account, username, usage or torrents leaves
-the dashboard, an existing row is never replaced, and the check runs after a
+the dashboard (as with any web request, the service sees your IP address and
+the client name), an existing row is never replaced, and the check runs after a
 box's quarter-hourly inventory, every six hours, and on demand. The settings
 page lists each host's standing (listed, submitted, pending, or the error).
 Off by default; untick the box or remove the key to stop it.
@@ -299,15 +300,19 @@ These are the design decisions that came out of it.
   integration on, the dashboard reads a third-party service that could be
   compromised or replaced. Its list is bounded in size and read for one
   fact only (which DNS-shaped hostnames exist; odd rows are skipped), an
-  error body never reaches the page (the UI shows the status code; the
-  log gets the keyless list fetch's message stripped to printable ASCII and
-  clipped, and nothing at all from a response to a submission, which the
-  service could answer with the key it was just sent in any encoding), a
-  transport failure or a redirect is reported as a fixed message rather
-  than Go's own text (which would carry a Location the service controls),
-  redirects are refused, and
-  the only decision its answer drives is whether a host is submitted, once.
-  It cannot change what is collected or shown about a box.
+  no text from any response is kept, logged or shown (the service knows
+  the shared upload key and could echo it in any encoding; an error is a
+  fixed message or a status code), the list is streamed with a hard row
+  cap so a flood of tiny elements costs no more than its bytes, response
+  headers and a submission's answer are capped small, a transport failure
+  or a redirect is reported as a fixed message rather than Go's own text
+  (which would carry a Location the service controls), redirects are
+  refused, one run has a total time budget and stops at a rate limit or a
+  service failure, and the only decision its answer drives is whether a
+  host is submitted, once. It cannot change what is collected or shown
+  about a box. What a compromised catalogue can still do is inherent in
+  talking to it: lie about which hosts are listed (so a host is submitted,
+  or not), refuse or throttle, and see the request itself.
 - **Bounded everything.** SSH dials, handshakes (including the agent),
   sessions and remote commands are bounded by contexts; a hung `quota` is run
   through a detached helper so it cannot stall the probe; remote stdout is

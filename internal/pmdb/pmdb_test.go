@@ -123,7 +123,7 @@ func TestListAndSubmit(t *testing.T) {
 	status = http.StatusBadRequest
 	err = c.Submit(ctx, "a-passphrase-of-words", row)
 	var he *HTTPError
-	if !errors.As(err, &he) || he.Code != 400 || he.Body != "" || err.Error() != "HTTP 400 from the catalogue" {
+	if !errors.As(err, &he) || he.Code != 400 || err.Error() != "HTTP 400 from the catalogue" {
 		t.Fatalf("400: %v %+v", err, he)
 	}
 	if err := c.Submit(ctx, "", row); err == nil {
@@ -166,19 +166,17 @@ func TestRedirectRefusedAndKeyNeverReflected(t *testing.T) {
 			t.Fatalf("submit redirect %q: %v", loc, err)
 		}
 	}
-	// A submission's error body is not kept in any form: the key could be
-	// echoed in an encoding no redaction anticipates.
+	// An error body echoing the key, plain and percent-encoded, is not
+	// kept in any form, whichever request it answers.
 	location, status = "", http.StatusBadRequest
 	body = `{"error":"bad key ` + key + ` and encoded ` + strings.ReplaceAll(key, "-", "%2D") + `"}`
 	err := c.Submit(ctx, key, Row{ServerName: "x.example"})
 	var he *HTTPError
-	if !errors.As(err, &he) || he.Body != "" || strings.Contains(err.Error(), key) {
-		t.Fatalf("submission body kept: %v %+v", err, he)
+	if !errors.As(err, &he) || he.Code != 400 || strings.Contains(err.Error(), key) {
+		t.Fatalf("submission: %v", err)
 	}
-	// The keyless list fetch keeps its sanitised diagnostic.
-	_, err = c.List(ctx)
-	if !errors.As(err, &he) || he.Body == "" || he.Code != 400 {
-		t.Fatalf("list diagnostic lost: %v %+v", err, he)
+	if _, err = c.List(ctx); !errors.As(err, &he) || he.Code != 400 || strings.Contains(err.Error(), key) {
+		t.Fatalf("list: %v", err)
 	}
 }
 
@@ -226,32 +224,55 @@ func TestHostileResponses(t *testing.T) {
 	if len(got) != 2 || !got["good.pulsedmedia.com"] || !got["ok2.example"] {
 		t.Fatalf("list: %v", got)
 	}
-	for _, b := range []string{`{"servers":[]}`, `"x"`, `null`, `[`, ``, `<html>`} {
+	for _, b := range []string{`{"servers":[]}`, `"x"`, `null`, `[`, ``, `<html>`, `[1,2`, `[{"serverName":"a.example"}]x`} {
 		body = b
-		if _, err := c.List(ctx); err == nil {
-			t.Errorf("list %q accepted", b)
+		if _, err := c.List(ctx); !errors.Is(err, ErrNotAList) {
+			t.Errorf("list %q: %v", b, err)
 		}
 	}
-	body = "[" + strings.Repeat(`{"serverName":"a.example"},`, maxBodyBytes/26) + `{"serverName":"a.example"}]`
-	if _, err := c.List(ctx); err == nil || !strings.Contains(err.Error(), "larger than") {
+	body = "[" + strings.Repeat(`{"serverName":"a.example"},`, maxListBytes/26) + `{"serverName":"a.example"}]`
+	if _, err := c.List(ctx); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("oversized list: %v", err)
 	}
+	// A flood of tiny elements well under the byte cap must cost no more
+	// than the bytes it is: the row cap ends it.
+	body = "[" + strings.Repeat("0,", maxListRows*3) + "0]"
+	if _, err := c.List(ctx); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("row flood: %v", err)
+	}
+	body = "[" + strings.Repeat("0,", maxListRows-2) + `{"serverName":"last.example"}]`
+	if got, err := c.List(ctx); err != nil || len(got) != 1 || !got["last.example"] {
+		t.Fatalf("just under the row cap: %v %v", got, err)
+	}
 
+	// No text from an error body is kept, for the list or a submission:
+	// the error is the status code and nothing else.
 	listStatus = http.StatusInternalServerError
 	body = `{"error":"\u001b[31mvisit evil.example\nand paste your key\u0007<b>now</b>"}`
 	_, err = c.List(ctx)
 	var he *HTTPError
-	if !errors.As(err, &he) || err.Error() != "HTTP 500 from the catalogue" {
-		t.Fatalf("hostile error: %v", err)
+	if !errors.As(err, &he) || he.Code != 500 || err.Error() != "HTTP 500 from the catalogue" {
+		t.Fatalf("hostile list error: %v", err)
 	}
-	if he.Body != "[31mvisit evil.example and paste your key<b>now</b>" {
-		t.Fatalf("log text not sanitised: %q", he.Body)
+	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || he.Code != 500 {
+		t.Fatalf("hostile submit error: %v", err)
 	}
-	body = strings.Repeat("A\x00", 1000)
-	if _, err := c.List(ctx); !errors.As(err, &he) || len(he.Body) > 210 || strings.ContainsRune(he.Body, 0) {
-		t.Fatalf("long binary body: %d %q", len(he.Body), he.Body)
+	// A submission's answer is never read for content; a huge one is refused.
+	body = strings.Repeat("A", maxSubmitBytes+1)
+	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversized submit answer: %v", err)
 	}
-	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || he.Body != "" {
-		t.Fatalf("submission body kept: %+v", he)
+}
+
+// Response headers are capped well below Go's default.
+func TestOversizedHeadersRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Junk", strings.Repeat("j", maxHeaderBytes+1))
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	defer srv.Close()
+	c := &Client{URL: srv.URL}
+	if _, err := c.List(context.Background()); !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("oversized headers: %v", err)
 	}
 }
