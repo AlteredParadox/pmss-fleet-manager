@@ -100,7 +100,14 @@ type Manager struct {
 	pmdbMu     sync.Mutex
 	pmdbSyncMu sync.Mutex
 	pmdbSt     pmdbState
-	pmdbWakeCh chan struct{}
+	// pmdbSettled is the process-lifetime record of decided hosts (see
+	// pmdbStatus.decided), keyed by catalogue name with the standing to
+	// show ("listed" or "submitted"). Outside pmdbState on purpose: a reset
+	// (a new key, a re-enable) and a host dropping out of the candidates
+	// clear display, error and backoff state, never a decision, or a later
+	// stale or hostile list could have a host posted a second time.
+	pmdbSettled map[string]string // under pmdbMu
+	pmdbWakeCh  chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc

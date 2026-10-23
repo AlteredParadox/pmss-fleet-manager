@@ -227,14 +227,21 @@ func (m *Manager) SyncPMDB(ctx context.Context) {
 		sctx, scancel := context.WithTimeout(run.ctx, time.Minute)
 		err := m.pmdb.Submit(sctx, run.key, row)
 		scancel()
-		if ctx.Err() != nil {
+		if err != nil && ctx.Err() != nil {
 			// The caller went away (a manual check whose page was closed,
-			// or shutdown): not the catalogue's doing, so nothing is
-			// recorded and no hold is set. The run's own budget is on
-			// run.ctx, not ctx, and still counts as a service failure.
+			// or shutdown) and the submission failed with it: not the
+			// catalogue's doing, so nothing is recorded and no hold is
+			// set. An answer that did arrive (accepted, or exists) still
+			// settles the host below, or a later run would post it again.
+			// The run's own budget is on run.ctx, not ctx, and still
+			// counts as a service failure.
 			return
 		}
-		if m.pmdbRecord(run, name, err) {
+		stop := m.pmdbRecord(run, name, err)
+		if ctx.Err() != nil {
+			return
+		}
+		if stop {
 			break
 		}
 	}
@@ -376,8 +383,16 @@ func (m *Manager) pmdbMerge(name string, c pmdbCandidate, listed bool, now time.
 		m.pmdbSt.hosts[name] = h
 	}
 	h.BoxIDs = append([]int64(nil), c.ids...)
+	if standing, ok := m.pmdbSettled[name]; ok && !h.decided {
+		// Decided earlier in this process, before a reset or while the
+		// host had no box: still decided.
+		h.decided = true
+		if h.Status == "" {
+			h.Status, h.At = standing, now
+		}
+	}
 	if listed && h.Status != "listed" {
-		h.Status, h.Detail, h.At, h.decided = "listed", "", now, true
+		m.pmdbSettle(h, "listed", now)
 	}
 	switch {
 	case h.decided:
@@ -391,6 +406,16 @@ func (m *Manager) pmdbMerge(name string, c pmdbCandidate, listed bool, now time.
 		h.Status, h.At = "pending", now
 	}
 	return true
+}
+
+// pmdbSettle records a host as decided for the life of the process, with
+// the standing to show. Called under pmdbMu.
+func (m *Manager) pmdbSettle(h *pmdbStatus, standing string, now time.Time) {
+	h.Status, h.Detail, h.At, h.decided = standing, "", now, true
+	if m.pmdbSettled == nil {
+		m.pmdbSettled = map[string]string{}
+	}
+	m.pmdbSettled[h.Hostname] = standing
 }
 
 // pmdbRecord notes a submission's outcome. It returns true when the rest
@@ -407,10 +432,10 @@ func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 	now := time.Now()
 	switch {
 	case err == nil:
-		h.Status, h.Detail, h.At, h.decided = "submitted", "", now, true
+		m.pmdbSettle(h, "submitted", now)
 		m.log.Info(pmdbSubmitLog, "host", name)
 	case errors.Is(err, pmdb.ErrExists):
-		h.Status, h.Detail, h.At, h.decided = "listed", "", now, true
+		m.pmdbSettle(h, "listed", now)
 	default:
 		// err is our own fixed wording or a status code, never the
 		// catalogue's words (see package pmdb).
@@ -453,7 +478,8 @@ func pmdbServiceDown(err error) bool {
 
 // resetPMDB forgets every host's standing and cancels a run in flight, so
 // a changed key or a re-enable starts from the public list again and an
-// opt-out posts nothing more.
+// opt-out posts nothing more. Decisions survive it (pmdbSettled): a host
+// this process has seen listed or had accepted is never posted again.
 func (m *Manager) resetPMDB() {
 	m.pmdbMu.Lock()
 	defer m.pmdbMu.Unlock()

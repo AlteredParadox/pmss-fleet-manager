@@ -154,7 +154,13 @@ func TestSyncPMDB(t *testing.T) {
 		t.Fatalf("resubmitted: %d", n)
 	}
 
-	// A new key starts over; the catalogue now says 409 for odin: listed.
+	// A new key starts the display over but not the decisions: odin and
+	// loki stay settled. A fresh host is what meets the refused key.
+	fresh := &store.Box{Name: "e", Host: "he.example", User: "u", Port: 22, Enabled: false}
+	if err := m.AddBox(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	m.mutateState(fresh.ID, func(s *BoxState) { s.Ready, s.Hostname, s.HostSys = true, "freya.pulsedmedia.com", hw })
 	status = http.StatusConflict
 	s.PMDBUploadKey = "another-passphrase-of-words"
 	m.SetSettings(s)
@@ -181,6 +187,10 @@ func TestSyncPMDB(t *testing.T) {
 	if v := m.PMDB(); n != 2 || v.Error == "" {
 		t.Fatalf("a run under the refused key went ahead: %d %+v", n, v)
 	}
+	// The good key again: only the fresh host is posted (and its 409
+	// counts as listed); odin and loki were accepted earlier in this
+	// process, so the reset did not unsettle them and they show as
+	// submitted although the mock list still omits them.
 	s.PMDBUploadKey = "a-passphrase-of-words"
 	m.SetSettings(s)
 	m.SyncPMDB(ctx)
@@ -188,8 +198,12 @@ func TestSyncPMDB(t *testing.T) {
 	for _, h := range v.Hosts {
 		byName[h.Hostname] = h
 	}
-	if v.Error != "" || byName["odin.pulsedmedia.com"].Status != "listed" || byName["loki.pulsedmedia.com"].Status != "listed" {
-		t.Fatalf("409 not counted as listed: %+v", v)
+	mu.Lock()
+	got = append([]string(nil), submitted...)
+	mu.Unlock()
+	if v.Error != "" || len(got) != 3 || got[2] != "freya.pulsedmedia.com" || byName["freya.pulsedmedia.com"].Status != "listed" ||
+		byName["odin.pulsedmedia.com"].Status != "submitted" || byName["loki.pulsedmedia.com"].Status != "submitted" {
+		t.Fatalf("after the key came back: %v %+v", got, v)
 	}
 }
 
@@ -592,8 +606,8 @@ func TestSyncPMDBCallerCancelIsNotAFailure(t *testing.T) {
 			return
 		}
 		posts++
-		if posts == 1 {
-			cancel() // the page closed while this submission was in flight
+		if posts == 2 {
+			cancel() // the page closed while the second submission was in flight; the first was answered
 		}
 		w.WriteHeader(http.StatusCreated)
 	}))
@@ -624,17 +638,25 @@ func TestSyncPMDBCallerCancelIsNotAFailure(t *testing.T) {
 	if v := m.PMDB(); v.Error != "" {
 		t.Fatalf("caller cancel recorded as a failure: %+v", v)
 	}
+	// The answer that arrived before the cancel still settles its host.
+	var settled int
 	for _, h := range m.PMDB().Hosts {
 		if h.Status == "error" {
 			t.Fatalf("caller cancel recorded on a host: %+v", h)
 		}
+		if h.Status == "submitted" {
+			settled++
+		}
 	}
-	m.SyncPMDB(context.Background()) // not held: fetches again and finishes the second host
+	if settled != 1 {
+		t.Fatalf("the accepted submission was not recorded: %+v", m.PMDB().Hosts)
+	}
+	m.SyncPMDB(context.Background()) // not held: fetches again and finishes only the second host
 	mu.Lock()
 	p, l := posts, lists
 	mu.Unlock()
-	if l != 2 || p < 2 {
-		t.Fatalf("after a caller cancel: lists=%d posts=%d", l, p)
+	if l != 2 || p != 3 {
+		t.Fatalf("after a caller cancel: lists=%d posts=%d; want 2 and 3 (the settled host is not posted again)", l, p)
 	}
 	if v := m.PMDB(); v.Error != "" {
 		t.Fatalf("second run: %+v", v)
@@ -700,14 +722,25 @@ func TestSyncPMDBDecisionsAreTerminal(t *testing.T) {
 		}
 	}
 
-	// Sequence B: accepted, then listed, then missing from the list.
+	// A reset does not unsettle them either.
 	m.resetPMDB()
+	m.SyncPMDB(ctx)
+	if n := count(); n != 2 {
+		t.Fatalf("a reset unsettled decided hosts: %d posts", n)
+	}
+
+	// Sequence B, on two hosts this process has not decided: accepted,
+	// then listed, then missing from the list.
+	for i, host := range []string{"freya.pulsedmedia.com", "tyr.pulsedmedia.com"} {
+		id := int64(i + 1)
+		m.mutateState(id, func(s *BoxState) { s.Hostname = host })
+	}
 	set(`[]`, http.StatusCreated)
 	m.SyncPMDB(ctx)
 	if n := count(); n != 4 {
-		t.Fatalf("after reset: %d posts", n)
+		t.Fatalf("new hosts: %d posts", n)
 	}
-	set(`[{"serverName":"odin.pulsedmedia.com"},{"serverName":"thor.pulsedmedia.com"}]`, http.StatusCreated)
+	set(`[{"serverName":"freya.pulsedmedia.com"},{"serverName":"tyr.pulsedmedia.com"}]`, http.StatusCreated)
 	m.SyncPMDB(ctx)
 	set(`[]`, http.StatusCreated)
 	m.SyncPMDB(ctx)
