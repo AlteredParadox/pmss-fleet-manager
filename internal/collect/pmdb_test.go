@@ -295,6 +295,27 @@ func TestSyncPMDBStopsOnOptOut(t *testing.T) {
 	if v := m.PMDB(); v.Enabled || len(v.Hosts) != 0 {
 		t.Fatalf("the stale run's outcome became state: %+v", v)
 	}
+
+	// 3. An answer that arrives just as a reset lands (display state gone,
+	// generation moved on) still settles the host. The window cannot be
+	// hit on purpose from outside, so the outcome is recorded under a
+	// stale generation directly; re-enabling then posts only the other
+	// host.
+	onPost = nil
+	m.SetSettings(s)
+	m.pmdbRecord(&pmdbRun{gen: 0, key: s.PMDBUploadKey}, "odin.pulsedmedia.com", nil)
+	m.SyncPMDB(ctx)
+	mu.Lock()
+	n = posts
+	mu.Unlock()
+	if n != 2 {
+		t.Fatalf("after re-enable: %d posts; want 2 (the accepted host is not posted again)", n)
+	}
+	for _, h := range m.PMDB().Hosts {
+		if h.Status != "submitted" {
+			t.Fatalf("standing after re-enable: %+v", h)
+		}
+	}
 }
 
 // A rate-limited submission ends the run: the remaining hosts stay pending

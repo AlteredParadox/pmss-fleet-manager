@@ -425,11 +425,22 @@ func (m *Manager) pmdbSettle(h *pmdbStatus, standing string, now time.Time) {
 func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 	m.pmdbMu.Lock()
 	defer m.pmdbMu.Unlock()
+	now := time.Now()
 	h := m.pmdbSt.hosts[name]
 	if h == nil || m.pmdbSt.gen != run.gen {
-		return true // reset while this ran (opt-out or key change): the outcome belongs to nobody
+		// Reset while this ran (opt-out or key change): the display state
+		// belongs to nobody, but a decision the catalogue did make is a
+		// fact of this process and is kept, or a re-enable could post the
+		// host again.
+		switch {
+		case err == nil:
+			m.pmdbSettle(&pmdbStatus{Hostname: name}, "submitted", now)
+			m.log.Info(pmdbSubmitLog, "host", name)
+		case errors.Is(err, pmdb.ErrExists):
+			m.pmdbSettle(&pmdbStatus{Hostname: name}, "listed", now)
+		}
+		return true
 	}
-	now := time.Now()
 	switch {
 	case err == nil:
 		m.pmdbSettle(h, "submitted", now)
