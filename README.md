@@ -83,7 +83,12 @@ new binary. "Set up autostart" writes a `~/bin/qbt-start` screen launcher and
 the `@reboot` and `*/5 * * * *` crontab entries without touching other
 crontab lines (a line that runs the helper along with something else is
 kept), after saving the previous crontab to
-`~/.config/pmss-fleet-manager/crontab.bak`. Where qBittorrent is enabled in
+`~/.config/pmss-fleet-manager/crontab.bak`. An existing helper is left alone
+unless its running check keys on `$USER`, which is empty under cron (so
+`pgrep -u ""` fails and the helper starts another copy every five minutes):
+the dashboard flags such a helper next to the autostart row, and "reapply"
+rewrites it after saving the old one to
+`~/.config/pmss-fleet-manager/qbt-start.bak`. Where qBittorrent is enabled in
 the Pulsed Media panel, PMSS runs and configures it itself: the dashboard
 still monitors it, but refuses to install or autostart a build of its own.
 
