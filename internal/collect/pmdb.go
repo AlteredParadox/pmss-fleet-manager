@@ -41,8 +41,9 @@ import (
 // list, which is what stops a second submission). An inventory wake
 // fetches the list only when a host still needs deciding and then at most
 // once per pmdbListInterval; the six-hourly timer and a check the user
-// asks for always fetch, so the standing shown is never older than that
-// and the automatic cost is bounded whatever the catalogue sends.
+// asks for always fetch (unless a hold applies), so the standing shown is
+// never older than that and the automatic cost is bounded whatever the
+// catalogue sends.
 
 // pmdbStatus is one host's standing with the catalogue.
 type pmdbStatus struct {
@@ -222,8 +223,9 @@ func (m *Manager) SyncPMDB(ctx context.Context) { m.syncPMDB(ctx, true) }
 // pmdbListInterval.
 // The run belongs to the settings it started under: when the opt-in is
 // withdrawn or the key replaced meanwhile (resetPMDB), its context is
-// cancelled, a list it already fetched is discarded rather than rebuilt
-// into state, and no further host is posted.
+// cancelled, no further host is posted, and a list it already fetched
+// is not rebuilt into the view (the hosts it names are still settled,
+// see pmdbSalvage).
 func (m *Manager) syncPMDB(ctx context.Context, fresh bool) {
 	m.pmdbSyncMu.Lock()
 	defer m.pmdbSyncMu.Unlock()

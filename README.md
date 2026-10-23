@@ -302,16 +302,19 @@ These are the design decisions that came out of it.
   integration on, the dashboard reads a third-party service that could be
   compromised or replaced. Its list is bounded in size and read for one
   fact only (which DNS-shaped hostnames exist; odd rows are skipped), the
-  bytes counted are the ones on the wire (compression is never asked for
-  and a compressed answer is refused rather than decoded, since a gzip
-  stream of any length can unpack to two bytes), no text from any
+  bytes counted are the entity's before any content decoding (compression
+  is never asked for and a compressed answer is refused rather than
+  decoded, since a gzip stream of any length can unpack to two bytes;
+  transfer framing is bounded by Go's parser and the request deadline), no
+  text from any
   response is kept, logged or shown (the service knows the shared upload
   key and could echo it in any encoding; an error is a fixed message or a
-  status code), every request has its own HTTP/1.1 connection (bytes a
-  server sends after the answer it declared would otherwise be found on
-  an idle connection and quoted into Go's standard logger, below anything
-  the code can intercept; over HTTP/2 the byte caps would count data after
-  framing and a stream's clean-up writes have no deadline of their own),
+  status code), every request has its own HTTP/1.1 connection that is
+  never reused, whatever the server answers (bytes a server sends after
+  the answer it declared would otherwise be found on an idle connection
+  and quoted into Go's standard logger, below anything the code can
+  intercept; over HTTP/2 the byte caps would count data after framing and
+  a stream's clean-up writes have no deadline of their own),
   the list is streamed with a hard row cap so a
   flood of tiny elements costs no more than its bytes, response headers
   are capped small and a submission's answer is its status code alone
@@ -324,7 +327,8 @@ These are the design decisions that came out of it.
   hour, the automatic cost is bounded whatever the service sends (a check
   after an inventory fetches the list only while a host still needs
   deciding and at most every ten minutes; the six-hourly check and "check
-  now" always fetch), and the only decision its answer drives is whether
+  now" always fetch unless a hold applies), and the only decision its
+  answer drives is whether
   a host is submitted, once: a host seen listed, accepted or reported as
   existing is settled for the life of the process, whatever a later list
   says, and a list that arrived in full counts even when the run it was

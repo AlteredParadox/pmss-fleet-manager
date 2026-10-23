@@ -22,8 +22,10 @@
 // Everything the catalogue sends back is untrusted: it is a third-party
 // service that could be compromised or replaced, and it knows the shared
 // upload key. So: a response is bounded in bytes, rows and header size,
-// and the bytes counted are the ones on the wire (no transparent
-// decompression: a compressed answer is refused, not decoded); the list is
+// and the bytes counted are the entity's as the transport delivers them
+// before any content decoding (no transparent decompression: a compressed
+// answer is refused, not decoded; HTTP/1.1 chunk framing is bounded by
+// Go's parser and the request deadline); the list is
 // read for the one fact needed (which DNS-shaped hostnames exist),
 // streamed row by row with a hard row cap; a submission's answer is its
 // status code and its body is never read at all; no text from any
@@ -40,6 +42,7 @@ package pmdb
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,9 +122,9 @@ type Client struct {
 }
 
 // Limits. The whole table is a few hundred rows; a real response is a few
-// hundred KiB at most. The byte caps are wire bytes of the body as the
-// transport frames it; the request deadline is the bound on everything
-// else (a slow trickle, chunk framing overhead).
+// hundred KiB at most. The byte caps are entity bytes before content
+// decoding; the request deadline is the bound on everything else (a slow
+// trickle, chunk framing overhead, which Go's parser also bounds).
 const (
 	maxListBytes      = 4 << 20  // the list body
 	maxListRows       = 10000    // elements of the list array, decoded one at a time
@@ -156,6 +159,17 @@ func (c *Client) client() *http.Client {
 		// few requests a day do not need HTTP/2.
 		tr.Protocols = new(http.Protocols)
 		tr.Protocols.SetHTTP1(true)
+		// Protocols alone is not enough: the cloned DefaultTransport
+		// carries a TLS configuration that already advertises h2 in its
+		// ALPN list, and an h2 server would select it while this client
+		// speaks HTTP/1.1 (no request would ever arrive). Own TLS
+		// configuration, HTTP/1.1 the only protocol offered.
+		if tr.TLSClientConfig == nil {
+			tr.TLSClientConfig = &tls.Config{}
+		} else {
+			tr.TLSClientConfig = tr.TLSClientConfig.Clone()
+		}
+		tr.TLSClientConfig.NextProtos = []string{"http/1.1"}
 		// The body limits must count what arrives, not what a decoder
 		// makes of it: with compression on, Go would add Accept-Encoding
 		// gzip and unpack the answer underneath the limiter, so a stream
@@ -187,6 +201,14 @@ func (c *Client) do(ctx context.Context, req *http.Request, limit int64) (int, [
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("User-Agent", "pmss-fleet-manager")
+	// Close is on the request itself, not only on the transport: the
+	// transport setting adds the Connection: close header, which a hostile
+	// server can ignore and answer as if the connection were reusable, in
+	// which case an early Body.Close would drain up to 256 KiB of the
+	// answer for up to 50 ms to keep the connection. With the request
+	// marked to close, the connection is never a candidate for reuse and
+	// nothing after the status is read.
+	req.Close = true
 	resp, err := c.client().Do(req)
 	if err != nil {
 		return 0, nil, classify(ctx, err)

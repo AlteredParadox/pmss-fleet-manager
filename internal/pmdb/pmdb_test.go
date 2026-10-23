@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -393,6 +392,64 @@ func TestCompressedListRefused(t *testing.T) {
 	}
 }
 
+// A server that ignores Connection: close and answers as if the connection
+// were reusable still gets nothing read after a submission's status: with
+// the request itself marked to close, the transport never drains the
+// unread answer to keep the connection (it would otherwise read up to
+// 256 KiB for up to 50 ms), it just closes. Observed from the server as
+// the time until the client hangs up: a drain holds the connection for
+// its full 50 ms since no body ever comes; the least of five tries is
+// well under that.
+func TestStatusOnlyAnswerIsNotDrained(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	closedAfter := make(chan time.Duration, 8)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				br := bufio.NewReader(conn)
+				req, err := http.ReadRequest(br)
+				if err != nil {
+					return
+				}
+				_, _ = io.Copy(io.Discard, req.Body) // the submission; the next byte on br is the client's hang-up
+				// A keep-alive-looking answer with a body that never comes.
+				_, _ = io.WriteString(conn, "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 100000\r\n\r\n")
+				start := time.Now()
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				_, _ = br.ReadByte() // returns when the client hangs up
+				closedAfter <- time.Since(start)
+			}()
+		}
+	}()
+	c := &Client{URL: "http://" + ln.Addr().String()}
+	least := time.Hour
+	for i := 0; i < 5; i++ {
+		if err := c.Submit(context.Background(), "a-passphrase-of-words", Row{ServerName: "x.example"}); err != nil {
+			t.Fatalf("try %d: %v", i, err)
+		}
+		select {
+		case d := <-closedAfter:
+			if d < least {
+				least = d
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the server never saw the client hang up")
+		}
+	}
+	if least >= 40*time.Millisecond {
+		t.Fatalf("the client held every connection for at least %v after the status: the answer was being drained", least)
+	}
+}
+
 // The catalogue is spoken to over HTTP/1.1 only: over HTTP/2 the body caps
 // would count DATA after framing and the stream's own acknowledgement and
 // clean-up writes have no deadline, so a peer that stops reading could
@@ -407,10 +464,21 @@ func TestHTTP1Only(t *testing.T) {
 	srv.StartTLS()
 	defer srv.Close()
 	c := &Client{URL: srv.URL}
-	// Trust the test server's certificate; everything else about the
-	// transport is the production one.
-	pool := srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
-	c.client().Transport.(*http.Transport).TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	// Trust the test server's certificate and nothing else: the TLS
+	// configuration under test is the production one, including the
+	// protocols it advertises (a cloned DefaultTransport carries h2 in
+	// its ALPN list, which an h2 server would pick while the client
+	// speaks HTTP/1.1 to it: no request would ever arrive).
+	tr := c.client().Transport.(*http.Transport)
+	if tr.TLSClientConfig == nil {
+		t.Fatal("the transport has no TLS configuration of its own")
+	}
+	tr.TLSClientConfig.RootCAs = srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	for _, p := range tr.TLSClientConfig.NextProtos {
+		if p != "http/1.1" {
+			t.Fatalf("ALPN advertises %q", p)
+		}
+	}
 	if _, err := c.List(context.Background()); err != nil {
 		t.Fatal(err)
 	}
