@@ -65,6 +65,10 @@ type pmdbState struct {
 	err       string
 	gen       uint64             // bumped by every reset; a run from an older generation stores nothing
 	cancel    context.CancelFunc // the run in flight, cancelled by a reset
+	// keyRefused holds every later run once the catalogue refused the key:
+	// retrying a rejected key host by host is pointless and noisy. Only a
+	// reset (a new key, a re-enable) lifts it.
+	keyRefused bool
 }
 
 // pmdbSubmitLog is the log message of every submission outcome.
@@ -210,7 +214,7 @@ type pmdbRun struct {
 }
 
 // pmdbBegin opens a run under the current settings, or false when the
-// integration is off.
+// integration is off or the catalogue has refused the current key.
 func (m *Manager) pmdbBegin(ctx context.Context) (*pmdbRun, bool) {
 	s := m.Settings()
 	if !s.PMDBEnabled || s.PMDBUploadKey == "" {
@@ -219,8 +223,12 @@ func (m *Manager) pmdbBegin(ctx context.Context) (*pmdbRun, bool) {
 	run := &pmdbRun{key: s.PMDBUploadKey}
 	run.ctx, run.cancel = context.WithCancel(ctx)
 	m.pmdbMu.Lock()
+	defer m.pmdbMu.Unlock()
+	if m.pmdbSt.keyRefused {
+		run.cancel()
+		return nil, false // the view still shows the refusal; a new key resets it
+	}
 	run.gen, m.pmdbSt.cancel = m.pmdbSt.gen, run.cancel
-	m.pmdbMu.Unlock()
 	return run, true
 }
 
@@ -346,6 +354,7 @@ func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 		}
 		if errors.Is(err, pmdb.ErrAuth) {
 			m.pmdbSt.err = "upload key refused by pmdb.fyi; check the key in settings"
+			m.pmdbSt.keyRefused = true
 			return true
 		}
 		if errors.Is(err, pmdb.ErrRateLimited) {

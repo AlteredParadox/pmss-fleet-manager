@@ -565,7 +565,6 @@ func (p *poller) poll(ctx context.Context) {
 	}
 	if snap.Inventory {
 		p.inv, p.invAt = snap.InventoryOnly(), start
-		p.m.pmdbWake() // fresh host facts: let the catalogue check see them (no-op unless enabled)
 	} else {
 		snap.CarryInventory(p.inv)
 	}
@@ -614,6 +613,13 @@ func (p *poller) poll(ctx context.Context) {
 	st.Sanitize() // before the cache write as well as the in-memory store
 	p.record(ctx, &st)
 	p.m.setStateWith(&st, p.storeFix(start, false))
+	if snap.Inventory {
+		// Fresh host facts are in the stored state now: let the catalogue
+		// check see them (a no-op unless the integration is on). After the
+		// commit, or a slow qbt/docker stage would let the check run
+		// before this box's facts were there to read.
+		p.m.pmdbWake()
+	}
 }
 
 // retryInterval is the poll interval for a box with the given number of

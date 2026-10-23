@@ -169,6 +169,15 @@ func TestSyncPMDB(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("the refused key kept submitting: %d", n)
 	}
+	// Later runs under the same refused key post nothing more and keep
+	// showing the refusal, until the key changes.
+	m.SyncPMDB(ctx)
+	mu.Lock()
+	n = len(submitted)
+	mu.Unlock()
+	if v := m.PMDB(); n != 2 || v.Error == "" {
+		t.Fatalf("a run under the refused key went ahead: %d %+v", n, v)
+	}
 	s.PMDBUploadKey = "a-passphrase-of-words"
 	m.SetSettings(s)
 	m.SyncPMDB(ctx)
