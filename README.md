@@ -307,10 +307,12 @@ These are the design decisions that came out of it.
   stream of any length can unpack to two bytes), no text from any
   response is kept, logged or shown (the service knows the shared upload
   key and could echo it in any encoding; an error is a fixed message or a
-  status code), every request has its own connection (bytes a server sends
-  after the answer it declared would otherwise be found on an idle
-  connection and quoted into Go's standard logger, below anything the
-  code can intercept), the list is streamed with a hard row cap so a
+  status code), every request has its own HTTP/1.1 connection (bytes a
+  server sends after the answer it declared would otherwise be found on
+  an idle connection and quoted into Go's standard logger, below anything
+  the code can intercept; over HTTP/2 the byte caps would count data after
+  framing and a stream's clean-up writes have no deadline of their own),
+  the list is streamed with a hard row cap so a
   flood of tiny elements costs no more than its bytes, response headers
   are capped small and a submission's answer is its status code alone
   (the body is never read, so an acceptance cannot be turned into a
@@ -325,7 +327,9 @@ These are the design decisions that came out of it.
   now" always fetch), and the only decision its answer drives is whether
   a host is submitted, once: a host seen listed, accepted or reported as
   existing is settled for the life of the process, whatever a later list
-  says. It cannot change what is collected or shown about a box. What a
+  says, and a list that arrived in full counts even when the run it was
+  fetched for was reset meanwhile. It cannot change what is collected or
+  shown about a box. What a
   compromised catalogue can still do is inherent in talking to it: lie
   about which hosts are listed (so a host is submitted, or not), refuse or
   throttle, and see the request itself.

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -825,6 +826,147 @@ func TestSyncPMDBCallerCancelDuringList(t *testing.T) {
 	}
 	if v := m.PMDB(); v.Error != "" || len(v.Hosts) != 1 || v.Hosts[0].Status != "listed" {
 		t.Fatalf("second run: %+v", v)
+	}
+}
+
+// A list that arrived in full is a fact of this process even when the run
+// it was fetched for is reset meanwhile: the hosts it names are settled,
+// so a re-enable met by a hostile empty list does not post them.
+func TestSyncPMDBListSurvivesReset(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var posts []string
+	var listBody atomic.Value
+	listBody.Store(`[{"serverName":"odin.pulsedmedia.com"}]`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/servers":
+			_, _ = io.WriteString(w, listBody.Load().(string))
+		case "/api/servers/raw":
+			var row struct{ ServerName string }
+			_ = json.NewDecoder(r.Body).Decode(&row)
+			mu.Lock()
+			posts = append(posts, row.ServerName)
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+		}
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmdb.URL = srv.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	hw := HostState{CPUModel: "Intel(R) N100", NCPU: 4, MemTotal: 32 << 30, HomeSize: 60 << 40}
+	for i, host := range []string{"odin.pulsedmedia.com", "thor.pulsedmedia.com"} {
+		b := &store.Box{Name: string(rune('a' + i)), Host: "h" + string(rune('a'+i)) + ".example", User: "u", Port: 22, Enabled: false}
+		if err := m.AddBox(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		m.mutateState(b.ID, func(s *BoxState) { s.Ready, s.Hostname, s.HostSys = true, host, hw })
+	}
+	s := m.Settings()
+	s.PMDBEnabled, s.PMDBUploadKey = true, "a-passphrase-of-words"
+	m.SetSettings(s)
+	off := m.Settings()
+	off.PMDBEnabled = false
+	pmdbAfterListHook = func() {
+		pmdbAfterListHook = nil
+		m.SetSettings(off) // the opt-out lands just as the list has arrived in full
+	}
+	defer func() { pmdbAfterListHook = nil }()
+	m.SyncPMDB(ctx)
+	mu.Lock()
+	n := len(posts)
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("a reset run posted %v", posts)
+	}
+	// Re-enabled, the catalogue now claims nothing is listed: odin was
+	// seen listed by this process and is not posted; thor is.
+	listBody.Store(`[]`)
+	m.SetSettings(s)
+	m.SyncPMDB(ctx)
+	mu.Lock()
+	got := append([]string(nil), posts...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != "thor.pulsedmedia.com" {
+		t.Fatalf("after the reset, posts were %v; want thor only", got)
+	}
+}
+
+// A fleet larger than one run's submission cap is worked through in
+// batches with no host posted twice.
+func TestSyncPMDBBatches(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	posted := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/servers" {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		var row struct{ ServerName string }
+		_ = json.NewDecoder(r.Body).Decode(&row)
+		mu.Lock()
+		posted[row.ServerName]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmdb.URL = srv.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	hw := HostState{CPUModel: "Intel(R) N100", NCPU: 4, MemTotal: 32 << 30, HomeSize: 60 << 40}
+	const hosts = pmdbMaxSubmits + 7
+	for i := 0; i < hosts; i++ {
+		host := fmt.Sprintf("host%03d.pulsedmedia.com", i)
+		b := &store.Box{Name: host, Host: host, User: "u", Port: 22, Enabled: false}
+		if err := m.AddBox(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		m.mutateState(b.ID, func(s *BoxState) { s.Ready, s.Hostname, s.HostSys = true, host, hw })
+	}
+	s := m.Settings()
+	s.PMDBEnabled, s.PMDBUploadKey = true, "a-passphrase-of-words"
+	m.SetSettings(s)
+	count := func() (n, dup int) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range posted {
+			n++
+			if c > 1 {
+				dup++
+			}
+		}
+		return
+	}
+	m.syncPMDB(ctx, false)
+	if n, dup := count(); n != pmdbMaxSubmits || dup != 0 {
+		t.Fatalf("first run: %d hosts posted (%d twice); want %d", n, dup, pmdbMaxSubmits)
+	}
+	m.syncPMDB(ctx, false) // the next wake: the rest, from the cached list
+	if n, dup := count(); n != hosts || dup != 0 {
+		t.Fatalf("second run: %d hosts posted (%d twice); want %d", n, dup, hosts)
+	}
+	m.syncPMDB(ctx, false)
+	m.SyncPMDB(ctx)
+	if n, dup := count(); n != hosts || dup != 0 {
+		t.Fatalf("later runs: %d hosts posted (%d twice)", n, dup)
 	}
 }
 

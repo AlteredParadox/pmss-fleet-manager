@@ -30,10 +30,11 @@
 // response is ever kept, logged or shown (an error is a fixed message or a
 // status code); transport failures are fixed messages too, because Go's
 // own text carries the URL and any Location the server sent; redirects are
-// refused; every request has its own connection, so bytes a server sends
-// after the answer it declared are never found on an idle one (which
-// net/http would quote into the standard logger). The only thing the
-// catalogue's answer decides is whether a host is submitted, once.
+// refused; every request has its own HTTP/1.1 connection, so bytes a
+// server sends after the answer it declared are never found on an idle
+// one (which net/http would quote into the standard logger) and no HTTP/2
+// frame traffic sits outside the byte caps and deadlines. The only thing
+// the catalogue's answer decides is whether a host is submitted, once.
 package pmdb
 
 import (
@@ -138,14 +139,23 @@ func (c *Client) base() string {
 
 func noRedirect(*http.Request, []*http.Request) error { return errRedirect }
 
-// client is the one HTTP client, with its own transport: header size
-// capped, redirects refused, one request deadline, no transparent
-// decompression and no connection reuse.
+// client is the one HTTP client, with its own transport: HTTP/1.1 only,
+// header size capped, redirects refused, one request deadline, no
+// transparent decompression and no connection reuse.
 func (c *Client) client() *http.Client {
 	c.once.Do(func() {
 		tr := http.DefaultTransport.(*http.Transport).Clone()
 		tr.MaxResponseHeaderBytes = maxHeaderBytes
 		tr.ResponseHeaderTimeout = responseHeaderCap
+		// HTTP/1.1 only. Over HTTP/2 the body limiter counts DATA after
+		// framing (control frames, padding and empty frames cost bytes
+		// and CPU it never sees), and the stream's acknowledgement and
+		// clean-up writes have no deadline of their own: a peer that
+		// stops reading can hold Body.Close past every timeout, and with
+		// it the serialised run and the shutdown that waits for it. A
+		// few requests a day do not need HTTP/2.
+		tr.Protocols = new(http.Protocols)
+		tr.Protocols.SetHTTP1(true)
 		// The body limits must count what arrives, not what a decoder
 		// makes of it: with compression on, Go would add Accept-Encoding
 		// gzip and unpack the answer underneath the limiter, so a stream

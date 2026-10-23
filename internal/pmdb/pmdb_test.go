@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -292,8 +293,11 @@ func TestHostileResponses(t *testing.T) {
 func TestAcceptedAnswerBodyIsNotRead(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
+	var mode atomic.Value // the client appends its own path, so the mode travels beside the server, not in the URL
+	var served atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("body") {
+		served.Add(1)
+		switch mode.Load() {
 		case "huge":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, strings.Repeat("A", 1<<20))
@@ -317,17 +321,23 @@ func TestAcceptedAnswerBodyIsNotRead(t *testing.T) {
 			w.Header().Set("Content-Encoding", "gzip")
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write(gzipped(t, []byte(`{"ok":true}`)))
+		default:
+			t.Errorf("unexpected mode %v", mode.Load())
 		}
 	}))
 	defer srv.Close()
-	for _, mode := range []string{"huge", "endless", "gzip"} {
-		c := &Client{URL: srv.URL + "/?body=" + mode}
+	c := &Client{URL: srv.URL}
+	for i, m := range []string{"huge", "endless", "gzip"} {
+		mode.Store(m)
 		start := time.Now()
 		if err := c.Submit(context.Background(), "a-passphrase-of-words", Row{ServerName: "x.example"}); err != nil {
-			t.Fatalf("%s accepted answer: %v", mode, err)
+			t.Fatalf("%s accepted answer: %v", m, err)
 		}
 		if d := time.Since(start); d > 10*time.Second {
-			t.Fatalf("%s accepted answer took %v: the body was waited for", mode, d)
+			t.Fatalf("%s accepted answer took %v: the body was waited for", m, d)
+		}
+		if n := served.Load(); int(n) != i+1 {
+			t.Fatalf("%s: %d requests served", m, n)
 		}
 	}
 }
@@ -357,25 +367,55 @@ func TestCompressedListRefused(t *testing.T) {
 	}
 	wire.Write(gzipped(t, []byte(`[]`)))
 	var sawIdentity atomic.Bool
+	var mode atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawIdentity.Store(r.Header.Get("Accept-Encoding") == "identity")
 		w.Header().Set("Content-Encoding", "gzip")
-		switch r.URL.Query().Get("body") {
+		switch mode.Load() {
 		case "small":
 			_, _ = w.Write(gzipped(t, []byte(`[{"serverName":"odin.pulsedmedia.com"}]`)))
-		default:
+		case "huge":
 			_, _ = w.Write(wire.Bytes())
+		default:
+			t.Errorf("unexpected mode %v", mode.Load())
 		}
 	}))
 	defer srv.Close()
-	for _, mode := range []string{"huge", "small"} {
-		c := &Client{URL: srv.URL + "/?body=" + mode}
+	c := &Client{URL: srv.URL}
+	for _, m := range []string{"huge", "small"} {
+		mode.Store(m)
 		if _, err := c.List(context.Background()); !errors.Is(err, ErrEncoded) {
-			t.Fatalf("%s compressed list: %v", mode, err)
+			t.Fatalf("%s compressed list: %v", m, err)
 		}
 		if !sawIdentity.Load() {
 			t.Fatal("the request did not ask for an identity encoding")
 		}
+	}
+}
+
+// The catalogue is spoken to over HTTP/1.1 only: over HTTP/2 the body caps
+// would count DATA after framing and the stream's own acknowledgement and
+// clean-up writes have no deadline, so a peer that stops reading could
+// hold a run past every timeout. A server offering h2 gets HTTP/1.1.
+func TestHTTP1Only(t *testing.T) {
+	var proto atomic.Value
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proto.Store(r.Proto)
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+	c := &Client{URL: srv.URL}
+	// Trust the test server's certificate; everything else about the
+	// transport is the production one.
+	pool := srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	c.client().Transport.(*http.Transport).TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	if _, err := c.List(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if p := proto.Load(); p != "HTTP/1.1" {
+		t.Fatalf("negotiated %v; want HTTP/1.1", p)
 	}
 }
 

@@ -313,8 +313,9 @@ type pmdbRun struct {
 	gen    uint64
 }
 
-// pmdbBeginHook, when set, runs at the top of pmdbBegin (tests only).
-var pmdbBeginHook func()
+// pmdbBeginHook and pmdbAfterListHook, when set, run at the top of
+// pmdbBegin and right after the list fetch returns (tests only).
+var pmdbBeginHook, pmdbAfterListHook func()
 
 // pmdbBegin opens a run under the current settings, or false when the
 // integration is off or the catalogue has refused the current key. The
@@ -365,25 +366,34 @@ type pmdbCandidate struct {
 // submit, sorted. false means nothing is to be done: the list could not be
 // fetched (recorded in the view) or the run is stale.
 func (m *Manager) pmdbPlan(run *pmdbRun, fresh bool) (todo []string, cands map[string]pmdbCandidate, ok bool) {
-	listed, fetch := m.pmdbListFor(m.pmdbCandidates(), fresh, time.Now())
+	cands = m.pmdbCandidates()
+	listed, fetch := m.pmdbListFor(cands, fresh, time.Now())
 	var err error
 	if fetch {
 		fctx, cancel := context.WithTimeout(run.ctx, 2*time.Minute)
 		listed, err = m.pmdb.List(fctx)
 		cancel()
+		if pmdbAfterListHook != nil {
+			pmdbAfterListHook()
+		}
+		// The boxes as they are after the fetch: one removed or moved
+		// while the list was fetching is not a candidate any more. (With
+		// no fetch the snapshot the decision was made on is the one
+		// used: a host that landed in between would otherwise be decided
+		// from the copy without the fetch its arrival calls for.)
+		cands = m.pmdbCandidates()
 	}
 	if errors.Is(run.ctx.Err(), context.DeadlineExceeded) {
 		err = pmdb.ErrTimeout // the run's own budget ran out: the service is too slow, which counts as down
 	} else if !m.pmdbCurrent(run) {
+		m.pmdbSalvage(listed, cands, err)
 		return nil, nil, false // stale, or the caller went away: nothing to record
 	}
-	// The boxes as they are after the fetch: one removed or moved while
-	// the list was fetching is not a candidate any more.
-	cands = m.pmdbCandidates()
 	now := time.Now()
 	m.pmdbMu.Lock()
 	if m.pmdbSt.gen != run.gen {
 		m.pmdbMu.Unlock()
+		m.pmdbSalvage(listed, cands, err)
 		return nil, nil, false // reset meanwhile: the outcome belongs to nobody
 	}
 	if m.pmdbSt.hosts == nil {
@@ -417,6 +427,27 @@ func (m *Manager) pmdbPlan(run *pmdbRun, fresh bool) (todo []string, cands map[s
 	}
 	sort.Strings(todo)
 	return todo, cands, true
+}
+
+// pmdbSalvage keeps what a list that did arrive says about the hosts it
+// was fetched for, when the run it belongs to is stale (reset, or the
+// caller gone): a host the catalogue lists is a fact of this process like
+// an accepted submission is, and is settled the same way, or a re-enable
+// met by a hostile empty list could post it.
+func (m *Manager) pmdbSalvage(listed map[string]bool, cands map[string]pmdbCandidate, err error) {
+	if err != nil || listed == nil {
+		return
+	}
+	now := time.Now()
+	m.pmdbMu.Lock()
+	defer m.pmdbMu.Unlock()
+	for name := range cands {
+		if listed[name] {
+			if _, done := m.pmdbSettled[name]; !done {
+				m.pmdbSettle(&pmdbStatus{Hostname: name}, "listed", now)
+			}
+		}
+	}
 }
 
 // pmdbListFor says which list a run decides against: the copy of the last
