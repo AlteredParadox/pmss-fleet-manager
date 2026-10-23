@@ -463,7 +463,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.7.1 is the current release. The code was written against five real Pulsed
+1.8.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -474,6 +474,31 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.8.0** adds the first outbound integration, opt-in. The minor bump is
+for the new settings fields `pmdb_enabled` / `pmdb_upload_key`, the
+endpoints `GET /api/pmdb` and `POST /api/pmdb/sync`, and the new inventory
+facts `host_sys.swap_total` / `swap_known` / `cpu_mhz`.
+
+- **pmdb.fyi hardware catalogue.** [pmdb.fyi](https://pmdb.fyi) is a
+  community table of Pulsed Media host hardware kept by another PMSS user.
+  Tick the box in settings and enter the catalogue's shared upload key, and
+  the dashboard looks up the host each of your boxes runs on in the public
+  list and submits the ones that are missing, from facts the probe already
+  reads (hostname, CPU model, core count, nominal clock, RAM, swap, home
+  filesystem size, Intel GPU present). Nothing about your account leaves
+  the dashboard, an existing row is never replaced, and each host is
+  decided once per process. The catalogue's answers are treated as
+  untrusted input throughout: bounded, streamed, never kept as text, one
+  HTTP/1.1 connection per request, holds after any failure. Five rounds of
+  external review went into that stance; the details are under *Security
+  and hardening*. (#114)
+- **A qbt-start helper that keys on `$USER` is rewritten.** `$USER` is
+  empty under cron, so such a helper's `pgrep` fails and it starts another
+  copy of qBittorrent every five minutes. The dashboard now flags one next
+  to the autostart row, and "reapply" rewrites it after saving the old one
+  to `~/.config/pmss-fleet-manager/qbt-start.bak`; any other existing
+  helper is still left alone. (#115)
 
 **1.7.1**
 
