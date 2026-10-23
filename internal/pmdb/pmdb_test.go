@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -120,8 +121,10 @@ func TestListAndSubmit(t *testing.T) {
 		t.Fatalf("429: %v", err)
 	}
 	status = http.StatusBadRequest
-	if err := c.Submit(ctx, "k", row); err == nil || err.Error() != "HTTP 400: This server already exists." {
-		t.Fatalf("400: %v", err)
+	err = c.Submit(ctx, "k", row)
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Code != 400 || he.Body != "This server already exists." || err.Error() != "HTTP 400 from the catalogue" {
+		t.Fatalf("400: %v %+v", err, he)
 	}
 	if err := c.Submit(ctx, "", row); err == nil {
 		t.Fatal("empty key must not be sent")
@@ -139,5 +142,58 @@ func TestRedirectRefused(t *testing.T) {
 	}
 	if err := c.Submit(context.Background(), "k", Row{ServerName: "x"}); err == nil {
 		t.Fatal("redirect followed with the key")
+	}
+}
+
+// What comes back from the catalogue is untrusted: junk rows, non-string
+// names, invalid hostnames and a non-array body must not break the list or
+// let anything through unvalidated, an oversized body is refused, and an
+// error message never reaches the page as it was sent.
+func TestHostileResponses(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/servers/raw" {
+			w.WriteHeader(500)
+		}
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	c := &Client{URL: srv.URL}
+	ctx := context.Background()
+
+	body = `[{"serverName":"Good.pulsedmedia.com"},{"serverName":42},{"serverName":null},"string",17,null,{"x":1},
+		{"serverName":"bad host.example"},{"serverName":"<script>alert(1)</script>"},{"serverName":"` + strings.Repeat("a", 300) + `"},
+		{"serverName":"ok2.example.","coreCount":{"deep":[[[[1]]]]}}]`
+	got, err := c.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || !got["good.pulsedmedia.com"] || !got["ok2.example"] {
+		t.Fatalf("list: %v", got)
+	}
+	for _, b := range []string{`{"servers":[]}`, `"x"`, `null`, `[`, ``, `<html>`} {
+		body = b
+		if _, err := c.List(ctx); err == nil {
+			t.Errorf("list %q accepted", b)
+		}
+	}
+	body = "[" + strings.Repeat(`{"serverName":"a.example"},`, maxBodyBytes/26) + `{"serverName":"a.example"}]`
+	if _, err := c.List(ctx); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("oversized list: %v", err)
+	}
+
+	body = `{"error":"\u001b[31mvisit evil.example\nand paste your key\u0007<b>now</b>"}`
+	err = c.Submit(ctx, "k", Row{ServerName: "x.example", ProcessorName: "cpu", CoreCount: 1, RAMGiB: 1})
+	var he *HTTPError
+	if !errors.As(err, &he) || err.Error() != "HTTP 500 from the catalogue" {
+		t.Fatalf("hostile error: %v", err)
+	}
+	if he.Body != "[31mvisit evil.example and paste your key<b>now</b>" {
+		t.Fatalf("log text not sanitised: %q", he.Body)
+	}
+	body = strings.Repeat("A\x00", 1000)
+	_ = c.Submit(ctx, "k", Row{ServerName: "x.example"})
+	if err := c.Submit(ctx, "k", Row{ServerName: "x.example"}); !errors.As(err, &he) || len(he.Body) > 210 || strings.ContainsRune(he.Body, 0) {
+		t.Fatalf("long binary body: %d %q", len(he.Body), he.Body)
 	}
 }

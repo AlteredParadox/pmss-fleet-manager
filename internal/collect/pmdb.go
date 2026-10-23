@@ -253,7 +253,12 @@ func (m *Manager) pmdbPlan(run *pmdbRun) (todo []string, cands map[string]pmdbCa
 	if err != nil {
 		m.pmdbSt.err = "catalogue list: " + err.Error()
 		m.pmdbMu.Unlock()
-		m.log.Warn("pmdb list", "err", err)
+		var he *pmdb.HTTPError
+		if errors.As(err, &he) {
+			m.log.Warn("pmdb list", "err", err, "catalogue_said", he.Body)
+		} else {
+			m.log.Warn("pmdb list", "err", err)
+		}
 		m.Publish(Event{Type: "pmdb"})
 		return nil, nil, false
 	}
@@ -321,8 +326,15 @@ func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 	case errors.Is(err, pmdb.ErrExists):
 		h.Status, h.Detail, h.At = "listed", "", now
 	default:
+		// err.Error() is our own wording (or the status code); the
+		// catalogue's message is untrusted text and goes to the log only.
 		h.Status, h.Detail, h.At, h.retryAt = "error", err.Error(), now, now.Add(pmdbRetry)
-		m.log.Warn("pmdb submit", "host", name, "err", err)
+		var he *pmdb.HTTPError
+		if errors.As(err, &he) {
+			m.log.Warn("pmdb submit", "host", name, "err", err, "catalogue_said", he.Body)
+		} else {
+			m.log.Warn("pmdb submit", "host", name, "err", err)
+		}
 		if errors.Is(err, pmdb.ErrAuth) {
 			m.pmdbSt.err = "upload key refused by pmdb.fyi; check the key in settings"
 			return true

@@ -18,6 +18,14 @@
 // host hardware (https://github.com/schmintendo/pmdb). The catalogue is
 // public to read (GET /api/servers lists every row) and takes one row per
 // host hostname on POST /api/servers/raw with a shared upload key.
+//
+// Everything the catalogue sends back is untrusted: it is a third-party
+// service that could be compromised or replaced. A response is bounded in
+// size, read only for the one fact needed (which hostnames exist, as
+// DNS-shaped names), an error body never reaches the page (the UI sees
+// the status code; the body goes to the log stripped to printable ASCII
+// and clipped), and redirects are refused. The only thing the catalogue's
+// answer decides is whether a host is submitted, once.
 package pmdb
 
 import (
@@ -49,10 +57,11 @@ type Row struct {
 	QSV           bool     `json:"qsv"`
 }
 
-// Listed is one catalogue row as GET /api/servers returns it; only the
-// name is needed to tell a host is already there.
-type Listed struct {
-	ServerName string `json:"serverName"`
+// listed is one catalogue row as GET /api/servers returns it; only the
+// name is needed to tell a host is already there, and a row whose name is
+// not a string is skipped rather than failing the list.
+type listed struct {
+	ServerName json.RawMessage `json:"serverName"`
 }
 
 var (
@@ -63,6 +72,20 @@ var (
 	// ErrRateLimited is a 429: too many uploads from this address.
 	ErrRateLimited = errors.New("upload rate limit reached")
 )
+
+// HTTPError is an unexpected status. Error() names only the code, which is
+// what the page shows; Body is the catalogue's message made safe for a log
+// line (printable ASCII, clipped) and is never shown to a person in the
+// dashboard, where it could carry whatever a compromised service wanted
+// read.
+type HTTPError struct {
+	Code int
+	Body string
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d from the catalogue", e.Code) }
+
+func httpErr(code int, body []byte) error { return &HTTPError{Code: code, Body: safeText(body)} }
 
 // Client is one catalogue endpoint. URL overrides BaseURL (for tests).
 type Client struct {
@@ -117,15 +140,24 @@ func (c *Client) List(ctx context.Context) (map[string]bool, error) {
 		return nil, err
 	}
 	if code != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", code, firstLine(body))
+		return nil, httpErr(code, body)
 	}
-	var rows []Listed
-	if err := json.Unmarshal(body, &rows); err != nil {
-		return nil, fmt.Errorf("parse catalogue: %w (%s)", err, firstLine(body))
+	var rows []json.RawMessage
+	if err := json.Unmarshal(body, &rows); err != nil || rows == nil {
+		// null is not an empty catalogue: treating it as one would submit
+		// every host, so only a real array counts.
+		return nil, errors.New("the catalogue list is not a JSON array")
 	}
 	out := make(map[string]bool, len(rows))
-	for _, r := range rows {
-		if n, ok := Normalize(r.ServerName); ok {
+	for _, raw := range rows {
+		// A row that is not an object with a string name is skipped, not
+		// fatal: one odd row must not hide every other host.
+		var r listed
+		var name string
+		if json.Unmarshal(raw, &r) != nil || json.Unmarshal(r.ServerName, &name) != nil {
+			continue
+		}
+		if n, ok := Normalize(name); ok {
 			out[n] = true
 		}
 	}
@@ -163,7 +195,7 @@ func (c *Client) Submit(ctx context.Context, key string, row Row) error {
 	case http.StatusTooManyRequests:
 		return fmt.Errorf("%w (HTTP %d)", ErrRateLimited, code)
 	}
-	return fmt.Errorf("HTTP %d: %s", code, firstLine(resp))
+	return httpErr(code, resp)
 }
 
 // Normalize keys a hostname the way the catalogue does: lower-case, no
@@ -187,21 +219,28 @@ func Normalize(h string) (string, bool) {
 	return h, true
 }
 
-// firstLine keeps an error body short enough for a log line. The
-// catalogue answers errors as {"error": "..."}; that message is lifted.
-func firstLine(b []byte) string {
+// safeText makes a response body fit for one log line: the catalogue's
+// error member if the body is its {"error": "..."} envelope, else the body
+// itself, reduced to printable ASCII (no control characters, no escape
+// sequences, nothing a terminal or log viewer would interpret) and clipped.
+func safeText(b []byte) string {
 	var env struct {
 		Error string `json:"error"`
 	}
 	if json.Unmarshal(b, &env) == nil && env.Error != "" {
 		b = []byte(env.Error)
 	}
-	s := strings.TrimSpace(string(b))
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
+	var sb strings.Builder
+	for _, c := range b {
+		if sb.Len() >= 200 {
+			sb.WriteString("…")
+			break
+		}
+		if c >= 0x20 && c < 0x7f {
+			sb.WriteByte(c)
+		} else if c == '\n' || c == '\t' {
+			sb.WriteByte(' ')
+		}
 	}
-	if len(s) > 200 {
-		s = s[:200] + "…"
-	}
-	return s
+	return strings.TrimSpace(sb.String())
 }

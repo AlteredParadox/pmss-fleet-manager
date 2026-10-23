@@ -295,6 +295,14 @@ These are the design decisions that came out of it.
   opens it so the -wal and -shm side files inherit the mode; the data
   directory is created 0700. Prefer SSH keys or the agent. The API key is
   never sent to the browser and passwords are never serialised.
+- **The hardware catalogue is untrusted input.** With the pmdb.fyi
+  integration on, the dashboard reads a third-party service that could be
+  compromised or replaced. Its list is bounded in size and read for one
+  fact only (which DNS-shaped hostnames exist; odd rows are skipped), an
+  error body never reaches the page (the UI shows the status code, the log
+  gets the message stripped to printable ASCII and clipped), redirects are
+  refused, and the only decision its answer drives is whether a host is
+  submitted, once. It cannot change what is collected or shown about a box.
 - **Bounded everything.** SSH dials, handshakes (including the agent),
   sessions and remote commands are bounded by contexts; a hung `quota` is run
   through a detached helper so it cannot stall the probe; remote stdout is
