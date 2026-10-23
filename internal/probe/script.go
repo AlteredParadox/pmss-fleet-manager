@@ -141,7 +141,7 @@ sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_stat; stat -L -c '%s %Y %Z %i' "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version
 ` + qbtVersionShell + `sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
-sec qbt_start_helper_stale; grep -Eq 'pgrep -u "?[$]USER"?' "$home/bin/qbt-start" 2>/dev/null && echo 1 || echo 0
+sec qbt_start_helper_stale; grep -Eq ` + QbtStaleHelperPattern + ` "$home/bin/qbt-start" 2>/dev/null && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + `
 sec logs
 ` + logsListShell + `# PMSS's live-stats rings (its ADR 0126): node sums for everyone, this
@@ -173,6 +173,15 @@ sec listen_pids
 # co-tenant's listener never appears here. Display only (never a gate).
 ` + listenPIDsShell + `sec end
 `
+
+// QbtStaleHelperPattern is the grep -E pattern, as one single-quoted sh
+// word, for a qbt-start helper whose running check keys on $USER, quoted,
+// braced or bare: the whole variable name, followed by a quote, a non-name
+// character or the end of the line, so a user's own "$USER_ID" does not
+// match. $USER is empty under cron, so such a helper's pgrep fails with a
+// usage error and the helper starts another copy on every run; autostart
+// rewrites it (internal/collect/qbtinstall.go) and the probe flags it.
+const QbtStaleHelperPattern = `'pgrep -u "?([$]USER|[$][{]USER[}])("|[^"A-Za-z0-9_]|$)'`
 
 // QbtCronPattern is the grep -E pattern, as one double-quoted sh word, for a
 // crontab line whose command is nothing but the qbt-start helper: a schedule

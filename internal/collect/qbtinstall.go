@@ -92,18 +92,13 @@ else echo "neither curl nor wget available"; exit 1; fi
 // is a usage error (exit 2), and "! pgrep" then reads that as "not running"
 // and starts another copy every five minutes. Earlier copies of this helper
 // (and the hand-written one it came from) used $USER; autostart replaces
-// those, see qbtStaleHelperPattern.
+// those, see probe.QbtStaleHelperPattern (the probe flags them too).
 const qbtStartHelper = `#!/bin/bash
 # start qbittorrent-nox in a screen session if not already running
 if ! pgrep -u "$(id -u)" -x qbittorrent-nox >/dev/null; then
     screen -dmS qbt "$HOME/bin/qbittorrent-nox"
 fi
 `
-
-// qbtStaleHelperPattern (grep -E, in single quotes) matches a helper whose
-// running check keys on $USER, quoted or not. The probe uses the same
-// pattern to flag such a helper (QbtInfo.StartHelperStale).
-const qbtStaleHelperPattern = `'pgrep -u "?[$]USER"?'`
 
 // autostartScript installs the helper (if missing, or if it is one of ours
 // that keyed on $USER) and the two crontab lines, idempotently: existing
@@ -117,7 +112,7 @@ LC_ALL=C; export LC_ALL
 mkdir -p "$HOME/bin" || exit 1
 write=1
 if [ -e "$HOME/bin/qbt-start" ]; then
-  if grep -Eq ` + qbtStaleHelperPattern + ` "$HOME/bin/qbt-start"; then
+  if grep -Eq ` + probe.QbtStaleHelperPattern + ` "$HOME/bin/qbt-start"; then
     # $USER is empty under cron, so this helper's pgrep fails with a usage
     # error and the helper starts another copy on every run.
     hbak="$HOME/.config/pmss-fleet-manager/qbt-start.bak"

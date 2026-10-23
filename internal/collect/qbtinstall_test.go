@@ -134,6 +134,7 @@ func TestAutostartRewritesUserKeyedHelper(t *testing.T) {
 	for _, old := range []string{
 		"#!/bin/bash\nif ! pgrep -u \"$USER\" -f \"$HOME/bin/qbittorrent-nox\" >/dev/null; then\n    screen -dmS qbt \"$HOME/bin/qbittorrent-nox\"\nfi\n",
 		"#!/bin/bash\nif ! pgrep -u $USER -x qbittorrent-nox; then screen -dmS qbt \"$HOME/bin/qbittorrent-nox\"; fi\n",
+		"#!/bin/bash\npgrep -u \"${USER}\" -x qbittorrent-nox >/dev/null || screen -dmS qbt \"$HOME/bin/qbittorrent-nox\"\n",
 	} {
 		got, out := run(t, old)
 		if got != qbtStartHelper {
@@ -143,9 +144,16 @@ func TestAutostartRewritesUserKeyedHelper(t *testing.T) {
 			t.Errorf("output does not say the helper was saved and rewritten:\n%s", out)
 		}
 	}
-	custom := "#!/bin/sh\n# mine\npgrep -u \"$(id -u)\" -x qbittorrent-nox >/dev/null || \"$HOME/bin/qbittorrent-nox\" -d\n"
-	if got, out := run(t, custom); got != custom || !strings.Contains(out, "left as is") {
-		t.Errorf("the user's own helper was touched:\n%s\n%s", got, out)
+	// The user's own helpers, left alone: one keyed on id -u, and ones
+	// whose own variable merely begins with USER (Codex on #115).
+	for _, custom := range []string{
+		"#!/bin/sh\n# mine\npgrep -u \"$(id -u)\" -x qbittorrent-nox >/dev/null || \"$HOME/bin/qbittorrent-nox\" -d\n",
+		"#!/bin/sh\nUSER_ID=$(id -u)\nif ! pgrep -u \"$USER_ID\" -x qbittorrent-nox >/dev/null; then \"$HOME/bin/qbittorrent-nox\" -d --profile=\"$HOME/alt\"; fi\n",
+		"#!/bin/sh\nUSERID=$(id -u); pgrep -u $USERID -x qbittorrent-nox >/dev/null || \"$HOME/bin/qbittorrent-nox\" -d\n",
+	} {
+		if got, out := run(t, custom); got != custom || !strings.Contains(out, "left as is") {
+			t.Errorf("the user's own helper was touched:\n%s\n%s", got, out)
+		}
 	}
 	if got, out := run(t, ""); got != qbtStartHelper || !strings.Contains(out, "wrote") {
 		t.Errorf("no helper: got\n%s\n%s", got, out)
