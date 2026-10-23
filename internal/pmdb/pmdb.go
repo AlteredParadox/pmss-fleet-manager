@@ -23,8 +23,10 @@
 // service that could be compromised or replaced. A response is bounded in
 // size, read only for the one fact needed (which hostnames exist, as
 // DNS-shaped names), an error body never reaches the page (the UI sees
-// the status code; the body goes to the log stripped to printable ASCII
-// and clipped), and redirects are refused. The only thing the catalogue's
+// the status code; the body of the keyless list fetch goes to the log
+// stripped to printable ASCII and clipped, the body of a submission
+// nowhere), transport errors are fixed messages, and redirects are
+// refused. The only thing the catalogue's
 // answer decides is whether a host is submitted, once.
 package pmdb
 
@@ -36,7 +38,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -75,10 +76,12 @@ var (
 )
 
 // HTTPError is an unexpected status. Error() names only the code, which is
-// what the page shows; Body is the catalogue's message made safe for a log
-// line (printable ASCII, clipped) and is never shown to a person in the
-// dashboard, where it could carry whatever a compromised service wanted
-// read.
+// what the page shows. Body is the catalogue's message made safe for a log
+// line (printable ASCII, clipped), and it is kept only for the keyless
+// list fetch: a response to a submission answered a request that carried
+// the upload key, which the service could echo back in any encoding it
+// likes, so nothing from such a response is kept at all. Body is never
+// shown to a person in the dashboard.
 type HTTPError struct {
 	Code int
 	Body string
@@ -86,18 +89,13 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d from the catalogue", e.Code) }
 
-// redacted stands in for the upload key wherever a response echoed it.
-const redacted = "[upload key]"
-
-// httpErr builds an HTTPError. The catalogue saw the key on a submission
-// and can echo it in the body: every occurrence (plain or URL-encoded) is
-// redacted before the text can reach a log.
-func httpErr(code int, body []byte, key string) error {
-	text := safeText(body)
-	if key != "" { // one pass, so the replacement text is never rescanned
-		text = strings.NewReplacer(key, redacted, url.QueryEscape(key), redacted, url.PathEscape(key), redacted).Replace(text)
+// httpErr builds an HTTPError; the body is kept only when the request
+// carried no secret (see HTTPError).
+func httpErr(code int, body []byte, carriedKey bool) error {
+	if carriedKey {
+		return &HTTPError{Code: code}
 	}
-	return &HTTPError{Code: code, Body: text}
+	return &HTTPError{Code: code, Body: safeText(body)}
 }
 
 // Client is one catalogue endpoint. URL overrides BaseURL (for tests).
@@ -188,7 +186,7 @@ func (c *Client) List(ctx context.Context) (map[string]bool, error) {
 		return nil, err
 	}
 	if code != http.StatusOK {
-		return nil, httpErr(code, body, "")
+		return nil, httpErr(code, body, false)
 	}
 	var rows []json.RawMessage
 	if err := json.Unmarshal(body, &rows); err != nil || rows == nil {
@@ -243,7 +241,7 @@ func (c *Client) Submit(ctx context.Context, key string, row Row) error {
 	case http.StatusTooManyRequests:
 		return fmt.Errorf("%w (HTTP %d)", ErrRateLimited, code)
 	}
-	return httpErr(code, resp, key)
+	return httpErr(code, resp, true)
 }
 
 // Normalize keys a hostname the way the catalogue does: lower-case, no

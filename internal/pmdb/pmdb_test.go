@@ -123,7 +123,7 @@ func TestListAndSubmit(t *testing.T) {
 	status = http.StatusBadRequest
 	err = c.Submit(ctx, "a-passphrase-of-words", row)
 	var he *HTTPError
-	if !errors.As(err, &he) || he.Code != 400 || he.Body != "This server already exists." || err.Error() != "HTTP 400 from the catalogue" {
+	if !errors.As(err, &he) || he.Code != 400 || he.Body != "" || err.Error() != "HTTP 400 from the catalogue" {
 		t.Fatalf("400: %v %+v", err, he)
 	}
 	if err := c.Submit(ctx, "", row); err == nil {
@@ -166,15 +166,19 @@ func TestRedirectRefusedAndKeyNeverReflected(t *testing.T) {
 			t.Fatalf("submit redirect %q: %v", loc, err)
 		}
 	}
+	// A submission's error body is not kept in any form: the key could be
+	// echoed in an encoding no redaction anticipates.
 	location, status = "", http.StatusBadRequest
 	body = `{"error":"bad key ` + key + ` and encoded ` + strings.ReplaceAll(key, "-", "%2D") + `"}`
 	err := c.Submit(ctx, key, Row{ServerName: "x.example"})
 	var he *HTTPError
-	if !errors.As(err, &he) || strings.Contains(he.Body, key) || strings.Contains(err.Error(), key) {
-		t.Fatalf("key reflected: %v %+v", err, he)
+	if !errors.As(err, &he) || he.Body != "" || strings.Contains(err.Error(), key) {
+		t.Fatalf("submission body kept: %v %+v", err, he)
 	}
-	if !strings.Contains(he.Body, "[upload key]") {
-		t.Fatalf("redaction marker missing: %q", he.Body)
+	// The keyless list fetch keeps its sanitised diagnostic.
+	_, err = c.List(ctx)
+	if !errors.As(err, &he) || he.Body == "" || he.Code != 400 {
+		t.Fatalf("list diagnostic lost: %v %+v", err, he)
 	}
 }
 
@@ -199,9 +203,12 @@ func TestTransportErrorsAreFixed(t *testing.T) {
 // error message never reaches the page as it was sent.
 func TestHostileResponses(t *testing.T) {
 	var body string
+	listStatus := http.StatusOK
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/servers/raw" {
 			w.WriteHeader(500)
+		} else {
+			w.WriteHeader(listStatus)
 		}
 		_, _ = io.WriteString(w, body)
 	}))
@@ -230,8 +237,9 @@ func TestHostileResponses(t *testing.T) {
 		t.Fatalf("oversized list: %v", err)
 	}
 
+	listStatus = http.StatusInternalServerError
 	body = `{"error":"\u001b[31mvisit evil.example\nand paste your key\u0007<b>now</b>"}`
-	err = c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example", ProcessorName: "cpu", CoreCount: 1, RAMGiB: 1})
+	_, err = c.List(ctx)
 	var he *HTTPError
 	if !errors.As(err, &he) || err.Error() != "HTTP 500 from the catalogue" {
 		t.Fatalf("hostile error: %v", err)
@@ -240,8 +248,10 @@ func TestHostileResponses(t *testing.T) {
 		t.Fatalf("log text not sanitised: %q", he.Body)
 	}
 	body = strings.Repeat("A\x00", 1000)
-	_ = c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"})
-	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || len(he.Body) > 210 || strings.ContainsRune(he.Body, 0) {
+	if _, err := c.List(ctx); !errors.As(err, &he) || len(he.Body) > 210 || strings.ContainsRune(he.Body, 0) {
 		t.Fatalf("long binary body: %d %q", len(he.Body), he.Body)
+	}
+	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || he.Body != "" {
+		t.Fatalf("submission body kept: %+v", he)
 	}
 }

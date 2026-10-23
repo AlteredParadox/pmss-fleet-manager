@@ -299,11 +299,13 @@ These are the design decisions that came out of it.
   integration on, the dashboard reads a third-party service that could be
   compromised or replaced. Its list is bounded in size and read for one
   fact only (which DNS-shaped hostnames exist; odd rows are skipped), an
-  error body never reaches the page (the UI shows the status code, the log
-  gets the message stripped to printable ASCII, clipped, with the upload
-  key redacted should the service echo it), a transport failure or a
-  redirect is reported as a fixed message rather than Go's own text (which
-  would carry a Location the service controls), redirects are refused, and
+  error body never reaches the page (the UI shows the status code; the
+  log gets the keyless list fetch's message stripped to printable ASCII and
+  clipped, and nothing at all from a response to a submission, which the
+  service could answer with the key it was just sent in any encoding), a
+  transport failure or a redirect is reported as a fixed message rather
+  than Go's own text (which would carry a Location the service controls),
+  redirects are refused, and
   the only decision its answer drives is whether a host is submitted, once.
   It cannot change what is collected or shown about a box.
 - **Bounded everything.** SSH dials, handshakes (including the agent),
