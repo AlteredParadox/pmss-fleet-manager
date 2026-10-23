@@ -264,7 +264,7 @@ async function loadTorrents() {
 // stored), so the draft starts them blank and a save sends them only when
 // typed; SECRET_SETTINGS are the fields a settings event must not overwrite
 // in an open draft.
-const SECRET_SETTINGS = ['pm_api_key', 'pmdb_upload_key'];
+const SECRET_SETTINGS = new Set(['pm_api_key', 'pmdb_upload_key']);
 function settingsDraftOf(settings) {
   return { ...settings, pm_api_key: '', clear_pm_api_key: false, pmdb_upload_key: '', clear_pmdb_upload_key: false };
 }
@@ -357,7 +357,7 @@ function connectEvents() {
     // does not revert them; touched fields and the theme preview stay.
     void loadState().then(() => {
       if (S.view !== 'settings') { render(); return; }
-      for (const k of Object.keys(S.settings)) if (!S.settingsTouched[k] && !SECRET_SETTINGS.includes(k)) S.settingsDraft[k] = S.settings[k];
+      for (const k of Object.keys(S.settings)) if (!S.settingsTouched[k] && !SECRET_SETTINGS.has(k)) S.settingsDraft[k] = S.settings[k];
       applyTheme(S.settingsDraft.theme);
       render();
     });
@@ -1568,7 +1568,7 @@ function viewSettings() {
     <div class="panel"><div class="tile-label">pmdb.fyi hardware catalogue</div>
       <label class="check"><input type="checkbox" data-s="pmdb_enabled" ${s.pmdb_enabled ? 'checked' : ''}> submit the hosts my boxes run on to the community hardware catalogue when they are missing from it</label>
       <label class="row">upload key<input data-s="pmdb_upload_key" type="password" autocomplete="off" value="${esc(s.pmdb_upload_key || '')}" placeholder="${s.clear_pmdb_upload_key ? 'will be removed on save' : S.settings.has_pmdb_upload_key ? '•••••••• (stored)' : 'paste key'}"></label>
-      <div class="hint"><a href="https://pmdb.fyi" target="_blank" rel="noopener">pmdb.fyi ↗</a> is a community-run, public table of Pulsed Media host hardware (<a href="https://github.com/schmintendo/pmdb" target="_blank" rel="noopener">source ↗</a>); the upload key is a shared passphrase handed out by its maintainers. <b>What leaves this dashboard when enabled:</b> a request for the public list, and for each host not in it, one submission with the key carrying the host's hostname, CPU model, core count, nominal clock, RAM, swap, home filesystem size and whether an Intel GPU is present. Nothing about your account, username, usage, torrents or this dashboard is sent, and an existing row is never replaced. Checked after each box's quarter-hourly inventory and every six hours. Stored in the local database; leave the key blank to keep the current one.${S.settings.has_pmdb_upload_key && !s.clear_pmdb_upload_key ? ` <button class="small ghost" data-act="settings:clear-pmdb-key">remove key</button>` : ''}</div>
+      <div class="hint"><a href="https://pmdb.fyi" target="_blank" rel="noopener">pmdb.fyi ↗</a> is a community-run, public table of Pulsed Media host hardware (<a href="https://github.com/schmintendo/pmdb" target="_blank" rel="noopener">source ↗</a>); the upload key is a shared passphrase handed out by its maintainers. <b>What leaves this dashboard when enabled:</b> a request for the public list, and for each host not in it, one submission with the key carrying the host's hostname, CPU model, core count, nominal clock, RAM, swap, home filesystem size and whether an Intel GPU is present. Nothing about your account, username, usage, torrents or this dashboard is sent, and an existing row is never replaced. Checked after each box's quarter-hourly inventory and every six hours. Stored in the local database; leave the key blank to keep the current one, and removing it switches submission off.${S.settings.has_pmdb_upload_key && !s.clear_pmdb_upload_key ? ` <button class="small ghost" data-act="settings:clear-pmdb-key">remove key</button>` : ''}</div>
       ${viewPMDB()}
     </div>
     <div class="form-foot" style="justify-content:flex-start"><button class="primary" data-act="settings:save">save settings</button></div>
@@ -1588,7 +1588,7 @@ function viewPMDB() {
   const label = { listed: 'in the catalogue', submitted: 'submitted', pending: 'not listed, submission pending', error: 'submission failed' };
   const rows = v.hosts.map((h) => `<div class="row"><span>${esc(h.hostname)}${h.box_ids.length > 1 ? ` <span class="muted">· ${h.box_ids.length} boxes</span>` : ''}</span><span class="${h.status === 'error' ? 'bad' : 'muted'}" title="${esc(h.detail || '')}">${label[h.status] || esc(h.status)}${h.detail ? `: ${esc(h.detail)}` : ''}</span></div>`).join('');
   const status = v.error ? `<span class="bad">${esc(v.error)}</span>` : v.checked_at ? `checked ${fmtAgo(v.checked_at)}` : v.configured ? 'not checked yet' : 'save an upload key to start';
-  return `<div class="row" style="margin-top:8px"><span class="muted">${status}</span>${v.configured ? '<button class="small ghost" data-act="pmdb:sync">check now</button>' : ''}</div>${rows || (v.configured ? '<div class="hint">No host has reported its inventory yet.</div>' : '')}`;
+  return `<div class="row" style="margin-top:8px"><span class="muted">${status}</span>${v.configured ? '<button class="small ghost" data-act="settings:pmdb-sync">check now</button>' : ''}</div>${rows || (v.configured ? '<div class="hint">No host has reported its inventory yet.</div>' : '')}`;
 }
 function viewServices() {
   const v = S.services;
@@ -1778,7 +1778,7 @@ async function settingsAction(a) {
   }
   else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; S.settingsTouched.clear_pm_api_key = true; render(); }
   else if (a === 'settings:clear-pmdb-key') { S.settingsDraft.clear_pmdb_upload_key = true; S.settingsDraft.pmdb_upload_key = ''; S.settingsTouched.clear_pmdb_upload_key = true; render(); }
-  else if (a === 'pmdb:sync') { toast('checking pmdb.fyi…'); const v = await api('POST', BASE + '/api/pmdb/sync'); pmdbSeq++; S.pmdb = v; toast(v.error ? v.error : `checked ${v.hosts.length} hosts`, v.error ? 'bad' : 'ok'); render(); }
+  else if (a === 'settings:pmdb-sync') { toast('checking pmdb.fyi…'); const v = await api('POST', BASE + '/api/pmdb/sync'); pmdbSeq++; S.pmdb = v; toast(v.error ? v.error : `checked ${v.hosts.length} hosts`, v.error ? 'bad' : 'ok'); render(); }
 }
 // settingsPatch is the settings save body: the touched fields, numbers as
 // numbers, the API key only when typed and the clear flag only when set

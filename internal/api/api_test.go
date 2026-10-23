@@ -856,17 +856,13 @@ func TestSettingsPMDB(t *testing.T) {
 	if got := srv.m.Settings(); got.PMDBUploadKey != "some words here" || !got.PMDBEnabled {
 		t.Fatalf("stored: %+v", got)
 	}
-	// An empty key on a later save keeps the stored one; the flag removes
-	// it, which also has to switch the integration off.
 	if code, _ = do(t, srv, "PUT", "/api/settings", `{"theme":"light"}`, nil); code != 200 || srv.m.Settings().PMDBUploadKey != "some words here" {
 		t.Fatalf("key not kept: %d", code)
 	}
+	// An empty key on a later save keeps the stored one; the flag removes
+	// it, which switches the integration off with it.
 	code, body = do(t, srv, "PUT", "/api/settings", `{"clear_pmdb_upload_key":true}`, nil)
-	if code != 400 || !strings.Contains(body, "untick") {
-		t.Fatalf("clearing the key while enabled: %d %s", code, body)
-	}
-	code, body = do(t, srv, "PUT", "/api/settings", `{"clear_pmdb_upload_key":true,"pmdb_enabled":false}`, nil)
-	if code != 200 || srv.m.Settings().PMDBUploadKey != "" || !strings.Contains(body, `"has_pmdb_upload_key":false`) {
+	if code != 200 || srv.m.Settings().PMDBUploadKey != "" || srv.m.Settings().PMDBEnabled || !strings.Contains(body, `"has_pmdb_upload_key":false`) || !strings.Contains(body, `"pmdb_enabled":false`) {
 		t.Fatalf("clear: %d %s", code, body)
 	}
 	if code, body = do(t, srv, "GET", "/api/pmdb", "", nil); code != 200 || !strings.Contains(body, `"enabled":false`) {

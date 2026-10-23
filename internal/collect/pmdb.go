@@ -63,6 +63,8 @@ type pmdbState struct {
 	hosts     map[string]*pmdbStatus
 	checkedAt time.Time
 	err       string
+	gen       uint64             // bumped by every reset; a run from an older generation stores nothing
+	cancel    context.CancelFunc // the run in flight, cancelled by a reset
 }
 
 // pmdbRetry is how long a failed submission waits before another try, and
@@ -103,14 +105,8 @@ func pmdbRow(st *BoxState) (pmdb.Row, bool) {
 func round2(f float64) float64 { return math.Round(f*100) / 100 }
 
 // pmdbCandidates groups the current box states by catalogue key.
-func (m *Manager) pmdbCandidates() map[string]struct {
-	row pmdb.Row
-	ids []int64
-} {
-	out := map[string]struct {
-		row pmdb.Row
-		ids []int64
-	}{}
+func (m *Manager) pmdbCandidates() map[string]pmdbCandidate {
+	out := map[string]pmdbCandidate{}
 	for _, st := range m.States() {
 		if !st.Ready {
 			continue
@@ -164,20 +160,92 @@ func (m *Manager) pmdbLoop() {
 
 // SyncPMDB checks every box's host against the catalogue now and submits
 // the ones that are missing. Calls are serialised. A host whose submission
-// failed is retried after pmdbRetry; a refused key stops submissions until
-// the key changes (SetSettings clears the state then).
+// failed is retried after pmdbRetry; a refused key stops the run until the
+// key changes. The run belongs to the settings it started under: when the
+// opt-in is withdrawn or the key replaced meanwhile (resetPMDB), its
+// context is cancelled, a list it already fetched is discarded rather than
+// rebuilt into state, and no further host is posted.
 func (m *Manager) SyncPMDB(ctx context.Context) {
 	m.pmdbSyncMu.Lock()
 	defer m.pmdbSyncMu.Unlock()
-	s := m.Settings()
-	if !s.PMDBEnabled || s.PMDBUploadKey == "" {
+	run, ok := m.pmdbBegin(ctx)
+	if !ok {
 		return
 	}
-	cands := m.pmdbCandidates()
+	defer run.cancel()
+	todo, cands, ok := m.pmdbPlan(run)
+	if !ok {
+		return
+	}
+	for _, name := range todo {
+		if !m.pmdbCurrent(run) {
+			return
+		}
+		sctx, scancel := context.WithTimeout(run.ctx, time.Minute)
+		err := m.pmdb.Submit(sctx, run.key, cands[name].row)
+		scancel()
+		if m.pmdbRecord(run, name, err) {
+			break
+		}
+	}
+	m.Publish(Event{Type: "pmdb"})
+}
+
+// pmdbRun is one SyncPMDB in flight: the key it posts with, the state
+// generation it started in and a context resetPMDB cancels.
+type pmdbRun struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	key    string
+	gen    uint64
+}
+
+// pmdbBegin opens a run under the current settings, or false when the
+// integration is off.
+func (m *Manager) pmdbBegin(ctx context.Context) (*pmdbRun, bool) {
+	s := m.Settings()
+	if !s.PMDBEnabled || s.PMDBUploadKey == "" {
+		return nil, false
+	}
+	run := &pmdbRun{key: s.PMDBUploadKey}
+	run.ctx, run.cancel = context.WithCancel(ctx)
+	m.pmdbMu.Lock()
+	run.gen, m.pmdbSt.cancel = m.pmdbSt.gen, run.cancel
+	m.pmdbMu.Unlock()
+	return run, true
+}
+
+// pmdbCurrent reports whether the run's settings still stand: the opt-in
+// is on, the key is the one it started with and no reset happened since.
+// Checked before anything is stored or posted.
+func (m *Manager) pmdbCurrent(run *pmdbRun) bool {
+	if run.ctx.Err() != nil {
+		return false
+	}
+	s := m.Settings()
+	m.pmdbMu.Lock()
+	gen := m.pmdbSt.gen
+	m.pmdbMu.Unlock()
+	return s.PMDBEnabled && s.PMDBUploadKey == run.key && gen == run.gen
+}
+
+type pmdbCandidate struct {
+	row pmdb.Row
+	ids []int64
+}
+
+// pmdbPlan fetches the catalogue list and merges it into the hosts' standing,
+// returning the hosts to submit, sorted. false means nothing is to be done:
+// the list could not be fetched (recorded in the view) or the run is stale.
+func (m *Manager) pmdbPlan(run *pmdbRun) (todo []string, cands map[string]pmdbCandidate, ok bool) {
+	cands = m.pmdbCandidates()
 	now := time.Now()
-	fctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	fctx, cancel := context.WithTimeout(run.ctx, 2*time.Minute)
 	defer cancel()
 	listed, err := m.pmdb.List(fctx)
+	if !m.pmdbCurrent(run) {
+		return nil, nil, false
+	}
 	m.pmdbMu.Lock()
 	if m.pmdbSt.hosts == nil {
 		m.pmdbSt.hosts = map[string]*pmdbStatus{}
@@ -187,8 +255,9 @@ func (m *Manager) SyncPMDB(ctx context.Context) {
 		m.pmdbMu.Unlock()
 		m.log.Warn("pmdb list", "err", err)
 		m.Publish(Event{Type: "pmdb"})
-		return
+		return nil, nil, false
 	}
+	defer m.pmdbMu.Unlock()
 	m.pmdbSt.err, m.pmdbSt.checkedAt = "", now
 	// Hosts whose boxes are gone drop out of the view.
 	for name := range m.pmdbSt.hosts {
@@ -196,60 +265,53 @@ func (m *Manager) SyncPMDB(ctx context.Context) {
 			delete(m.pmdbSt.hosts, name)
 		}
 	}
-	var todo []string
 	for name, c := range cands {
-		h := m.pmdbSt.hosts[name]
-		if h == nil {
-			h = &pmdbStatus{Hostname: name}
-			m.pmdbSt.hosts[name] = h
-		}
-		h.BoxIDs = append([]int64(nil), c.ids...)
-		switch {
-		case listed[name]:
-			if h.Status != "listed" {
-				h.Status, h.Detail, h.At = "listed", "", now
-			}
-		case h.Status == "submitted":
-			// Accepted earlier but not in the list yet: the catalogue
-			// may cache; leave it, the next check will see it.
-		case h.Status == "error" && now.Before(h.retryAt):
-			// Backing off.
-		default:
-			if h.Status == "" {
-				h.Status, h.At = "pending", now
-			}
+		if m.pmdbMerge(name, c, listed[name], now) {
 			todo = append(todo, name)
 		}
 	}
 	sort.Strings(todo)
-	m.pmdbMu.Unlock()
+	return todo, cands, true
+}
 
-	for _, name := range todo {
-		if ctx.Err() != nil {
-			return
-		}
-		if s.PMDBUploadKey != m.Settings().PMDBUploadKey {
-			return // key replaced meanwhile: the new key's run will decide
-		}
-		sctx, scancel := context.WithTimeout(ctx, time.Minute)
-		err := m.pmdb.Submit(sctx, s.PMDBUploadKey, cands[name].row)
-		scancel()
-		if stop := m.pmdbRecord(name, err); stop {
-			break
-		}
+// pmdbMerge updates one host's standing from the catalogue list and reports
+// whether it is to be submitted. Called under pmdbMu.
+func (m *Manager) pmdbMerge(name string, c pmdbCandidate, listed bool, now time.Time) bool {
+	h := m.pmdbSt.hosts[name]
+	if h == nil {
+		h = &pmdbStatus{Hostname: name}
+		m.pmdbSt.hosts[name] = h
 	}
-	m.Publish(Event{Type: "pmdb"})
+	h.BoxIDs = append([]int64(nil), c.ids...)
+	switch {
+	case listed:
+		if h.Status != "listed" {
+			h.Status, h.Detail, h.At = "listed", "", now
+		}
+		return false
+	case h.Status == "submitted":
+		// Accepted earlier but not in the list yet: the catalogue may
+		// cache; leave it, the next check will see it.
+		return false
+	case h.Status == "error" && now.Before(h.retryAt):
+		return false // backing off
+	}
+	if h.Status == "" {
+		h.Status, h.At = "pending", now
+	}
+	return true
 }
 
 // pmdbRecord notes a submission's outcome. It returns true when the rest
-// of the run is pointless: a refused key would refuse every host the same
-// way, so one refusal stops the run and is shown once, at the top.
-func (m *Manager) pmdbRecord(name string, err error) (stop bool) {
+// of the run is pointless: the run is stale, or a refused key would refuse
+// every host the same way, so one refusal stops the run and is shown once,
+// at the top.
+func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 	m.pmdbMu.Lock()
 	defer m.pmdbMu.Unlock()
 	h := m.pmdbSt.hosts[name]
-	if h == nil {
-		return true // the state was reset while this ran (key changed)
+	if h == nil || m.pmdbSt.gen != run.gen {
+		return true // reset while this ran (opt-out or key change): the outcome belongs to nobody
 	}
 	now := time.Now()
 	switch {
@@ -269,12 +331,16 @@ func (m *Manager) pmdbRecord(name string, err error) (stop bool) {
 	return false
 }
 
-// resetPMDB forgets every host's standing, so a changed key or a re-enable
-// starts from the public list again.
+// resetPMDB forgets every host's standing and cancels a run in flight, so
+// a changed key or a re-enable starts from the public list again and an
+// opt-out posts nothing more.
 func (m *Manager) resetPMDB() {
 	m.pmdbMu.Lock()
-	m.pmdbSt = pmdbState{}
-	m.pmdbMu.Unlock()
+	defer m.pmdbMu.Unlock()
+	if m.pmdbSt.cancel != nil {
+		m.pmdbSt.cancel()
+	}
+	m.pmdbSt = pmdbState{gen: m.pmdbSt.gen + 1}
 }
 
 // PMDB returns the catalogue standing of every host, sorted by hostname.

@@ -1369,10 +1369,10 @@ func (s *Server) handleAckAll(w http.ResponseWriter, r *http.Request) {
 // holding one of the forbidden characters is a paste gone wrong, not a
 // key (quotes and line breaks for either; spaces too for the PM API key,
 // while a pmdb upload key is a passphrase that may have them).
-func mergeSecret(typed, stored string, clear bool, what, forbidden string) (string, error) {
+func mergeSecret(typed, stored string, remove bool, what, forbidden string) (string, error) {
 	typed = strings.TrimSpace(typed)
 	switch {
-	case clear:
+	case remove:
 		return "", nil
 	case typed == "":
 		return stored, nil
@@ -1440,6 +1440,9 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	if err400 != nil {
 		writeErr(w, 400, err400)
 		return
+	}
+	if in.ClearPMDBUploadKey {
+		in.PMDBEnabled = false // "remove key" is the way out of the integration too; a key is what it runs on
 	}
 	in.ClearPMDBUploadKey = false
 	if in.PMDBEnabled && in.PMDBUploadKey == "" {

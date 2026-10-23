@@ -180,3 +180,93 @@ func TestSyncPMDB(t *testing.T) {
 		t.Fatalf("409 not counted as listed: %+v", v)
 	}
 }
+
+// Opting out while a run is in flight posts nothing more: a list fetched
+// before the opt-out is discarded instead of becoming state, and a run
+// between two submissions stops before the second.
+func TestSyncPMDBStopsOnOptOut(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var posts int
+	listArrived, release := make(chan struct{}), make(chan struct{})
+	var onPost func()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/servers":
+			select {
+			case listArrived <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, `[]`)
+		case "/api/servers/raw":
+			mu.Lock()
+			posts++
+			mu.Unlock()
+			if onPost != nil {
+				onPost()
+			}
+			w.WriteHeader(http.StatusCreated)
+		}
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmdb.URL = srv.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	hw := HostState{CPUModel: "Intel(R) N100", NCPU: 4, MemTotal: 32 << 30, HomeSize: 60 << 40}
+	for i, host := range []string{"odin.pulsedmedia.com", "thor.pulsedmedia.com"} {
+		b := &store.Box{Name: string(rune('a' + i)), Host: "h" + string(rune('a'+i)) + ".example", User: "u", Port: 22, Enabled: false}
+		if err := m.AddBox(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		m.mutateState(b.ID, func(s *BoxState) { s.Ready, s.Hostname, s.HostSys = true, host, hw })
+	}
+	s := m.Settings()
+	s.PMDBEnabled, s.PMDBUploadKey = true, "a-passphrase-of-words"
+	m.SetSettings(s)
+
+	// 1. The list is still fetching when the user unticks the box.
+	done := make(chan struct{})
+	go func() { m.SyncPMDB(ctx); close(done) }()
+	<-listArrived
+	off := s
+	off.PMDBEnabled = false
+	m.SetSettings(off)
+	close(release)
+	<-done
+	mu.Lock()
+	n := posts
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("posted %d hosts after the opt-out", n)
+	}
+	if v := m.PMDB(); v.Enabled || len(v.Hosts) != 0 || v.CheckedAt != "" {
+		t.Fatalf("stale list became state: %+v", v)
+	}
+
+	// 2. The opt-out lands between two submissions: the second never goes.
+	onPost = func() {
+		o := m.Settings()
+		o.PMDBEnabled = false
+		m.SetSettings(o)
+	}
+	m.SetSettings(s)
+	m.SyncPMDB(ctx)
+	mu.Lock()
+	n = posts
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("posted %d hosts; the opt-out after the first must stop the second", n)
+	}
+	if v := m.PMDB(); v.Enabled || len(v.Hosts) != 0 {
+		t.Fatalf("the stale run's outcome became state: %+v", v)
+	}
+}
