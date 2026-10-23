@@ -270,3 +270,64 @@ func TestSyncPMDBStopsOnOptOut(t *testing.T) {
 		t.Fatalf("the stale run's outcome became state: %+v", v)
 	}
 }
+
+// A rate-limited submission ends the run: the remaining hosts stay pending
+// for the next one instead of piling more requests onto a throttle.
+func TestSyncPMDBStopsOnRateLimit(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/servers" {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		mu.Lock()
+		posts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmdb.URL = srv.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	hw := HostState{CPUModel: "Intel(R) N100", NCPU: 4, MemTotal: 32 << 30, HomeSize: 60 << 40}
+	for i, host := range []string{"odin.pulsedmedia.com", "thor.pulsedmedia.com", "loki.pulsedmedia.com"} {
+		b := &store.Box{Name: string(rune('a' + i)), Host: "h" + string(rune('a'+i)) + ".example", User: "u", Port: 22, Enabled: false}
+		if err := m.AddBox(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		m.mutateState(b.ID, func(s *BoxState) { s.Ready, s.Hostname, s.HostSys = true, host, hw })
+	}
+	s := m.Settings()
+	s.PMDBEnabled, s.PMDBUploadKey = true, "a-passphrase-of-words"
+	m.SetSettings(s)
+	m.SyncPMDB(ctx)
+	mu.Lock()
+	n := posts
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d submissions after a 429; want 1", n)
+	}
+	var errs, pending int
+	for _, h := range m.PMDB().Hosts {
+		switch h.Status {
+		case "error":
+			errs++
+		case "pending":
+			pending++
+		}
+	}
+	if errs != 1 || pending != 2 {
+		t.Fatalf("standing after a 429: %+v", m.PMDB().Hosts)
+	}
+}
+

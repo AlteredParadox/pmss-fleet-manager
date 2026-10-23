@@ -359,6 +359,7 @@ function connectEvents() {
       if (S.view !== 'settings') { render(); return; }
       for (const k of Object.keys(S.settings)) if (!S.settingsTouched[k] && !SECRET_SETTINGS.has(k)) S.settingsDraft[k] = S.settings[k];
       applyTheme(S.settingsDraft.theme);
+      void loadPMDB(); // the other tab may have switched the catalogue off or changed its key: the panel follows
       render();
     });
   });

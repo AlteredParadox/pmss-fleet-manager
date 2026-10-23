@@ -308,9 +308,9 @@ func (m *Manager) pmdbMerge(name string, c pmdbCandidate, listed bool, now time.
 }
 
 // pmdbRecord notes a submission's outcome. It returns true when the rest
-// of the run is pointless: the run is stale, or a refused key would refuse
-// every host the same way, so one refusal stops the run and is shown once,
-// at the top.
+// of the run is pointless: the run is stale, a refused key would refuse
+// every host the same way (one refusal stops the run and is shown once, at
+// the top), or the catalogue is rate-limiting this address.
 func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 	m.pmdbMu.Lock()
 	defer m.pmdbMu.Unlock()
@@ -338,6 +338,9 @@ func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 		if errors.Is(err, pmdb.ErrAuth) {
 			m.pmdbSt.err = "upload key refused by pmdb.fyi; check the key in settings"
 			return true
+		}
+		if errors.Is(err, pmdb.ErrRateLimited) {
+			return true // the catalogue is throttling this address: the rest waits for the next run
 		}
 	}
 	return false
