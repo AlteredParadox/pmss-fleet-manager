@@ -212,6 +212,13 @@ func (m *Manager) SyncPMDB(ctx context.Context) {
 		sctx, scancel := context.WithTimeout(run.ctx, time.Minute)
 		err := m.pmdb.Submit(sctx, run.key, c.row)
 		scancel()
+		if ctx.Err() != nil {
+			// The caller went away (a manual check whose page was closed,
+			// or shutdown): not the catalogue's doing, so nothing is
+			// recorded and no hold is set. The run's own budget is on
+			// run.ctx, not ctx, and still counts as a service failure.
+			return
+		}
 		if m.pmdbRecord(run, name, err) {
 			break
 		}

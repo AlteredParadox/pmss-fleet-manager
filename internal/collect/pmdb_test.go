@@ -574,3 +574,70 @@ func TestSyncPMDBRevalidatesAfterFetch(t *testing.T) {
 		t.Fatalf("removed box submitted: posts=%d hosts=%+v", n, m.PMDB().Hosts)
 	}
 }
+
+// A caller that goes away mid-submission (a manual check whose page was
+// closed) is not a catalogue failure: nothing is recorded, no hold is set,
+// and the next run proceeds.
+func TestSyncPMDBCallerCancelIsNotAFailure(t *testing.T) {
+	var mu sync.Mutex
+	var posts, lists int
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path == "/api/servers" {
+			lists++
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		posts++
+		if posts == 1 {
+			cancel() // the page closed while this submission was in flight
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmdb.URL = srv.URL
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	hw := HostState{CPUModel: "Intel(R) N100", NCPU: 4, MemTotal: 32 << 30, HomeSize: 60 << 40}
+	for i, host := range []string{"odin.pulsedmedia.com", "thor.pulsedmedia.com"} {
+		b := &store.Box{Name: string(rune('a' + i)), Host: "h" + string(rune('a'+i)) + ".example", User: "u", Port: 22, Enabled: false}
+		if err := m.AddBox(context.Background(), b); err != nil {
+			t.Fatal(err)
+		}
+		m.mutateState(b.ID, func(s *BoxState) { s.Ready, s.Hostname, s.HostSys = true, host, hw })
+	}
+	s := m.Settings()
+	s.PMDBEnabled, s.PMDBUploadKey = true, "a-passphrase-of-words"
+	m.SetSettings(s)
+	m.SyncPMDB(ctx)
+	if v := m.PMDB(); v.Error != "" {
+		t.Fatalf("caller cancel recorded as a failure: %+v", v)
+	}
+	for _, h := range m.PMDB().Hosts {
+		if h.Status == "error" {
+			t.Fatalf("caller cancel recorded on a host: %+v", h)
+		}
+	}
+	m.SyncPMDB(context.Background()) // not held: fetches again and finishes the second host
+	mu.Lock()
+	p, l := posts, lists
+	mu.Unlock()
+	if l != 2 || p < 2 {
+		t.Fatalf("after a caller cancel: lists=%d posts=%d", l, p)
+	}
+	if v := m.PMDB(); v.Error != "" {
+		t.Fatalf("second run: %+v", v)
+	}
+}
+
