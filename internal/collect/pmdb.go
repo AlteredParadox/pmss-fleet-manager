@@ -301,8 +301,8 @@ func (m *Manager) pmdbPlan(run *pmdbRun) (todo []string, ok bool) {
 	}
 	if err != nil {
 		m.pmdbSt.err = "catalogue list: " + err.Error()
-		if pmdbServiceDown(err) {
-			m.pmdbSt.holdUntil = now.Add(pmdbRetry)
+		if pmdbServiceDown(err) || errors.Is(err, pmdb.ErrRateLimited) {
+			m.pmdbSt.holdUntil = now.Add(pmdbRetry) // the throttle is per address: every run waits, not just this one
 		}
 		m.pmdbMu.Unlock()
 		m.log.Warn("pmdb list", "err", err) // err is our own fixed text or a status code, never the catalogue's words

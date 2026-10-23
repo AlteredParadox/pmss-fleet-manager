@@ -73,8 +73,8 @@ var (
 	ErrExists = errors.New("host is already in the catalogue")
 	// ErrAuth is a 401: the upload key was refused.
 	ErrAuth = errors.New("upload key refused")
-	// ErrRateLimited is a 429: too many uploads from this address.
-	ErrRateLimited = errors.New("upload rate limit reached")
+	// ErrRateLimited is a 429: too many requests from this address.
+	ErrRateLimited = errors.New("rate limit reached")
 	// ErrRedirect: the catalogue answered with a redirect, which is never
 	// followed (the key travels in an Authorization header, and the
 	// catalogue has one fixed URL).
@@ -195,10 +195,13 @@ func (c *Client) List(ctx context.Context) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	if code != http.StatusOK {
-		return nil, &HTTPError{Code: code}
+	switch code {
+	case http.StatusOK:
+		return parseList(body)
+	case http.StatusTooManyRequests:
+		return nil, fmt.Errorf("%w (HTTP %d)", ErrRateLimited, code)
 	}
-	return parseList(body)
+	return nil, &HTTPError{Code: code}
 }
 
 func parseList(body []byte) (map[string]bool, error) {

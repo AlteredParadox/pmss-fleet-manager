@@ -419,7 +419,7 @@ func TestSyncPMDBHolds(t *testing.T) {
 	ctx := context.Background()
 	var mu sync.Mutex
 	var posts, lists int
-	slow := false
+	slow, listStatus := false, http.StatusOK
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -430,6 +430,7 @@ func TestSyncPMDBHolds(t *testing.T) {
 				time.Sleep(300 * time.Millisecond)
 				mu.Lock()
 			}
+			w.WriteHeader(listStatus)
 			_, _ = io.WriteString(w, `[]`)
 			return
 		}
@@ -496,6 +497,21 @@ func TestSyncPMDBHolds(t *testing.T) {
 	mu.Unlock()
 	if l != 2 {
 		t.Fatalf("not held after a service failure: lists=%d", l)
+	}
+	// A rate-limited list fetch holds every run too.
+	pmdbRunBudget = prev
+	s.PMDBUploadKey = "a-third-passphrase-of-words"
+	m.SetSettings(s)
+	mu.Lock()
+	slow, listStatus = false, http.StatusTooManyRequests
+	mu.Unlock()
+	m.SyncPMDB(ctx)
+	m.SyncPMDB(ctx)
+	mu.Lock()
+	l = lists
+	mu.Unlock()
+	if v := m.PMDB(); l != 3 || !strings.Contains(v.Error, "rate limit") {
+		t.Fatalf("list 429: lists=%d view=%+v", l, v)
 	}
 }
 

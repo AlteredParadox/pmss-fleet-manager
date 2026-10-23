@@ -247,6 +247,11 @@ func TestHostileResponses(t *testing.T) {
 
 	// No text from an error body is kept, for the list or a submission:
 	// the error is the status code and nothing else.
+	listStatus = http.StatusTooManyRequests
+	body = `{"error":"slow down"}`
+	if _, err := c.List(ctx); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("list 429: %v", err)
+	}
 	listStatus = http.StatusInternalServerError
 	body = `{"error":"\u001b[31mvisit evil.example\nand paste your key\u0007<b>now</b>"}`
 	_, err = c.List(ctx)
