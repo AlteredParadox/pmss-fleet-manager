@@ -122,7 +122,8 @@ count, nominal clock, RAM, swap, home filesystem size and whether an Intel GPU
 is present. Nothing about your account, username, usage or torrents leaves
 the dashboard (as with any web request, the service sees your IP address and
 the client name), an existing row is never replaced, and the check runs after a
-box's quarter-hourly inventory, every six hours, and on demand. The settings
+box's quarter-hourly inventory (asking the catalogue only while a host still
+needs deciding), every six hours, and on demand. The settings
 page lists each host's standing (listed, submitted, pending, or the error).
 Off by default; untick the box or remove the key to stop it.
 
@@ -300,23 +301,34 @@ These are the design decisions that came out of it.
 - **The hardware catalogue is untrusted input.** With the pmdb.fyi
   integration on, the dashboard reads a third-party service that could be
   compromised or replaced. Its list is bounded in size and read for one
-  fact only (which DNS-shaped hostnames exist; odd rows are skipped), no
-  text from any response is kept, logged or shown (the service knows
-  the shared upload key and could echo it in any encoding; an error is a
-  fixed message or a status code), the list is streamed with a hard row
-  cap so a flood of tiny elements costs no more than its bytes, response
-  headers and a submission's answer are capped small, a transport failure
-  or a redirect is reported as a fixed message rather than Go's own text
-  (which would carry a Location the service controls), redirects are
-  refused, one run has a total time budget, a submission budget and stops
-  at a rate limit or a service failure, every list failure holds the next
-  runs for an hour, and the only decision its answer drives is whether a
-  host is submitted, once: a host seen listed, accepted or reported as
+  fact only (which DNS-shaped hostnames exist; odd rows are skipped), the
+  bytes counted are the ones on the wire (compression is never asked for
+  and a compressed answer is refused rather than decoded, since a gzip
+  stream of any length can unpack to two bytes), no text from any
+  response is kept, logged or shown (the service knows the shared upload
+  key and could echo it in any encoding; an error is a fixed message or a
+  status code), every request has its own connection (bytes a server sends
+  after the answer it declared would otherwise be found on an idle
+  connection and quoted into Go's standard logger, below anything the
+  code can intercept), the list is streamed with a hard row cap so a
+  flood of tiny elements costs no more than its bytes, response headers
+  are capped small and a submission's answer is its status code alone
+  (the body is never read, so an acceptance cannot be turned into a
+  failure by what follows it), a transport failure or a redirect is
+  reported as a fixed message rather than Go's own text (which would
+  carry a Location the service controls), redirects are refused, one run
+  has a total time budget, a submission budget and stops at a rate limit
+  or a service failure, every list failure holds the next runs for an
+  hour, the automatic cost is bounded whatever the service sends (a check
+  after an inventory fetches the list only while a host still needs
+  deciding and at most every ten minutes; the six-hourly check and "check
+  now" always fetch), and the only decision its answer drives is whether
+  a host is submitted, once: a host seen listed, accepted or reported as
   existing is settled for the life of the process, whatever a later list
-  says. It cannot change what is collected or shown
-  about a box. What a compromised catalogue can still do is inherent in
-  talking to it: lie about which hosts are listed (so a host is submitted,
-  or not), refuse or throttle, and see the request itself.
+  says. It cannot change what is collected or shown about a box. What a
+  compromised catalogue can still do is inherent in talking to it: lie
+  about which hosts are listed (so a host is submitted, or not), refuse or
+  throttle, and see the request itself.
 - **Bounded everything.** SSH dials, handshakes (including the agent),
   sessions and remote commands are bounded by contexts; a hung `quota` is run
   through a detached helper so it cannot stall the probe; remote stdout is

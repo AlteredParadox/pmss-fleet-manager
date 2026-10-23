@@ -21,14 +21,19 @@
 //
 // Everything the catalogue sends back is untrusted: it is a third-party
 // service that could be compromised or replaced, and it knows the shared
-// upload key. So: a response is bounded in bytes, rows and header size;
-// the list is read for the one fact needed (which DNS-shaped hostnames
-// exist), streamed row by row with a hard row cap; no text from any
+// upload key. So: a response is bounded in bytes, rows and header size,
+// and the bytes counted are the ones on the wire (no transparent
+// decompression: a compressed answer is refused, not decoded); the list is
+// read for the one fact needed (which DNS-shaped hostnames exist),
+// streamed row by row with a hard row cap; a submission's answer is its
+// status code and its body is never read at all; no text from any
 // response is ever kept, logged or shown (an error is a fixed message or a
 // status code); transport failures are fixed messages too, because Go's
 // own text carries the URL and any Location the server sent; redirects are
-// refused. The only thing the catalogue's answer decides is whether a host
-// is submitted, once.
+// refused; every request has its own connection, so bytes a server sends
+// after the answer it declared are never found on an idle one (which
+// net/http would quote into the standard logger). The only thing the
+// catalogue's answer decides is whether a host is submitted, once.
 package pmdb
 
 import (
@@ -88,6 +93,10 @@ var (
 	ErrTooLarge = errors.New("the catalogue's response is larger than allowed; refusing to read it")
 	// ErrNotAList: the list body is not a JSON array.
 	ErrNotAList = errors.New("the catalogue list is not a JSON array")
+	// ErrEncoded: the response is compressed or otherwise encoded, which
+	// is never asked for and never decoded (the byte caps count wire
+	// bytes; a gzip stream of any length can decode to two).
+	ErrEncoded = errors.New("the catalogue's response is encoded; refusing to decode it")
 
 	errRedirect = errors.New("redirect")
 )
@@ -109,10 +118,11 @@ type Client struct {
 }
 
 // Limits. The whole table is a few hundred rows; a real response is a few
-// hundred KiB at most.
+// hundred KiB at most. The byte caps are wire bytes of the body as the
+// transport frames it; the request deadline is the bound on everything
+// else (a slow trickle, chunk framing overhead).
 const (
 	maxListBytes      = 4 << 20  // the list body
-	maxSubmitBytes    = 64 << 10 // a submission's answer, which is never read for content
 	maxListRows       = 10000    // elements of the list array, decoded one at a time
 	maxHeaderBytes    = 64 << 10 // response headers (Go's default allows ~10 MiB)
 	requestTimeout    = 30 * time.Second
@@ -129,26 +139,43 @@ func (c *Client) base() string {
 func noRedirect(*http.Request, []*http.Request) error { return errRedirect }
 
 // client is the one HTTP client, with its own transport: header size
-// capped, redirects refused, one request deadline.
+// capped, redirects refused, one request deadline, no transparent
+// decompression and no connection reuse.
 func (c *Client) client() *http.Client {
 	c.once.Do(func() {
 		tr := http.DefaultTransport.(*http.Transport).Clone()
 		tr.MaxResponseHeaderBytes = maxHeaderBytes
 		tr.ResponseHeaderTimeout = responseHeaderCap
+		// The body limits must count what arrives, not what a decoder
+		// makes of it: with compression on, Go would add Accept-Encoding
+		// gzip and unpack the answer underneath the limiter, so a stream
+		// of empty gzip members of any size would decode to "[]" and
+		// pass. Off, and a Content-Encoding is refused in do.
+		tr.DisableCompression = true
+		// One connection per request. On a kept-alive HTTP/1.1 connection
+		// Go reads ahead after the declared body; bytes the server sends
+		// beyond it are "unsolicited" and quoted into the standard logger
+		// (log.Printf in net/http's read loop), below anything this
+		// package can intercept. A connection that is closed after its
+		// answer is never idle, so never peeked at.
+		tr.DisableKeepAlives = true
 		c.hc = &http.Client{Transport: tr, Timeout: requestTimeout, CheckRedirect: noRedirect}
 	})
 	return c.hc
 }
 
-// do sends one request and returns the status and the body bounded to
-// limit bytes. A transport failure comes back as one of the fixed errors
-// and nothing else: Go's own error text carries the request URL and, for
-// a refused or malformed redirect, the Location the server sent, which a
-// hostile catalogue can fill with anything it knows, the upload key
-// included. That text is dropped here, before it can reach a log, a
-// state or the page.
+// do sends one request and returns the status and, for a 2xx when limit
+// is positive, the body bounded to limit bytes; with limit 0 no body is
+// read at all and the connection is dropped at the headers, so the server
+// decides nothing by what it sends after them. A transport failure comes
+// back as one of the fixed errors and nothing else: Go's own error text
+// carries the request URL and, for a refused or malformed redirect, the
+// Location the server sent, which a hostile catalogue can fill with
+// anything it knows, the upload key included. That text is dropped here,
+// before it can reach a log, a state or the page.
 func (c *Client) do(ctx context.Context, req *http.Request, limit int64) (int, []byte, error) {
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("User-Agent", "pmss-fleet-manager")
 	resp, err := c.client().Do(req)
 	if err != nil {
@@ -157,6 +184,12 @@ func (c *Client) do(ctx context.Context, req *http.Request, limit int64) (int, [
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		return resp.StatusCode, nil, nil // nothing in an error answer is read; the code is the whole message
+	}
+	if limit <= 0 {
+		return resp.StatusCode, nil, nil // the status is the whole answer
+	}
+	if ce := resp.Header.Get("Content-Encoding"); ce != "" && !strings.EqualFold(ce, "identity") {
+		return resp.StatusCode, nil, ErrEncoded // not asked for; never decoded (see client)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
@@ -244,8 +277,9 @@ func parseList(body []byte) (map[string]bool, error) {
 }
 
 // Submit adds one host. A host already listed is ErrExists; the catalogue
-// is never asked to replace a row. The answer's body is never read for
-// content; only the status counts.
+// is never asked to replace a row. The answer is its status code: the body
+// is never read, so an accepted submission is settled the moment the
+// headers arrive, whatever the server does with the body after them.
 func (c *Client) Submit(ctx context.Context, key string, row Row) error {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -261,7 +295,7 @@ func (c *Client) Submit(ctx context.Context, key string, row Row) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	code, _, err := c.do(ctx, req, maxSubmitBytes)
+	code, _, err := c.do(ctx, req, 0)
 	if err != nil {
 		return err
 	}

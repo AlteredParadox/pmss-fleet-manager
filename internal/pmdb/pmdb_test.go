@@ -17,14 +17,21 @@
 package pmdb
 
 import (
+	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestNormalize(t *testing.T) {
@@ -262,10 +269,9 @@ func TestHostileResponses(t *testing.T) {
 	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || he.Code != 500 {
 		t.Fatalf("hostile submit error: %v", err)
 	}
-	// A submission's answer is never read for content; a huge accepted
-	// one is refused, a huge error answer is not even read: the code is
-	// the whole message.
-	body = strings.Repeat("A", maxSubmitBytes+1)
+	// A submission's answer is never read at all: a huge error answer
+	// still yields its code and nothing else.
+	body = strings.Repeat("A", 1<<20)
 	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || he.Code != 500 {
 		t.Fatalf("oversized error answer: %v", err)
 	}
@@ -279,16 +285,151 @@ func TestHostileResponses(t *testing.T) {
 	}
 }
 
-// An accepted submission with an oversized answer is refused rather than read.
-func TestOversizedAcceptedAnswer(t *testing.T) {
+// An accepted submission is settled by its status: the body, oversized,
+// endless or compressed, is never read, so the server cannot turn an
+// acceptance it already gave into a failure that gets the host posted
+// again.
+func TestAcceptedAnswerBodyIsNotRead(t *testing.T) {
+	done := make(chan struct{})
+	defer close(done)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusCreated)
-		_, _ = io.WriteString(w, strings.Repeat("A", maxSubmitBytes+1))
+		switch r.URL.Query().Get("body") {
+		case "huge":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, strings.Repeat("A", 1<<20))
+		case "endless":
+			w.WriteHeader(http.StatusCreated)
+			w.(http.Flusher).Flush()
+			junk := []byte(strings.Repeat("A", 4096))
+			for {
+				if _, err := w.Write(junk); err != nil {
+					return // the client hung up, as it should
+				}
+				select {
+				case <-done:
+					return
+				case <-r.Context().Done():
+					return
+				default:
+				}
+			}
+		case "gzip":
+			w.Header().Set("Content-Encoding", "gzip")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write(gzipped(t, []byte(`{"ok":true}`)))
+		}
 	}))
 	defer srv.Close()
-	c := &Client{URL: srv.URL}
-	if err := c.Submit(context.Background(), "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.Is(err, ErrTooLarge) {
-		t.Fatalf("oversized accepted answer: %v", err)
+	for _, mode := range []string{"huge", "endless", "gzip"} {
+		c := &Client{URL: srv.URL + "/?body=" + mode}
+		start := time.Now()
+		if err := c.Submit(context.Background(), "a-passphrase-of-words", Row{ServerName: "x.example"}); err != nil {
+			t.Fatalf("%s accepted answer: %v", mode, err)
+		}
+		if d := time.Since(start); d > 10*time.Second {
+			t.Fatalf("%s accepted answer took %v: the body was waited for", mode, d)
+		}
+	}
+}
+
+func gzipped(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// A compressed list is refused, not decoded: compression is never asked
+// for (Accept-Encoding: identity, no transparent gzip in the transport),
+// and a gzip stream can be built from any number of empty members so that
+// a wire body well past the cap decodes to "[]". The cap counts wire bytes.
+func TestCompressedListRefused(t *testing.T) {
+	empty := gzipped(t, nil)
+	var wire bytes.Buffer
+	for wire.Len() <= maxListBytes {
+		wire.Write(empty)
+	}
+	wire.Write(gzipped(t, []byte(`[]`)))
+	var sawIdentity atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawIdentity.Store(r.Header.Get("Accept-Encoding") == "identity")
+		w.Header().Set("Content-Encoding", "gzip")
+		switch r.URL.Query().Get("body") {
+		case "small":
+			_, _ = w.Write(gzipped(t, []byte(`[{"serverName":"odin.pulsedmedia.com"}]`)))
+		default:
+			_, _ = w.Write(wire.Bytes())
+		}
+	}))
+	defer srv.Close()
+	for _, mode := range []string{"huge", "small"} {
+		c := &Client{URL: srv.URL + "/?body=" + mode}
+		if _, err := c.List(context.Background()); !errors.Is(err, ErrEncoded) {
+			t.Fatalf("%s compressed list: %v", mode, err)
+		}
+		if !sawIdentity.Load() {
+			t.Fatal("the request did not ask for an identity encoding")
+		}
+	}
+}
+
+// Bytes a server sends after the body it declared never reach the standard
+// logger: on a kept-alive HTTP/1.1 connection Go's transport would find
+// them on the idle connection and log.Printf them, quoted, below anything
+// this package can intercept. Every request gets its own connection and
+// says so (Connection: close). A raw listener is needed because an
+// http.Server never frames a response that way.
+func TestTrailingBytesNeverReachTheStandardLogger(t *testing.T) {
+	const sentinel = "sentinel-passphrase-of-words"
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var notClosing atomic.Int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				req, err := http.ReadRequest(bufio.NewReader(conn))
+				if err != nil {
+					return
+				}
+				if !req.Close {
+					notClosing.Add(1)
+				}
+				_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]"+sentinel)
+				time.Sleep(50 * time.Millisecond) // leave the extra bytes readable before closing
+			}()
+		}
+	}()
+	var logged bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(prev)
+	c := &Client{URL: "http://" + ln.Addr().String()}
+	for i := 0; i < 10; i++ {
+		got, err := c.List(context.Background())
+		if err != nil || len(got) != 0 {
+			t.Fatalf("list %d: %v %v", i, got, err)
+		}
+	}
+	time.Sleep(100 * time.Millisecond) // a read loop that was going to peek has by now
+	if n := notClosing.Load(); n != 0 {
+		t.Fatalf("%d requests did not ask for the connection to close", n)
+	}
+	if out := logged.String(); strings.Contains(out, sentinel) || strings.Contains(out, "Unsolicited") {
+		t.Fatalf("response bytes reached the standard logger: %q", out)
 	}
 }
 

@@ -38,7 +38,11 @@ import (
 // Several boxes can share a host, so the work is fleet-level: the hosts
 // are deduplicated by catalogue key, one list fetch covers them all, and
 // each host is decided once per process (a restart re-reads the public
-// list, which is what stops a second submission).
+// list, which is what stops a second submission). An inventory wake
+// fetches the list only when a host still needs deciding and then at most
+// once per pmdbListInterval; the six-hourly timer and a check the user
+// asks for always fetch, so the standing shown is never older than that
+// and the automatic cost is bounded whatever the catalogue sends.
 
 // pmdbStatus is one host's standing with the catalogue.
 type pmdbStatus struct {
@@ -78,18 +82,30 @@ type pmdbState struct {
 	// holdUntil holds every later run after a rate limit (which is per
 	// address, not per host) or a service failure, until it passes.
 	holdUntil time.Time
+	// listed is the last list fetched and listedAt when: an automatic run
+	// within pmdbListInterval of it decides from this copy instead of
+	// asking again, so inventories landing every few minutes across the
+	// fleet cannot be turned into a list fetch each (a valid list is a
+	// success and never holds, and the catalogue chooses its size).
+	listed   map[string]bool
+	listedAt time.Time
 }
 
 // pmdbSubmitLog is the log message of every submission outcome.
 const pmdbSubmitLog = "pmdb submit"
 
 // pmdbRetry is how long a failed submission waits before another try, and
-// pmdbInterval how often the loop re-checks on its own (a new box's first
-// inventory wakes it sooner).
+// pmdbInterval how often the loop fetches the list afresh on its own (a
+// new box's first inventory wakes it sooner, but such a wake fetches only
+// when a host needs deciding).
 const (
 	pmdbRetry    = time.Hour
 	pmdbInterval = 6 * time.Hour
 )
+
+// pmdbListInterval is the least time between two automatic list fetches;
+// a check the user asks for always fetches (a var for the tests).
+var pmdbListInterval = 10 * time.Minute
 
 // pmdbMaxSubmits bounds the submissions of one run: a fleet has a few
 // dozen hosts at most, and a catalogue that made every one look missing
@@ -165,10 +181,12 @@ func (m *Manager) pmdbLoop() {
 	t := time.NewTicker(pmdbInterval)
 	defer t.Stop()
 	for {
+		fresh := false
 		select {
 		case <-m.ctx.Done():
 			return
 		case <-t.C:
+			fresh = true // the periodic look: always asks, so the view is never older than this
 		case <-m.pmdbWakeCh:
 			// Inventories of a fleet land within seconds of each other
 			// after a start; let them, so one list fetch serves them all.
@@ -185,19 +203,28 @@ func (m *Manager) pmdbLoop() {
 			}
 		}
 		if s := m.Settings(); s.PMDBEnabled && s.PMDBUploadKey != "" {
-			m.SyncPMDB(m.ctx)
+			m.syncPMDB(m.ctx, fresh)
 		}
 	}
 }
 
-// SyncPMDB checks every box's host against the catalogue now and submits
-// the ones that are missing. Calls are serialised. A host whose submission
+// SyncPMDB is the check the user asks for: the list is fetched afresh and
+// every box's host decided against it, the missing ones submitted. Holds
+// (a refused key, a rate limit, a service failure) still apply. The
+// six-hourly timer does the same.
+func (m *Manager) SyncPMDB(ctx context.Context) { m.syncPMDB(ctx, true) }
+
+// syncPMDB checks every box's host against the catalogue and submits the
+// ones that are missing. Calls are serialised. A host whose submission
 // failed is retried after pmdbRetry; a refused key stops the run until the
-// key changes. The run belongs to the settings it started under: when the
-// opt-in is withdrawn or the key replaced meanwhile (resetPMDB), its
-// context is cancelled, a list it already fetched is discarded rather than
-// rebuilt into state, and no further host is posted.
-func (m *Manager) SyncPMDB(ctx context.Context) {
+// key changes. A run after an inventory (fresh false) asks the catalogue
+// only when a host needs deciding, and reuses a list fetched within
+// pmdbListInterval.
+// The run belongs to the settings it started under: when the opt-in is
+// withdrawn or the key replaced meanwhile (resetPMDB), its context is
+// cancelled, a list it already fetched is discarded rather than rebuilt
+// into state, and no further host is posted.
+func (m *Manager) syncPMDB(ctx context.Context, fresh bool) {
 	m.pmdbSyncMu.Lock()
 	defer m.pmdbSyncMu.Unlock()
 	run, ok := m.pmdbBegin(ctx)
@@ -205,7 +232,7 @@ func (m *Manager) SyncPMDB(ctx context.Context) {
 		return
 	}
 	defer run.cancel()
-	todo, cands, ok := m.pmdbPlan(run)
+	todo, cands, ok := m.pmdbPlan(run, fresh)
 	if !ok {
 		return
 	}
@@ -227,14 +254,15 @@ func (m *Manager) SyncPMDB(ctx context.Context) {
 		sctx, scancel := context.WithTimeout(run.ctx, time.Minute)
 		err := m.pmdb.Submit(sctx, run.key, row)
 		scancel()
-		if err != nil && ctx.Err() != nil {
+		if err != nil && !errors.Is(err, pmdb.ErrExists) && ctx.Err() != nil {
 			// The caller went away (a manual check whose page was closed,
 			// or shutdown) and the submission failed with it: not the
 			// catalogue's doing, so nothing is recorded and no hold is
-			// set. An answer that did arrive (accepted, or exists) still
-			// settles the host below, or a later run would post it again.
-			// The run's own budget is on run.ctx, not ctx, and still
-			// counts as a service failure.
+			// set. An answer that did arrive (accepted, or exists, which
+			// is an answer though it travels as an error) still settles
+			// the host below, or a later run would post it again. The
+			// run's own budget is on run.ctx, not ctx, and still counts
+			// as a service failure.
 			return
 		}
 		stop := m.pmdbRecord(run, name, err)
@@ -285,22 +313,31 @@ type pmdbRun struct {
 	gen    uint64
 }
 
+// pmdbBeginHook, when set, runs at the top of pmdbBegin (tests only).
+var pmdbBeginHook func()
+
 // pmdbBegin opens a run under the current settings, or false when the
-// integration is off or the catalogue has refused the current key.
+// integration is off or the catalogue has refused the current key. The
+// settings are read under pmdbMu, after any reset that was in progress
+// has finished: read before the lock, a run could start under settings an
+// opt-out had already replaced, adopt the new generation and fetch the
+// list once more after the user had said no.
 func (m *Manager) pmdbBegin(ctx context.Context) (*pmdbRun, bool) {
+	if pmdbBeginHook != nil {
+		pmdbBeginHook()
+	}
+	m.pmdbMu.Lock()
+	defer m.pmdbMu.Unlock()
 	s := m.Settings()
 	if !s.PMDBEnabled || s.PMDBUploadKey == "" {
 		return nil, false
 	}
-	run := &pmdbRun{key: s.PMDBUploadKey}
-	run.ctx, run.cancel = context.WithTimeout(ctx, pmdbRunBudget)
-	m.pmdbMu.Lock()
-	defer m.pmdbMu.Unlock()
 	if m.pmdbSt.keyRefused || time.Now().Before(m.pmdbSt.holdUntil) {
-		run.cancel()
 		return nil, false // the view still shows why; a new key resets it, a hold passes
 	}
-	run.gen, m.pmdbSt.cancel = m.pmdbSt.gen, run.cancel
+	run := &pmdbRun{key: s.PMDBUploadKey, gen: m.pmdbSt.gen}
+	run.ctx, run.cancel = context.WithTimeout(ctx, pmdbRunBudget)
+	m.pmdbSt.cancel = run.cancel
 	return run, true
 }
 
@@ -323,17 +360,22 @@ type pmdbCandidate struct {
 	ids []int64
 }
 
-// pmdbPlan fetches the catalogue list and merges it into the hosts' standing,
-// returning the hosts to submit, sorted. false means nothing is to be done:
-// the list could not be fetched (recorded in the view) or the run is stale.
-func (m *Manager) pmdbPlan(run *pmdbRun) (todo []string, cands map[string]pmdbCandidate, ok bool) {
-	fctx, cancel := context.WithTimeout(run.ctx, 2*time.Minute)
-	defer cancel()
-	listed, err := m.pmdb.List(fctx)
+// pmdbPlan decides every host against the catalogue list (fetched, or the
+// copy of the last fetch) and merges the standing, returning the hosts to
+// submit, sorted. false means nothing is to be done: the list could not be
+// fetched (recorded in the view) or the run is stale.
+func (m *Manager) pmdbPlan(run *pmdbRun, fresh bool) (todo []string, cands map[string]pmdbCandidate, ok bool) {
+	listed, fetch := m.pmdbListFor(m.pmdbCandidates(), fresh, time.Now())
+	var err error
+	if fetch {
+		fctx, cancel := context.WithTimeout(run.ctx, 2*time.Minute)
+		listed, err = m.pmdb.List(fctx)
+		cancel()
+	}
 	if errors.Is(run.ctx.Err(), context.DeadlineExceeded) {
 		err = pmdb.ErrTimeout // the run's own budget ran out: the service is too slow, which counts as down
 	} else if !m.pmdbCurrent(run) {
-		return nil, nil, false
+		return nil, nil, false // stale, or the caller went away: nothing to record
 	}
 	// The boxes as they are after the fetch: one removed or moved while
 	// the list was fetching is not a candidate any more.
@@ -358,7 +400,10 @@ func (m *Manager) pmdbPlan(run *pmdbRun) (todo []string, cands map[string]pmdbCa
 		return nil, nil, false
 	}
 	defer m.pmdbMu.Unlock()
-	m.pmdbSt.err, m.pmdbSt.checkedAt = "", now
+	if fetch {
+		m.pmdbSt.err, m.pmdbSt.checkedAt = "", now
+		m.pmdbSt.listed, m.pmdbSt.listedAt = listed, now
+	}
 	// Hosts whose boxes are gone drop out of the view.
 	for name := range m.pmdbSt.hosts {
 		if _, ok := cands[name]; !ok {
@@ -372,6 +417,43 @@ func (m *Manager) pmdbPlan(run *pmdbRun) (todo []string, cands map[string]pmdbCa
 	}
 	sort.Strings(todo)
 	return todo, cands, true
+}
+
+// pmdbListFor says which list a run decides against: the copy of the last
+// fetch (which may be nil: nothing listed), or none yet and fetch true.
+// A check the user asks for, and the periodic one, always fetch. A run
+// after an inventory fetches only when some candidate is undecided and
+// not backing off (a decided host is decided whatever the list says, so a
+// fleet of decided hosts asks nothing), and then not within
+// pmdbListInterval of the last fetch; a list failure on view is re-asked
+// once its hold has passed.
+func (m *Manager) pmdbListFor(cands map[string]pmdbCandidate, fresh bool, now time.Time) (map[string]bool, bool) {
+	if fresh {
+		return nil, true
+	}
+	m.pmdbMu.Lock()
+	defer m.pmdbMu.Unlock()
+	if m.pmdbSt.err != "" {
+		return nil, true
+	}
+	undecided := false
+	for name := range cands {
+		if _, ok := m.pmdbSettled[name]; ok {
+			continue
+		}
+		if h := m.pmdbSt.hosts[name]; h != nil && h.Status == "error" && now.Before(h.retryAt) {
+			continue
+		}
+		undecided = true
+		break
+	}
+	if !undecided {
+		return m.pmdbSt.listed, false
+	}
+	if !m.pmdbSt.listedAt.IsZero() && now.Before(m.pmdbSt.listedAt.Add(pmdbListInterval)) {
+		return m.pmdbSt.listed, false
+	}
+	return nil, true
 }
 
 // pmdbMerge updates one host's standing from the catalogue list and reports
