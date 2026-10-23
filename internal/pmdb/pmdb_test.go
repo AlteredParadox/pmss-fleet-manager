@@ -131,17 +131,65 @@ func TestListAndSubmit(t *testing.T) {
 	}
 }
 
-func TestRedirectRefused(t *testing.T) {
+// A redirect is refused, and nothing the server put in it (a Location
+// echoing the key it just saw, well-formed or not) survives into the
+// error: the error is the fixed ErrRedirect. Likewise the key echoed in an
+// error body is redacted from the log text.
+func TestRedirectRefusedAndKeyNeverReflected(t *testing.T) {
+	const key = "sentinel-passphrase-of-words"
+	var location, body string
+	status := http.StatusFound
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "https://elsewhere.example/api/servers", http.StatusFound)
+		if location != "" {
+			w.Header().Set("Location", location)
+		}
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
 	}))
 	defer srv.Close()
 	c := &Client{URL: srv.URL}
-	if _, err := c.List(context.Background()); err == nil {
-		t.Fatal("redirect followed")
+	ctx := context.Background()
+	for _, loc := range []string{
+		"https://elsewhere.example/api/servers",
+		"https://invalid.example/%zz?upload_key=" + key,
+		"https://evil.example/?k=" + key,
+		"/relative?key=" + key,
+		"http://[::1",
+	} {
+		location, body, status = loc, "", http.StatusFound
+		_, err := c.List(ctx)
+		if !errors.Is(err, ErrRedirect) || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), "example") {
+			t.Fatalf("list redirect %q: %v", loc, err)
+		}
+		err = c.Submit(ctx, key, Row{ServerName: "x.example"})
+		if !errors.Is(err, ErrRedirect) || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), "example") {
+			t.Fatalf("submit redirect %q: %v", loc, err)
+		}
 	}
-	if err := c.Submit(context.Background(), "k", Row{ServerName: "x"}); err == nil {
-		t.Fatal("redirect followed with the key")
+	location, status = "", http.StatusBadRequest
+	body = `{"error":"bad key ` + key + ` and encoded ` + strings.ReplaceAll(key, "-", "%2D") + `"}`
+	err := c.Submit(ctx, key, Row{ServerName: "x.example"})
+	var he *HTTPError
+	if !errors.As(err, &he) || strings.Contains(he.Body, key) || strings.Contains(err.Error(), key) {
+		t.Fatalf("key reflected: %v %+v", err, he)
+	}
+	if !strings.Contains(he.Body, "[upload key]") {
+		t.Fatalf("redaction marker missing: %q", he.Body)
+	}
+}
+
+// A transport failure is one of the fixed errors, never Go's own text
+// (which names the URL and whatever the server sent).
+func TestTransportErrorsAreFixed(t *testing.T) {
+	c := &Client{URL: "http://127.0.0.1:1"} // nothing listens there
+	_, err := c.List(context.Background())
+	if !errors.Is(err, ErrUnreachable) || strings.Contains(err.Error(), "127.0.0.1") {
+		t.Fatalf("unreachable: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.List(ctx); !errors.Is(err, ErrUnreachable) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled: %v", err)
 	}
 }
 

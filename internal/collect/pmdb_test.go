@@ -17,6 +17,7 @@
 package collect
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -337,5 +339,63 @@ func TestSyncPMDBStopsOnRateLimit(t *testing.T) {
 	}
 	if errs != 1 || pending != 2 {
 		t.Fatalf("standing after a 429: %+v", m.PMDB().Hosts)
+	}
+}
+
+// A hostile catalogue that echoes the upload key in a redirect or an error
+// body cannot get it into the public view or the log.
+func TestSyncPMDBNeverReflectsKey(t *testing.T) {
+	ctx := context.Background()
+	const key = "sentinel-passphrase-of-words"
+	mode := "redirect"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/servers" {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
+		if mode == "redirect" {
+			w.Header().Set("Location", "https://invalid.example/%zz?upload_key="+key)
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"rejected `+key+`"}`)
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var logs bytes.Buffer
+	m := New(st, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	m.pmdb.URL = srv.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	b := &store.Box{Name: "a", Host: "ha.example", User: "u", Port: 22, Enabled: false}
+	if err := m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	m.mutateState(b.ID, func(s *BoxState) {
+		s.Ready, s.Hostname, s.HostSys = true, "odin.pulsedmedia.com", HostState{CPUModel: "Intel(R) N100", NCPU: 4, MemTotal: 32 << 30, HomeSize: 60 << 40}
+	})
+	s := m.Settings()
+	s.PMDBEnabled, s.PMDBUploadKey = true, key
+	m.SetSettings(s)
+	for _, mode = range []string{"redirect", "body"} {
+		m.resetPMDB()
+		m.SyncPMDB(ctx)
+		view, _ := json.Marshal(m.PMDB())
+		if strings.Contains(string(view), key) {
+			t.Fatalf("%s: key in the public view: %s", mode, view)
+		}
+		if strings.Contains(logs.String(), key) {
+			t.Fatalf("%s: key in the log: %s", mode, logs.String())
+		}
+		if h := m.PMDB().Hosts; len(h) != 1 || h[0].Status != "error" || h[0].Detail == "" {
+			t.Fatalf("%s: standing: %+v", mode, h)
+		}
 	}
 }

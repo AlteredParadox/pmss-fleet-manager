@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -85,7 +86,16 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d from the catalogue", e.Code) }
 
-func httpErr(code int, body []byte) error { return &HTTPError{Code: code, Body: safeText(body)} }
+// httpErr builds an HTTPError. The catalogue saw the key on a submission
+// and can echo it in the body: every occurrence (plain or URL-encoded) is
+// redacted before the text can reach a log.
+func httpErr(code int, body []byte, key string) error {
+	text := safeText(body)
+	if len(key) >= 8 { // one pass, so the replacement text is never rescanned; a shorter key is not a pmdb key
+		text = strings.NewReplacer(key, "[upload key]", url.QueryEscape(key), "[upload key]", url.PathEscape(key), "[upload key]").Replace(text)
+	}
+	return &HTTPError{Code: code, Body: text}
+}
 
 // Client is one catalogue endpoint. URL overrides BaseURL (for tests).
 type Client struct {
@@ -102,30 +112,65 @@ func (c *Client) base() string {
 	return BaseURL
 }
 
-// The key travels in an Authorization header, which Go drops on a
-// cross-host redirect but keeps on a same-host one, and the catalogue has
-// one fixed URL: refuse every redirect rather than reason about it.
-func noRedirect(req *http.Request, _ []*http.Request) error {
-	return fmt.Errorf("pmdb redirected to %s://%s; refusing to follow", req.URL.Scheme, req.URL.Host)
-}
+var (
+	// ErrRedirect: the catalogue answered with a redirect, which is never
+	// followed (the key travels in an Authorization header, and the
+	// catalogue has one fixed URL).
+	ErrRedirect = errors.New("the catalogue redirected; refusing to follow")
+	// ErrTimeout: no complete answer within the deadline.
+	ErrTimeout = errors.New("the catalogue did not answer in time")
+	// ErrUnreachable: the request failed below HTTP (DNS, TCP, TLS, a
+	// broken response).
+	ErrUnreachable = errors.New("the catalogue could not be reached")
+	// ErrTooLarge: the response exceeded maxBodyBytes.
+	ErrTooLarge = errors.New("the catalogue's response is larger than allowed; refusing to read it")
 
+	errRedirect = errors.New("redirect")
+)
+
+func noRedirect(*http.Request, []*http.Request) error { return errRedirect }
+
+// do sends one request and returns the status and the bounded body. A
+// transport failure comes back as one of the fixed errors above and
+// nothing else: Go's own error text carries the request URL and, for a
+// refused or malformed redirect, the Location the server sent, which a
+// hostile catalogue can fill with anything it saw, the upload key
+// included. That text is dropped here, before it can reach a log, a
+// state or the page.
 func (c *Client) do(ctx context.Context, req *http.Request) (int, []byte, error) {
 	hc := &http.Client{Timeout: 30 * time.Second, CheckRedirect: noRedirect}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "pmss-fleet-manager")
 	resp, err := hc.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, classify(ctx, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
-		return resp.StatusCode, nil, err
+		return resp.StatusCode, nil, classify(ctx, err)
 	}
 	if len(body) > maxBodyBytes {
-		return resp.StatusCode, nil, fmt.Errorf("response larger than %d MiB; refusing to parse it", maxBodyBytes>>20)
+		return resp.StatusCode, nil, ErrTooLarge
 	}
 	return resp.StatusCode, body, nil
+}
+
+// classify maps a transport error to a fixed one (see do).
+func classify(ctx context.Context, err error) error {
+	var ne interface{ Timeout() bool }
+	switch {
+	case errors.Is(err, errRedirect), strings.Contains(err.Error(), "Location header"):
+		// The second form is a 3xx whose Location Go could not parse (or
+		// that was missing): it fails before CheckRedirect is asked, with
+		// the raw header in the text. Still a redirect, still refused.
+		return ErrRedirect
+	case ctx.Err() != nil:
+		return fmt.Errorf("%w: %w", ErrUnreachable, ctx.Err()) // the caller's cancel or deadline, both ours
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return ErrTimeout
+	}
+	return ErrUnreachable
 }
 
 // List returns the hostnames in the catalogue, normalised the way the
@@ -140,7 +185,7 @@ func (c *Client) List(ctx context.Context) (map[string]bool, error) {
 		return nil, err
 	}
 	if code != http.StatusOK {
-		return nil, httpErr(code, body)
+		return nil, httpErr(code, body, "")
 	}
 	var rows []json.RawMessage
 	if err := json.Unmarshal(body, &rows); err != nil || rows == nil {
@@ -195,7 +240,7 @@ func (c *Client) Submit(ctx context.Context, key string, row Row) error {
 	case http.StatusTooManyRequests:
 		return fmt.Errorf("%w (HTTP %d)", ErrRateLimited, code)
 	}
-	return httpErr(code, resp)
+	return httpErr(code, resp, key)
 }
 
 // Normalize keys a hostname the way the catalogue does: lower-case, no

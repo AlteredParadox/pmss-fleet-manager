@@ -300,9 +300,12 @@ These are the design decisions that came out of it.
   compromised or replaced. Its list is bounded in size and read for one
   fact only (which DNS-shaped hostnames exist; odd rows are skipped), an
   error body never reaches the page (the UI shows the status code, the log
-  gets the message stripped to printable ASCII and clipped), redirects are
-  refused, and the only decision its answer drives is whether a host is
-  submitted, once. It cannot change what is collected or shown about a box.
+  gets the message stripped to printable ASCII, clipped, with the upload
+  key redacted should the service echo it), a transport failure or a
+  redirect is reported as a fixed message rather than Go's own text (which
+  would carry a Location the service controls), redirects are refused, and
+  the only decision its answer drives is whether a host is submitted, once.
+  It cannot change what is collected or shown about a box.
 - **Bounded everything.** SSH dials, handshakes (including the agent),
   sessions and remote commands are bounded by contexts; a hung `quota` is run
   through a detached helper so it cannot stall the probe; remote stdout is
