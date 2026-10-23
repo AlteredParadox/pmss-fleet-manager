@@ -71,8 +71,10 @@ sec inventory; echo 1
 sec ncpu; grep -c '^processor' /proc/cpuinfo 2>/dev/null
 sec cpu_model; grep -m1 -E '^(model name|Model|cpu model)' /proc/cpuinfo 2>/dev/null | cut -d: -f2-
 # Nominal clock for the hardware catalogue (pmdb): the base frequency where
-# the cpufreq driver exposes it, else the first core's current clock.
-sec cpu_mhz; if [ -r /sys/devices/system/cpu/cpu0/cpufreq/base_frequency ]; then awk '{printf "%d\n", $1/1000}' /sys/devices/system/cpu/cpu0/cpufreq/base_frequency 2>/dev/null; else grep -m1 -E '^cpu MHz' /proc/cpuinfo 2>/dev/null | cut -d: -f2-; fi
+# the cpufreq driver exposes it. The current clock of an idle core is not a
+# nominal figure, so there is no fallback here; the parser takes the GHz in
+# the model name if there is one, else the clock is unknown.
+sec cpu_mhz; awk '{printf "%d\n", $1/1000}' /sys/devices/system/cpu/cpu0/cpufreq/base_frequency 2>/dev/null
 sec cpu_flags; grep -m1 -E '^(flags|Features)' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | tr ' ' '\n' | grep -E '^(avx2|avx512f|sse4_2|aes)$' | tr '\n' ' '
 sec dri
 for d in /dev/dri/renderD*; do

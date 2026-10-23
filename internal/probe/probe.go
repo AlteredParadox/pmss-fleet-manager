@@ -949,12 +949,29 @@ func parseMeminfo(h *HostInfo, raw string) {
 	}
 }
 
+// modelGHz is the clock Intel and AMD put in a model name ("@ 2.30GHz").
+var modelGHz = regexp.MustCompile(`@\s*([0-9]+(?:\.[0-9]+)?)\s*GHz`)
+
+// nominalMHz is the host's nominal clock for the hardware catalogue: the
+// cpufreq base frequency when the box exposes it, else the GHz in the
+// model name, else 0 for unknown. An idle core's current clock is never
+// used: it would list an N100 host at 800 MHz.
+func nominalMHz(base, model string) int {
+	if mhz, err := strconv.ParseFloat(strings.TrimSpace(base), 64); err == nil && mhz > 0 && mhz < 100000 {
+		return int(mhz)
+	}
+	if m := modelGHz.FindStringSubmatch(model); m != nil {
+		if ghz, err := strconv.ParseFloat(m[1], 64); err == nil && ghz > 0 && ghz < 100 {
+			return int(math.Round(ghz * 1000))
+		}
+	}
+	return 0
+}
+
 // parseCPUInfo fills the core count, model name (raw and short) and flags.
 func parseCPUInfo(h *HostInfo, s map[string]string) {
 	h.NCPU, _ = strconv.Atoi(strings.TrimSpace(s["ncpu"]))
-	if mhz, err := strconv.ParseFloat(strings.TrimSpace(s["cpu_mhz"]), 64); err == nil && mhz > 0 && mhz < 100000 {
-		h.CPUMHz = int(mhz)
-	}
+	h.CPUMHz = nominalMHz(s["cpu_mhz"], h.CPUModel)
 	h.CPUModel = strings.Join(strings.Fields(s["cpu_model"]), " ")
 	h.CPUShort = ShortCPU(h.CPUModel)
 	h.CPUFlags = strings.Fields(s["cpu_flags"])

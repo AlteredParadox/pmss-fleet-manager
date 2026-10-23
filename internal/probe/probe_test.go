@@ -1217,3 +1217,23 @@ func TestParseLiveRings(t *testing.T) {
 		t.Fatal("out-of-range slot times must be dropped")
 	}
 }
+
+func TestNominalMHz(t *testing.T) {
+	for _, c := range []struct {
+		base, model string
+		want        int
+	}{
+		{" 2100\n", "Intel(R) Core(TM) i7-12700", 2100},
+		{"", "Intel(R) Xeon(R) CPU E5-2630 0 @ 2.30GHz", 2300},
+		{"", "Intel(R) Xeon(R) CPU L5640 @ 2.27GHz", 2270},
+		{"", "AMD EPYC 7551P 32-Core Processor", 0},
+		{"", "Intel(R) N100", 0},
+		{"0", "Intel(R) N100", 0},
+		{"junk", "@ 2.5 GHz", 2500},
+		{"", "@ 500GHz", 0},
+	} {
+		if got := nominalMHz(c.base, c.model); got != c.want {
+			t.Errorf("nominalMHz(%q, %q) = %d, want %d", c.base, c.model, got, c.want)
+		}
+	}
+}
