@@ -565,6 +565,7 @@ func (p *poller) poll(ctx context.Context) {
 	}
 	if snap.Inventory {
 		p.inv, p.invAt = snap.InventoryOnly(), start
+		p.m.pmdbWake() // fresh host facts: let the catalogue check see them (no-op unless enabled)
 	} else {
 		snap.CarryInventory(p.inv)
 	}
@@ -799,7 +800,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	// remote string, or one hostile box bloats the cache row and every SSE event.
 	h := snap.Host
 	st.HostSys = HostState{UptimeSec: h.UptimeSec, Load1: h.Load1, Load5: h.Load5, Load15: h.Load15,
-		MemTotal: h.MemTotal, MemAvail: h.MemAvail, NCPU: h.NCPU, Kernel: clip(h.Kernel, 128), Debian: clip(h.Debian, 64), PMSSVersion: clip(h.PMSSVersion, 64),
+		MemTotal: h.MemTotal, MemAvail: h.MemAvail, SwapTotal: h.SwapTotal, SwapKnown: h.SwapKnown, NCPU: h.NCPU, CPUMHz: h.CPUMHz, Kernel: clip(h.Kernel, 128), Debian: clip(h.Debian, 64), PMSSVersion: clip(h.PMSSVersion, 64),
 		HomeFSType: clip(snap.HomeFS.Type, 32), HomeSize: snap.HomeFS.Size, HomeUsed: snap.HomeFS.Used, HomeAvail: snap.HomeFS.Avail,
 		CPUModel: clip(h.CPUModel, 128), CPUShort: clip(h.CPUShort, 64), CPUFlags: clip(strings.Join(h.CPUFlags, " "), 2048),
 		GPUPresent: h.GPU.Present, GPUDevice: clip(h.GPU.Device, 128), GPUVendor: h.GPU.Vendor, GPUAccess: h.GPU.Accessible, HWEncode: hwEncodeLabel(h.GPU)}

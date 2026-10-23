@@ -59,7 +59,7 @@ sec tz; date +%z
 sec uptime; cat /proc/uptime 2>/dev/null
 sec loadavg; cat /proc/loadavg 2>/dev/null
 sec stat; head -1 /proc/stat 2>/dev/null
-sec meminfo; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo 2>/dev/null
+sec meminfo; grep -E '^(MemTotal|MemAvailable|SwapTotal):' /proc/meminfo 2>/dev/null
 # Inventory: what changes rarely (host identity, the installed client, the
 # crontab, the log catalogue). The poller asks for it on its first poll,
 # every quarter hour, and on demand (PMSS_INVENTORY=0 skips every section
@@ -70,6 +70,9 @@ if [ "${PMSS_INVENTORY:-1}" = 1 ]; then
 sec inventory; echo 1
 sec ncpu; grep -c '^processor' /proc/cpuinfo 2>/dev/null
 sec cpu_model; grep -m1 -E '^(model name|Model|cpu model)' /proc/cpuinfo 2>/dev/null | cut -d: -f2-
+# Nominal clock for the hardware catalogue (pmdb): the base frequency where
+# the cpufreq driver exposes it, else the first core's current clock.
+sec cpu_mhz; if [ -r /sys/devices/system/cpu/cpu0/cpufreq/base_frequency ]; then awk '{printf "%d\n", $1/1000}' /sys/devices/system/cpu/cpu0/cpufreq/base_frequency 2>/dev/null; else grep -m1 -E '^cpu MHz' /proc/cpuinfo 2>/dev/null | cut -d: -f2-; fi
 sec cpu_flags; grep -m1 -E '^(flags|Features)' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | tr ' ' '\n' | grep -E '^(avx2|avx512f|sse4_2|aes)$' | tr '\n' ' '
 sec dri
 for d in /dev/dri/renderD*; do

@@ -196,7 +196,10 @@ type HostState struct {
 	CPUStealPct  float64 `json:"cpu_steal_pct"`  // time the hypervisor took, inside busy
 	MemTotal     int64   `json:"mem_total"`
 	MemAvail     int64   `json:"mem_avail"`
+	SwapTotal    int64   `json:"swap_total"`
+	SwapKnown    bool    `json:"swap_known"`
 	NCPU         int     `json:"ncpu"`
+	CPUMHz       int     `json:"cpu_mhz,omitempty"`
 	Kernel       string  `json:"kernel,omitempty"`
 	Debian       string  `json:"debian,omitempty"`
 	PMSSVersion  string  `json:"pmss_version,omitempty"`

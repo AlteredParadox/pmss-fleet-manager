@@ -112,6 +112,19 @@ services count towards costs and renewal alerts; any other status (Cancelled,
 Terminated, Pending, Fraud, Completed) stays listed but counts towards
 neither.
 
+**pmdb.fyi hardware catalogue (opt-in).** [pmdb.fyi](https://pmdb.fyi) is a
+community-run public table of Pulsed Media host hardware
+([source](https://github.com/schmintendo/pmdb)). Tick the box in settings and
+enter the catalogue's shared upload key, and the dashboard looks up the host
+each of your boxes runs on in the public list and submits the ones that are
+missing, from the facts the probe already reads: hostname, CPU model, core
+count, nominal clock, RAM, swap, home filesystem size and whether an Intel GPU
+is present. Nothing about your account, username, usage or torrents leaves
+the dashboard, an existing row is never replaced, and the check runs after a
+box's quarter-hourly inventory, every six hours, and on demand. The settings
+page lists each host's standing (listed, submitted, pending, or the error).
+Off by default; untick the box or remove the key to stop it.
+
 ## Run
 
 Requires Go 1.27 or later to build (go.mod names the exact toolchain and the go command fetches it). No other runtime dependencies.

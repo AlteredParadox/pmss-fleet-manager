@@ -46,8 +46,11 @@ odin.pulsedmedia.com
 @@meminfo
 MemTotal:       65536000 kB
 MemAvailable:   12345678 kB
+SwapTotal:       8388608 kB
 @@ncpu
 16
+@@cpu_mhz
+ 2100.000
 @@kernel
 6.1.0-18-amd64
 @@debian
@@ -137,6 +140,9 @@ func TestParse(t *testing.T) {
 		t.Fatalf("identity: %+v", snap)
 	}
 	if snap.Host.NCPU != 16 || snap.Host.MemTotal != 65536000*1024 || snap.Host.Load1 != 3.21 {
+		t.Errorf("host: %+v", snap.Host)
+	}
+	if !snap.Host.SwapKnown || snap.Host.SwapTotal != 8388608*1024 || snap.Host.CPUMHz != 2100 {
 		t.Fatalf("host: %+v", snap.Host)
 	}
 	if snap.HomeFS.Type != "ext4" || snap.HomeFS.Used != 9000000000000 {
