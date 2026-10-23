@@ -403,7 +403,10 @@ type HostInfo struct {
 	Load15      float64
 	MemTotal    int64
 	MemAvail    int64
+	SwapTotal   int64 // SwapKnown is false when meminfo had no SwapTotal line (0 is then unknown, not none)
+	SwapKnown   bool
 	NCPU        int
+	CPUMHz      int // nominal clock (inventory); 0 when the box did not say
 	Kernel      string
 	Debian      string
 	PMSSVersion string
@@ -847,7 +850,7 @@ func (s *Snapshot) CarryInventory(prev *Snapshot) {
 		return
 	}
 	h, ph := &s.Host, &prev.Host
-	h.NCPU, h.Kernel, h.Debian, h.PMSSVersion = ph.NCPU, ph.Kernel, ph.Debian, ph.PMSSVersion
+	h.NCPU, h.CPUMHz, h.Kernel, h.Debian, h.PMSSVersion = ph.NCPU, ph.CPUMHz, ph.Kernel, ph.Debian, ph.PMSSVersion
 	h.CPUModel, h.CPUShort, h.CPUFlags, h.GPU = ph.CPUModel, ph.CPUShort, append([]string(nil), ph.CPUFlags...), ph.GPU
 	q, pq := &s.Qbt, &prev.Qbt
 	q.BinaryPresent, q.BinaryVersion, q.BinaryStat = pq.BinaryPresent, pq.BinaryVersion, pq.BinaryStat
@@ -940,14 +943,36 @@ func parseMeminfo(h *HostInfo, raw string) {
 			h.MemTotal = kb * 1024
 		case "MemAvailable:":
 			h.MemAvail = kb * 1024
+		case "SwapTotal:":
+			h.SwapTotal, h.SwapKnown = kb*1024, true
 		}
 	}
+}
+
+// modelGHz is the clock Intel and AMD put in a model name ("@ 2.30GHz").
+var modelGHz = regexp.MustCompile(`@\s*([0-9]+(?:\.[0-9]+)?)\s*GHz`)
+
+// nominalMHz is the host's nominal clock for the hardware catalogue: the
+// cpufreq base frequency when the box exposes it, else the GHz in the
+// model name, else 0 for unknown. An idle core's current clock is never
+// used: it would list an N100 host at 800 MHz.
+func nominalMHz(base, model string) int {
+	if mhz, err := strconv.ParseFloat(strings.TrimSpace(base), 64); err == nil && mhz > 0 && mhz < 100000 {
+		return int(mhz)
+	}
+	if m := modelGHz.FindStringSubmatch(model); m != nil {
+		if ghz, err := strconv.ParseFloat(m[1], 64); err == nil && ghz > 0 && ghz < 100 {
+			return int(math.Round(ghz * 1000))
+		}
+	}
+	return 0
 }
 
 // parseCPUInfo fills the core count, model name (raw and short) and flags.
 func parseCPUInfo(h *HostInfo, s map[string]string) {
 	h.NCPU, _ = strconv.Atoi(strings.TrimSpace(s["ncpu"]))
 	h.CPUModel = strings.Join(strings.Fields(s["cpu_model"]), " ")
+	h.CPUMHz = nominalMHz(s["cpu_mhz"], h.CPUModel) // after the model: it is the fallback
 	h.CPUShort = ShortCPU(h.CPUModel)
 	h.CPUFlags = strings.Fields(s["cpu_flags"])
 }

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"pmss-fleet-manager/internal/pmapi"
+	"pmss-fleet-manager/internal/pmdb"
 	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
@@ -93,6 +94,21 @@ type Manager struct {
 	svc      servicesCache
 	syncMu   sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
 
+	// The pmdb.fyi catalogue integration (pmdb.go): pmdbMu guards pmdbSt,
+	// pmdbSyncMu serialises SyncPMDB, pmdbWakeCh nudges the loop.
+	pmdb       *pmdb.Client
+	pmdbMu     sync.Mutex
+	pmdbSyncMu sync.Mutex
+	pmdbSt     pmdbState
+	// pmdbSettled is the process-lifetime record of decided hosts (see
+	// pmdbStatus.decided), keyed by catalogue name with the standing to
+	// show ("listed" or "submitted"). Outside pmdbState on purpose: a reset
+	// (a new key, a re-enable) and a host dropping out of the candidates
+	// clear display, error and backoff state, never a decision, or a later
+	// stale or hostile list could have a host posted a second time.
+	pmdbSettled map[string]string // under pmdbMu
+	pmdbWakeCh  chan struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -101,7 +117,9 @@ type Manager struct {
 // New creates a Manager. Call Start to begin polling.
 func New(st *store.Store, log *slog.Logger) *Manager {
 	m := &Manager{st: st, bus: NewBus(), log: log, states: map[int64]*BoxState{}, pollers: map[int64]*poller{},
-		pmapi: &pmapi.Client{URL: os.Getenv("PMSS_PMAPI_URL")}} // URL override is for testing against a mock feed
+		pmapi:      &pmapi.Client{URL: os.Getenv("PMSS_PMAPI_URL")}, // URL overrides are for testing against a mock
+		pmdb:       &pmdb.Client{URL: os.Getenv("PMSS_PMDB_URL")},
+		pmdbWakeCh: make(chan struct{}, 1)}
 	def := store.DefaultSettings()
 	m.settings.Store(&def)
 	return m
@@ -164,6 +182,14 @@ func (m *Manager) SetSettings(s store.Settings) {
 			}()
 		}
 	}
+	if prev.PMDBUploadKey != s.PMDBUploadKey || prev.PMDBEnabled != s.PMDBEnabled {
+		// A new key or a re-enable starts over from the public list: a
+		// "key refused" standing must not outlive the key it was for.
+		m.resetPMDB()
+		if s.PMDBEnabled && s.PMDBUploadKey != "" {
+			m.pmdbWake()
+		}
+	}
 	if prev.PollIntervalSec == s.PollIntervalSec {
 		return // thresholds and keys are read on the next poll anyway
 	}
@@ -193,9 +219,10 @@ func (m *Manager) Start(ctx context.Context) error {
 	for _, b := range boxes {
 		m.startPoller(b, nil)
 	}
-	m.wg.Add(2)
+	m.wg.Add(3)
 	go m.housekeeping()
 	go m.servicesLoop()
+	go m.pmdbLoop()
 	return nil
 }
 

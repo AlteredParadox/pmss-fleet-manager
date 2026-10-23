@@ -46,8 +46,11 @@ odin.pulsedmedia.com
 @@meminfo
 MemTotal:       65536000 kB
 MemAvailable:   12345678 kB
+SwapTotal:       8388608 kB
 @@ncpu
 16
+@@cpu_mhz
+ 2100.000
 @@kernel
 6.1.0-18-amd64
 @@debian
@@ -137,6 +140,9 @@ func TestParse(t *testing.T) {
 		t.Fatalf("identity: %+v", snap)
 	}
 	if snap.Host.NCPU != 16 || snap.Host.MemTotal != 65536000*1024 || snap.Host.Load1 != 3.21 {
+		t.Errorf("host: %+v", snap.Host)
+	}
+	if !snap.Host.SwapKnown || snap.Host.SwapTotal != 8388608*1024 || snap.Host.CPUMHz != 2100 {
 		t.Fatalf("host: %+v", snap.Host)
 	}
 	if snap.HomeFS.Type != "ext4" || snap.HomeFS.Used != 9000000000000 {
@@ -1209,5 +1215,41 @@ func TestParseLiveRings(t *testing.T) {
 	bad := `{"samples":[{"t":1792697161000,"dt":300,"cb":1,"ct":2,"mu":1,"mt":2,"tx":0,"rx":0},{"t":1000,"dt":300,"cb":1,"ct":2,"mu":1,"mt":2,"tx":0,"rx":0},{"t":1793301961,"dt":300,"cb":1,"ct":2,"mu":1,"mt":2,"tx":0,"rx":0}]}`
 	if _, known := parseLiveRings(bad, `{"samples":[{"t":1792697161000,"cpu":1,"mem":1,"tx":0,"rx":0}]}`, now); known {
 		t.Fatal("out-of-range slot times must be dropped")
+	}
+}
+
+// Through the section parser: the model name's GHz is the clock when the
+// box exposes no base frequency, and the base frequency wins when it does.
+func TestParseHostClock(t *testing.T) {
+	h := parseHost(Sections([]byte("@@cpu_model\n Intel(R) Xeon(R) CPU E5-2630 0 @ 2.30GHz\n@@cpu_mhz\n\n@@end\n")))
+	if h.CPUMHz != 2300 || h.CPUModel != "Intel(R) Xeon(R) CPU E5-2630 0 @ 2.30GHz" {
+		t.Fatalf("model fallback: %+v", h)
+	}
+	h = parseHost(Sections([]byte("@@cpu_model\n Intel(R) Xeon(R) CPU E5-2630 0 @ 2.30GHz\n@@cpu_mhz\n2100\n@@end\n")))
+	if h.CPUMHz != 2100 {
+		t.Fatalf("base frequency should win: %+v", h)
+	}
+	if h = parseHost(Sections([]byte("@@cpu_model\n Intel(R) N100\n@@end\n"))); h.CPUMHz != 0 {
+		t.Fatalf("unknown clock: %+v", h)
+	}
+}
+
+func TestNominalMHz(t *testing.T) {
+	for _, c := range []struct {
+		base, model string
+		want        int
+	}{
+		{" 2100\n", "Intel(R) Core(TM) i7-12700", 2100},
+		{"", "Intel(R) Xeon(R) CPU E5-2630 0 @ 2.30GHz", 2300},
+		{"", "Intel(R) Xeon(R) CPU L5640 @ 2.27GHz", 2270},
+		{"", "AMD EPYC 7551P 32-Core Processor", 0},
+		{"", "Intel(R) N100", 0},
+		{"0", "Intel(R) N100", 0},
+		{"junk", "@ 2.5 GHz", 2500},
+		{"", "@ 500GHz", 0},
+	} {
+		if got := nominalMHz(c.base, c.model); got != c.want {
+			t.Errorf("nominalMHz(%q, %q) = %d, want %d", c.base, c.model, got, c.want)
+		}
 	}
 }

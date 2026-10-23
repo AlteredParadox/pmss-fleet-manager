@@ -70,12 +70,16 @@ func TestRoundTrip(t *testing.T) {
 	}
 	st.PollIntervalSec = 60
 	st.Theme = "light"
+	st.PMDBEnabled, st.PMDBUploadKey = true, "words-that-make-a-passphrase"
 	if err := s.SaveSettings(ctx, st); err != nil {
 		t.Fatal(err)
 	}
 	st, _ = s.GetSettings(ctx)
-	if st.PollIntervalSec != 60 || st.Theme != "light" || st.DiskThresholdPct != 90 {
+	if st.PollIntervalSec != 60 || st.Theme != "light" || st.DiskThresholdPct != 90 || !st.PMDBEnabled || st.PMDBUploadKey != "words-that-make-a-passphrase" {
 		t.Fatalf("settings: %+v", st)
+	}
+	if pub := st.Public(); pub.PMDBUploadKey != "" || !pub.HasPMDBUploadKey || pub.PMAPIKey != "" {
+		t.Fatalf("public settings leak a key: %+v", pub)
 	}
 
 	created, err := s.RaiseAlert(ctx, b.ID, "disk", "warn", "disk at 95%")

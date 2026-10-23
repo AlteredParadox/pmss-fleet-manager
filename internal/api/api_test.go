@@ -836,3 +836,42 @@ func TestEventsSubscribedBeforeOpen(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// The pmdb upload key follows the PM API key's rules (kept on an empty
+// PUT, never echoed, cleared by its flag), and enabling the catalogue
+// without a key is refused rather than silently doing nothing.
+func TestSettingsPMDB(t *testing.T) {
+	srv, _ := newTestServer(t)
+	code, body := do(t, srv, "PUT", "/api/settings", `{"pmdb_enabled":true}`, nil)
+	if code != 400 || !strings.Contains(body, "upload key") {
+		t.Fatalf("enable without a key: %d %s", code, body)
+	}
+	code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_enabled":true,"pmdb_upload_key":" some words that make a passphrase "}`, nil)
+	if code != 200 || strings.Contains(body, "passphrase") || !strings.Contains(body, `"has_pmdb_upload_key":true`) || !strings.Contains(body, `"pmdb_enabled":true`) {
+		t.Fatalf("enable: %d %s", code, body)
+	}
+	if code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_upload_key":"bad\nkey but long enough to pass"}`, nil); code != 400 {
+		t.Fatalf("key with a line break: %d %s", code, body)
+	}
+	if code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_upload_key":"short"}`, nil); code != 400 || !strings.Contains(body, "too short") {
+		t.Fatalf("short key: %d %s", code, body)
+	}
+	if got := srv.m.Settings(); got.PMDBUploadKey != "some words that make a passphrase" || !got.PMDBEnabled {
+		t.Fatalf("stored: %+v", got)
+	}
+	if code, _ = do(t, srv, "PUT", "/api/settings", `{"theme":"light"}`, nil); code != 200 || srv.m.Settings().PMDBUploadKey != "some words that make a passphrase" {
+		t.Fatalf("key not kept: %d", code)
+	}
+	// An empty key on a later save keeps the stored one; the flag removes
+	// it, which switches the integration off with it.
+	code, body = do(t, srv, "PUT", "/api/settings", `{"clear_pmdb_upload_key":true}`, nil)
+	if code != 200 || srv.m.Settings().PMDBUploadKey != "" || srv.m.Settings().PMDBEnabled || !strings.Contains(body, `"has_pmdb_upload_key":false`) || !strings.Contains(body, `"pmdb_enabled":false`) {
+		t.Fatalf("clear: %d %s", code, body)
+	}
+	if code, body = do(t, srv, "GET", "/api/pmdb", "", nil); code != 200 || !strings.Contains(body, `"enabled":false`) {
+		t.Fatalf("view: %d %s", code, body)
+	}
+	if code, _ = do(t, srv, "POST", "/api/pmdb/sync", "", nil); code != 400 {
+		t.Fatalf("sync while off: %d", code)
+	}
+}

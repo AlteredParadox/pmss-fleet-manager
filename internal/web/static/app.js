@@ -37,6 +37,7 @@ const S = {
   alerts: [], filter: '', live: false,
   torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
   torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, status_reason, qbt}]
+  pmdb: null, // pmdb.fyi catalogue standing from /api/pmdb, loaded on the settings view
   logView: null, // open log on the logs tab: { kind: 'file'|'ctr', key, label, text, busy, err, at }
   logOpen: new Set(), // directories whose "older / rotated" group the user expanded on the logs tab
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
@@ -173,7 +174,7 @@ function route() {
   }
   if (S.view === 'alerts') void loadAlerts();
   if (S.view === 'torrents') void loadTorrents();
-  if (S.view === 'settings') { S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; void loadServices(); }
+  if (S.view === 'settings') { S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; void loadServices(); void loadPMDB(); }
   S.filter = '';
   S.torAdd = null;
   S.logView = null;
@@ -188,7 +189,7 @@ const go = (hash) => { location.hash = hash; };
 // services and alerts lists). A successful save bumps the sequence too, so
 // a GET that started before the save cannot land after it with the old
 // values. Boxes and the alert badge carry revisions and merge on their own.
-let stateSeq = 0, servicesSeq = 0, alertsSeq = 0;
+let stateSeq = 0, servicesSeq = 0, alertsSeq = 0, pmdbSeq = 0;
 async function loadState() {
   const seq = ++stateSeq;
   try {
@@ -258,6 +259,22 @@ async function loadTorrents() {
   torInflight = false; torLast = Date.now();
   if (S.view === 'torrents') render();
   if (torDirty) loadTorrentsSoon();
+}
+// The keys never come back from the server (has_* says whether one is
+// stored), so the draft starts them blank and a save sends them only when
+// typed; SECRET_SETTINGS are the fields a settings event must not overwrite
+// in an open draft.
+const SECRET_SETTINGS = new Set(['pm_api_key', 'pmdb_upload_key']);
+function settingsDraftOf(settings) {
+  return { ...settings, pm_api_key: '', clear_pm_api_key: false, pmdb_upload_key: '', clear_pmdb_upload_key: false };
+}
+async function loadPMDB() {
+  const seq = ++pmdbSeq;
+  let next;
+  try { next = await api('GET', BASE + '/api/pmdb'); } catch (e) { next = { enabled: false, hosts: [], error: e.message }; }
+  if (seq !== pmdbSeq) return;
+  S.pmdb = next;
+  if (S.view === 'settings') render();
 }
 async function loadServices() {
   const seq = ++servicesSeq;
@@ -340,8 +357,9 @@ function connectEvents() {
     // does not revert them; touched fields and the theme preview stay.
     void loadState().then(() => {
       if (S.view !== 'settings') { render(); return; }
-      for (const k of Object.keys(S.settings)) if (!S.settingsTouched[k] && k !== 'pm_api_key') S.settingsDraft[k] = S.settings[k];
+      for (const k of Object.keys(S.settings)) if (!S.settingsTouched[k] && !SECRET_SETTINGS.has(k)) S.settingsDraft[k] = S.settings[k];
       applyTheme(S.settingsDraft.theme);
+      void loadPMDB(); // the other tab may have switched the catalogue off or changed its key: the panel follows
       render();
     });
   });
@@ -352,6 +370,11 @@ function connectEvents() {
     if (S.view === 'settings') void loadServices();
     else if (S.view === 'box' && S.selId) void loadDetail(S.selId);
     else render();
+  });
+  es.addEventListener('pmdb', (ev) => {
+    const e = JSON.parse(ev.data);
+    pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
+    if (S.view === 'settings') void loadPMDB();
   });
   es.addEventListener('alerts', (ev) => {
     const e = JSON.parse(ev.data);
@@ -1543,6 +1566,12 @@ function viewSettings() {
       <label class="row">API key<input data-s="pm_api_key" type="password" autocomplete="off" value="${esc(s.pm_api_key || '')}" placeholder="${s.clear_pm_api_key ? 'will be removed on save' : S.settings.has_pm_api_key ? '•••••••• (stored)' : 'paste key'}"></label>
       <div class="hint">Read-only customer API key from the client area (<a href="https://pulsedmedia.com/clients/index.php?m=pmapi" target="_blank" rel="noopener">?m=pmapi ↗</a>). Fills in plan names, prices and renewal dates for boxes whose host or username matches a service. Stored in the local database; leave blank to keep the current key.${S.settings.has_pm_api_key && !s.clear_pm_api_key ? ` <button class="small ghost" data-act="settings:clear-key">remove key</button>` : ''}</div>
     </div>
+    <div class="panel"><div class="tile-label">pmdb.fyi hardware catalogue</div>
+      <label class="check"><input type="checkbox" data-s="pmdb_enabled" ${s.pmdb_enabled ? 'checked' : ''}> submit the hosts my boxes run on to the community hardware catalogue when they are missing from it</label>
+      <label class="row">upload key<input data-s="pmdb_upload_key" type="password" autocomplete="off" value="${esc(s.pmdb_upload_key || '')}" placeholder="${s.clear_pmdb_upload_key ? 'will be removed on save' : S.settings.has_pmdb_upload_key ? '•••••••• (stored)' : 'paste key'}"></label>
+      <div class="hint"><a href="https://pmdb.fyi" target="_blank" rel="noopener">pmdb.fyi ↗</a> is a community-run, public table of Pulsed Media host hardware (<a href="https://github.com/schmintendo/pmdb" target="_blank" rel="noopener">source ↗</a>); the upload key is a shared passphrase handed out by its maintainers. <b>What leaves this dashboard when enabled:</b> a request for the public list, and for each host not in it, one submission with the key carrying the host's hostname, CPU model, core count, nominal clock, RAM, swap, home filesystem size and whether an Intel GPU is present. Nothing about your account, username, usage or torrents is sent, and an existing row is never replaced; as with any web request, the service sees your IP address and the client name (pmss-fleet-manager). Checked after each box's quarter-hourly inventory and every six hours. Stored in the local database; leave the key blank to keep the current one, and removing it switches submission off.${S.settings.has_pmdb_upload_key && !s.clear_pmdb_upload_key ? ` <button class="small ghost" data-act="settings:clear-pmdb-key">remove key</button>` : ''}</div>
+      ${viewPMDB()}
+    </div>
     <div class="form-foot" style="justify-content:flex-start"><button class="primary" data-act="settings:save">save settings</button></div>
     <div class="panel"><div class="tile-label">about &amp; licensing</div>
       <div class="row"><span>version</span><span>${esc(S.version || 'dev')}</span></div>
@@ -1551,6 +1580,16 @@ function viewSettings() {
     </div>
   </div>
   ${viewServices()}`;
+}
+// viewPMDB lists each distinct host and its standing with the catalogue,
+// below the settings that enable the integration.
+function viewPMDB() {
+  const v = S.pmdb;
+  if (!v?.enabled) return '';
+  const label = { listed: 'in the catalogue', submitted: 'submitted', pending: 'not listed, submission pending', error: 'submission failed' };
+  const rows = v.hosts.map((h) => `<div class="row"><span>${esc(h.hostname)}${h.box_ids.length > 1 ? ` <span class="muted">· ${h.box_ids.length} boxes</span>` : ''}</span><span class="${h.status === 'error' ? 'bad' : 'muted'}" title="${esc(h.detail || '')}">${label[h.status] || esc(h.status)}${h.detail ? `: ${esc(h.detail)}` : ''}</span></div>`).join('');
+  const status = v.error ? `<span class="bad">${esc(v.error)}</span>` : v.checked_at ? `checked ${fmtAgo(v.checked_at)}` : v.configured ? 'not checked yet' : 'save an upload key to start';
+  return `<div class="row" style="margin-top:8px"><span class="muted">${status}</span>${v.configured ? '<button class="small ghost" data-act="settings:pmdb-sync">check now</button>' : ''}</div>${rows || (v.configured ? '<div class="hint">No host has reported its inventory yet.</div>' : '')}`;
 }
 function viewServices() {
   const v = S.services;
@@ -1731,12 +1770,16 @@ async function settingsAction(a) {
     // whose settings event has not reached this tab yet.
     const d = settingsPatch(S.settingsDraft, S.settingsTouched);
     const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
+    const pmdbChanged = 'pmdb_enabled' in d || !!(d.pmdb_upload_key || d.clear_pmdb_upload_key);
     const saved = await api('PUT', BASE + '/api/settings', d);
     stateSeq++; // a state load started before the save must not put the old values back
-    S.settings = saved; S.settingsDraft = { ...S.settings, pm_api_key: '', clear_pm_api_key: false }; S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
+    S.settings = saved; S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
     if (keyChanged) { S.services = null; servicesSeq++; setTimeout(loadServices, 1500); }
+    if (pmdbChanged) void loadPMDB(); // the first check runs a few seconds later and announces itself with a pmdb event
   }
   else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; S.settingsTouched.clear_pm_api_key = true; render(); }
+  else if (a === 'settings:clear-pmdb-key') { S.settingsDraft.clear_pmdb_upload_key = true; S.settingsDraft.pmdb_upload_key = ''; S.settingsTouched.clear_pmdb_upload_key = true; render(); }
+  else if (a === 'settings:pmdb-sync') { toast('checking pmdb.fyi…'); const v = await api('POST', BASE + '/api/pmdb/sync'); pmdbSeq++; S.pmdb = v; toast(v.error ? v.error : `checked ${v.hosts.length} hosts`, v.error ? 'bad' : 'ok'); render(); }
 }
 // settingsPatch is the settings save body: the touched fields, numbers as
 // numbers, the API key only when typed and the clear flag only when set
@@ -1747,6 +1790,9 @@ function settingsPatch(draft, touched) {
   for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px']) if (k in d) d[k] = Number(d[k]);
   if (draft.pm_api_key) { d.pm_api_key = draft.pm_api_key; delete d.clear_pm_api_key; }
   else { delete d.pm_api_key; if (draft.clear_pm_api_key) d.clear_pm_api_key = true; else delete d.clear_pm_api_key; }
+  if (draft.pmdb_upload_key) { d.pmdb_upload_key = draft.pmdb_upload_key; delete d.clear_pmdb_upload_key; }
+  else { delete d.pmdb_upload_key; if (draft.clear_pmdb_upload_key) d.clear_pmdb_upload_key = true; else delete d.clear_pmdb_upload_key; }
+  if ('pmdb_enabled' in d) d.pmdb_enabled = !!d.pmdb_enabled;
   return d;
 }
 async function servicesAction(a, act) {
@@ -1821,8 +1867,9 @@ document.addEventListener('input', (e) => {
   }
   const s = e.target.closest('[data-s]');
   if (s && S.settingsDraft) {
-    S.settingsDraft[s.dataset.s] = s.value; S.settingsTouched[s.dataset.s] = true;
+    S.settingsDraft[s.dataset.s] = s.type === 'checkbox' ? s.checked : s.value; S.settingsTouched[s.dataset.s] = true;
     if (s.dataset.s === 'pm_api_key' && s.value) S.settingsDraft.clear_pm_api_key = false; // a key typed after "remove" replaces instead
+    if (s.dataset.s === 'pmdb_upload_key' && s.value) S.settingsDraft.clear_pmdb_upload_key = false;
     return;
   }
   const fl = e.target.closest('[data-filter]');

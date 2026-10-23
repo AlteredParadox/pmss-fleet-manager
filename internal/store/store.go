@@ -95,6 +95,16 @@ type Settings struct {
 	PMAPIKey      string `json:"pm_api_key,omitempty"`
 	HasPMAPIKey   bool   `json:"has_pm_api_key"`
 	ClearPMAPIKey bool   `json:"clear_pm_api_key,omitempty"`
+
+	// PMDBEnabled switches on the pmdb.fyi hardware catalogue integration:
+	// the dashboard checks the public catalogue for each box's host and
+	// submits the host's hardware when it is missing. The upload key is
+	// handled like PMAPIKey: never sent to the browser, kept on an empty
+	// PUT, removed by ClearPMDBUploadKey.
+	PMDBEnabled        bool   `json:"pmdb_enabled"`
+	PMDBUploadKey      string `json:"pmdb_upload_key,omitempty"`
+	HasPMDBUploadKey   bool   `json:"has_pmdb_upload_key"`
+	ClearPMDBUploadKey bool   `json:"clear_pmdb_upload_key,omitempty"`
 }
 
 // Public returns a copy safe to serialise to the browser.
@@ -102,6 +112,9 @@ func (s Settings) Public() Settings {
 	s.HasPMAPIKey = s.PMAPIKey != ""
 	s.PMAPIKey = ""
 	s.ClearPMAPIKey = false
+	s.HasPMDBUploadKey = s.PMDBUploadKey != ""
+	s.PMDBUploadKey = ""
+	s.ClearPMDBUploadKey = false
 	return s
 }
 
@@ -122,6 +135,13 @@ func DefaultSettings() Settings {
 		QbtDownloadURL:   DefaultQbtDownloadURL,
 		CardMinPx:        340,
 	}
+}
+
+func boolKV(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
 }
 
 // Alert is a persisted alert. Key dedups by box and rule.
@@ -533,6 +553,8 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 	gets("client_area_url", &out.ClientAreaURL)
 	gets("qbt_download_url", &out.QbtDownloadURL)
 	gets("pm_api_key", &out.PMAPIKey)
+	gets("pmdb_upload_key", &out.PMDBUploadKey)
+	out.PMDBEnabled = kv["pmdb_enabled"] == "1"
 	if out.QbtDownloadURL == "" {
 		out.QbtDownloadURL = DefaultQbtDownloadURL
 	}
@@ -553,6 +575,8 @@ func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
 		"qbt_download_url":      st.QbtDownloadURL,
 		"card_min_px":           strconv.Itoa(st.CardMinPx),
 		"pm_api_key":            st.PMAPIKey,
+		"pmdb_upload_key":       st.PMDBUploadKey,
+		"pmdb_enabled":          boolKV(st.PMDBEnabled),
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

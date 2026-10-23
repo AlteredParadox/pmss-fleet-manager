@@ -272,6 +272,8 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET "+bp+"/source", s.handleSource)
 	mux.HandleFunc("GET "+bp+"/api/services", s.handleServices)
 	mux.HandleFunc("POST "+bp+"/api/services/sync", s.handleServicesSync)
+	mux.HandleFunc("GET "+bp+"/api/pmdb", s.handlePMDB)
+	mux.HandleFunc("POST "+bp+"/api/pmdb/sync", s.handlePMDBSync)
 
 	static, _ := fs.Sub(web.FS, "static")
 	fileServer := http.FileServer(http.FS(static))
@@ -1362,6 +1364,29 @@ func (s *Server) handleAckAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
+// pmdbMinKeyLen is the shortest upload key accepted: the catalogue refuses
+// to start with one under 24 characters, so a shorter one is a paste gone
+// wrong.
+const pmdbMinKeyLen = 24
+
+// mergeSecret applies a settings PUT to a stored secret: a typed value
+// replaces it, an empty one keeps it, the clear flag removes it. A secret
+// holding one of the forbidden characters is a paste gone wrong, not a
+// key (quotes and line breaks for either; spaces too for the PM API key,
+// while a pmdb upload key is a passphrase that may have them).
+func mergeSecret(typed, stored string, remove bool, what, forbidden string) (string, error) {
+	typed = strings.TrimSpace(typed)
+	switch {
+	case remove:
+		return "", nil
+	case typed == "":
+		return stored, nil
+	case strings.ContainsAny(typed, forbidden):
+		return "", errors.New(what + " contains quotes, line breaks or other characters a key cannot hold")
+	}
+	return typed, nil
+}
+
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.m.Settings().Public())
 }
@@ -1378,6 +1403,19 @@ func (s *Server) handleServicesSync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.m.Services())
 }
 
+func (s *Server) handlePMDB(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, s.m.PMDB())
+}
+
+func (s *Server) handlePMDBSync(w http.ResponseWriter, r *http.Request) {
+	if v := s.m.PMDB(); !v.Configured {
+		writeErr(w, 400, errors.New("pmdb.fyi submission is not enabled, or no upload key is set"))
+		return
+	}
+	s.m.SyncPMDB(r.Context())
+	writeJSON(w, 200, s.m.PMDB())
+}
+
 func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	// Read the body first: a client trickling bytes must not hold the lock
 	// that every other settings save waits on.
@@ -1389,24 +1427,37 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	s.settingsMu.Lock()
 	defer s.settingsMu.Unlock()
 	in := s.m.Settings()
-	prevKey := in.PMAPIKey
-	in.PMAPIKey = ""
+	prevKey, prevPMDBKey := in.PMAPIKey, in.PMDBUploadKey
+	in.PMAPIKey, in.PMDBUploadKey = "", ""
 	if err := json.Unmarshal(body, &in); err != nil {
 		writeErr(w, 400, err)
 		return
 	}
-	// The browser never sees the stored key, so an empty field means "keep".
-	in.PMAPIKey = strings.TrimSpace(in.PMAPIKey)
-	switch {
-	case in.ClearPMAPIKey:
-		in.PMAPIKey = ""
-	case in.PMAPIKey == "":
-		in.PMAPIKey = prevKey
-	case strings.ContainsAny(in.PMAPIKey, " \t\r\n\"'"):
-		writeErr(w, 400, errors.New("API key contains whitespace or quotes"))
+	// The browser never sees a stored key, so an empty field means "keep".
+	var err400 error
+	in.PMAPIKey, err400 = mergeSecret(in.PMAPIKey, prevKey, in.ClearPMAPIKey, "API key", " \t\r\n\"'")
+	if err400 != nil {
+		writeErr(w, 400, err400)
 		return
 	}
 	in.ClearPMAPIKey = false
+	in.PMDBUploadKey, err400 = mergeSecret(in.PMDBUploadKey, prevPMDBKey, in.ClearPMDBUploadKey, "pmdb upload key", "\t\r\n\"'")
+	if err400 != nil {
+		writeErr(w, 400, err400)
+		return
+	}
+	if in.ClearPMDBUploadKey {
+		in.PMDBEnabled = false // "remove key" is the way out of the integration too; a key is what it runs on
+	}
+	in.ClearPMDBUploadKey = false
+	if n := len(in.PMDBUploadKey); n > 0 && n < pmdbMinKeyLen {
+		writeErr(w, 400, fmt.Errorf("pmdb upload key is too short (%d characters, the catalogue's keys have at least %d)", n, pmdbMinKeyLen))
+		return
+	}
+	if in.PMDBEnabled && in.PMDBUploadKey == "" {
+		writeErr(w, 400, errors.New("pmdb.fyi submission needs an upload key; enter one or untick the box"))
+		return
+	}
 	if in.PollIntervalSec < 5 || in.PollIntervalSec > 3600 {
 		writeErr(w, 400, errors.New("poll interval must be 5..3600 seconds"))
 		return
