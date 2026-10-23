@@ -330,4 +330,3 @@ func TestSyncPMDBStopsOnRateLimit(t *testing.T) {
 		t.Fatalf("standing after a 429: %+v", m.PMDB().Hosts)
 	}
 }
-
