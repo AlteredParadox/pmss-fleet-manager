@@ -251,33 +251,36 @@ type TorrentView struct {
 
 // QbtState is the torrent client view.
 type QbtState struct {
-	Enabled       bool    `json:"enabled"`
-	Installed     bool    `json:"installed"`
-	ProcessUp     bool    `json:"process_up"`
-	Reachable     bool    `json:"reachable"`
-	Version       string  `json:"version,omitempty"`
-	Port          int     `json:"port"`
-	Error         string  `json:"error,omitempty"`
-	LocalBypass   bool    `json:"local_bypass"`  // qBittorrent.conf bypasses auth for localhost
-	SubnetBypass  bool    `json:"subnet_bypass"` // whitelist bypass enabled
-	SubnetList    string  `json:"subnet_list,omitempty"`
-	ConfUser      string  `json:"conf_user,omitempty"`
-	HasCreds      bool    `json:"has_creds"`
-	AuthHold      bool    `json:"auth_hold"`                // login attempts suspended after a failure
-	PortOK        bool    `json:"port_ok"`                  // WebUI port verified as owned by this account
-	BinaryVersion string  `json:"binary_version,omitempty"` // ~/bin/qbittorrent-nox --version
-	LatestVersion string  `json:"latest_version,omitempty"` // newest userdocs release
-	UpdateAvail   bool    `json:"update_available"`         // binary on disk is older than latest
-	RestartNeeded bool    `json:"restart_needed"`           // running version differs from binary on disk
-	StartHelper   bool    `json:"start_helper"`             // ~/bin/qbt-start present
-	CronInstalled bool    `json:"cron_installed"`
-	PMSSManaged   bool    `json:"pmss_managed"` // enabled in the PMSS panel, which runs and configures it
-	Total         int     `json:"total"`
-	Seeding       int     `json:"seeding"`
-	Leeching      int     `json:"leeching"`
-	Paused        int     `json:"paused"`
-	Errored       int     `json:"errored"`
-	GlobalRatio   float64 `json:"global_ratio"`
+	Enabled       bool   `json:"enabled"`
+	Installed     bool   `json:"installed"`
+	ProcessUp     bool   `json:"process_up"`
+	Reachable     bool   `json:"reachable"`
+	Version       string `json:"version,omitempty"`
+	Port          int    `json:"port"`
+	Error         string `json:"error,omitempty"`
+	LocalBypass   bool   `json:"local_bypass"`  // qBittorrent.conf bypasses auth for localhost
+	SubnetBypass  bool   `json:"subnet_bypass"` // whitelist bypass enabled
+	SubnetList    string `json:"subnet_list,omitempty"`
+	ConfUser      string `json:"conf_user,omitempty"`
+	HasCreds      bool   `json:"has_creds"`
+	AuthHold      bool   `json:"auth_hold"`                // login attempts suspended after a failure
+	PortOK        bool   `json:"port_ok"`                  // WebUI port verified as owned by this account
+	BinaryVersion string `json:"binary_version,omitempty"` // ~/bin/qbittorrent-nox --version
+	LatestVersion string `json:"latest_version,omitempty"` // newest userdocs release
+	UpdateAvail   bool   `json:"update_available"`         // binary on disk is older than latest
+	RestartNeeded bool   `json:"restart_needed"`           // running version differs from binary on disk
+	StartHelper   bool   `json:"start_helper"`             // ~/bin/qbt-start present
+	// StartHelperStale: the helper keys on $USER, empty under cron, so each
+	// cron run starts another copy; "reapply" autostart rewrites it.
+	StartHelperStale bool    `json:"start_helper_stale"`
+	CronInstalled    bool    `json:"cron_installed"`
+	PMSSManaged      bool    `json:"pmss_managed"` // enabled in the PMSS panel, which runs and configures it
+	Total            int     `json:"total"`
+	Seeding          int     `json:"seeding"`
+	Leeching         int     `json:"leeching"`
+	Paused           int     `json:"paused"`
+	Errored          int     `json:"errored"`
+	GlobalRatio      float64 `json:"global_ratio"`
 	// Connection is the client's incoming connectivity as libtorrent sees
 	// it: connected | firewalled | disconnected | "" (not read). ListenPort
 	// is the port peers must reach. FirewalledSince (RFC3339) is when the

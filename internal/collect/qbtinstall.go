@@ -88,6 +88,11 @@ else echo "neither curl nor wget available"; exit 1; fi
 )
 
 // qbtStartHelper is the user's standard launcher, written to ~/bin/qbt-start.
+// It keys the running check on id -u: $USER is empty under cron, pgrep -u ""
+// is a usage error (exit 2), and "! pgrep" then reads that as "not running"
+// and starts another copy every five minutes. Earlier copies of this helper
+// (and the hand-written one it came from) used $USER; autostart replaces
+// those, see qbtStaleHelperPattern.
 const qbtStartHelper = `#!/bin/bash
 # start qbittorrent-nox in a screen session if not already running
 if ! pgrep -u "$(id -u)" -x qbittorrent-nox >/dev/null; then
@@ -95,20 +100,37 @@ if ! pgrep -u "$(id -u)" -x qbittorrent-nox >/dev/null; then
 fi
 `
 
-// autostartScript installs the helper (if missing) and the two crontab lines,
-// idempotently: existing lines that run only the helper are replaced,
-// everything else kept, and the previous crontab is saved first.
+// qbtStaleHelperPattern (grep -E, in single quotes) matches a helper whose
+// running check keys on $USER, quoted or not. The probe uses the same
+// pattern to flag such a helper (QbtInfo.StartHelperStale).
+const qbtStaleHelperPattern = `'pgrep -u "?[$]USER"?'`
+
+// autostartScript installs the helper (if missing, or if it is one of ours
+// that keyed on $USER) and the two crontab lines, idempotently: existing
+// lines that run only the helper are replaced, everything else kept, the
+// previous crontab and a replaced helper are saved first.
 const autostartScript = `#!/bin/sh
 set -u
 # Byte-wise: under a UTF-8 locale grep silently drops lines with invalid
 # UTF-8, and they would then be missing from what is piped into crontab -.
 LC_ALL=C; export LC_ALL
 mkdir -p "$HOME/bin" || exit 1
-if [ -e "$HOME/bin/qbt-start" ]; then echo "helper: ~/bin/qbt-start already exists, left as is"
-else
+write=1
+if [ -e "$HOME/bin/qbt-start" ]; then
+  if grep -Eq ` + qbtStaleHelperPattern + ` "$HOME/bin/qbt-start"; then
+    # $USER is empty under cron, so this helper's pgrep fails with a usage
+    # error and the helper starts another copy on every run.
+    hbak="$HOME/.config/pmss-fleet-manager/qbt-start.bak"
+    ( umask 077; mkdir -p "$HOME/.config/pmss-fleet-manager" && rm -f "$hbak" && cp "$HOME/bin/qbt-start" "$hbak" ) || { echo "could not save the current helper to $hbak; not changing it"; exit 1; }
+    echo "helper: ~/bin/qbt-start keyed on \$USER, which is empty under cron (so it started another copy every run); saved to ~/.config/pmss-fleet-manager/qbt-start.bak and rewritten"
+  else
+    echo "helper: ~/bin/qbt-start already exists, left as is"; write=0
+  fi
+fi
+if [ "$write" = 1 ]; then
 cat > "$HOME/bin/qbt-start" <<'PMSSMGR_EOF'
 ` + qbtStartHelper + `PMSSMGR_EOF
-chmod 700 "$HOME/bin/qbt-start" && echo "helper: created ~/bin/qbt-start"
+chmod 700 "$HOME/bin/qbt-start" && echo "helper: wrote ~/bin/qbt-start"
 fi
 command -v screen >/dev/null 2>&1 || echo "warning: 'screen' not found on this box; qbt-start needs it"
 # Read the existing crontab first and distinguish "none yet" from a real

@@ -517,8 +517,12 @@ type QbtInfo struct {
 	BinaryVersion string // "v5.2.3" from ~/bin/qbittorrent-nox --version; empty when the probe skipped the call (see ScriptWith)
 	BinaryStat    string // "size mtime ctime inode" of ~/bin/qbittorrent-nox, the key the poller caches BinaryVersion under
 	StartHelper   bool   // ~/bin/qbt-start exists
-	CronEntries   int    // crontab lines that run only bin/qbt-start (QbtCronPattern)
-	PMSSManaged   bool   // ~/.qbittorrentEnable: the PMSS panel runs and configures qBittorrent
+	// StartHelperStale: the helper keys its running check on $USER, which
+	// is empty under cron, so every cron run starts another copy. Fixed by
+	// running autostart again (the helper is rewritten).
+	StartHelperStale bool
+	CronEntries      int  // crontab lines that run only bin/qbt-start (QbtCronPattern)
+	PMSSManaged      bool // ~/.qbittorrentEnable: the PMSS panel runs and configures qBittorrent
 }
 
 // DockerInfo reports the rootless daemon's presence.
@@ -854,7 +858,7 @@ func (s *Snapshot) CarryInventory(prev *Snapshot) {
 	h.CPUModel, h.CPUShort, h.CPUFlags, h.GPU = ph.CPUModel, ph.CPUShort, append([]string(nil), ph.CPUFlags...), ph.GPU
 	q, pq := &s.Qbt, &prev.Qbt
 	q.BinaryPresent, q.BinaryVersion, q.BinaryStat = pq.BinaryPresent, pq.BinaryVersion, pq.BinaryStat
-	q.StartHelper, q.CronEntries = pq.StartHelper, pq.CronEntries // PMSSManaged is read every poll
+	q.StartHelper, q.StartHelperStale, q.CronEntries = pq.StartHelper, pq.StartHelperStale, pq.CronEntries // PMSSManaged is read every poll
 	s.Logs, s.LogsKnown = append([]LogFile(nil), prev.Logs...), prev.LogsKnown
 	s.Live = LiveRings{Node: append([]LiveNodeSample(nil), prev.Live.Node...), User: append([]LiveUserSample(nil), prev.Live.User...)}
 	s.LiveKnown = prev.LiveKnown
@@ -1260,6 +1264,7 @@ func parseQbt(s map[string]string) QbtInfo {
 		q.BinaryStat = st // anything else is not a stat line, and it is echoed back to the box every poll
 	}
 	q.StartHelper = strings.TrimSpace(s["qbt_start_helper"]) == "1"
+	q.StartHelperStale = q.StartHelper && strings.TrimSpace(s["qbt_start_helper_stale"]) == "1"
 	q.CronEntries, _ = strconv.Atoi(strings.TrimSpace(s["qbt_cron"]))
 	q.PMSSManaged = strings.TrimSpace(s["qbt_pmss"]) == "1"
 	for _, line := range strings.Split(s["qbt_conf"], "\n") {

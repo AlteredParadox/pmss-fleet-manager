@@ -924,6 +924,29 @@ func TestParseQbtBinaryStatShape(t *testing.T) {
 	}
 }
 
+// A helper keyed on $USER is flagged only when the helper is there at all.
+func TestParseQbtStaleHelper(t *testing.T) {
+	q := parseQbt(map[string]string{"qbt_start_helper": "1\n", "qbt_start_helper_stale": "1\n"})
+	if !q.StartHelper || !q.StartHelperStale {
+		t.Fatalf("stale helper: %+v", q)
+	}
+	q = parseQbt(map[string]string{"qbt_start_helper": "1\n", "qbt_start_helper_stale": "0\n"})
+	if !q.StartHelper || q.StartHelperStale {
+		t.Fatalf("fixed helper: %+v", q)
+	}
+	q = parseQbt(map[string]string{"qbt_start_helper": "0\n", "qbt_start_helper_stale": "1\n"})
+	if q.StartHelper || q.StartHelperStale {
+		t.Fatalf("no helper: %+v", q)
+	}
+	// Carried across a non-inventory poll like the rest of the inventory.
+	prev := Snapshot{Qbt: QbtInfo{StartHelper: true, StartHelperStale: true}}
+	cur := Snapshot{}
+	cur.CarryInventory(&prev)
+	if !cur.Qbt.StartHelperStale {
+		t.Fatal("stale flag not carried")
+	}
+}
+
 func TestParseQbtPMSSManaged(t *testing.T) {
 	for in, want := range map[string]bool{"1": true, "1\n": true, "0": false, "": false} {
 		if got := parseQbt(map[string]string{"qbt_pmss": in}).PMSSManaged; got != want {

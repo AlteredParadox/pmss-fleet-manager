@@ -91,6 +91,67 @@ func TestAutostartKeepsOtherCronLines(t *testing.T) {
 	}
 }
 
+// A helper that keys its running check on $USER (empty under cron, so it
+// started another copy on every run) is saved and rewritten by autostart;
+// any other existing helper is the user's and left alone.
+func TestAutostartRewritesUserKeyedHelper(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	stub := t.TempDir()
+	fake := "#!/bin/sh\ncase \"$1\" in\n-l) cat \"$TAB\" ;;\n-) cat > \"$TAB\" ;;\n*) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(stub, "crontab"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	run := func(t *testing.T, helper string) (string, string) {
+		home := t.TempDir()
+		tab := filepath.Join(home, "tab")
+		if err := os.WriteFile(tab, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if helper != "" {
+			if err := os.MkdirAll(filepath.Join(home, "bin"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, "bin", "qbt-start"), []byte(helper), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cmd := exec.Command("sh")
+		cmd.Stdin = strings.NewReader(autostartScript)
+		cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+stub+string(os.PathListSeparator)+os.Getenv("PATH"), "TAB="+tab, "USER=")
+		var out bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &out
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("autostart failed: %v\n%s", err, out.String())
+		}
+		got, err := os.ReadFile(filepath.Join(home, "bin", "qbt-start"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(got), out.String()
+	}
+	for _, old := range []string{
+		"#!/bin/bash\nif ! pgrep -u \"$USER\" -f \"$HOME/bin/qbittorrent-nox\" >/dev/null; then\n    screen -dmS qbt \"$HOME/bin/qbittorrent-nox\"\nfi\n",
+		"#!/bin/bash\nif ! pgrep -u $USER -x qbittorrent-nox; then screen -dmS qbt \"$HOME/bin/qbittorrent-nox\"; fi\n",
+	} {
+		got, out := run(t, old)
+		if got != qbtStartHelper {
+			t.Errorf("helper keyed on $USER not rewritten:\n%s", got)
+		}
+		if !strings.Contains(out, "rewritten") || !strings.Contains(out, "qbt-start.bak") {
+			t.Errorf("output does not say the helper was saved and rewritten:\n%s", out)
+		}
+	}
+	custom := "#!/bin/sh\n# mine\npgrep -u \"$(id -u)\" -x qbittorrent-nox >/dev/null || \"$HOME/bin/qbittorrent-nox\" -d\n"
+	if got, out := run(t, custom); got != custom || !strings.Contains(out, "left as is") {
+		t.Errorf("the user's own helper was touched:\n%s\n%s", got, out)
+	}
+	if got, out := run(t, ""); got != qbtStartHelper || !strings.Contains(out, "wrote") {
+		t.Errorf("no helper: got\n%s\n%s", got, out)
+	}
+}
+
 // Install and autostart refuse before connecting when the last snapshot saw
 // the PMSS panel's qBittorrent marker.
 func TestQbtInstallRefusesPMSSManaged(t *testing.T) {

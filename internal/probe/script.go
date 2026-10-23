@@ -141,6 +141,7 @@ sec qbt_bin; ls "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_stat; stat -L -c '%s %Y %Z %i' "$home/bin/qbittorrent-nox" 2>/dev/null
 sec qbt_bin_version
 ` + qbtVersionShell + `sec qbt_start_helper; [ -x "$home/bin/qbt-start" ] && echo 1 || echo 0
+sec qbt_start_helper_stale; grep -Eq 'pgrep -u "?[$]USER"?' "$home/bin/qbt-start" 2>/dev/null && echo 1 || echo 0
 sec qbt_cron; timeout 10 crontab -l 2>/dev/null | grep -Ec ` + QbtCronPattern + `
 sec logs
 ` + logsListShell + `# PMSS's live-stats rings (its ADR 0126): node sums for everyone, this

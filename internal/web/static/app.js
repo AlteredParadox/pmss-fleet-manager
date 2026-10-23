@@ -700,7 +700,8 @@ function ovBinaryRow(q) {
 }
 function ovAutostartRow(b, q) {
   if (q.pmss_managed) return `<div><span>autostart</span><span class="muted">Pulsed Media watchdog</span></div>`;
-  return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'} <button class="small ghost" data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button></span></div>`;
+  const stale = q.start_helper_stale ? ' <span class="warn" title="~/bin/qbt-start checks for a running client with $USER, which is empty under cron, so every cron run starts another copy. Reapply rewrites the helper (the old one is saved to ~/.config/pmss-fleet-manager/qbt-start.bak).">helper needs a rewrite</span>' : '';
+  return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'}${stale} <button class="small ghost" data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing, or if it keys on $USER, which is empty under cron) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept; a replaced helper is saved first.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button></span></div>`;
 }
 // binary + autostart rows: shown whenever the client is monitored or at least present on the box.
 function ovAutostartRows(b, q) {
