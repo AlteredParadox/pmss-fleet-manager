@@ -67,6 +67,9 @@ type pmdbState struct {
 	cancel    context.CancelFunc // the run in flight, cancelled by a reset
 }
 
+// pmdbSubmitLog is the log message of every submission outcome.
+const pmdbSubmitLog = "pmdb submit"
+
 // pmdbRetry is how long a failed submission waits before another try, and
 // pmdbInterval how often the loop re-checks on its own (a new box's first
 // inventory wakes it sooner).
@@ -150,6 +153,12 @@ func (m *Manager) pmdbLoop() {
 			case <-m.ctx.Done():
 				return
 			case <-time.After(10 * time.Second):
+			}
+			// A wake that arrived during the wait is covered by this run:
+			// drop it, or it would fetch the catalogue a second time.
+			select {
+			case <-m.pmdbWakeCh:
+			default:
 			}
 		}
 		if s := m.Settings(); s.PMDBEnabled && s.PMDBUploadKey != "" {
@@ -322,7 +331,7 @@ func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 	switch {
 	case err == nil:
 		h.Status, h.Detail, h.At = "submitted", "", now
-		m.log.Info("pmdb submit", "host", name)
+		m.log.Info(pmdbSubmitLog, "host", name)
 	case errors.Is(err, pmdb.ErrExists):
 		h.Status, h.Detail, h.At = "listed", "", now
 	default:
@@ -331,9 +340,9 @@ func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 		h.Status, h.Detail, h.At, h.retryAt = "error", err.Error(), now, now.Add(pmdbRetry)
 		var he *pmdb.HTTPError
 		if errors.As(err, &he) {
-			m.log.Warn("pmdb submit", "host", name, "err", err, "catalogue_said", he.Body)
+			m.log.Warn(pmdbSubmitLog, "host", name, "err", err, "catalogue_said", he.Body)
 		} else {
-			m.log.Warn("pmdb submit", "host", name, "err", err)
+			m.log.Warn(pmdbSubmitLog, "host", name, "err", err)
 		}
 		if errors.Is(err, pmdb.ErrAuth) {
 			m.pmdbSt.err = "upload key refused by pmdb.fyi; check the key in settings"
