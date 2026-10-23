@@ -291,25 +291,29 @@ These are the design decisions that came out of it.
   SSH host key" after a reinstall, clears it. Saved SSH and WebUI passwords
   are reused only for the exact host, port and user they were saved for;
   moving a box means re-entering them.
-- **Secrets on disk.** Box credentials and the Pulsed Media API key are stored
-  in plain text in the SQLite file, which is created mode 0600 before SQLite
-  opens it so the -wal and -shm side files inherit the mode; the data
-  directory is created 0700. Prefer SSH keys or the agent. The API key is
-  never sent to the browser and passwords are never serialised.
+- **Secrets on disk.** Box credentials, the Pulsed Media API key and the
+  pmdb.fyi upload key are stored in plain text in the SQLite file, which is
+  created mode 0600 before SQLite opens it so the -wal and -shm side files
+  inherit the mode; the data directory is created 0700. Prefer SSH keys or
+  the agent. Neither key is ever sent to the browser and passwords are never
+  serialised.
 - **The hardware catalogue is untrusted input.** With the pmdb.fyi
   integration on, the dashboard reads a third-party service that could be
   compromised or replaced. Its list is bounded in size and read for one
-  fact only (which DNS-shaped hostnames exist; odd rows are skipped), an
-  no text from any response is kept, logged or shown (the service knows
+  fact only (which DNS-shaped hostnames exist; odd rows are skipped), no
+  text from any response is kept, logged or shown (the service knows
   the shared upload key and could echo it in any encoding; an error is a
   fixed message or a status code), the list is streamed with a hard row
   cap so a flood of tiny elements costs no more than its bytes, response
   headers and a submission's answer are capped small, a transport failure
   or a redirect is reported as a fixed message rather than Go's own text
   (which would carry a Location the service controls), redirects are
-  refused, one run has a total time budget and stops at a rate limit or a
-  service failure, and the only decision its answer drives is whether a
-  host is submitted, once. It cannot change what is collected or shown
+  refused, one run has a total time budget, a submission budget and stops
+  at a rate limit or a service failure, every list failure holds the next
+  runs for an hour, and the only decision its answer drives is whether a
+  host is submitted, once: a host seen listed, accepted or reported as
+  existing is settled for the life of the process, whatever a later list
+  says. It cannot change what is collected or shown
   about a box. What a compromised catalogue can still do is inherent in
   talking to it: lie about which hosts are listed (so a host is submitted,
   or not), refuse or throttle, and see the request itself.

@@ -48,6 +48,12 @@ type pmdbStatus struct {
 	At       time.Time `json:"at"`
 	BoxIDs   []int64   `json:"box_ids"`
 	retryAt  time.Time
+	// decided is set once this process has settled the host (seen listed,
+	// accepted, or told it exists) and is never cleared short of a reset:
+	// whatever a later list says, the host is not submitted again. A
+	// catalogue that alternated its answers could otherwise make every
+	// check resubmit the whole fleet.
+	decided bool
 }
 
 // PMDBView is what GET /api/pmdb returns.
@@ -84,6 +90,11 @@ const (
 	pmdbRetry    = time.Hour
 	pmdbInterval = 6 * time.Hour
 )
+
+// pmdbMaxSubmits bounds the submissions of one run: a fleet has a few
+// dozen hosts at most, and a catalogue that made every one look missing
+// should not get more than this out of a single check.
+const pmdbMaxSubmits = 50
 
 // pmdbRunBudget bounds one whole run, list fetch and every submission: a
 // catalogue that answers slowly cannot hold the loop for long (a var for
@@ -194,23 +205,27 @@ func (m *Manager) SyncPMDB(ctx context.Context) {
 		return
 	}
 	defer run.cancel()
-	todo, ok := m.pmdbPlan(run)
+	todo, cands, ok := m.pmdbPlan(run)
 	if !ok {
 		return
+	}
+	if len(todo) > pmdbMaxSubmits {
+		todo = todo[:pmdbMaxSubmits] // the rest stay pending for the next run
 	}
 	for _, name := range todo {
 		if !m.pmdbCurrent(run) {
 			return
 		}
-		// The row is built from the boxes as they are now: one removed or
-		// moved since the list fetch must not be posted from stale facts.
-		c, still := m.pmdbCandidates()[name]
+		// The row is built from the box as it is now: one removed or moved
+		// since the list fetch must not be posted from stale facts. Only
+		// this host's boxes are looked at, not the whole fleet again.
+		row, still := m.pmdbRowFor(name, cands[name].ids)
 		if !still {
 			m.pmdbDrop(run, name)
 			continue
 		}
 		sctx, scancel := context.WithTimeout(run.ctx, time.Minute)
-		err := m.pmdb.Submit(sctx, run.key, c.row)
+		err := m.pmdb.Submit(sctx, run.key, row)
 		scancel()
 		if ctx.Err() != nil {
 			// The caller went away (a manual check whose page was closed,
@@ -224,6 +239,25 @@ func (m *Manager) SyncPMDB(ctx context.Context) {
 		}
 	}
 	m.Publish(Event{Type: "pmdb"})
+}
+
+// pmdbRowFor rebuilds the catalogue row for one host from the current
+// state of the boxes the plan attributed to it, or false when none of them
+// is still that host. One map lookup per box, under the states lock.
+func (m *Manager) pmdbRowFor(name string, ids []int64) (pmdb.Row, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, id := range ids {
+		st := m.states[id]
+		if st == nil || !st.Ready {
+			continue
+		}
+		cp := *st
+		if row, ok := pmdbRow(&cp); ok && row.ServerName == name {
+			return row, true
+		}
+	}
+	return pmdb.Row{}, false
 }
 
 // pmdbDrop forgets a host whose boxes went away during the run.
@@ -285,36 +319,36 @@ type pmdbCandidate struct {
 // pmdbPlan fetches the catalogue list and merges it into the hosts' standing,
 // returning the hosts to submit, sorted. false means nothing is to be done:
 // the list could not be fetched (recorded in the view) or the run is stale.
-func (m *Manager) pmdbPlan(run *pmdbRun) (todo []string, ok bool) {
+func (m *Manager) pmdbPlan(run *pmdbRun) (todo []string, cands map[string]pmdbCandidate, ok bool) {
 	fctx, cancel := context.WithTimeout(run.ctx, 2*time.Minute)
 	defer cancel()
 	listed, err := m.pmdb.List(fctx)
 	if errors.Is(run.ctx.Err(), context.DeadlineExceeded) {
 		err = pmdb.ErrTimeout // the run's own budget ran out: the service is too slow, which counts as down
 	} else if !m.pmdbCurrent(run) {
-		return nil, false
+		return nil, nil, false
 	}
 	// The boxes as they are after the fetch: one removed or moved while
 	// the list was fetching is not a candidate any more.
-	cands := m.pmdbCandidates()
+	cands = m.pmdbCandidates()
 	now := time.Now()
 	m.pmdbMu.Lock()
 	if m.pmdbSt.gen != run.gen {
 		m.pmdbMu.Unlock()
-		return nil, false // reset meanwhile: the outcome belongs to nobody
+		return nil, nil, false // reset meanwhile: the outcome belongs to nobody
 	}
 	if m.pmdbSt.hosts == nil {
 		m.pmdbSt.hosts = map[string]*pmdbStatus{}
 	}
 	if err != nil {
 		m.pmdbSt.err = "catalogue list: " + err.Error()
-		if pmdbServiceDown(err) || errors.Is(err, pmdb.ErrRateLimited) {
-			m.pmdbSt.holdUntil = now.Add(pmdbRetry) // the throttle is per address: every run waits, not just this one
-		}
+		// Every list failure is the catalogue's, not a host's: another run
+		// straight away would only ask the same question again.
+		m.pmdbSt.holdUntil = now.Add(pmdbRetry)
 		m.pmdbMu.Unlock()
 		m.log.Warn("pmdb list", "err", err) // err is our own fixed text or a status code, never the catalogue's words
 		m.Publish(Event{Type: "pmdb"})
-		return nil, false
+		return nil, nil, false
 	}
 	defer m.pmdbMu.Unlock()
 	m.pmdbSt.err, m.pmdbSt.checkedAt = "", now
@@ -330,7 +364,7 @@ func (m *Manager) pmdbPlan(run *pmdbRun) (todo []string, ok bool) {
 		}
 	}
 	sort.Strings(todo)
-	return todo, true
+	return todo, cands, true
 }
 
 // pmdbMerge updates one host's standing from the catalogue list and reports
@@ -342,15 +376,13 @@ func (m *Manager) pmdbMerge(name string, c pmdbCandidate, listed bool, now time.
 		m.pmdbSt.hosts[name] = h
 	}
 	h.BoxIDs = append([]int64(nil), c.ids...)
+	if listed && h.Status != "listed" {
+		h.Status, h.Detail, h.At, h.decided = "listed", "", now, true
+	}
 	switch {
-	case listed:
-		if h.Status != "listed" {
-			h.Status, h.Detail, h.At = "listed", "", now
-		}
-		return false
-	case h.Status == "submitted":
-		// Accepted earlier but not in the list yet: the catalogue may
-		// cache; leave it, the next check will see it.
+	case h.decided:
+		// Settled in this process (listed, accepted, or told it exists):
+		// never again, whatever today's list says.
 		return false
 	case h.Status == "error" && now.Before(h.retryAt):
 		return false // backing off
@@ -375,10 +407,10 @@ func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 	now := time.Now()
 	switch {
 	case err == nil:
-		h.Status, h.Detail, h.At = "submitted", "", now
+		h.Status, h.Detail, h.At, h.decided = "submitted", "", now, true
 		m.log.Info(pmdbSubmitLog, "host", name)
 	case errors.Is(err, pmdb.ErrExists):
-		h.Status, h.Detail, h.At = "listed", "", now
+		h.Status, h.Detail, h.At, h.decided = "listed", "", now, true
 	default:
 		// err is our own fixed wording or a status code, never the
 		// catalogue's words (see package pmdb).
@@ -406,12 +438,17 @@ func (m *Manager) pmdbRecord(run *pmdbRun, name string, err error) (stop bool) {
 	return false
 }
 
-// pmdbServiceDown reports a failure that says the service, not this host's
-// row, is the problem: unreachable, timed out, or a 5xx.
+// pmdbServiceDown reports a submission failure that says the service, not
+// this host's row, is the problem: anything but a 4xx about the row (and
+// the refused key and the rate limit, which have their own handling).
+// Unreachable, timed out, oversized, a redirect, a 3xx or a 5xx all mean
+// the next host would meet the same, so the run ends on the first.
 func pmdbServiceDown(err error) bool {
 	var he *pmdb.HTTPError
-	return errors.Is(err, pmdb.ErrUnreachable) || errors.Is(err, pmdb.ErrTimeout) || errors.Is(err, pmdb.ErrTooLarge) ||
-		(errors.As(err, &he) && he.Code >= 500)
+	if errors.As(err, &he) {
+		return he.Code < 400 || he.Code >= 500
+	}
+	return !errors.Is(err, pmdb.ErrExists) && !errors.Is(err, pmdb.ErrAuth) && !errors.Is(err, pmdb.ErrRateLimited)
 }
 
 // resetPMDB forgets every host's standing and cancels a run in flight, so

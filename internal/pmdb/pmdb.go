@@ -155,6 +155,9 @@ func (c *Client) do(ctx context.Context, req *http.Request, limit int64) (int, [
 		return 0, nil, classify(ctx, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return resp.StatusCode, nil, nil // nothing in an error answer is read; the code is the whole message
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return resp.StatusCode, nil, classify(ctx, err)

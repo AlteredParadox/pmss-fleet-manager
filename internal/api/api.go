@@ -1366,8 +1366,7 @@ func (s *Server) handleAckAll(w http.ResponseWriter, r *http.Request) {
 
 // pmdbMinKeyLen is the shortest upload key accepted: the catalogue refuses
 // to start with one under 24 characters, so a shorter one is a paste gone
-// wrong, and a very short string would be redacted from log text as a
-// substring of ordinary words.
+// wrong.
 const pmdbMinKeyLen = 24
 
 // mergeSecret applies a settings PUT to a stored secret: a typed value

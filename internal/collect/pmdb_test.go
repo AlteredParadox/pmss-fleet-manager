@@ -640,3 +640,163 @@ func TestSyncPMDBCallerCancelIsNotAFailure(t *testing.T) {
 		t.Fatalf("second run: %+v", v)
 	}
 }
+
+// A decision is terminal for the process: a catalogue that alternates its
+// list, or answers 409 to everything, cannot make the fleet submit again.
+func TestSyncPMDBDecisionsAreTerminal(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var posts int
+	listBody, postStatus := `[]`, http.StatusConflict
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path == "/api/servers" {
+			_, _ = io.WriteString(w, listBody)
+			return
+		}
+		posts++
+		w.WriteHeader(postStatus)
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmdb.URL = srv.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	hw := HostState{CPUModel: "Intel(R) N100", NCPU: 4, MemTotal: 32 << 30, HomeSize: 60 << 40}
+	for i, host := range []string{"odin.pulsedmedia.com", "thor.pulsedmedia.com"} {
+		b := &store.Box{Name: string(rune('a' + i)), Host: "h" + string(rune('a'+i)) + ".example", User: "u", Port: 22, Enabled: false}
+		if err := m.AddBox(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		m.mutateState(b.ID, func(s *BoxState) { s.Ready, s.Hostname, s.HostSys = true, host, hw })
+	}
+	s := m.Settings()
+	s.PMDBEnabled, s.PMDBUploadKey = true, "a-passphrase-of-words"
+	m.SetSettings(s)
+	count := func() int { mu.Lock(); defer mu.Unlock(); return posts }
+	set := func(list string, code int) { mu.Lock(); defer mu.Unlock(); listBody, postStatus = list, code }
+
+	// Sequence A: empty list, 409 to every submission, empty list again.
+	m.SyncPMDB(ctx)
+	if n := count(); n != 2 {
+		t.Fatalf("first run: %d posts", n)
+	}
+	m.SyncPMDB(ctx)
+	m.SyncPMDB(ctx)
+	if n := count(); n != 2 {
+		t.Fatalf("hosts told they exist were submitted again: %d posts", n)
+	}
+	for _, h := range m.PMDB().Hosts {
+		if h.Status != "listed" {
+			t.Fatalf("standing after 409: %+v", h)
+		}
+	}
+
+	// Sequence B: accepted, then listed, then missing from the list.
+	m.resetPMDB()
+	set(`[]`, http.StatusCreated)
+	m.SyncPMDB(ctx)
+	if n := count(); n != 4 {
+		t.Fatalf("after reset: %d posts", n)
+	}
+	set(`[{"serverName":"odin.pulsedmedia.com"},{"serverName":"thor.pulsedmedia.com"}]`, http.StatusCreated)
+	m.SyncPMDB(ctx)
+	set(`[]`, http.StatusCreated)
+	m.SyncPMDB(ctx)
+	m.SyncPMDB(ctx)
+	if n := count(); n != 4 {
+		t.Fatalf("hosts the list dropped again were resubmitted: %d posts", n)
+	}
+}
+
+// Every list failure holds the next runs, and a redirect on a submission
+// ends the run after the first host.
+func TestSyncPMDBListFailuresHold(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var posts, lists int
+	mode := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path == "/api/servers" {
+			lists++
+			switch mode {
+			case "malformed":
+				_, _ = io.WriteString(w, `{"servers":`)
+			case "redirect":
+				w.Header().Set("Location", "https://elsewhere.example/")
+				w.WriteHeader(http.StatusFound)
+			case "400":
+				w.WriteHeader(http.StatusBadRequest)
+			default:
+				_, _ = io.WriteString(w, `[]`)
+			}
+			return
+		}
+		posts++
+		w.Header().Set("Location", "https://elsewhere.example/")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.pmdb.URL = srv.URL
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	hw := HostState{CPUModel: "Intel(R) N100", NCPU: 4, MemTotal: 32 << 30, HomeSize: 60 << 40}
+	for i, host := range []string{"odin.pulsedmedia.com", "thor.pulsedmedia.com", "loki.pulsedmedia.com"} {
+		b := &store.Box{Name: string(rune('a' + i)), Host: "h" + string(rune('a'+i)) + ".example", User: "u", Port: 22, Enabled: false}
+		if err := m.AddBox(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		m.mutateState(b.ID, func(s *BoxState) { s.Ready, s.Hostname, s.HostSys = true, host, hw })
+	}
+	s := m.Settings()
+	s.PMDBEnabled, s.PMDBUploadKey = true, "a-passphrase-of-words"
+	m.SetSettings(s)
+	for _, md := range []string{"malformed", "redirect", "400"} {
+		m.resetPMDB()
+		mu.Lock()
+		mode, lists = md, 0
+		mu.Unlock()
+		m.SyncPMDB(ctx)
+		m.SyncPMDB(ctx)
+		mu.Lock()
+		l := lists
+		mu.Unlock()
+		if l != 1 {
+			t.Fatalf("%s: %d list requests across two runs; want 1 (held)", md, l)
+		}
+		if v := m.PMDB(); !strings.HasPrefix(v.Error, "catalogue list:") {
+			t.Fatalf("%s: hold not shown: %+v", md, v)
+		}
+	}
+	// A redirect on a submission: one POST, then the run ends and holds.
+	m.resetPMDB()
+	mu.Lock()
+	mode, lists = "", 0
+	mu.Unlock()
+	m.SyncPMDB(ctx)
+	m.SyncPMDB(ctx)
+	mu.Lock()
+	p, l := posts, lists
+	mu.Unlock()
+	if p != 1 || l != 1 {
+		t.Fatalf("submission redirect: posts=%d lists=%d; want 1 and 1", p, l)
+	}
+}

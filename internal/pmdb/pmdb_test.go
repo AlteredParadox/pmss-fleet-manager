@@ -133,8 +133,8 @@ func TestListAndSubmit(t *testing.T) {
 
 // A redirect is refused, and nothing the server put in it (a Location
 // echoing the key it just saw, well-formed or not) survives into the
-// error: the error is the fixed ErrRedirect. Likewise the key echoed in an
-// error body is redacted from the log text.
+// error: the error is the fixed ErrRedirect. Likewise an error body echoing
+// the key is not kept in any form.
 func TestRedirectRefusedAndKeyNeverReflected(t *testing.T) {
 	const key = "sentinel-passphrase-of-words"
 	var location, body string
@@ -262,10 +262,33 @@ func TestHostileResponses(t *testing.T) {
 	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || he.Code != 500 {
 		t.Fatalf("hostile submit error: %v", err)
 	}
-	// A submission's answer is never read for content; a huge one is refused.
+	// A submission's answer is never read for content; a huge accepted
+	// one is refused, a huge error answer is not even read: the code is
+	// the whole message.
 	body = strings.Repeat("A", maxSubmitBytes+1)
-	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.Is(err, ErrTooLarge) {
-		t.Fatalf("oversized submit answer: %v", err)
+	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || he.Code != 500 {
+		t.Fatalf("oversized error answer: %v", err)
+	}
+	body = strings.Repeat("A", maxListBytes+1)
+	if _, err := c.List(ctx); !errors.As(err, &he) || he.Code != 500 {
+		t.Fatalf("oversized list error answer: %v", err)
+	}
+	listStatus, body = http.StatusOK, strings.Repeat("A", maxListBytes+1)
+	if _, err := c.List(ctx); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversized accepted list: %v", err)
+	}
+}
+
+// An accepted submission with an oversized answer is refused rather than read.
+func TestOversizedAcceptedAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, strings.Repeat("A", maxSubmitBytes+1))
+	}))
+	defer srv.Close()
+	c := &Client{URL: srv.URL}
+	if err := c.Submit(context.Background(), "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversized accepted answer: %v", err)
 	}
 }
 
