@@ -175,8 +175,14 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
   appdata share on the LAN, a file attached to a bug report, a file-read
   bug. It does not protect against whoever can read the process's
   environment or the secret file on the same host, which is the same
-  person who could read a 0600 database. Keep the secret out of the data
-  directory, or it travels with every copy of it.
+  person who could read a 0600 database. So the secret must not travel
+  with copies of the database: not in the data directory, not in a
+  backup set that includes it, and not in a container template or compose
+  file that sits on a share exported next to the data (on Unraid the
+  template XML is on the flash drive; see *Running in a container*). A
+  secret file on an unexported path, mounted read-only, is the safe
+  default; the environment variable is for setups where nothing writes
+  the environment to disk.
 - **The secret must be random**, at least 24 characters and ideally the 44
   that `openssl rand -base64 32` prints. The key is derived with HKDF
   (no stretching), so a memorable passphrase could be brute-forced offline
@@ -223,11 +229,19 @@ docker run -d --name pmss-fleet-manager \
 - The image listens on `0.0.0.0:8080` and keeps its database in `/data`.
   Every flag is available as the matching environment variable, so `-e
   PMSS_AUTH=me:secret` or `-e PMSS_BASE_PATH=/fleet` configure it.
-- To encrypt the stored credentials, pass `-e PMSS_SECRET=...` (a random
-  value from `openssl rand -base64 32`; on Unraid, a template variable),
-  or mount a secret file and point `PMSS_SECRET_FILE` at it. Keep a copy
-  of the secret outside the container: see *Encrypting stored
-  credentials* for what happens when it is missing, changed or lost.
+- To encrypt the stored credentials, mount a secret file read-only and
+  point `PMSS_SECRET_FILE` at it, for example `-v
+  /path/to/secret:/run/pmss-secret:ro -e PMSS_SECRET_FILE=/run/pmss-secret`.
+  The file must live somewhere a copy of the data directory does not
+  travel with it: on Unraid that means a share whose SMB/NFS export is
+  off, not `appdata`, and not the flash drive. **Do not put the secret in
+  an Unraid template variable:** the template is saved in plain text on
+  the flash drive, which is often exported as the `flash` share next to
+  `appdata`, so the secret and the database would leak together.
+  `-e PMSS_SECRET=...` is fine where the environment is not written to a
+  shared place, but `docker inspect` and the compose file show it. Keep
+  a copy of the secret outside the container either way: see *Encrypting
+  stored credentials* for what happens when it is missing, changed or lost.
 - The process runs as uid 65532. A named volume as above works out of the
   box; a bind-mounted directory has to be writable by that uid (`chown
   65532:65532 ./data`), or run the container with `--user "$(id -u)"`. If
