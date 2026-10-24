@@ -31,10 +31,7 @@ func TestRoundTripAndLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealed, err := sl.Seal("boxes.password", "hunter2")
-	if err != nil {
-		t.Fatal(err)
-	}
+	sealed := sl.Seal("boxes.password", "hunter2")
 	if !IsSealed(sealed) || strings.Contains(sealed, "hunter2") {
 		t.Fatalf("sealed = %q", sealed)
 	}
@@ -46,7 +43,7 @@ func TestRoundTripAndLabels(t *testing.T) {
 		t.Fatalf("moved ciphertext opened: %v", err)
 	}
 	// Two seals of one value differ (random nonce) and both open.
-	again, _ := sl.Seal("boxes.password", "hunter2")
+	again := sl.Seal("boxes.password", "hunter2")
 	if again == sealed {
 		t.Fatal("nonce reused")
 	}
@@ -57,8 +54,8 @@ func TestRoundTripAndLabels(t *testing.T) {
 
 func TestEmptyAndPlaintextPassThrough(t *testing.T) {
 	sl, _ := New([]byte(testSecret))
-	if v, err := sl.Seal("x", ""); v != "" || err != nil {
-		t.Fatalf("empty sealed to %q %v", v, err)
+	if v := sl.Seal("x", ""); v != "" {
+		t.Fatalf("empty sealed to %q", v)
 	}
 	// Plaintext from before the secret was set is returned as is.
 	if v, err := sl.Open("x", "plain"); v != "plain" || err != nil {
@@ -68,13 +65,13 @@ func TestEmptyAndPlaintextPassThrough(t *testing.T) {
 	if none.Enabled() {
 		t.Fatal("nil sealer enabled")
 	}
-	if v, err := none.Seal("x", "plain"); v != "plain" || err != nil {
-		t.Fatalf("nil seal: %q %v", v, err)
+	if v := none.Seal("x", "plain"); v != "plain" {
+		t.Fatalf("nil seal: %q", v)
 	}
 	if v, err := none.Open("x", "plain"); v != "plain" || err != nil {
 		t.Fatalf("nil open plain: %q %v", v, err)
 	}
-	sealed, _ := sl.Seal("x", "secret")
+	sealed := sl.Seal("x", "secret")
 	if _, err := none.Open("x", sealed); !errors.Is(err, ErrNoKey) {
 		t.Fatalf("nil open sealed: %v", err)
 	}
@@ -83,7 +80,7 @@ func TestEmptyAndPlaintextPassThrough(t *testing.T) {
 func TestWrongKeyAndDamage(t *testing.T) {
 	a, _ := New([]byte(testSecret))
 	b, _ := New([]byte("fedcba9876543210fedcba9876543210"))
-	sealed, _ := a.Seal("x", "secret")
+	sealed := a.Seal("x", "secret")
 	if _, err := b.Open("x", sealed); !errors.Is(err, ErrWrongKey) {
 		t.Fatalf("other key: %v", err)
 	}
@@ -131,5 +128,34 @@ func TestLoad(t *testing.T) {
 	}
 	if _, err := Load("", filepath.Join(dir, "missing")); err == nil {
 		t.Fatal("missing file accepted")
+	}
+}
+
+func TestResolve(t *testing.T) {
+	r, err := Resolve("", "", "")
+	if err != nil || r.Current != nil || r.Previous != nil {
+		t.Fatalf("nothing set: %+v %v", r, err)
+	}
+	if _, err := Resolve("a", "b", ""); err == nil {
+		t.Fatal("both sources accepted")
+	}
+	if _, err := Resolve("short", "", ""); err == nil || !strings.Contains(err.Error(), "credential secret") {
+		t.Fatalf("short current: %v", err)
+	}
+	if _, err := Resolve(testSecret, "", "short"); err == nil || !strings.Contains(err.Error(), "PMSS_SECRET_PREVIOUS") {
+		t.Fatalf("short previous: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(path, []byte(testSecret), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err = Resolve("", path, "fedcba9876543210fedcba9876543210")
+	if err != nil || r.Current == nil || r.Previous == nil || r.Source != path || r.Warning == "" {
+		t.Fatalf("file + previous: %+v %v", r, err)
+	}
+	// The two sealers are different keys.
+	sealed := r.Previous.Seal("x", "v")
+	if _, err := r.Current.Open("x", sealed); !errors.Is(err, ErrWrongKey) {
+		t.Fatalf("previous opened with current: %v", err)
 	}
 }

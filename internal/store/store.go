@@ -186,19 +186,20 @@ const (
 // Option configures Open.
 type Option func(*Store)
 
-// WithSealer encrypts the stored credentials with sl. On Open, plaintext
-// credentials already in the database are sealed in place and the file is
-// vacuumed so the plaintext is not left in free pages; a sealed credential
-// that does not open with sl makes Open fail. Without this option, Open
-// fails if the database holds sealed credentials, so a dashboard started
-// without its secret never sends ciphertext to a box as the password.
+// WithSealer encrypts the stored credentials with sl (nil: no encryption).
+// On Open, plaintext credentials already in the database are sealed in
+// place and the file is vacuumed so the plaintext is not left in free
+// pages; a sealed credential that does not open with sl makes Open fail.
+// Without a sealer, Open fails if the database holds sealed credentials,
+// so a dashboard started without its secret never sends ciphertext to a
+// box as the password.
 func WithSealer(sl *secrets.Sealer) Option { return func(s *Store) { s.sealer = sl } }
 
 // WithPreviousSealer names the secret the credentials were sealed under
-// before this start: credentials that open with it (and not with the
-// current sealer) are re-encrypted under the current one, or stored in
-// plain text again when there is none. That is how the secret is changed,
-// or encryption switched off, without re-entering anything.
+// before this start (nil: none): credentials that open with it (and not
+// with the current sealer) are re-encrypted under the current one, or
+// stored in plain text again when there is none. That is how the secret
+// is changed, or encryption switched off, without re-entering anything.
 func WithPreviousSealer(sl *secrets.Sealer) Option { return func(s *Store) { s.prev = sl } }
 
 // WithForgetUnreadable makes Open clear every sealed credential that
@@ -428,10 +429,10 @@ func (s *Store) scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 	if err != nil {
 		return nil, err
 	}
-	if b.Password, err = s.sealer.Open(labelPassword, b.Password); err != nil {
+	if b.Password, err = s.openSecret(labelPassword, b.Password); err != nil {
 		return nil, fmt.Errorf("box %d SSH password: %w", b.ID, err)
 	}
-	if b.QbtPass, err = s.sealer.Open(labelQbtPass, b.QbtPass); err != nil {
+	if b.QbtPass, err = s.openSecret(labelQbtPass, b.QbtPass); err != nil {
 		return nil, fmt.Errorf("box %d WebUI password: %w", b.ID, err)
 	}
 	b.AppsWatch = []string{}
@@ -489,10 +490,7 @@ func (s *Store) CreateBox(ctx context.Context, b *Box) error {
 		b.Type = "seedbox"
 	}
 	// The Box keeps its plaintext: the caller starts the poller from it.
-	pw, qp, err := s.sealBoxSecrets(b)
-	if err != nil {
-		return err
-	}
+	pw, qp := s.sealBoxSecrets(b)
 	res, err := s.db.ExecContext(ctx, `INSERT INTO boxes (name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
 		qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -537,10 +535,7 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	}
 	// A blank secret seals to blank, so the CASE below still reads it as
 	// "keep the stored value".
-	pw, qp, err := s.sealBoxSecrets(b)
-	if err != nil {
-		return err
-	}
+	pw, qp := s.sealBoxSecrets(b)
 	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
 		password=CASE WHEN ? THEN '' WHEN ?='' THEN password ELSE ? END,
 		host_key=CASE WHEN ? THEN '' WHEN ? THEN ? WHEN host_key='' THEN ? ELSE host_key END,
@@ -569,13 +564,19 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	return nil
 }
 
-// sealBoxSecrets returns the stored forms of b's SSH and WebUI passwords.
-func (s *Store) sealBoxSecrets(b *Box) (pw, qp string, err error) {
-	if pw, err = s.sealer.Seal(labelPassword, b.Password); err != nil {
-		return "", "", err
+// openSecret returns the plaintext of a stored value. Without a sealer
+// every value is plaintext, whatever it starts with: Open established that
+// (the secrets_sealed marker) before anything is read.
+func (s *Store) openSecret(label, stored string) (string, error) {
+	if s.sealer == nil {
+		return stored, nil
 	}
-	qp, err = s.sealer.Seal(labelQbtPass, b.QbtPass)
-	return pw, qp, err
+	return s.sealer.Open(label, stored)
+}
+
+// sealBoxSecrets returns the stored forms of b's SSH and WebUI passwords.
+func (s *Store) sealBoxSecrets(b *Box) (pw, qp string) {
+	return s.sealer.Seal(labelPassword, b.Password), s.sealer.Seal(labelQbtPass, b.QbtPass)
 }
 
 // SetHostKey pins a key seen while dialling host:port onto the box, only if
@@ -645,10 +646,10 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 	if err := rows.Err(); err != nil {
 		return out, err
 	}
-	if out.PMAPIKey, err = s.sealer.Open(labelPMAPIKey, out.PMAPIKey); err != nil {
+	if out.PMAPIKey, err = s.openSecret(labelPMAPIKey, out.PMAPIKey); err != nil {
 		return out, fmt.Errorf("Pulsed Media API key: %w", err)
 	}
-	if out.PMDBUploadKey, err = s.sealer.Open(labelPMDBUploadKey, out.PMDBUploadKey); err != nil {
+	if out.PMDBUploadKey, err = s.openSecret(labelPMDBUploadKey, out.PMDBUploadKey); err != nil {
 		return out, fmt.Errorf("pmdb upload key: %w", err)
 	}
 	return out, nil
@@ -656,14 +657,6 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 
 // SaveSettings writes every setting.
 func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
-	apiKey, err := s.sealer.Seal(labelPMAPIKey, st.PMAPIKey)
-	if err != nil {
-		return err
-	}
-	pmdbKey, err := s.sealer.Seal(labelPMDBUploadKey, st.PMDBUploadKey)
-	if err != nil {
-		return err
-	}
 	kv := map[string]string{
 		"poll_interval_sec":     strconv.Itoa(st.PollIntervalSec),
 		"disk_threshold_pct":    strconv.Itoa(st.DiskThresholdPct),
@@ -675,8 +668,8 @@ func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
 		"client_area_url":       st.ClientAreaURL,
 		"qbt_download_url":      st.QbtDownloadURL,
 		"card_min_px":           strconv.Itoa(st.CardMinPx),
-		"pm_api_key":            apiKey,
-		"pmdb_upload_key":       pmdbKey,
+		"pm_api_key":            s.sealer.Seal(labelPMAPIKey, st.PMAPIKey),
+		"pmdb_upload_key":       s.sealer.Seal(labelPMDBUploadKey, st.PMDBUploadKey),
 		"pmdb_enabled":          boolKV(st.PMDBEnabled),
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

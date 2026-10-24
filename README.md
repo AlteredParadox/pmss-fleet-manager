@@ -183,8 +183,12 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
   against the very file this guards. Keep a copy in a password manager:
   a lost secret means re-entering every password and key.
 - **First start with the secret** encrypts the credentials already in the
-  database, vacuums the file and truncates the write-ahead log, so the
-  plain text is not left in free pages. Nothing changes in the dashboard.
+  database, then vacuums the file and truncates the write-ahead log so the
+  plain text is not left in free pages; if that cleanup is interrupted it
+  is finished at the next start before anything is served. The database
+  records that its credentials are encrypted, so a password that happens
+  to start with `pmss1:` is never mistaken for ciphertext. Nothing changes
+  in the dashboard.
 - **Starting without the secret, or with a different one, is refused** with
   a log line naming the first credential it could not read. The pollers
   would otherwise present ciphertext to your boxes as the password. Fix

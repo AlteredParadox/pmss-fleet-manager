@@ -81,19 +81,18 @@ func New(master []byte) (*Sealer, error) {
 	if len(master) < MinSecretLen {
 		return nil, fmt.Errorf("the secret is %d bytes long; it must be at least %d, e.g. the output of `openssl rand -base64 32`", len(master), MinSecretLen)
 	}
-	key, err := hkdf.Key(sha256.New, master, nil, hkdfInfo, 32)
+	// None of these can fail: the secret is non-empty, the key 32 bytes.
+	key := must(hkdf.Key(sha256.New, master, nil, hkdfInfo, 32))
+	return &Sealer{aead: must(cipher.NewGCM(must(aes.NewCipher(key))))}, nil
+}
+
+// must is for the constructors above, whose errors cannot occur for the
+// fixed parameters they are given.
+func must[T any](v T, err error) T {
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	return &Sealer{aead: aead}, nil
+	return v
 }
 
 // Enabled reports whether values are encrypted.
@@ -103,16 +102,14 @@ func (s *Sealer) Enabled() bool { return s != nil }
 func IsSealed(stored string) bool { return strings.HasPrefix(stored, Prefix) }
 
 // Seal encrypts plain for the column named label. "" seals to "".
-func (s *Sealer) Seal(label, plain string) (string, error) {
+func (s *Sealer) Seal(label, plain string) string {
 	if s == nil || plain == "" {
-		return plain, nil
+		return plain
 	}
 	nonce := make([]byte, s.aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", err
-	}
+	rand.Read(nonce) // cannot fail (crypto/rand since Go 1.24)
 	out := s.aead.Seal(nonce, nonce, []byte(plain), []byte(label))
-	return Prefix + base64.RawStdEncoding.EncodeToString(out), nil
+	return Prefix + base64.RawStdEncoding.EncodeToString(out)
 }
 
 // Open decrypts a stored value for the column named label. A value without
@@ -171,4 +168,35 @@ func Load(envValue, filePath string) (*Loaded, error) {
 		l.Warning = fmt.Sprintf("the secret file %s is readable by other users (mode %04o); chmod 600 it", filePath, fi.Mode().Perm())
 	}
 	return l, nil
+}
+
+// Resolved is what the process configuration asks for.
+type Resolved struct {
+	Current  *Sealer // nil: credentials are stored in plain text
+	Previous *Sealer // nil: no secret change in progress
+	Source   string  // where Current came from, for the startup log
+	Warning  string  // a loose secret-file mode, see Loaded
+}
+
+// Resolve turns the configuration (the PMSS_SECRET value, the -secret-file
+// path, the PMSS_SECRET_PREVIOUS value) into sealers. Errors are meant for
+// the operator as they are.
+func Resolve(secret, secretFile, previous string) (*Resolved, error) {
+	var r Resolved
+	loaded, err := Load(secret, secretFile)
+	if err != nil {
+		return nil, err
+	}
+	if loaded != nil {
+		if r.Current, err = New(loaded.Master); err != nil {
+			return nil, fmt.Errorf("credential secret: %w", err)
+		}
+		r.Source, r.Warning = loaded.Source, loaded.Warning
+	}
+	if previous != "" {
+		if r.Previous, err = New([]byte(previous)); err != nil {
+			return nil, fmt.Errorf("PMSS_SECRET_PREVIOUS: %w", err)
+		}
+	}
+	return &r, nil
 }

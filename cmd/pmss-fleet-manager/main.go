@@ -97,41 +97,10 @@ func main() {
 		}
 	}
 
-	// Like PMSS_AUTH, the secret itself is only ever read from the
-	// environment, never a flag: a flag would be in `ps` and in -h output.
-	var opts []store.Option
-	encrypted := false
-	if loaded, err := secrets.Load(os.Getenv("PMSS_SECRET"), *secretFile); err != nil {
+	opts, encrypted, err := credentialOptions(*secretFile, *forgetCreds, log)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
-	} else if loaded != nil {
-		sl, err := secrets.New(loaded.Master)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "credential secret:", err)
-			os.Exit(2)
-		}
-		if loaded.Warning != "" {
-			log.Warn(loaded.Warning)
-		}
-		log.Info("stored credentials are encrypted", "secret", loaded.Source)
-		opts = append(opts, store.WithSealer(sl))
-		encrypted = true
-	}
-	if prev := os.Getenv("PMSS_SECRET_PREVIOUS"); prev != "" {
-		// Changing or removing the secret: credentials sealed under the
-		// old one are rewritten under the new one (or in plain text) at
-		// this start. The variable is meant to be removed afterwards.
-		sl, err := secrets.New([]byte(prev))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "PMSS_SECRET_PREVIOUS:", err)
-			os.Exit(2)
-		}
-		log.Warn("PMSS_SECRET_PREVIOUS is set: credentials encrypted under it are being rewritten; remove it once this start succeeds")
-		opts = append(opts, store.WithPreviousSealer(sl))
-	}
-	if *forgetCreds {
-		log.Warn("-forget-encrypted-credentials is set: stored credentials that do not decrypt are being removed; unset it once this start succeeds")
-		opts = append(opts, store.WithForgetUnreadable())
 	}
 
 	st, err := store.Open(filepath.Join(*dataDir, "pmss-fleet-manager.db"), opts...)
@@ -249,6 +218,36 @@ func allowedHostList(addrs []string, extra string) (hosts []string, wildcard boo
 		}
 	}
 	return hosts, wildcard
+}
+
+// credentialOptions turns the credential-encryption configuration into
+// store options and logs what it means for this start. Like PMSS_AUTH, the
+// secret itself is only ever read from the environment, never a flag: a
+// flag would be in `ps` and in -h output. encrypted reports whether the
+// stored credentials are ciphertext from here on.
+func credentialOptions(secretFile string, forget bool, log *slog.Logger) (opts []store.Option, encrypted bool, err error) {
+	creds, err := secrets.Resolve(os.Getenv("PMSS_SECRET"), secretFile, os.Getenv("PMSS_SECRET_PREVIOUS"))
+	if err != nil {
+		return nil, false, err
+	}
+	if creds.Warning != "" {
+		log.Warn(creds.Warning)
+	}
+	if creds.Current != nil {
+		log.Info("stored credentials are encrypted", "secret", creds.Source)
+	}
+	if creds.Previous != nil {
+		// Changing or removing the secret: credentials sealed under the
+		// old one are rewritten under the new one (or in plain text) at
+		// this start. The variable is meant to be removed afterwards.
+		log.Warn("PMSS_SECRET_PREVIOUS is set: credentials encrypted under it are being rewritten; remove it once this start succeeds")
+	}
+	opts = []store.Option{store.WithSealer(creds.Current), store.WithPreviousSealer(creds.Previous)}
+	if forget {
+		log.Warn("-forget-encrypted-credentials is set: stored credentials that do not decrypt are being removed; unset it once this start succeeds")
+		opts = append(opts, store.WithForgetUnreadable())
+	}
+	return opts, creds.Current != nil, nil
 }
 
 // flagGiven reports whether name was passed on the command line.

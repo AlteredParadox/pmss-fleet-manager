@@ -18,6 +18,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io/fs"
 	"os"
@@ -675,4 +676,228 @@ func TestResealLeavesNoPlaintextInFiles(t *testing.T) {
 		}
 	}
 	s.Close()
+}
+
+// Without a secret, a password that happens to start with the ciphertext
+// prefix is a password: the marker, not the prefix, says what a value is.
+func TestPrefixedPlaintextStaysPlaintext(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const odd = secrets.Prefix + "not-really-encrypted"
+	b := &Box{Name: "seed-01", Host: "odin.example", User: "ragnar", Password: odd, Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetBox(ctx, b.ID); err != nil || got.Password != odd {
+		t.Fatalf("read back: %+v %v", got, err)
+	}
+	s.Close()
+	if s, err = Open(path); err != nil {
+		t.Fatalf("reopen refused a plaintext database: %v", err)
+	}
+	if got, _ := s.GetBox(ctx, b.ID); got.Password != odd {
+		t.Fatalf("after reopen: %q", got.Password)
+	}
+	s.Close()
+	// Switching encryption on seals it like any other password.
+	s, err = Open(path, WithSealer(mustSealer(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetBox(ctx, b.ID); got.Password != odd {
+		t.Fatalf("after sealing: %q", got.Password)
+	}
+	if pw, _, _ := rawSecrets(t, s, b.ID); pw == odd {
+		t.Fatal("not sealed")
+	}
+	s.Close()
+}
+
+// A cleanup that fails after the rewrite committed is retried at the next
+// open, and the marker that asks for it is cleared only once it succeeded.
+func TestResealCleanupIsRetried(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Box{Name: "seed-01", Host: "odin.example", User: "ragnar", Password: "zebra-unique-password", Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	vacuumSQL = "VACUUM no_such_schema"
+	defer func() { vacuumSQL = "VACUUM" }()
+	sl := mustSealer(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if _, err := Open(path, WithSealer(sl)); err == nil || !strings.Contains(err.Error(), "retried at the next start") {
+		t.Fatalf("failed vacuum: %v", err)
+	}
+	// The rewrite is committed and the cleanup is owed.
+	s, err = Open(path, WithSealer(sl))
+	if err == nil {
+		s.Close()
+		t.Fatal("second open with a failing vacuum succeeded")
+	}
+	vacuumSQL = "VACUUM"
+	s, err = Open(path, WithSealer(sl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.ResealedOnOpen() != 0 {
+		t.Fatalf("rows rewritten again: %d", s.ResealedOnOpen())
+	}
+	if v, _ := s.GetValue(ctx, cleanupKey); v != "0" {
+		t.Fatalf("cleanup marker %q after success", v)
+	}
+	if v, _ := s.GetValue(ctx, sealedKey); v != "1" {
+		t.Fatalf("sealed marker %q", v)
+	}
+	if got, err := s.GetBox(ctx, b.ID); err != nil || got.Password != "zebra-unique-password" {
+		t.Fatalf("after retry: %+v %v", got, err)
+	}
+	for _, side := range []string{"", "-wal"} {
+		data, err := os.ReadFile(path + side)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "zebra-unique-password") {
+			t.Fatalf("plaintext still in %s", path+side)
+		}
+	}
+	s.Close()
+}
+
+// Switching encryption on with no live credentials still scrubs the file:
+// a password cleared earlier may sit in free pages.
+func TestEnablingWithNoCredentialsScrubs(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Box{Name: "seed-01", Host: "odin.example", User: "ragnar", Password: "zebra-unique-password", Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateBox(ctx, b, Clears{Password: true}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(path, WithSealer(mustSealer(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.ResealedOnOpen() != 0 {
+		t.Fatalf("resealed %d", s.ResealedOnOpen())
+	}
+	if v, _ := s.GetValue(ctx, sealedKey); v != "1" {
+		t.Fatalf("sealed marker %q", v)
+	}
+	if v, _ := s.GetValue(ctx, cleanupKey); v != "0" {
+		t.Fatalf("cleanup marker %q: the scrub did not run or did not finish", v)
+	}
+	for _, side := range []string{"", "-wal"} {
+		data, err := os.ReadFile(path + side)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "zebra-unique-password") {
+			t.Fatalf("plaintext still in %s", path+side)
+		}
+	}
+	s.Close()
+}
+
+// A value sealed under another secret that reaches the read path (written
+// behind the store's back after Open) is an error, not a password.
+func TestReadPathRefusesForeignCiphertext(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	a, b := mustSealer(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), mustSealer(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	s, err := Open(path, WithSealer(a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	box := &Box{Name: "seed-01", Host: "odin.example", User: "ragnar", Password: "pw", QbtPass: "qp", Enabled: true}
+	if err := s.CreateBox(ctx, box); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE boxes SET password=? WHERE id=?`, b.Seal(labelPassword, "x"), box.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetBox(ctx, box.ID); !errors.Is(err, secrets.ErrWrongKey) || !strings.Contains(err.Error(), "SSH password") {
+		t.Fatalf("foreign SSH password: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE boxes SET password='', qbt_pass=? WHERE id=?`, b.Seal(labelQbtPass, "x"), box.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ListBoxes(ctx); !errors.Is(err, secrets.ErrWrongKey) || !strings.Contains(err.Error(), "WebUI password") {
+		t.Fatalf("foreign WebUI password: %v", err)
+	}
+	for _, kv := range []struct{ key, what string }{{"pm_api_key", "API key"}, {"pmdb_upload_key", "pmdb upload key"}} {
+		if err := s.SetValue(ctx, kv.key, b.Seal("settings."+kv.key, "x")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.GetSettings(ctx); !errors.Is(err, secrets.ErrWrongKey) || !strings.Contains(err.Error(), kv.what) {
+			t.Fatalf("foreign %s: %v", kv.key, err)
+		}
+		if err := s.SetValue(ctx, kv.key, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A checkpoint that cannot complete because another connection holds the
+// log leaves the cleanup owed, and the open is refused with that reason.
+func TestScrubRefusedWhileAnotherConnectionReads(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Box{Name: "seed-01", Host: "odin.example", User: "ragnar", Password: "pw", Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	other, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(100)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	tx, err := other.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM boxes`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	sl := mustSealer(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	_, err = Open(path, WithSealer(sl))
+	tx.Rollback()
+	if err == nil || !strings.Contains(err.Error(), "retried at the next start") {
+		t.Fatalf("open with a reader holding the log: %v", err)
+	}
+	// With the reader gone the retry succeeds and the marker clears.
+	s, err = Open(path, WithSealer(sl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if v, _ := s.GetValue(ctx, cleanupKey); v != "0" {
+		t.Fatalf("cleanup marker %q", v)
+	}
+	if got, err := s.GetBox(ctx, b.ID); err != nil || got.Password != "pw" {
+		t.Fatalf("after retry: %+v %v", got, err)
+	}
 }
