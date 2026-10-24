@@ -585,7 +585,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.8.0 is the current release. The code was written against five real Pulsed
+1.9.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -596,6 +596,43 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.9.0** adds optional encryption of the stored credentials. The minor
+bump is for the new flags `-secret-file`, `-previous-secret-file` and
+`-forget-encrypted-credentials`, their environment twins, `PMSS_SECRET`
+and `PMSS_SECRET_PREVIOUS`, and three new rows in the settings table
+(`secrets_sealed`, `secrets_check`, `secrets_cleanup`). Without a secret,
+nothing changes.
+
+- **Encrypted stored credentials, opt-in.** Box SSH passwords, qBittorrent
+  WebUI passwords, the Pulsed Media API key and the pmdb.fyi upload key can
+  be stored as AES-256-GCM ciphertext under a key derived (HKDF-SHA256)
+  from a secret kept outside the database: `PMSS_SECRET`, or a file named
+  by `-secret-file`. The first start with the secret encrypts what is
+  already there and scrubs the old bytes from the file; a start without
+  the secret, with a different one, or with damaged encryption metadata
+  is refused rather than let a poller present ciphertext to a box as the
+  password. The secret is verified at every start even with no credential
+  stored. `PMSS_SECRET_PREVIOUS` (or `-previous-secret-file`) changes or
+  removes the secret in one start with the credentials kept;
+  `-forget-encrypted-credentials` is the way out after losing it, dropping
+  only what no longer decrypts. The whole thing protects a copy of the
+  database on its own (a backup, an appdata share, a bug-report
+  attachment), not against whoever can read the process environment on
+  the same host; *Encrypting stored credentials* says where the secret
+  may and may not live, including why an Unraid template variable is the
+  wrong place. Three rounds of external audit and the Codex reviewer went
+  into the recovery state machine. (#117, #118)
+- **Do not roll back to 1.8.x or earlier with an encrypted database.** An
+  older build knows nothing about the encryption and would present the
+  ciphertext as the password. Switch encryption off first (previous
+  secret set, `PMSS_SECRET` unset), then downgrade.
+- **Run it on a machine you control.** The README now says plainly that
+  the dashboard holds the keys to the whole fleet and must not run on a
+  Pulsed Media seedbox, storage box or any other shared host, and states
+  the threat model: file modes and the encryption restrict other user
+  accounts, `-auth` protects the dashboard, the loopback bind only limits
+  remote access, and none of it defends against privileged access.
 
 **1.8.0** adds the first outbound integration, opt-in. The minor bump is
 for the new settings fields `pmdb_enabled` / `pmdb_upload_key`, the
