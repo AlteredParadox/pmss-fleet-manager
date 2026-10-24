@@ -231,8 +231,8 @@ func credentialOptions(secretFile, previousFile string, forget bool, log *slog.L
 	if err != nil {
 		return nil, false, err
 	}
-	if creds.Warning != "" {
-		log.Warn(creds.Warning)
+	for _, w := range creds.Warnings {
+		log.Warn(w)
 	}
 	if creds.Current != nil {
 		log.Info("stored credentials are encrypted", "secret", creds.Source)

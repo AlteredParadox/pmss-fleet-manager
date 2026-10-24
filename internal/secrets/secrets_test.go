@@ -17,6 +17,7 @@
 package secrets
 
 import (
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -84,7 +85,22 @@ func TestWrongKeyAndDamage(t *testing.T) {
 	if _, err := b.Open("x", sealed); !errors.Is(err, ErrWrongKey) {
 		t.Fatalf("other key: %v", err)
 	}
-	for _, bad := range []string{Prefix, Prefix + "!!!", Prefix + "AAAA", sealed[:len(sealed)-2] + "zz"} {
+	// Damage every byte position in turn: nonce, ciphertext and tag. The
+	// decoded bytes are flipped and re-encoded, so the damage is never a
+	// no-op in base64's unused bits.
+	raw, err := base64.RawStdEncoding.DecodeString(sealed[len(Prefix):])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range raw {
+		dmg := append([]byte(nil), raw...)
+		dmg[i] ^= 0x01
+		bad := Prefix + base64.RawStdEncoding.EncodeToString(dmg)
+		if _, err := a.Open("x", bad); !errors.Is(err, ErrWrongKey) {
+			t.Fatalf("byte %d flipped: %v", i, err)
+		}
+	}
+	for _, bad := range []string{Prefix, Prefix + "!!!", Prefix + "AAAA"} {
 		if _, err := a.Open("x", bad); !errors.Is(err, ErrWrongKey) {
 			t.Fatalf("%q: %v", bad, err)
 		}
@@ -159,7 +175,7 @@ func TestResolve(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, err = Resolve("", path, "fedcba9876543210fedcba9876543210", "")
-	if err != nil || r.Current == nil || r.Previous == nil || r.Source != path || r.Warning == "" {
+	if err != nil || r.Current == nil || r.Previous == nil || r.Source != path || len(r.Warnings) != 1 {
 		t.Fatalf("file + previous: %+v %v", r, err)
 	}
 	// The previous secret from a file too; its loose mode is reported.
@@ -167,8 +183,12 @@ func TestResolve(t *testing.T) {
 	if err := os.WriteFile(prevPath, []byte("fedcba9876543210fedcba9876543210\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if r2, err := Resolve(testSecret, "", "", prevPath); err != nil || r2.Previous == nil || r2.Warning == "" {
+	if r2, err := Resolve(testSecret, "", "", prevPath); err != nil || r2.Previous == nil || len(r2.Warnings) != 1 || !strings.Contains(r2.Warnings[0], prevPath) {
 		t.Fatalf("previous from file: %+v %v", r2, err)
+	}
+	// Both files loose: both named, so neither is left exposed.
+	if r3, err := Resolve("", path, "", prevPath); err != nil || len(r3.Warnings) != 2 {
+		t.Fatalf("two loose files: %+v %v", r3, err)
 	}
 	// The two sealers are different keys.
 	sealed := r.Previous.Seal("x", "v")

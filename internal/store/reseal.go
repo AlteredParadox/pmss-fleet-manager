@@ -60,11 +60,15 @@ const recoveryHint = "; restore the database from a consistent backup, or start 
 
 // encoding is what the settings rows say about the secret columns.
 type encoding struct {
-	sealed   bool   // sealedKey is "1"
-	explicit bool   // sealedKey is present ("0" or "1")
-	check    string // checkKey's value, "" when absent
-	cleanup  bool   // cleanupKey is "1"
-	repair   bool   // the rows were read leniently (forget) and must be rewritten
+	sealed bool // sealedKey is "1"
+	// explicit: sealedKey is present ("0" or "1"), so the marker decides.
+	// initialized: any of the three rows is present, so this database has
+	// been opened by a build with encryption support and a missing row is
+	// damage, not age. A database with none of them is from before.
+	explicit, initialized bool
+	check                 string // checkKey's value, "" when absent
+	cleanup               bool   // a scrub is owed
+	repair                bool   // the rows were read leniently (forget) and must be rewritten
 }
 
 // secretCell is one stored credential and how to rewrite it.
@@ -128,45 +132,62 @@ func (s *Store) resealSecrets(ctx context.Context) error {
 }
 
 // readEncoding reads the three rows and refuses states this build cannot
-// interpret, unless forgetting was asked for: then a malformed marker or
-// an inconsistent pair is read as sealed, the stricter reading, so
-// nothing unreadable is kept and the rows are rewritten consistent.
+// interpret, unless forgetting was asked for: then a malformed marker, a
+// missing one or an inconsistent set is read as sealed, the stricter
+// reading, so nothing unreadable is kept, the rows are rewritten
+// consistent and a scrub is owed (the lost rows may have been owing one).
 func (s *Store) readEncoding(ctx context.Context) (encoding, error) {
 	var enc encoding
-	v, ok, err := s.lookup(ctx, sealedKey)
+	sv, sok, err := s.lookup(ctx, sealedKey)
 	if err != nil {
 		return enc, err
 	}
-	switch {
-	case !ok:
-	case v == "0":
-		enc.explicit = true
-	case v == "1":
-		enc.explicit, enc.sealed = true, true
-	case s.forget:
-		// A value this build does not understand, read conservatively as
-		// sealed: every credential is then verified or dropped below and
-		// the row rewritten.
-		enc.explicit, enc.sealed, enc.repair = true, true, true
-	default:
-		return enc, fmt.Errorf("the settings row %s holds %q, which this version does not understand%s", sealedKey, v, recoveryHint)
-	}
-	if enc.check, _, err = s.lookup(ctx, checkKey); err != nil {
+	check, cok, err := s.lookup(ctx, checkKey)
+	if err != nil {
 		return enc, err
 	}
-	if enc.sealed != (enc.check != "") {
-		if !s.forget {
-			state := "missing"
-			if enc.check != "" {
-				state = "present"
-			}
-			return enc, fmt.Errorf("the database's encryption markers disagree (%s=%q, key check %s): a partial restore or a repair?%s", sealedKey, v, state, recoveryHint)
-		}
-		enc.sealed, enc.repair = true, true
+	cv, clok, err := s.lookup(ctx, cleanupKey)
+	if err != nil {
+		return enc, err
 	}
-	cv, ok, err := s.lookup(ctx, cleanupKey)
-	enc.cleanup = (ok && cv != "0") || (!ok && enc.explicit)
-	return enc, err
+	enc.check, enc.initialized = check, sok || cok || clok
+	switch {
+	case !sok:
+	case sv == "0":
+		enc.explicit = true
+	case sv == "1":
+		enc.explicit, enc.sealed = true, true
+	case s.forget:
+		enc.explicit, enc.sealed, enc.repair = true, true, true
+	default:
+		return enc, fmt.Errorf("the settings row %s holds %q, which this version does not understand%s", sealedKey, sv, recoveryHint)
+	}
+	// A marker missing from an initialized database, or a marker and key
+	// check that disagree, is damage: a partial restore or a repair.
+	if (enc.initialized && !sok) || enc.sealed != cok {
+		if !s.forget {
+			return enc, fmt.Errorf("the database's encryption metadata is inconsistent (%s %s, key check %s, cleanup row %s): a partial restore or a repair?%s",
+				sealedKey, rowState(sok, sv), presence(cok), presence(clok), recoveryHint)
+		}
+		enc.explicit, enc.sealed, enc.repair = true, true, true
+	}
+	// The cleanup row is an obligation: only an explicit "0" clears it.
+	enc.cleanup = (clok && cv != "0") || (!clok && enc.initialized) || enc.repair
+	return enc, nil
+}
+
+func presence(ok bool) string {
+	if ok {
+		return "present"
+	}
+	return "missing"
+}
+
+func rowState(ok bool, v string) string {
+	if ok {
+		return fmt.Sprintf("%q", v)
+	}
+	return "missing"
 }
 
 // verifyKeyCheck authenticates the configured secret against the key

@@ -1042,10 +1042,10 @@ func TestDamagedEncodingMetadataFailsClosed(t *testing.T) {
 		path, id := sealedFixture(t)
 		rawExec(t, path, `DELETE FROM settings WHERE key=?`, sealedKey)
 		// Markers disagree: refused with or without the right key...
-		if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "disagree") {
+		if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "inconsistent") {
 			t.Fatalf("no key: %v", err)
 		}
-		if _, err := Open(path, WithSealer(mustSealer(t, keyA))); err == nil || !strings.Contains(err.Error(), "disagree") {
+		if _, err := Open(path, WithSealer(mustSealer(t, keyA))); err == nil || !strings.Contains(err.Error(), "inconsistent") {
 			t.Fatalf("right key: %v", err)
 		}
 		// ...and forgetting with the right key keeps everything, since it all opens.
@@ -1064,11 +1064,11 @@ func TestDamagedEncodingMetadataFailsClosed(t *testing.T) {
 		}
 		s.Close()
 	})
-	t.Run("both markers lost", func(t *testing.T) {
+	t.Run("all metadata lost", func(t *testing.T) {
 		path, id := sealedFixture(t)
-		rawExec(t, path, `DELETE FROM settings WHERE key IN (?,?)`, sealedKey, checkKey)
-		// The store reads as plain, but the cells are shaped like ciphertext:
-		// never handed out as passwords.
+		rawExec(t, path, `DELETE FROM settings WHERE key IN (?,?,?)`, sealedKey, checkKey, cleanupKey)
+		// The store reads as never initialized, but the cells are shaped
+		// like ciphertext: never handed out as passwords.
 		if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "looks encrypted") {
 			t.Fatalf("no key: %v", err)
 		}
@@ -1094,7 +1094,7 @@ func TestDamagedEncodingMetadataFailsClosed(t *testing.T) {
 		}
 		s.Close()
 		// Without the key, forgetting drops them and the store is plain.
-		rawExec(t, path, `DELETE FROM settings WHERE key IN (?,?)`, sealedKey, checkKey)
+		rawExec(t, path, `DELETE FROM settings WHERE key IN (?,?,?)`, sealedKey, checkKey, cleanupKey)
 		s, err = Open(path, WithForgetUnreadable())
 		if err != nil {
 			t.Fatal(err)
@@ -1110,7 +1110,7 @@ func TestDamagedEncodingMetadataFailsClosed(t *testing.T) {
 	t.Run("key check lost", func(t *testing.T) {
 		path, id := sealedFixture(t)
 		rawExec(t, path, `DELETE FROM settings WHERE key=?`, checkKey)
-		if _, err := Open(path, WithSealer(mustSealer(t, keyA))); err == nil || !strings.Contains(err.Error(), "disagree") {
+		if _, err := Open(path, WithSealer(mustSealer(t, keyA))); err == nil || !strings.Contains(err.Error(), "inconsistent") {
 			t.Fatalf("right key: %v", err)
 		}
 		s, err := Open(path, WithSealer(mustSealer(t, keyA)), WithForgetUnreadable())
@@ -1335,4 +1335,93 @@ func TestUnreadableCleanupMarkerScrubs(t *testing.T) {
 			noPlaintextIn(t, path, "zebra-unique-password")
 		})
 	}
+}
+
+// A surviving row of any kind proves the database was initialized: the
+// marker and key check being lost does not make it a legacy plaintext
+// store that accepts any secret.
+func TestSurvivingCleanupRowRefusesAnyKey(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path, WithSealer(mustSealer(t, keyA)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	rawExec(t, path, `DELETE FROM settings WHERE key IN (?,?)`, sealedKey, checkKey)
+	for name, opts := range map[string][]Option{
+		"no key":    nil,
+		"any key":   {WithSealer(mustSealer(t, keyB))},
+		"right key": {WithSealer(mustSealer(t, keyA))},
+	} {
+		if _, err := Open(path, opts...); err == nil || !strings.Contains(err.Error(), "inconsistent") {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// The explicit recovery path rebuilds the metadata and owes a scrub.
+	s, err = Open(path, WithSealer(mustSealer(t, keyB)), WithForgetUnreadable())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for k, want := range map[string]string{sealedKey: "1", cleanupKey: "0"} {
+		if v, _ := s.GetValue(ctx, k); v != want {
+			t.Fatalf("%s = %q, want %q", k, v, want)
+		}
+	}
+	if v, _ := s.GetValue(ctx, checkKey); !secrets.IsSealed(v) {
+		t.Fatalf("check %q", v)
+	}
+}
+
+// The audit's sequence: an interrupted first scrub, then a partial restore
+// that keeps the key check but loses the marker and the cleanup row. The
+// documented recovery must still scrub.
+func TestRepairOfLostRowsOwesTheScrub(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Box{Name: "seed-01", Host: "odin.example", User: "ragnar", Password: "zebra-unique-password-" + strings.Repeat("x", 200), Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateBox(ctx, b, Clears{Password: true}); err != nil {
+		t.Fatal(err)
+	}
+	st := DefaultSettings()
+	st.PMAPIKey = "apikey"
+	if err := s.SaveSettings(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	vacuumSQL = "VACUUM no_such_schema"
+	_, err = Open(path, WithSealer(mustSealer(t, keyA)))
+	vacuumSQL = "VACUUM"
+	if err == nil {
+		t.Fatal("open with a failing vacuum succeeded")
+	}
+	rawExec(t, path, `DELETE FROM settings WHERE key IN (?,?)`, sealedKey, cleanupKey)
+	if _, err := Open(path, WithSealer(mustSealer(t, keyA))); err == nil || !strings.Contains(err.Error(), "inconsistent") {
+		t.Fatalf("without the recovery flag: %v", err)
+	}
+	s, err = Open(path, WithSealer(mustSealer(t, keyA)), WithForgetUnreadable())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.ForgottenOnOpen() != 0 {
+		t.Fatalf("forgot %d with the right key", s.ForgottenOnOpen())
+	}
+	if gs, err := s.GetSettings(ctx); err != nil || gs.PMAPIKey != "apikey" {
+		t.Fatalf("after repair: %+v %v", gs, err)
+	}
+	for k, want := range map[string]string{sealedKey: "1", cleanupKey: "0"} {
+		if v, _ := s.GetValue(ctx, k); v != want {
+			t.Fatalf("%s = %q, want %q", k, v, want)
+		}
+	}
+	s.Close()
+	noPlaintextIn(t, path, "zebra-unique-password")
 }

@@ -227,10 +227,10 @@ func Load(n Names, envValue, filePath string) (*Loaded, error) {
 
 // Resolved is what the process configuration asks for.
 type Resolved struct {
-	Current  *Sealer // nil: credentials are stored in plain text
-	Previous *Sealer // nil: no secret change in progress
-	Source   string  // where Current came from, for the startup log
-	Warning  string  // a loose secret-file mode, see Loaded
+	Current  *Sealer  // nil: credentials are stored in plain text
+	Previous *Sealer  // nil: no secret change in progress
+	Source   string   // where Current came from, for the startup log
+	Warnings []string // loose secret-file modes, see Loaded; one per file
 }
 
 // Resolve turns the configuration (the PMSS_SECRET value or the
@@ -247,7 +247,10 @@ func Resolve(secret, secretFile, previous, previousFile string) (*Resolved, erro
 		if r.Current, err = New(loaded.Master); err != nil {
 			return nil, fmt.Errorf("credential secret: %w", err)
 		}
-		r.Source, r.Warning = loaded.Source, loaded.Warning
+		r.Source = loaded.Source
+		if loaded.Warning != "" {
+			r.Warnings = append(r.Warnings, loaded.Warning)
+		}
 	}
 	prev, err := Load(PreviousNames, previous, previousFile)
 	if err != nil {
@@ -257,8 +260,8 @@ func Resolve(secret, secretFile, previous, previousFile string) (*Resolved, erro
 		if r.Previous, err = New(prev.Master); err != nil {
 			return nil, fmt.Errorf("previous secret: %w", err)
 		}
-		if prev.Warning != "" && r.Warning == "" {
-			r.Warning = prev.Warning
+		if prev.Warning != "" {
+			r.Warnings = append(r.Warnings, prev.Warning)
 		}
 	}
 	return &r, nil
