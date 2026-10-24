@@ -139,12 +139,14 @@ Requires Go 1.27 or later to build (go.mod names the exact toolchain and the go 
 **Run it on a machine you control**, such as a home server, a NAS, a VPS or
 your workstation, and **not on a Pulsed Media seedbox, storage box or any
 other shared host.** The dashboard holds the SSH and WebUI credentials for
-every box in your fleet, and everything it does to protect them (file
-modes, the optional encryption, the loopback bind) assumes that no one
-else has an account on the machine it runs on. On a shared host the
-other tenants and the provider's staff are on the same kernel as the
-database and the process memory, which is outside the threat model;
-see *Security and hardening*.
+every box in your fleet. File modes and the optional encryption keep
+other user accounts out of the database, `-auth` protects the dashboard
+itself, and the loopback bind limits access to the local machine, which
+on a shared host is exactly where the other tenants are: every one of
+them can open a loopback port. None of it protects against privileged
+access, and on a shared host the provider's staff and anyone who gets
+root are on the same kernel as the database and the process memory. That
+is outside the threat model; see *Security and hardening*.
 
 ```sh
 make build                                 # or: go build -o pmss-fleet-manager ./cmd/pmss-fleet-manager
@@ -355,13 +357,15 @@ These are the design decisions that came out of it.
 - **The threat model stops at the machine that runs the dashboard.** The
   design treats the boxes as hostile territory (tenant-only reads, pinned
   host keys, credentials never sent to a port you do not own) and the
-  dashboard's own host as yours: 0600 files, a loopback bind and the
-  optional encryption keep other *users* of that host out, but a root
-  user, another tenant with a kernel exploit or the provider's staff are
-  not defended against. That is why the dashboard must not run on a
-  seedbox, a storage box or any other shared host: it holds the keys to
-  the whole fleet, and on a shared host the people you are keeping those
-  keys from are on the same machine.
+  dashboard's own host as yours. There, 0600 files and the optional
+  encryption restrict other UIDs, `-auth` protects the dashboard, and the
+  default loopback bind limits remote network access; it does not keep
+  other local users off the port. None of this defends against
+  privileged access: root, another tenant with a kernel exploit, or the
+  provider's staff. That is why the dashboard must not run on a seedbox,
+  a storage box or any other shared host: it holds the keys to the whole
+  fleet, and on a shared host the people you are keeping those keys from
+  are on the same machine, with the loopback port in reach.
 
 - **Tenant-only on a shared host.** Everything the dashboard reads comes from
   your own account: `/proc`, your cgroup, your home directory and the kernel's
