@@ -38,6 +38,7 @@ import (
 	"pmss-fleet-manager/internal/alerts"
 	"pmss-fleet-manager/internal/api"
 	"pmss-fleet-manager/internal/collect"
+	"pmss-fleet-manager/internal/secrets"
 	"pmss-fleet-manager/internal/store"
 )
 
@@ -56,6 +57,8 @@ func main() {
 	auth := flag.String("auth", "", "optional HTTP basic auth as user:password (or set PMSS_AUTH, which -h never prints)")
 	basePath := flag.String("base-path", os.Getenv("PMSS_BASE_PATH"), "URL path prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged (e.g. /fleet)")
 	logLevel := flag.String("log", envOr("PMSS_LOG", "info"), "log level: debug, info, warn, error")
+	secretFile := flag.String("secret-file", os.Getenv("PMSS_SECRET_FILE"), "file holding the secret that encrypts stored credentials (or set PMSS_SECRET to the secret itself, which -h never prints); unset keeps them in plain text")
+	forgetCreds := flag.Bool("forget-encrypted-credentials", os.Getenv("PMSS_FORGET_ENCRYPTED_CREDENTIALS") == "1", "after losing the secret: remove every stored credential that does not decrypt with the configured one, then start; the edit forms ask for them again")
 	flag.Parse()
 	if !flagGiven("auth") {
 		// Read after parsing, not as the flag's default: -h and a flag
@@ -94,7 +97,44 @@ func main() {
 		}
 	}
 
-	st, err := store.Open(filepath.Join(*dataDir, "pmss-fleet-manager.db"))
+	// Like PMSS_AUTH, the secret itself is only ever read from the
+	// environment, never a flag: a flag would be in `ps` and in -h output.
+	var opts []store.Option
+	encrypted := false
+	if loaded, err := secrets.Load(os.Getenv("PMSS_SECRET"), *secretFile); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	} else if loaded != nil {
+		sl, err := secrets.New(loaded.Master)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "credential secret:", err)
+			os.Exit(2)
+		}
+		if loaded.Warning != "" {
+			log.Warn(loaded.Warning)
+		}
+		log.Info("stored credentials are encrypted", "secret", loaded.Source)
+		opts = append(opts, store.WithSealer(sl))
+		encrypted = true
+	}
+	if prev := os.Getenv("PMSS_SECRET_PREVIOUS"); prev != "" {
+		// Changing or removing the secret: credentials sealed under the
+		// old one are rewritten under the new one (or in plain text) at
+		// this start. The variable is meant to be removed afterwards.
+		sl, err := secrets.New([]byte(prev))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "PMSS_SECRET_PREVIOUS:", err)
+			os.Exit(2)
+		}
+		log.Warn("PMSS_SECRET_PREVIOUS is set: credentials encrypted under it are being rewritten; remove it once this start succeeds")
+		opts = append(opts, store.WithPreviousSealer(sl))
+	}
+	if *forgetCreds {
+		log.Warn("-forget-encrypted-credentials is set: stored credentials that do not decrypt are being removed; unset it once this start succeeds")
+		opts = append(opts, store.WithForgetUnreadable())
+	}
+
+	st, err := store.Open(filepath.Join(*dataDir, "pmss-fleet-manager.db"), opts...)
 	if err != nil {
 		if errors.Is(err, fs.ErrPermission) {
 			// The usual cause is a bind-mounted data directory owned by
@@ -109,6 +149,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+	if n := st.ResealedOnOpen(); n > 0 {
+		log.Info("rewrote stored credentials", "count", n, "encrypted", encrypted)
+	}
+	if n := st.ForgottenOnOpen(); n > 0 {
+		log.Warn("removed stored credentials that did not decrypt; re-enter them in the edit forms", "count", n)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

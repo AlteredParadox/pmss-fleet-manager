@@ -31,6 +31,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver with database/sql
+
+	"pmss-fleet-manager/internal/secrets"
 )
 
 // Box is one managed seedbox or storage box.
@@ -161,10 +163,59 @@ type Alert struct {
 // Store wraps the database.
 type Store struct {
 	db *sql.DB
+	// sealer encrypts the secret columns (see labels below); nil stores
+	// them in plain text. Set with WithSealer.
+	sealer *secrets.Sealer
+	// prev opens credentials sealed under the secret before a change (see
+	// WithPreviousSealer); forget drops the ones nothing opens.
+	prev      *secrets.Sealer
+	forget    bool
+	resealed  int
+	forgotten int
 }
 
+// The additional data each secret column is sealed under: a ciphertext
+// copied from one column to another does not open.
+const (
+	labelPassword      = "boxes.password"
+	labelQbtPass       = "boxes.qbt_pass"
+	labelPMAPIKey      = "settings.pm_api_key"
+	labelPMDBUploadKey = "settings.pmdb_upload_key"
+)
+
+// Option configures Open.
+type Option func(*Store)
+
+// WithSealer encrypts the stored credentials with sl. On Open, plaintext
+// credentials already in the database are sealed in place and the file is
+// vacuumed so the plaintext is not left in free pages; a sealed credential
+// that does not open with sl makes Open fail. Without this option, Open
+// fails if the database holds sealed credentials, so a dashboard started
+// without its secret never sends ciphertext to a box as the password.
+func WithSealer(sl *secrets.Sealer) Option { return func(s *Store) { s.sealer = sl } }
+
+// WithPreviousSealer names the secret the credentials were sealed under
+// before this start: credentials that open with it (and not with the
+// current sealer) are re-encrypted under the current one, or stored in
+// plain text again when there is none. That is how the secret is changed,
+// or encryption switched off, without re-entering anything.
+func WithPreviousSealer(sl *secrets.Sealer) Option { return func(s *Store) { s.prev = sl } }
+
+// WithForgetUnreadable makes Open clear every sealed credential that
+// neither the current nor the previous sealer opens, instead of failing.
+// It is the way out after losing the secret: the dashboard starts with
+// those passwords and keys removed, and the edit forms ask for them again.
+func WithForgetUnreadable() Option { return func(s *Store) { s.forget = true } }
+
+// ResealedOnOpen reports how many credentials Open re-encrypted: plaintext
+// ones sealed for the first time, and ones moved from the previous secret.
+func (s *Store) ResealedOnOpen() int { return s.resealed }
+
+// ForgottenOnOpen reports how many unreadable credentials Open cleared.
+func (s *Store) ForgottenOnOpen() int { return s.forgotten }
+
 // Open opens (creating if needed) the SQLite database at path.
-func Open(path string) (*Store, error) {
+func Open(path string, opts ...Option) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -196,7 +247,14 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
+	for _, o := range opts {
+		o(s)
+	}
 	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.resealSecrets(context.Background()); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -361,7 +419,7 @@ const (
 	getBoxSQL    = "SELECT " + boxCols + " FROM boxes WHERE id = ?"
 )
 
-func scanBox(row interface{ Scan(...any) error }) (*Box, error) {
+func (s *Store) scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 	var b Box
 	var created, updated, watch string
 	err := row.Scan(&b.ID, &b.Name, &b.Host, &b.Port, &b.User, &b.AuthMethod, &b.KeyPath, &b.Password, &b.HostKey,
@@ -369,6 +427,12 @@ func scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 		&b.DockerEnabled, &b.DuEnabled, &b.Enabled, &created, &updated, &watch, &b.Revision)
 	if err != nil {
 		return nil, err
+	}
+	if b.Password, err = s.sealer.Open(labelPassword, b.Password); err != nil {
+		return nil, fmt.Errorf("box %d SSH password: %w", b.ID, err)
+	}
+	if b.QbtPass, err = s.sealer.Open(labelQbtPass, b.QbtPass); err != nil {
+		return nil, fmt.Errorf("box %d WebUI password: %w", b.ID, err)
 	}
 	b.AppsWatch = []string{}
 	if watch != "" {
@@ -389,7 +453,7 @@ func (s *Store) ListBoxes(ctx context.Context) ([]*Box, error) {
 	defer rows.Close()
 	var out []*Box
 	for rows.Next() {
-		b, err := scanBox(rows)
+		b, err := s.scanBox(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -407,7 +471,7 @@ var ErrStale = errors.New("the box was changed by another edit since this form w
 
 // GetBox loads one box.
 func (s *Store) GetBox(ctx context.Context, id int64) (*Box, error) {
-	b, err := scanBox(s.db.QueryRowContext(ctx, getBoxSQL, id))
+	b, err := s.scanBox(s.db.QueryRowContext(ctx, getBoxSQL, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -424,11 +488,16 @@ func (s *Store) CreateBox(ctx context.Context, b *Box) error {
 	if b.Type == "" {
 		b.Type = "seedbox"
 	}
+	// The Box keeps its plaintext: the caller starts the poller from it.
+	pw, qp, err := s.sealBoxSecrets(b)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `INSERT INTO boxes (name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
 		qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, b.Password, b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
-		b.QbtEnabled, b.QbtPort, b.QbtUser, b.QbtPass, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
+		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, pw, b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
+		b.QbtEnabled, b.QbtPort, b.QbtUser, qp, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
 		now.Format(time.RFC3339), now.Format(time.RFC3339))
 	if err != nil {
 		return err
@@ -466,16 +535,22 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	if clears.QbtPass {
 		b.QbtPass = ""
 	}
+	// A blank secret seals to blank, so the CASE below still reads it as
+	// "keep the stored value".
+	pw, qp, err := s.sealBoxSecrets(b)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
 		password=CASE WHEN ? THEN '' WHEN ?='' THEN password ELSE ? END,
 		host_key=CASE WHEN ? THEN '' WHEN ? THEN ? WHEN host_key='' THEN ? ELSE host_key END,
 		type=?, plan=?, datacenter=?, renewal=?,
 		qbt_enabled=?, qbt_port=?, qbt_user=?, qbt_pass=CASE WHEN ? THEN '' WHEN ?='' THEN qbt_pass ELSE ? END, qbt_start_cmd=?,
 		docker_enabled=?, du_enabled=?, enabled=?, updated_at=?, revision=revision+1 WHERE id=? AND revision=?`,
-		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clears.Password, b.Password, b.Password,
+		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clears.Password, pw, pw,
 		clears.ForgetHostKey, clears.ReplaceHostKey, b.HostKey, b.HostKey,
 		b.Type, b.Plan, b.Datacenter, b.Renewal,
-		b.QbtEnabled, b.QbtPort, b.QbtUser, clears.QbtPass, b.QbtPass, b.QbtPass, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
+		b.QbtEnabled, b.QbtPort, b.QbtUser, clears.QbtPass, qp, qp, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
 		now.Format(time.RFC3339), b.ID, b.Revision)
 	if err != nil {
 		return err
@@ -492,6 +567,15 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	}
 	b.Revision++
 	return nil
+}
+
+// sealBoxSecrets returns the stored forms of b's SSH and WebUI passwords.
+func (s *Store) sealBoxSecrets(b *Box) (pw, qp string, err error) {
+	if pw, err = s.sealer.Seal(labelPassword, b.Password); err != nil {
+		return "", "", err
+	}
+	qp, err = s.sealer.Seal(labelQbtPass, b.QbtPass)
+	return pw, qp, err
 }
 
 // SetHostKey pins a key seen while dialling host:port onto the box, only if
@@ -558,11 +642,28 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 	if out.QbtDownloadURL == "" {
 		out.QbtDownloadURL = DefaultQbtDownloadURL
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	if out.PMAPIKey, err = s.sealer.Open(labelPMAPIKey, out.PMAPIKey); err != nil {
+		return out, fmt.Errorf("Pulsed Media API key: %w", err)
+	}
+	if out.PMDBUploadKey, err = s.sealer.Open(labelPMDBUploadKey, out.PMDBUploadKey); err != nil {
+		return out, fmt.Errorf("pmdb upload key: %w", err)
+	}
+	return out, nil
 }
 
 // SaveSettings writes every setting.
 func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
+	apiKey, err := s.sealer.Seal(labelPMAPIKey, st.PMAPIKey)
+	if err != nil {
+		return err
+	}
+	pmdbKey, err := s.sealer.Seal(labelPMDBUploadKey, st.PMDBUploadKey)
+	if err != nil {
+		return err
+	}
 	kv := map[string]string{
 		"poll_interval_sec":     strconv.Itoa(st.PollIntervalSec),
 		"disk_threshold_pct":    strconv.Itoa(st.DiskThresholdPct),
@@ -574,8 +675,8 @@ func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
 		"client_area_url":       st.ClientAreaURL,
 		"qbt_download_url":      st.QbtDownloadURL,
 		"card_min_px":           strconv.Itoa(st.CardMinPx),
-		"pm_api_key":            st.PMAPIKey,
-		"pmdb_upload_key":       st.PMDBUploadKey,
+		"pm_api_key":            apiKey,
+		"pmdb_upload_key":       pmdbKey,
 		"pmdb_enabled":          boolKV(st.PMDBEnabled),
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
