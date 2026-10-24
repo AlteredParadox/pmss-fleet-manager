@@ -1276,3 +1276,59 @@ func TestNominalMHz(t *testing.T) {
 		}
 	}
 }
+
+// TestQbtConfShell reads the WebUI settings out of both conf layouts: the
+// 4.x `WebUI\Key` under [Preferences] and the 5.x bare keys under [WebUI].
+// Lines the parser does not read (the password hash above all) never leave
+// the box. Runs under the system awk and, when installed, mawk (Debian's
+// default awk on the boxes).
+func TestQbtConfShell(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	v4 := "[Preferences]\nWebUI\\Port=8089\nWebUI\\LocalHostAuth=false\nWebUI\\Username=ragnar\nWebUI\\Password_PBKDF2=\"@ByteArray(secret)\"\nConnection\\ResolvePeerCountries=true\n"
+	v5 := "[BitTorrent]\nSession\\Port=15143\n\n[Preferences]\nConnection\\ResolvePeerCountries=true\n\n[WebUI]\r\nAddress=127.0.0.1\nAuthSubnetWhitelistEnabled=false\nLocalHostAuth=true\nPassword_PBKDF2=\"@ByteArray(secret)\"\nPort=16209\nUsername=rc5\n"
+	awks := []string{""}
+	if mawk, err := exec.LookPath("mawk"); err == nil {
+		awks = append(awks, mawk)
+	}
+	for _, awk := range awks {
+		for name, conf := range map[string]string{"v4": v4, "v5": v5} {
+			home := t.TempDir()
+			dir := home + "/.config/qBittorrent"
+			os.MkdirAll(dir, 0o700)
+			os.WriteFile(dir+"/qBittorrent.conf", []byte(conf), 0o600)
+			cmd := exec.Command("sh")
+			cmd.Stdin = strings.NewReader("home=" + home + "\n" + qbtConfShell)
+			if awk != "" {
+				bin := t.TempDir()
+				os.Symlink(awk, bin+"/awk")
+				cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+			}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("%s/%s: %v", awk, name, err)
+			}
+			if strings.Contains(string(out), "secret") || strings.Contains(string(out), "Address") {
+				t.Fatalf("%s/%s: leaked a line the parser does not read: %q", awk, name, out)
+			}
+			q := parseQbt(map[string]string{"qbt_conf": string(out)})
+			switch name {
+			case "v4":
+				if !q.ConfFound || q.ConfPort != 8089 || !q.LocalHostAuth || q.Username != "ragnar" {
+					t.Fatalf("%s/v4: %+v from %q", awk, q, out)
+				}
+			case "v5":
+				if !q.ConfFound || q.ConfPort != 16209 || q.LocalHostAuth || q.SubnetBypass || q.Username != "rc5" {
+					t.Fatalf("%s/v5: %+v from %q", awk, q, out)
+				}
+			}
+		}
+		// No conf at all: an empty section and nothing on stderr (awk's
+		// non-zero exit is as harmless as grep's was: the script has no set -e).
+		out, stderr, _ := runSh(t, "home="+t.TempDir()+"\n"+qbtConfShell)
+		if out != "" || stderr != "" {
+			t.Fatalf("%s/missing conf: %q %q", awk, out, stderr)
+		}
+	}
+}

@@ -129,8 +129,7 @@ if [ -f "/sys/fs/cgroup/$S/cpu.stat" ]; then
 fi
 if [ -f "/sys/fs/cgroup/pids/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/cgroup/pids/$S/pids.current)"
 elif [ -f "/sys/fs/cgroup/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/cgroup/$S/pids.current)"; fi
-sec qbt_conf; grep -E '^WebUI\\(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=' "$home/.config/qBittorrent/qBittorrent.conf" 2>/dev/null
-sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
+sec qbt_conf; ` + qbtConfShell + `sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
 sec listen
 ` + listenShell + `sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
 # Every poll, not inventory: the panel can switch its own qBittorrent on
@@ -330,6 +329,17 @@ const (
 		" .config/rclone .flexget .pyload/logs .config/pyload/logs .config/cloudplow .config/Jackett/log logs"
 	logFilesShell = ".trackerCleaner.log .rtorrent.log rtorrent.log .rtorrent.session/rtorrent.log"
 )
+
+// qbtConfShell prints the WebUI settings parseQbt reads, one `WebUI\Key=value`
+// line each whatever the file's layout: qBittorrent 4.x keeps them as
+// `WebUI\Key` under [Preferences]; 5.x (conf MigrationVersion 12) moved them
+// to a [WebUI] section with bare keys, which the old grep for `^WebUI\` never
+// matched, so every 5.x box read as "no port in the config" and fell back to
+// 8080. Only the listed keys are printed: the password hash stays on the box.
+const qbtConfShell = `awk '/^\[/{s=$0; sub(/[ \r]+$/,"",s); next}
+s=="[Preferences]" && /^WebUI\\(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=/{print; next}
+s=="[WebUI]" && /^(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=/{print "WebUI\\" $0}' "$home/.config/qBittorrent/qBittorrent.conf" 2>/dev/null
+`
 
 // logsListShell lists log files in the places the PMSS stack and the usual
 // self-installed apps write them, as "mtime<TAB>size<TAB>path" relative to
