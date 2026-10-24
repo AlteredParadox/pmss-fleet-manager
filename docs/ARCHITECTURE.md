@@ -40,6 +40,7 @@ PMSS "month" counters are a rolling 30-day window, not a billing cycle. The UI s
 
 - `cmd/pmss-fleet-manager` flags, wiring, graceful shutdown
 - `internal/store` SQLite (modernc, pure Go): boxes, settings, alerts, per-box caches
+- `internal/secrets` optional encryption of the stored credentials (HKDF-SHA256 → AES-256-GCM, column name as additional data) under a secret from the environment or a file
 - `internal/sshx` SSH client (TOFU host keys, bounded dial/run), unix/tcp dialer; reconnects are the poller's job
 - `internal/phpserial` minimal PHP `unserialize`
 - `internal/probe` the remote shell probe and its parser -> `probe.Snapshot`. The probe has two cadences: every poll measures (load, memory, quota, traffic, cgroup, processes, listeners); the inventory sections (host identity, the installed qBittorrent binary and its version, the start helper, the crontab, the log catalogue) run on a poller's first poll, every 15 minutes, and on demand (a refresh, an install or autostart action, the logs tab finding its listing older than ten minutes), and the poller carries the last inventory across the polls in between
@@ -55,5 +56,5 @@ PMSS "month" counters are a rolling 30-day window, not a billing cycle. The UI s
 ## Security
 
 - Binds to 127.0.0.1 by default; optional HTTP basic auth (`-auth user:pass`).
-- Box credentials live in the SQLite file (0600). Prefer SSH keys or the agent over passwords.
+- Box credentials live in the SQLite file (0600), in plain text or, with `PMSS_SECRET` set, as AES-256-GCM ciphertext sealed and opened at the store boundary (`internal/secrets`; plaintext rows are resealed at open, a missing or different secret refuses to start). Prefer SSH keys or the agent over passwords.
 - Host keys are pinned on first connect (known_hosts style, stored per box).

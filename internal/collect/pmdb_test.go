@@ -216,7 +216,9 @@ func TestSyncPMDBStopsOnOptOut(t *testing.T) {
 	ctx := context.Background()
 	var mu sync.Mutex
 	var posts int
-	listArrived, release := make(chan struct{}), make(chan struct{})
+	// listArrived is buffered: the fetch can land before the test is at
+	// the receive, and the non-blocking send below must not lose it.
+	listArrived, release := make(chan struct{}, 1), make(chan struct{})
 	var onPost func()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

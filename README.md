@@ -136,6 +136,18 @@ Off by default; untick the box or remove the key to stop it.
 
 Requires Go 1.27 or later to build (go.mod names the exact toolchain and the go command fetches it). No other runtime dependencies.
 
+**Run it on a machine you control**, such as a home server, a NAS, a VPS or
+your workstation, and **not on a Pulsed Media seedbox, storage box or any
+other shared host.** The dashboard holds the SSH and WebUI credentials for
+every box in your fleet. File modes and the optional encryption keep
+other user accounts out of the database, `-auth` protects the dashboard
+itself, and the loopback bind limits access to the local machine, which
+on a shared host is exactly where the other tenants are: every one of
+them can open a loopback port. None of it protects against privileged
+access, and on a shared host the provider's staff and anyone who gets
+root are on the same kernel as the database and the process memory. That
+is outside the threat model; see *Security and hardening*.
+
 ```sh
 make build                                 # or: go build -o pmss-fleet-manager ./cmd/pmss-fleet-manager
 ./pmss-fleet-manager                       # http://127.0.0.1:8080, data in ./data
@@ -143,7 +155,10 @@ make build                                 # or: go build -o pmss-fleet-manager 
 ```
 
 Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
-`PMSS_AUTH`, `PMSS_LOG`, `PMSS_ALLOWED_HOSTS`, `PMSS_BASE_PATH`:
+`PMSS_AUTH`, `PMSS_LOG`, `PMSS_ALLOWED_HOSTS`, `PMSS_BASE_PATH`,
+`PMSS_SECRET_FILE`, `PMSS_SECRET_PREVIOUS_FILE`,
+`PMSS_FORGET_ENCRYPTED_CREDENTIALS`; `PMSS_SECRET` and
+`PMSS_SECRET_PREVIOUS` exist only as environment variables:
 
 | flag | default | meaning |
 |---|---|---|
@@ -153,6 +168,82 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
 | `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
+| `-secret-file` | none | file holding the secret that encrypts the stored credentials, or set `PMSS_SECRET` to the secret itself; see *Encrypting stored credentials* below. Unset keeps them in plain text |
+| `-previous-secret-file` | none | when changing or removing the secret: file holding the one the credentials are encrypted with now, or set `PMSS_SECRET_PREVIOUS`; for one start |
+| `-forget-encrypted-credentials` | off | after losing the secret: remove every stored credential that does not decrypt, then start |
+
+### Encrypting stored credentials
+
+Box SSH passwords, qBittorrent WebUI passwords, the Pulsed Media API key
+and the pmdb.fyi upload key live in the SQLite file. By default they are in
+plain text, protected by the file's mode (0600 in a 0700 directory). To
+encrypt them, give the dashboard a secret from outside the data directory:
+
+```sh
+openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-fleet-manager.secret
+./pmss-fleet-manager -secret-file /etc/pmss-fleet-manager.secret
+# or, for a container:  -e PMSS_SECRET="$(openssl rand -base64 32)"
+```
+
+- **What it protects.** A copy of the database on its own: a backup, an
+  appdata share on the LAN, a file attached to a bug report, a file-read
+  bug. It does not protect against whoever can read the process's
+  environment or the secret file on the same host, which is the same
+  person who could read a 0600 database. So the secret must not travel
+  with copies of the database: not in the data directory, not in a
+  backup set that includes it, and not in a container template or compose
+  file that sits on a share exported next to the data (on Unraid the
+  template XML is on the flash drive; see *Running in a container*). A
+  secret file on an unexported path, mounted read-only, is the safe
+  default; the environment variable is for setups where nothing writes
+  the environment to disk.
+- **The secret must be random**, at least 24 characters and ideally the 44
+  that `openssl rand -base64 32` prints. The key is derived with HKDF
+  (no stretching), so a memorable passphrase could be brute-forced offline
+  against the very file this guards. Keep a copy in a password manager:
+  a lost secret means re-entering every password and key.
+- **First start with the secret** encrypts the credentials already in the
+  database, then vacuums the file and truncates the write-ahead log so the
+  plain text is not left in free pages; if that cleanup is interrupted it
+  is finished at the next start before anything is served. The database
+  records whether its credentials are encrypted and keeps a small key
+  check (a fixed string sealed under the secret), so that marker, not what
+  a value looks like, decides: a password that happens to start with
+  `pmss1:` is a password in a store marked plain text, and the secret is
+  verified at every start even when no credential is stored yet. The one
+  time a value's shape is consulted is a database that has no marker yet
+  (never opened by a release with encryption support, or metadata lost):
+  a credential there that is exactly shaped like this dashboard's
+  ciphertext is refused rather than sent to a box as a password. Nothing
+  changes in the dashboard.
+- **Starting without the secret, or with a different one, is refused** with
+  a log line saying so, or naming the first credential it could not read.
+  The pollers would otherwise present ciphertext to your boxes as the
+  password. Fix the environment and start again; nothing is lost. The same
+  refusal covers a database whose encryption markers were damaged or only
+  partly restored: the dashboard fails closed rather than guess, and the
+  log line says what to do.
+- **Changing or removing the secret:** for a single start, give the old
+  one as `PMSS_SECRET_PREVIOUS` or in a file named by
+  `-previous-secret-file` / `PMSS_SECRET_PREVIOUS_FILE`. Credentials are
+  rewritten under the new `PMSS_SECRET`, or back to plain text when it is
+  unset. Remove it once that start has succeeded. In a container, run the
+  rotation as a one-off `docker run --rm` with both files mounted rather
+  than editing the template, so the old secret is never recorded there.
+- **Lost the secret:** start once with `-forget-encrypted-credentials`
+  (or `PMSS_FORGET_ENCRYPTED_CREDENTIALS=1`). Credentials that do not
+  decrypt are removed, the rest of each record stays, and the edit forms
+  ask for the passwords again. It is also the way through a damaged
+  marker: whatever still decrypts with the configured secret is kept.
+  Unset it afterwards.
+- **Do not roll back to a release before 1.9 with an encrypted
+  database.** An older build knows nothing about the encryption and would
+  present the ciphertext to your boxes as the password. Switch encryption
+  off first (previous secret set, `PMSS_SECRET` unset), then downgrade.
+- The format is AES-256-GCM with the column name as additional data, the
+  key derived with HKDF-SHA256 from the secret; stored values start with
+  `pmss1:`. The SSH key files a box points at are not touched: they are
+  yours to protect, and the agent keeps them out of reach altogether.
 
 ### Running in a container
 
@@ -171,6 +262,19 @@ docker run -d --name pmss-fleet-manager \
 - The image listens on `0.0.0.0:8080` and keeps its database in `/data`.
   Every flag is available as the matching environment variable, so `-e
   PMSS_AUTH=me:secret` or `-e PMSS_BASE_PATH=/fleet` configure it.
+- To encrypt the stored credentials, mount a secret file read-only and
+  point `PMSS_SECRET_FILE` at it, for example `-v
+  /path/to/secret:/run/pmss-secret:ro -e PMSS_SECRET_FILE=/run/pmss-secret`.
+  The file must live somewhere a copy of the data directory does not
+  travel with it: on Unraid that means a share whose SMB/NFS export is
+  off, not `appdata`, and not the flash drive. **Do not put the secret in
+  an Unraid template variable:** the template is saved in plain text on
+  the flash drive, which is often exported as the `flash` share next to
+  `appdata`, so the secret and the database would leak together.
+  `-e PMSS_SECRET=...` is fine where the environment is not written to a
+  shared place, but `docker inspect` and the compose file show it. Keep
+  a copy of the secret outside the container either way: see *Encrypting
+  stored credentials* for what happens when it is missing, changed or lost.
 - The process runs as uid 65532. A named volume as above works out of the
   box; a bind-mounted directory has to be writable by that uid (`chown
   65532:65532 ./data`), or run the container with `--user "$(id -u)"`. If
@@ -271,6 +375,19 @@ The code went through a fourteen-round adversarial review before 1.0 (SSH
 resiliency, remote-command safety, web/API, concurrency, parsers, dead code).
 These are the design decisions that came out of it.
 
+- **The threat model stops at the machine that runs the dashboard.** The
+  design treats the boxes as hostile territory (tenant-only reads, pinned
+  host keys, credentials never sent to a port you do not own) and the
+  dashboard's own host as yours. There, 0600 files and the optional
+  encryption restrict other UIDs, `-auth` protects the dashboard, and the
+  default loopback bind limits remote network access; it does not keep
+  other local users off the port. None of this defends against
+  privileged access: root, another tenant with a kernel exploit, or the
+  provider's staff. That is why the dashboard must not run on a seedbox,
+  a storage box or any other shared host: it holds the keys to the whole
+  fleet, and on a shared host the people you are keeping those keys from
+  are on the same machine, with the loopback port in reach.
+
 - **Tenant-only on a shared host.** Everything the dashboard reads comes from
   your own account: `/proc`, your cgroup, your home directory and the kernel's
   socket table. Probe output is tagged with a per-run secret delivered on
@@ -298,11 +415,16 @@ These are the design decisions that came out of it.
   are reused only for the exact host, port and user they were saved for;
   moving a box means re-entering them.
 - **Secrets on disk.** Box credentials, the Pulsed Media API key and the
-  pmdb.fyi upload key are stored in plain text in the SQLite file, which is
-  created mode 0600 before SQLite opens it so the -wal and -shm side files
-  inherit the mode; the data directory is created 0700. Prefer SSH keys or
-  the agent. Neither key is ever sent to the browser and passwords are never
-  serialised.
+  pmdb.fyi upload key are stored in the SQLite file, which is created mode
+  0600 before SQLite opens it so the -wal and -shm side files inherit the
+  mode; the data directory is created 0700. They are plain text unless a
+  secret is configured (`PMSS_SECRET` or `-secret-file`), in which case
+  they are AES-256-GCM ciphertext under a key the database does not hold,
+  so a copy of the file alone is harmless; a dashboard started without the
+  secret refuses to run rather than present ciphertext as a password. The
+  design and its limits are under *Encrypting stored credentials*. Prefer
+  SSH keys or the agent regardless. Neither key is ever sent to the browser
+  and passwords are never serialised.
 - **The hardware catalogue is untrusted input.** With the pmdb.fyi
   integration on, the dashboard reads a third-party service that could be
   compromised or replaced. Its list is bounded in size and read for one
