@@ -28,21 +28,21 @@ func TestCredentialOptions(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	t.Setenv("PMSS_SECRET", "")
 	t.Setenv("PMSS_SECRET_PREVIOUS", "")
-	opts, enc, err := credentialOptions("", false, log)
+	opts, enc, err := credentialOptions("", "", false, log)
 	if err != nil || enc || len(opts) != 2 {
 		t.Fatalf("plain: %d %v %v", len(opts), enc, err)
 	}
 	t.Setenv("PMSS_SECRET", "0123456789abcdef0123456789abcdef")
 	t.Setenv("PMSS_SECRET_PREVIOUS", "fedcba9876543210fedcba9876543210")
-	opts, enc, err = credentialOptions("", true, log)
+	opts, enc, err = credentialOptions("", "", true, log)
 	if err != nil || !enc || len(opts) != 3 {
 		t.Fatalf("encrypted+previous+forget: %d %v %v", len(opts), enc, err)
 	}
-	if _, _, err = credentialOptions("", false, log); err != nil {
+	if _, _, err = credentialOptions("", "", false, log); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PMSS_SECRET", "short")
-	if _, _, err = credentialOptions("", false, log); err == nil {
+	if _, _, err = credentialOptions("", "", false, log); err == nil {
 		t.Fatal("short secret accepted")
 	}
 	t.Setenv("PMSS_SECRET", "")
@@ -51,10 +51,18 @@ func TestCredentialOptions(t *testing.T) {
 	if err := os.WriteFile(path, []byte("0123456789abcdef0123456789abcdef\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, enc, err = credentialOptions(path, false, log); err != nil || !enc {
+	if _, enc, err = credentialOptions(path, "", false, log); err != nil || !enc {
 		t.Fatalf("file: %v %v", enc, err)
 	}
-	if _, _, err = credentialOptions(filepath.Join(t.TempDir(), "missing"), false, log); err == nil || !strings.Contains(err.Error(), "secret file") {
+	if _, _, err = credentialOptions(filepath.Join(t.TempDir(), "missing"), "", false, log); err == nil || !strings.Contains(err.Error(), "secret file") {
 		t.Fatalf("missing file: %v", err)
+	}
+	// The previous secret from a file, with the current one from the environment.
+	t.Setenv("PMSS_SECRET", "fedcba9876543210fedcba9876543210")
+	if opts, enc, err = credentialOptions("", path, false, log); err != nil || !enc || len(opts) != 2 {
+		t.Fatalf("previous from file: %d %v %v", len(opts), enc, err)
+	}
+	if _, _, err = credentialOptions("", filepath.Join(t.TempDir(), "missing"), false, log); err == nil || !strings.Contains(err.Error(), "previous secret") {
+		t.Fatalf("missing previous file: %v", err)
 	}
 }

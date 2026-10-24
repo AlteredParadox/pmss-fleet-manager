@@ -45,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -98,8 +99,43 @@ func must[T any](v T, err error) T {
 // Enabled reports whether values are encrypted.
 func (s *Sealer) Enabled() bool { return s != nil }
 
-// IsSealed reports whether a stored value is a sealed one.
+// IsSealed reports whether a stored value carries the version-1 envelope
+// prefix. Whether it is ciphertext is the store's call (its encoding
+// marker), since a plaintext password may start with anything.
 func IsSealed(stored string) bool { return strings.HasPrefix(stored, Prefix) }
+
+// Envelope reports the envelope version a stored value is written in (0:
+// none, so plaintext) and, for version 1, whether the body is a
+// well-formed nonce and ciphertext. A plaintext that happens to begin
+// with "pmss1:" is almost never well-formed: the body has to be raw
+// standard base64 of at least 28 bytes.
+func Envelope(stored string) (version int, wellFormed bool) {
+	rest, ok := strings.CutPrefix(stored, "pmss")
+	if !ok {
+		return 0, false
+	}
+	digits, _, ok := strings.Cut(rest, ":")
+	if !ok || digits == "" || len(digits) > 3 {
+		return 0, false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	version, _ = strconv.Atoi(digits)
+	if version != 1 {
+		return version, false
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(stored[len(Prefix):])
+	return 1, err == nil && len(raw) >= nonceSize+tagSize
+}
+
+// AES-GCM parameters, fixed by the construction.
+const (
+	nonceSize = 12
+	tagSize   = 16
+)
 
 // Seal encrypts plain for the column named label. "" seals to "".
 func (s *Sealer) Seal(label, plain string) string {
@@ -178,10 +214,11 @@ type Resolved struct {
 	Warning  string  // a loose secret-file mode, see Loaded
 }
 
-// Resolve turns the configuration (the PMSS_SECRET value, the -secret-file
-// path, the PMSS_SECRET_PREVIOUS value) into sealers. Errors are meant for
-// the operator as they are.
-func Resolve(secret, secretFile, previous string) (*Resolved, error) {
+// Resolve turns the configuration (the PMSS_SECRET value or the
+// -secret-file path; the PMSS_SECRET_PREVIOUS value or the
+// -previous-secret-file path) into sealers. Errors are meant for the
+// operator as they are.
+func Resolve(secret, secretFile, previous, previousFile string) (*Resolved, error) {
 	var r Resolved
 	loaded, err := Load(secret, secretFile)
 	if err != nil {
@@ -193,9 +230,16 @@ func Resolve(secret, secretFile, previous string) (*Resolved, error) {
 		}
 		r.Source, r.Warning = loaded.Source, loaded.Warning
 	}
-	if previous != "" {
-		if r.Previous, err = New([]byte(previous)); err != nil {
-			return nil, fmt.Errorf("PMSS_SECRET_PREVIOUS: %w", err)
+	prev, err := Load(previous, previousFile)
+	if err != nil {
+		return nil, fmt.Errorf("previous secret: %w", err)
+	}
+	if prev != nil {
+		if r.Previous, err = New(prev.Master); err != nil {
+			return nil, fmt.Errorf("previous secret: %w", err)
+		}
+		if prev.Warning != "" && r.Warning == "" {
+			r.Warning = prev.Warning
 		}
 	}
 	return &r, nil

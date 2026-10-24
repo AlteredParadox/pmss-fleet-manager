@@ -19,19 +19,30 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"pmss-fleet-manager/internal/secrets"
 )
 
-// Two settings rows describe the encoding of the secret columns. They are
-// what says whether a value is ciphertext: the "pmss1:" prefix alone is not,
-// since a plaintext password may start with anything.
+// Three settings rows describe the encoding of the secret columns. They,
+// not the "pmss1:" prefix, say whether a value is ciphertext: a plaintext
+// password may start with anything.
 const (
 	// sealedKey is "1" while every non-empty secret column is ciphertext
-	// (a value without the prefix is plaintext written by an older build
-	// and is sealed at the next open). Unset, every value is plaintext.
+	// (envelope version 1), "0" while they are plaintext. Missing means a
+	// database never opened by a build with encryption support, which is
+	// plaintext too; the row is written at the first open so that missing
+	// and "0" can be told apart afterwards.
 	sealedKey = "secrets_sealed"
+	// checkKey holds a fixed string sealed under the current secret while
+	// sealedKey is "1". It is what authenticates the configured secret
+	// when there is no credential to open, and it has to agree with
+	// sealedKey: one without the other is a damaged or partially restored
+	// settings table, and the open fails rather than guess.
+	checkKey   = "secrets_check"
+	labelCheck = "settings.secrets_check"
+	checkPlain = "pmss-fleet-manager key check"
 	// cleanupKey is "1" from the commit that rewrote secrets until the
 	// VACUUM and checkpoint that scrub the old bytes have both succeeded,
 	// so a stop or a full disk in between is retried at the next open.
@@ -42,82 +53,65 @@ const (
 // statement to exercise the retry.
 var vacuumSQL = "VACUUM"
 
+// recoveryHint ends every error about metadata the open cannot trust.
+const recoveryHint = "; restore the database from a consistent backup, or start once with -forget-encrypted-credentials to drop every credential that cannot be read"
+
+// encoding is what the settings rows say about the secret columns.
+type encoding struct {
+	sealed   bool   // sealedKey is "1"
+	explicit bool   // sealedKey is present ("0" or "1")
+	check    string // checkKey's value, "" when absent
+	cleanup  bool   // cleanupKey is "1"
+}
+
 // secretCell is one stored credential and how to rewrite it.
 type secretCell struct {
 	where string // for the error message
 	label string
-	value string // the stored form; after triage, the plaintext to store
+	value string // the stored form; once planned, the plaintext to store
 	apply func(tx *sql.Tx, stored string) error
 }
 
 // resealSecrets runs at Open. It brings every stored credential into the
-// configured encoding: with a sealer, plaintext ones (a database from
-// before the secret was set, or written by a build without it) are sealed
-// in place; a sealed one the current sealer does not open is tried with
-// the previous sealer and re-encrypted (or stored plain, when there is no
-// current sealer) if that works; failing that it is cleared when
-// forgetting was asked for. Otherwise it fails the open, naming the row:
-// starting half-working, with pollers presenting ciphertext as the
-// password, is worse than not starting.
+// configured encoding and verifies the configured secret against what
+// the database holds, failing the open rather than starting with a
+// credential it cannot read: pollers presenting ciphertext to a box as
+// the password is worse than not starting.
+//
+// With a sealer, plaintext credentials (a database from before the secret
+// was set, or written by a build without it) are sealed in place. A sealed
+// credential or the key check that the current sealer does not open is
+// tried with the previous sealer and rewritten (re-encrypted, or stored
+// plain when there is no current sealer) if that works; failing that it
+// is cleared when forgetting was asked for; otherwise the open fails,
+// naming the row.
 //
 // After a rewrite, and the first time encryption is switched on (earlier,
 // since-deleted plaintext may sit in free pages), the database is vacuumed
 // and the WAL truncated. Revisions are not bumped: the record's content is
 // unchanged, only its encoding.
 func (s *Store) resealSecrets(ctx context.Context) error {
-	sealedBefore, err := s.flag(ctx, sealedKey)
+	enc, err := s.readEncoding(ctx)
 	if err != nil {
 		return err
 	}
-	cleanupDue, err := s.flag(ctx, cleanupKey)
-	if err != nil {
+	if err := s.verifyKeyCheck(enc); err != nil {
 		return err
 	}
 	cells, err := s.secretCells(ctx)
 	if err != nil {
 		return err
 	}
-
-	var pending []secretCell
-	forgotten := 0
-	for _, c := range cells {
-		if c.value == "" {
-			continue
-		}
-		if !sealedBefore || !secrets.IsSealed(c.value) {
-			// Plaintext (by the marker, or written by a build without the
-			// secret): seal it if there is a sealer, leave it otherwise.
-			if s.sealer.Enabled() {
-				pending = append(pending, c)
-			}
-			continue
-		}
-		// Ciphertext: it has to open with the current secret, or with the
-		// previous one on a change, or be forgotten on request.
-		_, err := s.sealer.Open(c.label, c.value)
-		if err == nil {
-			continue
-		}
-		if s.prev != nil {
-			if plain, perr := s.prev.Open(c.label, c.value); perr == nil {
-				c.value = plain
-				pending = append(pending, c)
-				continue
-			}
-		}
-		if s.forget {
-			c.value = ""
-			pending = append(pending, c)
-			forgotten++
-			continue
-		}
-		return fmt.Errorf("%s: %w", c.where, err)
+	pending, forgotten, err := s.planCells(enc, cells)
+	if err != nil {
+		return err
 	}
 
 	sealedAfter := s.sealer.Enabled()
-	cleanup := cleanupDue || len(pending) > 0 || (sealedAfter && !sealedBefore)
-	if len(pending) > 0 || sealedAfter != sealedBefore || cleanup {
-		if err := s.rewriteSecrets(ctx, pending, sealedAfter, cleanup); err != nil {
+	check, checkChanged := s.planCheck(enc, sealedAfter)
+	cleanup := enc.cleanup || len(pending) > 0 || (sealedAfter && !enc.sealed)
+	if len(pending) > 0 || checkChanged || cleanup || sealedAfter != enc.sealed || !enc.explicit {
+		if err := s.rewriteSecrets(ctx, pending, sealedAfter, cleanup, check); err != nil {
 			return err
 		}
 	}
@@ -129,6 +123,145 @@ func (s *Store) resealSecrets(ctx context.Context) error {
 	s.resealed, s.forgotten = len(pending)-forgotten, forgotten
 	return nil
 }
+
+// readEncoding reads the three rows and refuses states this build cannot
+// interpret, unless forgetting was asked for: then an inconsistent pair
+// is read as sealed, the stricter reading, so nothing unreadable is kept.
+func (s *Store) readEncoding(ctx context.Context) (encoding, error) {
+	var enc encoding
+	v, ok, err := s.lookup(ctx, sealedKey)
+	if err != nil {
+		return enc, err
+	}
+	switch {
+	case !ok:
+	case v == "0":
+		enc.explicit = true
+	case v == "1":
+		enc.explicit, enc.sealed = true, true
+	default:
+		return enc, fmt.Errorf("the settings row %s holds %q, which this version does not understand%s", sealedKey, v, recoveryHint)
+	}
+	if enc.check, _, err = s.lookup(ctx, checkKey); err != nil {
+		return enc, err
+	}
+	if enc.sealed != (enc.check != "") {
+		if !s.forget {
+			state := "missing"
+			if enc.check != "" {
+				state = "present"
+			}
+			return enc, fmt.Errorf("the database's encryption markers disagree (%s=%q, key check %s): a partial restore or a repair?%s", sealedKey, v, state, recoveryHint)
+		}
+		enc.sealed = true
+	}
+	cv, _, err := s.lookup(ctx, cleanupKey)
+	enc.cleanup = cv == "1"
+	return enc, err
+}
+
+// verifyKeyCheck authenticates the configured secret against the key
+// check, so a wrong or missing secret is refused even when no credential
+// is stored. The previous sealer opening it means a rotation is under way;
+// forgetting accepts anything (the check is rewritten, the unreadable
+// credentials dropped).
+func (s *Store) verifyKeyCheck(enc encoding) error {
+	if !enc.sealed || s.forget || opensCheck(s.sealer, enc.check) || opensCheck(s.prev, enc.check) {
+		return nil
+	}
+	_, err := s.sealer.Open(labelCheck, enc.check)
+	if err == nil {
+		err = secrets.ErrWrongKey // it opened but is not the check string: not ours
+	}
+	return fmt.Errorf("stored credentials: %w", err)
+}
+
+// opensCheck reports whether sl (possibly nil) opens v to the key-check
+// string. Only a sealed value counts: "" and plaintext pass through Open
+// and must not pass here.
+func opensCheck(sl *secrets.Sealer, v string) bool {
+	if sl == nil || !secrets.IsSealed(v) {
+		return false
+	}
+	plain, err := sl.Open(labelCheck, v)
+	return err == nil && plain == checkPlain
+}
+
+// planCells decides, for every stored credential, what the rewrite stores:
+// nothing (keep), its plaintext (to seal, re-seal or store plain), or ""
+// (forgotten). A value it can neither read nor legitimately leave alone
+// fails the open.
+func (s *Store) planCells(enc encoding, cells []secretCell) (pending []secretCell, forgotten int, err error) {
+	for _, c := range cells {
+		if c.value == "" {
+			continue
+		}
+		version, wellFormed := secrets.Envelope(c.value)
+		switch {
+		case version > 1:
+			if !s.forget {
+				return nil, 0, fmt.Errorf("%s was written by a newer version of pmss-fleet-manager (envelope v%d); upgrade%s", c.where, version, recoveryHint)
+			}
+			pending = append(pending, c.cleared())
+			forgotten++
+		case enc.sealed && version == 0, !enc.sealed && !wellFormed:
+			// Plaintext: by the marker, or written by a build without the
+			// secret (in a sealed store a value without an envelope can
+			// only be that). Sealed if there is a sealer, left otherwise.
+			if s.sealer.Enabled() {
+				pending = append(pending, c)
+			}
+		default:
+			// Ciphertext, or in a plaintext store something that is
+			// exactly shaped like it: it has to open with the current
+			// secret, or with the previous one on a change, or be
+			// forgotten on request. A plaintext store never passes such
+			// a value through as a password.
+			_, cur := s.sealer.Open(c.label, c.value)
+			if cur == nil {
+				continue // already under the current secret (a lost marker is repaired below)
+			}
+			if plain, ok := s.opensWithPrevious(c.label, c.value); ok {
+				pending = append(pending, c.with(plain))
+				continue
+			}
+			if s.forget {
+				pending = append(pending, c.cleared())
+				forgotten++
+				continue
+			}
+			if !enc.sealed {
+				return nil, 0, fmt.Errorf("%s looks encrypted but the database is marked plain text (%w)%s", c.where, cur, recoveryHint)
+			}
+			return nil, 0, fmt.Errorf("%s: %w", c.where, cur)
+		}
+	}
+	return pending, forgotten, nil
+}
+
+// opensWithPrevious opens a ciphertext with the previous sealer, if any.
+func (s *Store) opensWithPrevious(label, stored string) (string, bool) {
+	if s.prev == nil {
+		return "", false
+	}
+	plain, err := s.prev.Open(label, stored)
+	return plain, err == nil
+}
+
+// planCheck returns the key check row the rewrite should store ("" to
+// remove it) and whether that differs from what is stored.
+func (s *Store) planCheck(enc encoding, sealedAfter bool) (check string, changed bool) {
+	if !sealedAfter {
+		return "", enc.check != ""
+	}
+	if opensCheck(s.sealer, enc.check) {
+		return enc.check, false
+	}
+	return s.sealer.Seal(labelCheck, checkPlain), true
+}
+
+func (c secretCell) with(plain string) secretCell { c.value = plain; return c }
+func (c secretCell) cleared() secretCell          { c.value = ""; return c }
 
 // secretCells lists every stored credential with its rewrite.
 func (s *Store) secretCells(ctx context.Context) ([]secretCell, error) {
@@ -176,9 +309,10 @@ func (s *Store) secretCells(ctx context.Context) ([]secretCell, error) {
 }
 
 // rewriteSecrets stores the pending cells' plaintext in the current
-// encoding and records the encoding and, when due, the cleanup, in one
-// transaction: the markers can never disagree with the rows.
-func (s *Store) rewriteSecrets(ctx context.Context, pending []secretCell, sealed, cleanup bool) error {
+// encoding and records the encoding, the key check and, when due, the
+// cleanup, in one transaction: the markers can never disagree with the
+// rows.
+func (s *Store) rewriteSecrets(ctx context.Context, pending []secretCell, sealed, cleanup bool, check string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -189,13 +323,19 @@ func (s *Store) rewriteSecrets(ctx context.Context, pending []secretCell, sealed
 			return fmt.Errorf("rewrite %s: %w", c.where, err)
 		}
 	}
-	for _, m := range []struct {
-		key string
-		on  bool
-	}{{sealedKey, sealed}, {cleanupKey, cleanup}} {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, m.key, boolKV(m.on)); err != nil {
+	const upsert = `INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`
+	for _, m := range []struct{ key, value string }{{sealedKey, boolKV(sealed)}, {cleanupKey, boolKV(cleanup)}} {
+		if _, err := tx.ExecContext(ctx, upsert, m.key, m.value); err != nil {
 			return err
 		}
+	}
+	if check == "" {
+		_, err = tx.ExecContext(ctx, `DELETE FROM settings WHERE key=?`, checkKey)
+	} else {
+		_, err = tx.ExecContext(ctx, upsert, checkKey, check)
+	}
+	if err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -220,8 +360,12 @@ func (s *Store) scrubFreePages(ctx context.Context) error {
 	return s.SetValue(ctx, cleanupKey, "0")
 }
 
-// flag reads a "1"/"0" settings row.
-func (s *Store) flag(ctx context.Context, key string) (bool, error) {
-	v, err := s.GetValue(ctx, key)
-	return v == "1", err
+// lookup reads one settings row, reporting whether it exists.
+func (s *Store) lookup(ctx context.Context, key string) (string, bool, error) {
+	var v string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return v, err == nil, err
 }

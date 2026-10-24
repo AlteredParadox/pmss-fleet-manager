@@ -156,7 +156,8 @@ make build                                 # or: go build -o pmss-fleet-manager 
 
 Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 `PMSS_AUTH`, `PMSS_LOG`, `PMSS_ALLOWED_HOSTS`, `PMSS_BASE_PATH`,
-`PMSS_SECRET_FILE`, `PMSS_FORGET_ENCRYPTED_CREDENTIALS`; `PMSS_SECRET` and
+`PMSS_SECRET_FILE`, `PMSS_SECRET_PREVIOUS_FILE`,
+`PMSS_FORGET_ENCRYPTED_CREDENTIALS`; `PMSS_SECRET` and
 `PMSS_SECRET_PREVIOUS` exist only as environment variables:
 
 | flag | default | meaning |
@@ -168,6 +169,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
 | `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
 | `-secret-file` | none | file holding the secret that encrypts the stored credentials, or set `PMSS_SECRET` to the secret itself; see *Encrypting stored credentials* below. Unset keeps them in plain text |
+| `-previous-secret-file` | none | when changing or removing the secret: file holding the one the credentials are encrypted with now, or set `PMSS_SECRET_PREVIOUS`; for one start |
 | `-forget-encrypted-credentials` | off | after losing the secret: remove every stored credential that does not decrypt, then start |
 
 ### Encrypting stored credentials
@@ -204,21 +206,35 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
   database, then vacuums the file and truncates the write-ahead log so the
   plain text is not left in free pages; if that cleanup is interrupted it
   is finished at the next start before anything is served. The database
-  records that its credentials are encrypted, so a password that happens
-  to start with `pmss1:` is never mistaken for ciphertext. Nothing changes
-  in the dashboard.
+  records that its credentials are encrypted and keeps a small key check
+  (a fixed string sealed under the secret), so a password that happens to
+  start with `pmss1:` is never mistaken for ciphertext, and the secret is
+  verified at every start even when no credential is stored yet. Nothing
+  changes in the dashboard.
 - **Starting without the secret, or with a different one, is refused** with
-  a log line naming the first credential it could not read. The pollers
-  would otherwise present ciphertext to your boxes as the password. Fix
-  the environment and start again; nothing is lost.
-- **Changing or removing the secret:** set `PMSS_SECRET_PREVIOUS` to the
-  old one for a single start. Credentials are rewritten under the new
-  `PMSS_SECRET`, or back to plain text when it is unset. Remove the
-  variable once that start has succeeded.
+  a log line saying so, or naming the first credential it could not read.
+  The pollers would otherwise present ciphertext to your boxes as the
+  password. Fix the environment and start again; nothing is lost. The same
+  refusal covers a database whose encryption markers were damaged or only
+  partly restored: the dashboard fails closed rather than guess, and the
+  log line says what to do.
+- **Changing or removing the secret:** for a single start, give the old
+  one as `PMSS_SECRET_PREVIOUS` or in a file named by
+  `-previous-secret-file` / `PMSS_SECRET_PREVIOUS_FILE`. Credentials are
+  rewritten under the new `PMSS_SECRET`, or back to plain text when it is
+  unset. Remove it once that start has succeeded. In a container, run the
+  rotation as a one-off `docker run --rm` with both files mounted rather
+  than editing the template, so the old secret is never recorded there.
 - **Lost the secret:** start once with `-forget-encrypted-credentials`
   (or `PMSS_FORGET_ENCRYPTED_CREDENTIALS=1`). Credentials that do not
   decrypt are removed, the rest of each record stays, and the edit forms
-  ask for the passwords again. Unset it afterwards.
+  ask for the passwords again. It is also the way through a damaged
+  marker: whatever still decrypts with the configured secret is kept.
+  Unset it afterwards.
+- **Do not roll back to a release before 1.9 with an encrypted
+  database.** An older build knows nothing about the encryption and would
+  present the ciphertext to your boxes as the password. Switch encryption
+  off first (previous secret set, `PMSS_SECRET` unset), then downgrade.
 - The format is AES-256-GCM with the column name as additional data, the
   key derived with HKDF-SHA256 from the secret; stored values start with
   `pmss1:`. The SSH key files a box points at are not touched: they are

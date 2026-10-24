@@ -132,30 +132,70 @@ func TestLoad(t *testing.T) {
 }
 
 func TestResolve(t *testing.T) {
-	r, err := Resolve("", "", "")
+	r, err := Resolve("", "", "", "")
 	if err != nil || r.Current != nil || r.Previous != nil {
 		t.Fatalf("nothing set: %+v %v", r, err)
 	}
-	if _, err := Resolve("a", "b", ""); err == nil {
+	if _, err := Resolve("a", "b", "", ""); err == nil {
 		t.Fatal("both sources accepted")
 	}
-	if _, err := Resolve("short", "", ""); err == nil || !strings.Contains(err.Error(), "credential secret") {
+	if _, err := Resolve("short", "", "", ""); err == nil || !strings.Contains(err.Error(), "credential secret") {
 		t.Fatalf("short current: %v", err)
 	}
-	if _, err := Resolve(testSecret, "", "short"); err == nil || !strings.Contains(err.Error(), "PMSS_SECRET_PREVIOUS") {
+	if _, err := Resolve(testSecret, "", "short", ""); err == nil || !strings.Contains(err.Error(), "previous secret") {
 		t.Fatalf("short previous: %v", err)
+	}
+	if _, err := Resolve(testSecret, "", "a", "b"); err == nil || !strings.Contains(err.Error(), "previous secret") {
+		t.Fatalf("both previous sources: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "secret")
 	if err := os.WriteFile(path, []byte(testSecret), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r, err = Resolve("", path, "fedcba9876543210fedcba9876543210")
+	r, err = Resolve("", path, "fedcba9876543210fedcba9876543210", "")
 	if err != nil || r.Current == nil || r.Previous == nil || r.Source != path || r.Warning == "" {
 		t.Fatalf("file + previous: %+v %v", r, err)
+	}
+	// The previous secret from a file too; its loose mode is reported.
+	prevPath := filepath.Join(t.TempDir(), "old")
+	if err := os.WriteFile(prevPath, []byte("fedcba9876543210fedcba9876543210\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r2, err := Resolve(testSecret, "", "", prevPath); err != nil || r2.Previous == nil || r2.Warning == "" {
+		t.Fatalf("previous from file: %+v %v", r2, err)
 	}
 	// The two sealers are different keys.
 	sealed := r.Previous.Seal("x", "v")
 	if _, err := r.Current.Open("x", sealed); !errors.Is(err, ErrWrongKey) {
 		t.Fatalf("previous opened with current: %v", err)
+	}
+}
+
+func TestEnvelope(t *testing.T) {
+	sl, _ := New([]byte(testSecret))
+	real := sl.Seal("x", "v")
+	for _, tc := range []struct {
+		in      string
+		version int
+		ok      bool
+	}{
+		{"", 0, false},
+		{"hunter2", 0, false},
+		{"pmss", 0, false},
+		{"pmss:", 0, false},
+		{"pmssx:", 0, false},
+		{"pmss1", 0, false},
+		{"pmss1:", 1, false},
+		{"pmss1:not-really-encrypted", 1, false}, // not base64
+		{"pmss1:AAAA", 1, false},                 // too short
+		{real, 1, true},
+		{"pmss2:" + real[len(Prefix):], 2, false},
+		{"pmss12:whatever", 12, false},
+		{"pmss1234:x", 0, false},
+	} {
+		v, ok := Envelope(tc.in)
+		if v != tc.version || ok != tc.ok {
+			t.Errorf("Envelope(%q) = %d %v, want %d %v", tc.in, v, ok, tc.version, tc.ok)
+		}
 	}
 }

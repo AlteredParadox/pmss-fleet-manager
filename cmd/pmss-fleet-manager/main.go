@@ -58,6 +58,7 @@ func main() {
 	basePath := flag.String("base-path", os.Getenv("PMSS_BASE_PATH"), "URL path prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged (e.g. /fleet)")
 	logLevel := flag.String("log", envOr("PMSS_LOG", "info"), "log level: debug, info, warn, error")
 	secretFile := flag.String("secret-file", os.Getenv("PMSS_SECRET_FILE"), "file holding the secret that encrypts stored credentials (or set PMSS_SECRET to the secret itself, which -h never prints); unset keeps them in plain text")
+	previousSecretFile := flag.String("previous-secret-file", os.Getenv("PMSS_SECRET_PREVIOUS_FILE"), "when changing or removing the secret: file holding the one the credentials are encrypted with now (or set PMSS_SECRET_PREVIOUS); remove it after one successful start")
 	forgetCreds := flag.Bool("forget-encrypted-credentials", os.Getenv("PMSS_FORGET_ENCRYPTED_CREDENTIALS") == "1", "after losing the secret: remove every stored credential that does not decrypt with the configured one, then start; the edit forms ask for them again")
 	flag.Parse()
 	if !flagGiven("auth") {
@@ -97,7 +98,7 @@ func main() {
 		}
 	}
 
-	opts, encrypted, err := credentialOptions(*secretFile, *forgetCreds, log)
+	opts, encrypted, err := credentialOptions(*secretFile, *previousSecretFile, *forgetCreds, log)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -225,8 +226,8 @@ func allowedHostList(addrs []string, extra string) (hosts []string, wildcard boo
 // secret itself is only ever read from the environment, never a flag: a
 // flag would be in `ps` and in -h output. encrypted reports whether the
 // stored credentials are ciphertext from here on.
-func credentialOptions(secretFile string, forget bool, log *slog.Logger) (opts []store.Option, encrypted bool, err error) {
-	creds, err := secrets.Resolve(os.Getenv("PMSS_SECRET"), secretFile, os.Getenv("PMSS_SECRET_PREVIOUS"))
+func credentialOptions(secretFile, previousFile string, forget bool, log *slog.Logger) (opts []store.Option, encrypted bool, err error) {
+	creds, err := secrets.Resolve(os.Getenv("PMSS_SECRET"), secretFile, os.Getenv("PMSS_SECRET_PREVIOUS"), previousFile)
 	if err != nil {
 		return nil, false, err
 	}
@@ -240,7 +241,7 @@ func credentialOptions(secretFile string, forget bool, log *slog.Logger) (opts [
 		// Changing or removing the secret: credentials sealed under the
 		// old one are rewritten under the new one (or in plain text) at
 		// this start. The variable is meant to be removed afterwards.
-		log.Warn("PMSS_SECRET_PREVIOUS is set: credentials encrypted under it are being rewritten; remove it once this start succeeds")
+		log.Warn("a previous secret is configured: credentials encrypted under it are being rewritten; remove it once this start succeeds")
 	}
 	opts = []store.Option{store.WithSealer(creds.Current), store.WithPreviousSealer(creds.Previous)}
 	if forget {
