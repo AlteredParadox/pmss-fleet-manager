@@ -99,23 +99,29 @@ func must[T any](v T, err error) T {
 // Enabled reports whether values are encrypted.
 func (s *Sealer) Enabled() bool { return s != nil }
 
-// IsSealed reports whether a stored value carries the version-1 envelope
-// prefix. Whether it is ciphertext is the store's call (its encoding
-// marker), since a plaintext password may start with anything.
-func IsSealed(stored string) bool { return strings.HasPrefix(stored, Prefix) }
+// IsSealed reports whether a stored value carries the version-1 envelope.
+// Whether it is ciphertext is the store's call (its encoding marker),
+// since a plaintext password may start with anything.
+func IsSealed(stored string) bool {
+	v, _ := Envelope(stored)
+	return v == 1
+}
 
-// Envelope reports the envelope version a stored value is written in (0:
-// none, so plaintext) and, for version 1, whether the body is a
-// well-formed nonce and ciphertext. A plaintext that happens to begin
-// with "pmss1:" is almost never well-formed: the body has to be raw
-// standard base64 of at least 28 bytes.
+// Envelope is the one parser of the envelope grammar, shared by Open and
+// the store's classification so the two never disagree. It reports the
+// envelope version a stored value is written in (0: none) and, for
+// version 1, whether the body is a well-formed nonce and ciphertext. The
+// grammar is canonical: "pmss", a version of one to three digits with no
+// leading zero, ":". A plaintext that happens to begin with "pmss1:" is
+// almost never well-formed: the body has to be raw standard base64 of at
+// least 28 bytes.
 func Envelope(stored string) (version int, wellFormed bool) {
 	rest, ok := strings.CutPrefix(stored, "pmss")
 	if !ok {
 		return 0, false
 	}
 	digits, _, ok := strings.Cut(rest, ":")
-	if !ok || digits == "" || len(digits) > 3 {
+	if !ok || digits == "" || len(digits) > 3 || digits[0] == '0' {
 		return 0, false
 	}
 	for _, r := range digits {
@@ -149,20 +155,22 @@ func (s *Sealer) Seal(label, plain string) string {
 }
 
 // Open decrypts a stored value for the column named label. A value without
-// the prefix is plaintext from before the secret was configured and is
-// returned as is; the store re-seals those at startup.
+// the version-1 envelope is plaintext (from before the secret was
+// configured; the store re-seals those at startup) and is returned as is.
+// One with the envelope but a malformed body is a damaged ciphertext.
 func (s *Sealer) Open(label, stored string) (string, error) {
-	if !IsSealed(stored) {
+	version, wellFormed := Envelope(stored)
+	if version != 1 {
 		return stored, nil
 	}
 	if s == nil {
 		return "", ErrNoKey
 	}
-	raw, err := base64.RawStdEncoding.DecodeString(stored[len(Prefix):])
-	ns := s.aead.NonceSize()
-	if err != nil || len(raw) < ns+s.aead.Overhead() {
+	if !wellFormed {
 		return "", ErrWrongKey
 	}
+	raw, _ := base64.RawStdEncoding.DecodeString(stored[len(Prefix):])
+	ns := s.aead.NonceSize()
 	plain, err := s.aead.Open(nil, raw[:ns], raw[ns:], []byte(label))
 	if err != nil {
 		return "", ErrWrongKey
@@ -170,10 +178,21 @@ func (s *Sealer) Open(label, stored string) (string, error) {
 	return string(plain), nil
 }
 
+// Names are the configuration options a secret can come from, for
+// messages: the environment variable holding the secret itself, the flag
+// naming a file, and that flag's environment twin.
+type Names struct{ Env, Flag, FileEnv string }
+
+// The two secrets the process can be given.
+var (
+	CurrentNames  = Names{"PMSS_SECRET", "-secret-file", "PMSS_SECRET_FILE"}
+	PreviousNames = Names{"PMSS_SECRET_PREVIOUS", "-previous-secret-file", "PMSS_SECRET_PREVIOUS_FILE"}
+)
+
 // Loaded is a master secret and where it came from.
 type Loaded struct {
 	Master []byte
-	Source string // "PMSS_SECRET" or the file's path, for the startup log
+	Source string // the environment variable's name or the file's path, for the startup log
 	// Warning is set when the secret file is readable by other users, so
 	// the operator is told without the start being refused: the file may
 	// be a mounted Docker or Kubernetes secret whose mode is not theirs
@@ -186,12 +205,12 @@ type Loaded struct {
 // is refused: a silent precedence rule is how one ends up encrypting
 // under a secret one did not mean to. Trailing whitespace (the newline
 // an editor or echo adds) is not part of a file's secret.
-func Load(envValue, filePath string) (*Loaded, error) {
+func Load(n Names, envValue, filePath string) (*Loaded, error) {
 	switch {
 	case envValue != "" && filePath != "":
-		return nil, errors.New("set PMSS_SECRET or -secret-file (PMSS_SECRET_FILE), not both")
+		return nil, fmt.Errorf("set %s or %s (%s), not both", n.Env, n.Flag, n.FileEnv)
 	case envValue != "":
-		return &Loaded{Master: []byte(envValue), Source: "PMSS_SECRET"}, nil
+		return &Loaded{Master: []byte(envValue), Source: n.Env}, nil
 	case filePath == "":
 		return nil, nil
 	}
@@ -220,7 +239,7 @@ type Resolved struct {
 // operator as they are.
 func Resolve(secret, secretFile, previous, previousFile string) (*Resolved, error) {
 	var r Resolved
-	loaded, err := Load(secret, secretFile)
+	loaded, err := Load(CurrentNames, secret, secretFile)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +249,7 @@ func Resolve(secret, secretFile, previous, previousFile string) (*Resolved, erro
 		}
 		r.Source, r.Warning = loaded.Source, loaded.Warning
 	}
-	prev, err := Load(previous, previousFile)
+	prev, err := Load(PreviousNames, previous, previousFile)
 	if err != nil {
 		return nil, fmt.Errorf("previous secret: %w", err)
 	}

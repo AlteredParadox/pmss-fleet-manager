@@ -46,6 +46,8 @@ const (
 	// cleanupKey is "1" from the commit that rewrote secrets until the
 	// VACUUM and checkpoint that scrub the old bytes have both succeeded,
 	// so a stop or a full disk in between is retried at the next open.
+	// It is an obligation, so only an explicit "0" means none: a row that
+	// is missing or unreadable in a store with encoding metadata scrubs.
 	cleanupKey = "secrets_cleanup"
 )
 
@@ -162,8 +164,8 @@ func (s *Store) readEncoding(ctx context.Context) (encoding, error) {
 		}
 		enc.sealed, enc.repair = true, true
 	}
-	cv, _, err := s.lookup(ctx, cleanupKey)
-	enc.cleanup = cv == "1"
+	cv, ok, err := s.lookup(ctx, cleanupKey)
+	enc.cleanup = (ok && cv != "0") || (!ok && enc.explicit)
 	return enc, err
 }
 
@@ -198,52 +200,92 @@ func opensCheck(sl *secrets.Sealer, v string) bool {
 // nothing (keep), its plaintext (to seal, re-seal or store plain), or ""
 // (forgotten). A value it can neither read nor legitimately leave alone
 // fails the open.
+//
+// The marker is authoritative: in a store marked plain every value is
+// plaintext whatever it looks like, and in a sealed store every value
+// with the envelope is ciphertext. Only when the marker is missing (a
+// database from before encryption support, or metadata lost) is a
+// value's shape consulted, and then only to refuse to hand out as a
+// password something that is exactly shaped like our ciphertext.
 func (s *Store) planCells(enc encoding, cells []secretCell) (pending []secretCell, forgotten int, err error) {
 	for _, c := range cells {
 		if c.value == "" {
 			continue
 		}
-		version, wellFormed := secrets.Envelope(c.value)
+		var plan secretCell
+		var keep bool
 		switch {
-		case version > 1:
-			if !s.forget {
-				return nil, 0, fmt.Errorf("%s was written by a newer version of pmss-fleet-manager (envelope v%d); upgrade%s", c.where, version, recoveryHint)
-			}
-			pending = append(pending, c.cleared())
-			forgotten++
-		case enc.sealed && version == 0, !enc.sealed && !wellFormed:
-			// Plaintext: by the marker, or written by a build without the
-			// secret (in a sealed store a value without an envelope can
-			// only be that). Sealed if there is a sealer, left otherwise.
-			if s.sealer.Enabled() {
-				pending = append(pending, c)
-			}
+		case enc.sealed:
+			plan, keep, err = s.planSealedCell(c)
+		case enc.explicit:
+			plan, keep = c, false // marked plain: plaintext, whatever it looks like
 		default:
-			// Ciphertext, or in a plaintext store something that is
-			// exactly shaped like it: it has to open with the current
-			// secret, or with the previous one on a change, or be
-			// forgotten on request. A plaintext store never passes such
-			// a value through as a password.
-			_, cur := s.sealer.Open(c.label, c.value)
-			if cur == nil {
-				continue // already under the current secret (a lost marker is repaired below)
-			}
-			if plain, ok := s.opensWithPrevious(c.label, c.value); ok {
-				pending = append(pending, c.with(plain))
-				continue
-			}
-			if s.forget {
-				pending = append(pending, c.cleared())
-				forgotten++
-				continue
-			}
-			if !enc.sealed {
-				return nil, 0, fmt.Errorf("%s looks encrypted but the database is marked plain text (%w)%s", c.where, cur, recoveryHint)
-			}
-			return nil, 0, fmt.Errorf("%s: %w", c.where, cur)
+			plan, keep, err = s.planUnmarkedCell(c)
 		}
+		if err != nil {
+			return nil, 0, err
+		}
+		if keep {
+			continue
+		}
+		if plan.value == "" {
+			forgotten++
+		} else if !s.sealer.Enabled() && plan.value == c.value {
+			continue // plaintext staying plaintext
+		}
+		pending = append(pending, plan)
 	}
 	return pending, forgotten, nil
+}
+
+// planSealedCell classifies a value in a sealed store. keep means the row
+// is already right; otherwise plan.value is what to store (sealed if
+// there is a sealer), "" for a forgotten credential.
+func (s *Store) planSealedCell(c secretCell) (plan secretCell, keep bool, err error) {
+	version, _ := secrets.Envelope(c.value)
+	switch {
+	case version == 0:
+		// No envelope in a sealed store: plaintext written by a build
+		// without the secret. Sealed if there is a sealer, left otherwise.
+		return c, false, nil
+	case version > 1:
+		if s.forget {
+			return c.cleared(), false, nil
+		}
+		return c, false, fmt.Errorf("%s was written by a newer version of pmss-fleet-manager (envelope v%d); upgrade%s", c.where, version, recoveryHint)
+	}
+	return s.planCiphertext(c, func(err error) error { return fmt.Errorf("%s: %w", c.where, err) })
+}
+
+// planUnmarkedCell classifies a value in a store with no encoding marker:
+// plaintext, unless it is exactly shaped like our ciphertext, in which
+// case it has to open (proving it ours) or be forgotten, never be handed
+// out as a password.
+func (s *Store) planUnmarkedCell(c secretCell) (plan secretCell, keep bool, err error) {
+	if version, wellFormed := secrets.Envelope(c.value); version != 1 || !wellFormed {
+		return c, false, nil
+	}
+	return s.planCiphertext(c, func(err error) error {
+		return fmt.Errorf("%s looks encrypted but the database has no encryption marker (%w)%s", c.where, err, recoveryHint)
+	})
+}
+
+// planCiphertext: a ciphertext has to open with the current secret (keep),
+// or with the previous one on a change (rewrite), or be forgotten on
+// request; otherwise the open fails with wrap around the current sealer's
+// error.
+func (s *Store) planCiphertext(c secretCell, wrap func(error) error) (plan secretCell, keep bool, err error) {
+	_, cur := s.sealer.Open(c.label, c.value)
+	if cur == nil {
+		return c, true, nil
+	}
+	if plain, ok := s.opensWithPrevious(c.label, c.value); ok {
+		return c.with(plain), false, nil
+	}
+	if s.forget {
+		return c.cleared(), false, nil
+	}
+	return c, false, wrap(cur)
 }
 
 // opensWithPrevious opens a ciphertext with the previous sealer, if any.

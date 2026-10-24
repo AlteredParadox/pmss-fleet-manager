@@ -1224,3 +1224,115 @@ func TestDamagedEncodingMetadataFailsClosed(t *testing.T) {
 		noPlaintextIn(t, path, "typed-by-old-build")
 	})
 }
+
+// In a store marked plain, the marker is authoritative: values shaped like
+// an envelope, well-formed or of a newer version, are passwords.
+func TestExplicitPlainMarkerIsAuthoritative(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A well-formed envelope from an unrelated secret, used as a password.
+	shaped := mustSealer(t, keyB).Seal("elsewhere", "whatever")
+	if v, ok := secrets.Envelope(shaped); v != 1 || !ok {
+		t.Fatal("fixture is not a well-formed envelope")
+	}
+	b := &Box{Name: "seed-01", Host: "odin.example", User: "ragnar", Password: shaped, QbtPass: "pmss2:hunter2", Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if s, err = Open(path); err != nil {
+		t.Fatalf("plain reopen: %v", err)
+	}
+	if got, _ := s.GetBox(ctx, b.ID); got.Password != shaped || got.QbtPass != "pmss2:hunter2" {
+		t.Fatalf("plain reopen changed them: %+v", got)
+	}
+	s.Close()
+	// Switching encryption on seals them like any other password.
+	s, err = Open(path, WithSealer(mustSealer(t, keyA)))
+	if err != nil {
+		t.Fatalf("switch on: %v", err)
+	}
+	if s.ResealedOnOpen() != 2 {
+		t.Fatalf("resealed %d", s.ResealedOnOpen())
+	}
+	if got, _ := s.GetBox(ctx, b.ID); got.Password != shaped || got.QbtPass != "pmss2:hunter2" {
+		t.Fatalf("after sealing: %+v", got)
+	}
+	s.Close()
+	if s, err = Open(path, WithSealer(mustSealer(t, keyA))); err != nil {
+		t.Fatalf("sealed reopen: %v", err)
+	}
+	s.Close()
+}
+
+// A non-canonical spelling of the envelope is not an envelope: in a sealed
+// store it is old-build plaintext and is sealed, never kept as is.
+func TestNonCanonicalEnvelopeInSealedStoreIsSealed(t *testing.T) {
+	ctx := context.Background()
+	path, id := sealedFixture(t)
+	odd := "pmss01:" + mustSealer(t, keyA).Seal(labelPassword, "x")[len(secrets.Prefix):]
+	rawExec(t, path, `UPDATE boxes SET password=? WHERE id=?`, odd, id)
+	s, err := Open(path, WithSealer(mustSealer(t, keyA)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if s.ResealedOnOpen() != 1 {
+		t.Fatalf("resealed %d", s.ResealedOnOpen())
+	}
+	pw, _, _ := rawSecrets(t, s, id)
+	if pw == odd || !secrets.IsSealed(pw) {
+		t.Fatalf("left on disk as %q", pw)
+	}
+	if got, _ := s.GetBox(ctx, id); got.Password != odd {
+		t.Fatalf("reads back %q", got.Password)
+	}
+}
+
+// A cleanup row that is missing or unreadable in a store with encoding
+// metadata is an owed scrub, not a cleared one.
+func TestUnreadableCleanupMarkerScrubs(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct{ name, stmt string }{
+		{"deleted", `DELETE FROM settings WHERE key=?`},
+		{"malformed", `UPDATE settings SET value='yes' WHERE key=?`},
+		{"unknown", `UPDATE settings SET value='2' WHERE key=?`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "test.db")
+			s, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := &Box{Name: "seed-01", Host: "odin.example", User: "ragnar", Password: "zebra-unique-password-" + strings.Repeat("x", 200), Enabled: true}
+			if err := s.CreateBox(ctx, b); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UpdateBox(ctx, b, Clears{Password: true}); err != nil {
+				t.Fatal(err)
+			}
+			s.Close()
+			// Enable encryption with the scrub failing: the rows commit, the scrub is owed.
+			vacuumSQL = "VACUUM no_such_schema"
+			_, err = Open(path, WithSealer(mustSealer(t, keyA)))
+			vacuumSQL = "VACUUM"
+			if err == nil {
+				t.Fatal("open with a failing vacuum succeeded")
+			}
+			rawExec(t, path, tc.stmt, cleanupKey)
+			s, err = Open(path, WithSealer(mustSealer(t, keyA)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v, _ := s.GetValue(ctx, cleanupKey); v != "0" {
+				t.Fatalf("cleanup marker %q: the scrub did not run", v)
+			}
+			s.Close()
+			noPlaintextIn(t, path, "zebra-unique-password")
+		})
+	}
+}

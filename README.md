@@ -206,10 +206,15 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
   database, then vacuums the file and truncates the write-ahead log so the
   plain text is not left in free pages; if that cleanup is interrupted it
   is finished at the next start before anything is served. The database
-  records that its credentials are encrypted and keeps a small key check
-  (a fixed string sealed under the secret), so a password that happens to
-  start with `pmss1:` is never mistaken for ciphertext, and the secret is
-  verified at every start even when no credential is stored yet. Nothing
+  records whether its credentials are encrypted and keeps a small key
+  check (a fixed string sealed under the secret), so that marker, not what
+  a value looks like, decides: a password that happens to start with
+  `pmss1:` is a password in a store marked plain text, and the secret is
+  verified at every start even when no credential is stored yet. The one
+  time a value's shape is consulted is a database that has no marker yet
+  (never opened by a release with encryption support, or metadata lost):
+  a credential there that is exactly shaped like this dashboard's
+  ciphertext is refused rather than sent to a box as a password. Nothing
   changes in the dashboard.
 - **Starting without the secret, or with a different one, is refused** with
   a log line saying so, or naming the first credential it could not read.

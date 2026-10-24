@@ -101,32 +101,38 @@ func TestShortSecretRefused(t *testing.T) {
 }
 
 func TestLoad(t *testing.T) {
-	if l, err := Load("", ""); l != nil || err != nil {
+	if l, err := Load(CurrentNames, "", ""); l != nil || err != nil {
 		t.Fatalf("neither: %v %v", l, err)
 	}
-	if _, err := Load("a", "b"); err == nil {
-		t.Fatal("both accepted")
+	if _, err := Load(CurrentNames, "a", "b"); err == nil || !strings.Contains(err.Error(), "PMSS_SECRET or -secret-file (PMSS_SECRET_FILE)") {
+		t.Fatalf("both: %v", err)
 	}
-	l, err := Load(testSecret, "")
+	if _, err := Load(PreviousNames, "a", "b"); err == nil || !strings.Contains(err.Error(), "PMSS_SECRET_PREVIOUS or -previous-secret-file (PMSS_SECRET_PREVIOUS_FILE)") {
+		t.Fatalf("both previous: %v", err)
+	}
+	l, err := Load(CurrentNames, testSecret, "")
 	if err != nil || string(l.Master) != testSecret || l.Source != "PMSS_SECRET" {
 		t.Fatalf("env: %+v %v", l, err)
+	}
+	if l, err := Load(PreviousNames, testSecret, ""); err != nil || l.Source != "PMSS_SECRET_PREVIOUS" {
+		t.Fatalf("previous env: %+v %v", l, err)
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "secret")
 	if err := os.WriteFile(path, []byte(testSecret+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	l, err = Load("", path)
+	l, err = Load(CurrentNames, "", path)
 	if err != nil || string(l.Master) != testSecret || l.Source != path || l.Warning != "" {
 		t.Fatalf("file: %+v %v", l, err)
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if l, err = Load("", path); err != nil || l.Warning == "" {
+	if l, err = Load(CurrentNames, "", path); err != nil || l.Warning == "" {
 		t.Fatalf("loose file not warned: %+v %v", l, err)
 	}
-	if _, err := Load("", filepath.Join(dir, "missing")); err == nil {
+	if _, err := Load(CurrentNames, "", filepath.Join(dir, "missing")); err == nil {
 		t.Fatal("missing file accepted")
 	}
 }
@@ -145,7 +151,7 @@ func TestResolve(t *testing.T) {
 	if _, err := Resolve(testSecret, "", "short", ""); err == nil || !strings.Contains(err.Error(), "previous secret") {
 		t.Fatalf("short previous: %v", err)
 	}
-	if _, err := Resolve(testSecret, "", "a", "b"); err == nil || !strings.Contains(err.Error(), "previous secret") {
+	if _, err := Resolve(testSecret, "", "a", "b"); err == nil || !strings.Contains(err.Error(), "PMSS_SECRET_PREVIOUS or -previous-secret-file") {
 		t.Fatalf("both previous sources: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "secret")
@@ -173,7 +179,7 @@ func TestResolve(t *testing.T) {
 
 func TestEnvelope(t *testing.T) {
 	sl, _ := New([]byte(testSecret))
-	real := sl.Seal("x", "v")
+	genuine := sl.Seal("x", "v")
 	for _, tc := range []struct {
 		in      string
 		version int
@@ -188,14 +194,27 @@ func TestEnvelope(t *testing.T) {
 		{"pmss1:", 1, false},
 		{"pmss1:not-really-encrypted", 1, false}, // not base64
 		{"pmss1:AAAA", 1, false},                 // too short
-		{real, 1, true},
-		{"pmss2:" + real[len(Prefix):], 2, false},
+		{genuine, 1, true},
+		{"pmss2:" + genuine[len(Prefix):], 2, false},
 		{"pmss12:whatever", 12, false},
 		{"pmss1234:x", 0, false},
+		{"pmss01:" + genuine[len(Prefix):], 0, false}, // not canonical: not an envelope
+		{"pmss0:x", 0, false},
 	} {
 		v, ok := Envelope(tc.in)
 		if v != tc.version || ok != tc.ok {
 			t.Errorf("Envelope(%q) = %d %v, want %d %v", tc.in, v, ok, tc.version, tc.ok)
+		}
+		// Open agrees: a value Envelope does not call version 1 passes
+		// through as plaintext; one it does is decrypted or refused.
+		got, err := sl.Open("x", tc.in)
+		switch {
+		case tc.version != 1 && (err != nil || got != tc.in):
+			t.Errorf("Open(%q) = %q %v, want pass-through", tc.in, got, err)
+		case tc.version == 1 && tc.ok && (err != nil || got != "v"):
+			t.Errorf("Open(%q) = %q %v, want v", tc.in, got, err)
+		case tc.version == 1 && !tc.ok && !errors.Is(err, ErrWrongKey):
+			t.Errorf("Open(%q) = %q %v, want ErrWrongKey", tc.in, got, err)
 		}
 	}
 }
