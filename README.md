@@ -586,7 +586,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.9.0 is the current release. The code was written against five real Pulsed
+1.9.1 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -597,6 +597,18 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.9.1**
+
+- The WebUI port, login bypass and username are read from
+  `qBittorrent.conf` again on qBittorrent 5.x. Version 5 keeps the WebUI
+  settings in their own `[WebUI]` section with bare keys; the probe only
+  looked for the 4.x `WebUI\Port=` form under `[Preferences]`, so the file
+  read as empty on every 5.x box and a box without a pinned port fell back
+  to 8080 ("nothing is listening on port 8080" while qBittorrent was up on
+  its real port). Boxes whose port was pinned when they were added were not
+  affected. Both layouts are understood now; only the keys the dashboard
+  uses are read, never the password hash.
 
 **1.9.0** adds optional encryption of the stored credentials. The minor
 bump is for the new flags `-secret-file`, `-previous-secret-file` and
