@@ -336,7 +336,8 @@ confirm.
 ### qBittorrent access
 
 The WebUI port is read from `~/.config/qBittorrent/qBittorrent.conf` on the
-box unless you set one. Requests reach qBittorrent through the SSH tunnel, so
+box unless you set one (both the 4.x `[Preferences]` and the 5.x `[WebUI]`
+layouts are understood). Requests reach qBittorrent through the SSH tunnel, so
 they arrive from the box's own loopback address. On a shared host other tenants
 can reach that same loopback port, so keep WebUI authentication on and give the
 dashboard the username and password rather than enabling the localhost bypass.
