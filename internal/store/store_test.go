@@ -1133,11 +1133,43 @@ func TestDamagedEncodingMetadataFailsClosed(t *testing.T) {
 		}
 	})
 	t.Run("malformed marker", func(t *testing.T) {
-		path, _ := sealedFixture(t)
+		path, id := sealedFixture(t)
 		rawExec(t, path, `UPDATE settings SET value='yes' WHERE key=?`, sealedKey)
 		if _, err := Open(path, WithSealer(mustSealer(t, keyA))); err == nil || !strings.Contains(err.Error(), "does not understand") {
 			t.Fatalf("malformed: %v", err)
 		}
+		// The recovery flag the message recommends reads it as sealed:
+		// with the right key everything is kept and the row rewritten...
+		s, err := Open(path, WithSealer(mustSealer(t, keyA)), WithForgetUnreadable())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.GetBox(ctx, id); err != nil || got.Password != "pw" || s.ForgottenOnOpen() != 0 {
+			t.Fatalf("recovered with the right key: %+v %v, forgot %d", got, err, s.ForgottenOnOpen())
+		}
+		if v, _ := s.GetValue(ctx, sealedKey); v != "1" {
+			t.Fatalf("marker %q after recovery", v)
+		}
+		s.Close()
+		if s, err = Open(path, WithSealer(mustSealer(t, keyA))); err != nil {
+			t.Fatalf("plain reopen after recovery: %v", err)
+		}
+		s.Close()
+		// ...and without a key the unreadable credentials go and the store is plain.
+		rawExec(t, path, `UPDATE settings SET value='yes' WHERE key=?`, sealedKey)
+		if s, err = Open(path, WithForgetUnreadable()); err != nil {
+			t.Fatal(err)
+		}
+		if s.ForgottenOnOpen() != 2 {
+			t.Fatalf("forgot %d without a key", s.ForgottenOnOpen())
+		}
+		if v, _ := s.GetValue(ctx, sealedKey); v != "0" {
+			t.Fatalf("marker %q after forgetting without a key", v)
+		}
+		if v, _ := s.GetValue(ctx, checkKey); v != "" {
+			t.Fatalf("check %q kept in a plain store", v)
+		}
+		s.Close()
 	})
 	t.Run("damaged ciphertext", func(t *testing.T) {
 		path, id := sealedFixture(t)

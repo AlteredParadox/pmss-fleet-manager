@@ -62,6 +62,7 @@ type encoding struct {
 	explicit bool   // sealedKey is present ("0" or "1")
 	check    string // checkKey's value, "" when absent
 	cleanup  bool   // cleanupKey is "1"
+	repair   bool   // the rows were read leniently (forget) and must be rewritten
 }
 
 // secretCell is one stored credential and how to rewrite it.
@@ -110,7 +111,7 @@ func (s *Store) resealSecrets(ctx context.Context) error {
 	sealedAfter := s.sealer.Enabled()
 	check, checkChanged := s.planCheck(enc, sealedAfter)
 	cleanup := enc.cleanup || len(pending) > 0 || (sealedAfter && !enc.sealed)
-	if len(pending) > 0 || checkChanged || cleanup || sealedAfter != enc.sealed || !enc.explicit {
+	if len(pending) > 0 || checkChanged || cleanup || sealedAfter != enc.sealed || !enc.explicit || enc.repair {
 		if err := s.rewriteSecrets(ctx, pending, sealedAfter, cleanup, check); err != nil {
 			return err
 		}
@@ -125,8 +126,9 @@ func (s *Store) resealSecrets(ctx context.Context) error {
 }
 
 // readEncoding reads the three rows and refuses states this build cannot
-// interpret, unless forgetting was asked for: then an inconsistent pair
-// is read as sealed, the stricter reading, so nothing unreadable is kept.
+// interpret, unless forgetting was asked for: then a malformed marker or
+// an inconsistent pair is read as sealed, the stricter reading, so
+// nothing unreadable is kept and the rows are rewritten consistent.
 func (s *Store) readEncoding(ctx context.Context) (encoding, error) {
 	var enc encoding
 	v, ok, err := s.lookup(ctx, sealedKey)
@@ -139,6 +141,11 @@ func (s *Store) readEncoding(ctx context.Context) (encoding, error) {
 		enc.explicit = true
 	case v == "1":
 		enc.explicit, enc.sealed = true, true
+	case s.forget:
+		// A value this build does not understand, read conservatively as
+		// sealed: every credential is then verified or dropped below and
+		// the row rewritten.
+		enc.explicit, enc.sealed, enc.repair = true, true, true
 	default:
 		return enc, fmt.Errorf("the settings row %s holds %q, which this version does not understand%s", sealedKey, v, recoveryHint)
 	}
@@ -153,7 +160,7 @@ func (s *Store) readEncoding(ctx context.Context) (encoding, error) {
 			}
 			return enc, fmt.Errorf("the database's encryption markers disagree (%s=%q, key check %s): a partial restore or a repair?%s", sealedKey, v, state, recoveryHint)
 		}
-		enc.sealed = true
+		enc.sealed, enc.repair = true, true
 	}
 	cv, _, err := s.lookup(ctx, cleanupKey)
 	enc.cleanup = cv == "1"
