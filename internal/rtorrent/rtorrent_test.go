@@ -923,8 +923,9 @@ func TestMagnetLabelSurvivesMetadata(t *testing.T) {
 	c := New(f.dial)
 	now := time.Now()
 	c.now = func() time.Time { return now }
-	if _, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"}); err != nil || label != "tv" || sets != 1 {
-		t.Fatalf("add: %v label %q sets %d", err, label, sets)
+	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
+	if err != nil || label != "tv" || sets != 1 || res.Deferred != 1 {
+		t.Fatalf("add: %v label %q sets %d %+v", err, label, sets, res)
 	}
 	// Still the placeholder (no size): the label shows, nothing to do, and
 	// the entry must survive, since the rebuild is still to come.
@@ -944,15 +945,23 @@ func TestMagnetLabelSurvivesMetadata(t *testing.T) {
 	if err != nil || rows[0].Label != "tv" || label != "tv" || sets != 2 {
 		t.Fatalf("after rebuild: %v %+v box %q sets %d", err, rows, label, sets)
 	}
-	// Seen on the real torrent: settled, no further calls.
-	if _, err := c.Torrents(context.Background()); err != nil || sets != 2 {
-		t.Fatalf("settle: %v sets %d", err, sets)
-	}
+	// The entry was spent on the rebuilt torrent: a label the user clears in
+	// ruTorrent afterwards is not put back.
 	c.pendMu.Lock()
 	_, kept = c.pending[hashA]
 	c.pendMu.Unlock()
 	if kept {
-		t.Fatal("entry must settle once the label is on the torrent with metadata")
+		t.Fatal("entry must be spent once the rebuilt torrent was seen")
+	}
+	label = ""
+	if _, err := c.Torrents(context.Background()); err != nil || sets != 2 || label != "" {
+		t.Fatalf("cleared label put back: %v sets %d %q", err, sets, label)
+	}
+	// A rebuilt torrent seen with a different label is left alone too.
+	c.remember(hashA, "tv")
+	label = "films"
+	if _, err := c.Torrents(context.Background()); err != nil || sets != 2 || label != "films" {
+		t.Fatalf("other label overwritten: %v sets %d %q", err, sets, label)
 	}
 	// Expired entries are dropped without a call.
 	c.remember(hashB, "x")
@@ -977,5 +986,33 @@ func TestMagnetLabelSurvivesMetadata(t *testing.T) {
 	c.pendMu.Unlock()
 	if n != pendingMax {
 		t.Fatalf("pending %d, cap %d", n, pendingMax)
+	}
+}
+
+func TestPendingLabelsPersist(t *testing.T) {
+	c := New(func(ctx context.Context) (net.Conn, error) { return nil, errors.New("unused") })
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	c.remember(hashA, "tv")
+	saved := c.Pending()
+	if len(saved) != 1 || saved[0].Hash != hashA || saved[0].Label != "tv" || !saved[0].Until.After(now) {
+		t.Fatalf("%+v", saved)
+	}
+	// A new client (a restarted dashboard) takes them back; junk and expired
+	// entries are dropped, hashes normalised, labels clipped.
+	d := New(c.dial)
+	d.now = c.now
+	d.Restore(append(saved, PendingLabel{Hash: "nope", Label: "x", Until: now.Add(time.Hour)},
+		PendingLabel{Hash: hashB, Label: "", Until: now.Add(time.Hour)},
+		PendingLabel{Hash: hashB, Label: "old", Until: now.Add(-time.Minute)},
+		PendingLabel{Hash: strings.ToLower(hashB), Label: strings.Repeat("l", 500), Until: now.Add(time.Hour)}))
+	got := d.Pending()
+	if len(got) != 2 {
+		t.Fatalf("%+v", got)
+	}
+	for _, p := range got {
+		if p.Hash == strings.ToUpper(hashB) && len(p.Label) != maxLabel {
+			t.Fatalf("label not clipped: %d", len(p.Label))
+		}
 	}
 }

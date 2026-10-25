@@ -325,9 +325,11 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 // reconcileLabels applies pending labels to the listed torrents that lost
 // theirs (rTorrent's process_meta_download builds a fresh download when a
 // magnet's metadata arrives and does not copy custom1: fred and Codex on
-// PR 122). An entry settles once the label is seen on a torrent that has
-// its metadata (a size: the placeholder has none, and showing the label
-// there proves nothing), or expires after pendingTTL.
+// PR 122). An entry lives through the placeholder phase (no size) and is
+// spent the first time its torrent is listed with metadata: the label is
+// set then if the torrent has none, and the entry goes whatever the label
+// is, so a label the user changed or cleared in ruTorrent afterwards is
+// left alone. Entries also expire after pendingTTL.
 func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
 	c.pendMu.Lock()
 	if len(c.pending) == 0 {
@@ -350,10 +352,10 @@ func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
 		if !ok {
 			continue // not listed yet (or removed): keep until it expires
 		}
-		if rows[i].Label == p.label && rows[i].Size > 0 {
-			delete(c.pending, h) // settled on the real torrent
-			continue
+		if rows[i].Size == 0 {
+			continue // still the placeholder: the rebuild is yet to come
 		}
+		delete(c.pending, h) // the real torrent: one chance, taken now or not needed
 		if rows[i].Label == "" {
 			set = append(set, todo{h, p.label})
 		}
@@ -366,6 +368,42 @@ func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
 		if i, ok := seen[t.hash]; ok {
 			rows[i].Label = t.label
 		}
+	}
+}
+
+// PendingLabel is a label owed to a magnet's torrent until its metadata
+// arrives, as persisted by the caller across restarts (see Pending and
+// Restore): the client's memory is otherwise the process's.
+type PendingLabel struct {
+	Hash  string    `json:"hash"`
+	Label string    `json:"label"`
+	Until time.Time `json:"until"`
+}
+
+// Pending returns the labels still owed, for the caller to persist.
+func (c *Client) Pending() []PendingLabel {
+	c.pendMu.Lock()
+	defer c.pendMu.Unlock()
+	out := make([]PendingLabel, 0, len(c.pending))
+	for h, p := range c.pending {
+		out = append(out, PendingLabel{Hash: h, Label: p.label, Until: p.until})
+	}
+	return out
+}
+
+// Restore adds persisted pending labels (expired ones and malformed hashes
+// are dropped; the cap applies).
+func (c *Client) Restore(labels []PendingLabel) {
+	now := c.now()
+	for _, l := range labels {
+		if !ValidHash(l.Hash) || l.Label == "" || !now.Before(l.Until) {
+			continue
+		}
+		c.pendMu.Lock()
+		if len(c.pending) < pendingMax {
+			c.pending[strings.ToUpper(l.Hash)] = pendingLabel{label: clip(l.Label, maxLabel), until: l.Until}
+		}
+		c.pendMu.Unlock()
 	}
 }
 
@@ -442,6 +480,9 @@ type AddResult struct {
 	Added      int
 	Failed     int
 	Unlabelled int
+	// Deferred counts magnets whose label is set now on the placeholder and
+	// again once the metadata arrives (see reconcileLabels).
+	Deferred int
 }
 
 // Add loads every entry; one refused entry does not stop the rest.
@@ -518,6 +559,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 				// torrent when the metadata arrives and drops custom1, so the
 				// label is owed again then (reconciled by Torrents).
 				c.remember(e.hash, label)
+				res.Deferred++
 			}
 		}
 	}
