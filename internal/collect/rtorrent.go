@@ -70,20 +70,25 @@ func ValidRtEndpoint(ep string) bool {
 	return false
 }
 
-// rtClient returns the cached client for ep, building one when the
-// endpoint changed. A unix socket is dialed as-is: the kernel enforces who
-// may connect inside the home. A loopback port goes through verifiedDial
-// like the WebUI, since on a shared host a co-tenant can bind a free port.
+// rtClient returns the cached client for ep over cli, building one when the
+// endpoint or the SSH transport changed: the dialer is bound to one
+// transport, and conn() replaces a dead one (the cache is also dropped
+// wherever the transport is closed). A unix socket is dialed as-is: the
+// kernel enforces who may connect inside the home. A loopback port goes
+// through verifiedDial like the WebUI, since on a shared host a co-tenant
+// can bind a free port.
 func (p *poller) rtClient(cli *sshx.Client, ep string) (*rtorrent.Client, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.rt != nil && p.rtEP == ep {
+	if p.rt != nil && p.rtEP == ep && p.rtSSH == cli {
 		return p.rt, nil
 	}
 	var dial rtorrent.Dialer
 	switch {
 	case p.dialRt != nil:
 		dial = p.dialRt(ep)
+	case cli == nil:
+		return nil, errors.New("rtorrent: no SSH connection")
 	case strings.HasPrefix(ep, "unix:"):
 		path := ep[len("unix:"):]
 		dial = func(ctx context.Context) (netConn, error) { return cli.DialUnix(ctx, path) }
@@ -98,9 +103,12 @@ func (p *poller) rtClient(cli *sshx.Client, ep string) (*rtorrent.Client, error)
 	default:
 		return nil, errors.New("rtorrent: no SCGI endpoint known (set one under edit, or check ~/.rtorrent.rc)")
 	}
-	p.rt, p.rtEP = rtorrent.New(dial), ep
+	p.rt, p.rtEP, p.rtSSH = rtorrent.New(dial), ep, cli
 	return p.rt, nil
 }
+
+// detectRtDial is the test hook for detectRt's socket dial.
+var detectRtDial func(ep string) rtorrent.Dialer
 
 // pollRt fills st.Rt from the snapshot and the client.
 func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot) {
@@ -285,10 +293,16 @@ func rtRemoveData(ctx context.Context, cli *rtorrent.Client, sshc *sshx.Client, 
 	if err != nil {
 		return err
 	}
+	// Refused here, before the erase, so a torrent whose path cannot even
+	// be handed to the box is not removed either: absolute, bounded, no
+	// line breaks (the box's own check is the authority on what is inside).
 	for _, s := range []string{base, root} {
-		if s == "" || len(s) > 4096 || strings.ContainsAny(s, "\x00\n\r") {
+		if !strings.HasPrefix(s, "/") || len(s) > 4096 || strings.ContainsAny(s, "\x00\n\r") {
 			return errors.New("rTorrent reported a path that cannot be checked; not deleting anything")
 		}
+	}
+	if sshc == nil {
+		return errors.New("no SSH connection to the box")
 	}
 	if err := cli.Action(ctx, rtorrent.ActionRemove, hash); err != nil {
 		return err

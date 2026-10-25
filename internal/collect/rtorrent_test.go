@@ -19,6 +19,7 @@ package collect
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,7 +33,9 @@ import (
 	"testing"
 
 	"pmss-fleet-manager/internal/probe"
+	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/rtorrent"
+	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 )
 
@@ -148,6 +151,8 @@ func rtReplies(method, body string) string {
 			row(rtHashA, "ubuntu-24.04.5.1-desktop-amd64.iso", "6250332160", "4868000000", "54197410", "0", "0", "1", "0", "1", "", "iso") +
 			row(rtHashB, "ubuntu-26.04.1-desktop-amd64.iso", "6482409472", "6482409472", "0", "0", "2", "0", "1", "0", "Tracker: [Could not parse bencoded data]", "") +
 			`</data></array>`)
+	case "system.client_version":
+		return xmlResp(xs("0.9.8"))
 	case "d.base_path":
 		return xmlResp(xs("/home/u/data/ubuntu-24.04.5.1-desktop-amd64.iso"))
 	case "directory.default":
@@ -362,5 +367,209 @@ func TestRtRemoveDataFlow(t *testing.T) {
 		if m == "d.erase" {
 			t.Fatal("erase must not run when the path is unusable")
 		}
+	}
+}
+
+func TestRtClientFollowsTransport(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	p.dialRt = nil
+	// Without a transport and without the hook there is nothing to dial.
+	if _, err := p.rtClient(nil, "unix:/x"); err == nil {
+		t.Fatal("nil transport")
+	}
+	p.dialRt = f.dialer
+	a := &sshx.Client{}
+	c1, err := p.rtClient(a, "unix:/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2, _ := p.rtClient(a, "unix:/x"); c2 != c1 {
+		t.Fatal("same transport and endpoint: same client")
+	}
+	// A reconnected transport must not reuse a client whose dialer holds the
+	// closed one (Codex P1 on PR 123); so must a changed endpoint.
+	if c3, _ := p.rtClient(&sshx.Client{}, "unix:/x"); c3 == c1 {
+		t.Fatal("new transport must rebuild the client")
+	}
+	if c4, _ := p.rtClient(a, "unix:/y"); c4 == c1 {
+		t.Fatal("new endpoint must rebuild the client")
+	}
+	// The teardown paths drop the cache.
+	p.rt, p.rtSSH = c1, a
+	p.closeConns()
+	if p.rt != nil || p.rtSSH != nil {
+		t.Fatal("closeConns must drop the rtorrent client")
+	}
+}
+
+// readyRt seeds a Ready state with rTorrent's endpoint for p, as a poll
+// would, so the action gates pass.
+func readyRt(t *testing.T, p *poller, ep string) {
+	t.Helper()
+	st := BoxState{ID: p.box.ID, Ready: true, Rt: RtState{Enabled: true, Endpoint: ep, Reachable: true}}
+	p.m.mu.Lock()
+	p.m.states[p.box.ID] = &st
+	p.m.mu.Unlock()
+}
+
+func TestRtActionsThroughPoller(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	ctx := context.Background()
+	// Not ready yet: nothing reaches the box.
+	if err := p.rtTorrentAction(ctx, rtHashA, "stop"); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("%v", err)
+	}
+	p.box.RtEnabled = false
+	readyRt(t, p, "unix:/home/u/.rtorrent.socket")
+	if err := p.rtTorrentAction(ctx, rtHashA, "stop"); err == nil || !strings.Contains(err.Error(), "not enabled") {
+		t.Fatalf("%v", err)
+	}
+	p.box.RtEnabled = true
+	if err := p.rtTorrentAction(ctx, strings.ToLower(rtHashA), "stop"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.called(), ","); got != "d.stop,d.close" {
+		t.Fatalf("methods %s", got)
+	}
+	res, err := p.rtAddTorrents(ctx, qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Files: []qbt.TorrentFile{{Name: "a", Data: []byte("d8:announcee")}}, Category: "(d.stop)", Stopped: true})
+	if err != nil || res.Added != 2 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	m := f.called()
+	if strings.Join(m[len(m)-2:], ",") != "load.normal,load.raw" {
+		t.Fatalf("%v", m)
+	}
+	// No endpoint in the state: refused before any dial.
+	readyRt(t, p, "")
+	if err := p.rtTorrentAction(ctx, rtHashA, "stop"); err == nil || !strings.Contains(err.Error(), "no SCGI endpoint") {
+		t.Fatalf("%v", err)
+	}
+	// A loopback endpoint needs the poll's ownership verdict first.
+	readyRt(t, p, "tcp:127.0.0.1:5000")
+	if err := p.rtTorrentAction(ctx, rtHashA, "stop"); err == nil || !strings.Contains(err.Error(), "not been verified") {
+		t.Fatalf("%v", err)
+	}
+	// remove-data with an unusable path never erases.
+	readyRt(t, p, "unix:/home/u/.rtorrent.socket")
+	f.reply = func(m, b string) string {
+		if m == "d.base_path" {
+			return xmlResp(xs("relative/path"))
+		}
+		return rtReplies(m, b)
+	}
+	before := len(f.called())
+	err = p.rtTorrentAction(ctx, rtHashA, RtActionRemoveData)
+	if err == nil || !strings.Contains(err.Error(), "cannot be checked") {
+		t.Fatalf("%v", err)
+	}
+	for _, m := range f.called()[before:] {
+		if m == "d.erase" {
+			t.Fatal("erase ran on an unusable path")
+		}
+	}
+}
+
+func TestManagerRtGuards(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	ctx := context.Background()
+	if err := m.RtTorrentAction(ctx, 1, rtHashA, "stop"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal(err)
+	}
+	if _, err := m.RtAddTorrents(ctx, 1, qbt.AddRequest{}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.pollers[1] = p
+	m.mu.Unlock()
+	if err := m.RtTorrentAction(ctx, 1, rtHashA, "pause"); err == nil || !strings.Contains(err.Error(), "unknown rTorrent action") {
+		t.Fatal(err)
+	}
+	if err := m.RtTorrentAction(ctx, 1, rtHashA, "stop"); !errors.Is(err, ErrDisabled) {
+		t.Fatal(err)
+	}
+	if _, err := m.RtAddTorrents(ctx, 1, qbt.AddRequest{}); !errors.Is(err, ErrDisabled) {
+		t.Fatal(err)
+	}
+	p.box.Enabled = true
+	readyRt(t, p, "unix:/home/u/.rtorrent.socket")
+	if err := m.RtTorrentAction(ctx, 1, rtHashA, "start"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.called(), ","); got != "d.open,d.start" {
+		t.Fatal(got)
+	}
+}
+
+func TestDetectRt(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	detectRtDial = f.dialer
+	t.Cleanup(func() { detectRtDial = nil })
+	run := func(snap *probe.Snapshot, b *store.Box) (*DetectResult, string) {
+		res := &DetectResult{}
+		var texts []string
+		var add addStep = func(status, format string, args ...any) {
+			texts = append(texts, status+": "+fmt.Sprintf(format, args...))
+		}
+		detectRt(context.Background(), nil, snap, b, res, add)
+		return res, strings.Join(texts, " | ")
+	}
+	// Nothing found: off.
+	b := &store.Box{}
+	_, out := run(&probe.Snapshot{Home: "/home/u", ProcsKnown: true}, b)
+	if b.RtEnabled || !strings.Contains(out, "no rTorrent configuration") {
+		t.Fatal(out)
+	}
+	_, out = run(&probe.Snapshot{Home: "/home/u", ProcsKnown: true, Rt: probe.RtInfo{Disabled: true}}, b)
+	if b.RtEnabled || !strings.Contains(out, "switched off") {
+		t.Fatal(out)
+	}
+	// Configured but not running: on, unless stopped on purpose.
+	conf := probe.RtInfo{ConfFound: true, SCGI: "unix:/home/u/.rtorrent.socket"}
+	_, out = run(&probe.Snapshot{Home: "/home/u", ProcsKnown: true, Rt: conf}, b)
+	if !b.RtEnabled || !strings.Contains(out, "warn: rTorrent is configured") {
+		t.Fatal(out)
+	}
+	conf.Disabled = true
+	_, out = run(&probe.Snapshot{Home: "/home/u", ProcsKnown: true, Rt: conf}, b)
+	if b.RtEnabled || !strings.Contains(out, "stopped on purpose") {
+		t.Fatal(out)
+	}
+	conf.Disabled = false
+	// Running: the socket is asked.
+	running := &probe.Snapshot{Home: "/home/u", ProcsKnown: true, Procs: []probe.ProcInfo{{Comm: "rtorrent main"}}, Rt: conf}
+	res, out := run(running, b)
+	if !b.RtEnabled || res.Facts.RtVersion != "0.9.8" || res.Facts.RtEndpoint != "unix:/home/u/.rtorrent.socket" || !strings.Contains(out, "ok: rTorrent 0.9.8 responding") {
+		t.Fatalf("%+v %s", res.Facts, out)
+	}
+	// A loopback port owned by someone else is not dialed.
+	tcp := *running
+	tcp.Rt = probe.RtInfo{ConfFound: true, SCGI: "tcp:127.0.0.1:5000"}
+	tcp.ListenersKnown, tcp.Listeners = true, map[int]int{5000: 1002}
+	n := len(f.called())
+	_, out = run(&tcp, b)
+	if !b.RtEnabled || !strings.Contains(out, "not connecting") || len(f.called()) != n {
+		t.Fatal(out)
+	}
+	// The socket not answering is a warning, still enabled.
+	f.reply = func(m, b string) string {
+		return `<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>1</i4></value></member><member><name>faultString</name><value><string>x</string></value></member></struct></value></fault></methodResponse>`
+	}
+	_, out = run(running, b)
+	if !b.RtEnabled || !strings.Contains(out, "did not answer") {
+		t.Fatal(out)
+	}
+	// The box setting counts as configuration.
+	b2 := &store.Box{RtSCGI: "unix:/srv/s"}
+	_, out = run(&probe.Snapshot{Home: "/home/u", ProcsKnown: true}, b2)
+	if !b2.RtEnabled || !strings.Contains(out, "unix:/srv/s") {
+		t.Fatal(out)
 	}
 }

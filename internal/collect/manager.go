@@ -759,15 +759,15 @@ func (m *Manager) TorrentAction(ctx context.Context, id int64, hash, action stri
 // RtTorrentAction performs one RtTorrentActions entry on a torrent in the
 // box's rTorrent and wakes the poller so the list reflects it promptly.
 func (m *Manager) RtTorrentAction(ctx context.Context, id int64, hash, action string) error {
+	if !RtTorrentActions[action] {
+		return fmt.Errorf("unknown rTorrent action %q", action)
+	}
 	p := m.poller(id)
 	if p == nil {
 		return store.ErrNotFound
 	}
 	if !p.box.Enabled {
 		return ErrDisabled
-	}
-	if !RtTorrentActions[action] {
-		return fmt.Errorf("unknown rTorrent action %q", action)
 	}
 	err := p.rtTorrentAction(ctx, hash, action)
 	p.wake()

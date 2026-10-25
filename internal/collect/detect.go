@@ -325,7 +325,7 @@ func detectRt(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *st
 			return
 		}
 	}
-	p := &poller{box: b}
+	p := &poller{box: b, dialRt: detectRtDial}
 	rc, err := p.rtClient(cli, ep)
 	if err != nil {
 		add("warn", "rTorrent: %v", err)

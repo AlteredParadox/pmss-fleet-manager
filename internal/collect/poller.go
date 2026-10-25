@@ -89,6 +89,7 @@ type poller struct {
 	// hook that replaces the SSH channel to the SCGI endpoint.
 	rt     *rtorrent.Client
 	rtEP   string
+	rtSSH  *sshx.Client // the transport rt's dialer is bound to; a new one means a new client
 	dialRt func(ep string) rtorrent.Dialer
 
 	duMu      sync.Mutex
@@ -344,6 +345,7 @@ func (p *poller) closeConns() {
 		p.dk.Close()
 		p.dk = nil
 	}
+	p.rt, p.rtSSH = nil, nil
 	if p.ssh != nil {
 		p.ssh.Close()
 		p.ssh = nil
@@ -422,6 +424,7 @@ func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
 			p.dk.Close()
 			p.dk = nil
 		}
+		p.rt, p.rtSSH = nil, nil // its dialer held the closed transport (Codex on PR 123)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -558,6 +561,7 @@ func (p *poller) poll(ctx context.Context) {
 			p.ssh.Close()
 			p.ssh = nil
 		}
+		p.rt, p.rtSSH = nil, nil
 		p.mu.Unlock()
 		p.inventoryFailed(inventory)
 		p.fail(ctx, &st, fmt.Errorf("probe: %w %s", explainSessionError(err), strings.TrimSpace(string(stderr))), start)
