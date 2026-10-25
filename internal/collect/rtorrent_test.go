@@ -2814,3 +2814,40 @@ func TestStaleDismissWithDirtyNoticeRow(t *testing.T) {
 		t.Fatal("dismissing the live notice clears it and the dirty row")
 	}
 }
+
+// TestEditWaitsForMutationLease (fred on PR 123): an edit takes the box's
+// rTorrent mutation lease first, like a removal, so its label handoff
+// cannot fall between a removal's recorded intent and its outcome; a lease
+// held past the request's deadline fails the edit and changes nothing.
+func TestEditWaitsForMutationLease(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	defer m.cancel()
+	m.mu.Lock()
+	m.states[p.box.ID] = &BoxState{ID: p.box.ID}
+	m.mu.Unlock()
+	release, err := m.rtLease(p.box.ID).Acquire(context.Background()) // a removal between intent and outcome
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := *p.box
+	edited.Name = "renamed"
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := m.UpdateBox(ctx, &edited, store.Clears{}); err == nil || !strings.Contains(err.Error(), "cannot be edited right now") {
+		t.Fatalf("edit over a held lease: %v", err)
+	}
+	if got, _ := m.st.GetBox(context.Background(), p.box.ID); got == nil || got.Name != "x" {
+		t.Fatal("a refused edit must change nothing")
+	}
+	release()
+	if err := m.UpdateBox(context.Background(), &edited, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := m.st.GetBox(context.Background(), p.box.ID); got == nil || got.Name != "renamed" {
+		t.Fatal("the edit proceeds once the lease is free")
+	}
+}

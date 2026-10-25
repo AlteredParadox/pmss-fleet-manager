@@ -925,6 +925,18 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 
 // UpdateBox persists changes and restarts the poller with fresh connections.
 func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clears) error {
+	// The box's rTorrent mutation lease first, as RemoveBox and late
+	// adoption take it: an edit's label handoff then cannot fall between a
+	// removal's recorded intent and its outcome (fred on PR 123: an erase
+	// refused unsent would withdraw its intent, but the edit's flush had
+	// already filtered the live torrent's label out as erased). A removal
+	// in progress holds the lease for its life; the edit then fails with
+	// its message and can be repeated.
+	release, err := m.rtLease(b.ID).Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("the box cannot be edited right now: %w", err)
+	}
+	defer release()
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
 	if err := m.st.UpdateBox(ctx, b, clears); err != nil {
