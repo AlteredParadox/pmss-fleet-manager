@@ -108,3 +108,9 @@ test('the confirmation and action markup of a row carry the client (snapshot of 
   assert.match(app, /refuses otherwise, leaving the torrent in place/, 'the rTorrent remove-with-data confirmation states the real ordering');
   assert.match(app, /\/\$\{seg\}\/torrents\//, 'actions are routed per client');
 });
+
+test('an intentionally stopped rTorrent stays visible with monitoring off (Codex on #124)', () => {
+  const app = readFileSync(new URL('./static/app.js', import.meta.url), 'utf8');
+  assert.match(app, /b\.rtorrent\?\.disabled\) tabs\.push\(\['torrents'/, 'the torrents tab shows for the marker alone');
+  assert.match(app, /stopped on purpose · monitoring off/, 'the overview names the marker when monitoring is off');
+});

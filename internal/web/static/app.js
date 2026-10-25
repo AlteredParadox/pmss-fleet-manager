@@ -575,7 +575,7 @@ function viewBox() {
   const b = curBox();
   if (!b) return `<button class="crumb" data-go="/fleet">← fleet</button><div class="empty">box not found</div>`;
   const tabs = [['overview', 'overview'], ['traffic', 'traffic']];
-  if (b.qbt.enabled || b.qbt.installed || b.rtorrent?.enabled || b.rtorrent?.process_up) tabs.push(['torrents', 'torrents']);
+  if (b.qbt.enabled || b.qbt.installed || b.rtorrent?.enabled || b.rtorrent?.process_up || b.rtorrent?.disabled) tabs.push(['torrents', 'torrents']); // the stopped-on-purpose note lives there too
   if (b.docker.enabled || b.docker.socket_up) tabs.push(['containers', 'containers']);
   tabs.push(['services', 'services'], ['logs', 'logs'], ['storage', 'storage'], ['host', 'host']);
   if (!tabs.some(([k]) => k === S.tab)) S.tab = 'overview';
@@ -729,7 +729,11 @@ function ovTorrentsRow(q, both) {
 // whether it answers on its socket and what it holds.
 function ovRtRows(r, both) {
   if (!r) return '';
-  if (!r.enabled) return r.process_up ? `<div><span>rTorrent</span><span>running, monitoring off</span></div>` : '';
+  if (!r.enabled) {
+    if (r.process_up) return `<div><span>rTorrent</span><span>running, monitoring off</span></div>`;
+    if (r.disabled) return `<div><span>rTorrent</span><span class="muted" title="~/.rtorrentDisable is set: the Pulsed Media watchdog leaves it stopped">stopped on purpose · monitoring off</span></div>`;
+    return '';
+  }
   const state = r.reachable ? '' : r.disabled ? ' <span class="muted" title="~/.rtorrentDisable is set: the Pulsed Media watchdog leaves it stopped">(stopped on purpose)</span>' : ' <span class="warn">(not responding)</span>';
   return `<div><span>rTorrent</span><span>${esc(r.version || '')}${r.library ? ` <span class="muted">· libtorrent ${esc(r.library)}</span>` : ''}${state}${r.endpoint ? ` <span class="muted" title="SCGI endpoint">· ${esc(r.endpoint.replace(/^unix:/, ''))}</span>` : ''}</span></div>
       ${r.enabled && !r.reachable && r.error && !r.disabled ? `<div><span>rTorrent error</span><span class="warn" style="text-align:right">${esc(r.error)}</span></div>` : ''}
