@@ -345,9 +345,11 @@ permissions decide who may connect. A loopback TCP endpoint
 its own and on a shared host every tenant can reach the same loopback port:
 anyone on the box could then drive your rTorrent. The dashboard checks that
 the port is owned by your account before it connects, which keeps it from
-talking to an impostor, but it cannot keep others from talking to your
-rTorrent. Keep the unix socket unless the host isolates loopback between
-tenants. The client is PMSS's own, started by the panel's watchdog, so there is no
+talking to an impostor (on hosts whose socket-table privacy hides
+established sockets this falls back to the listener check described under
+qBittorrent access, with its narrow release-and-rebind window), but it
+cannot keep others from talking to your rTorrent. Keep the unix socket
+unless the host isolates loopback between tenants. The client is PMSS's own, started by the panel's watchdog, so there is no
 install, start or stop for it here; the tenant's `~/.rtorrentDisable`
 marker is shown and silences the alert. On a box running both clients the
 torrents tab groups the torrents by client, each group with its own counts
@@ -362,7 +364,13 @@ closing the browser, editing the box or stopping the dashboard does not cut
 them (a stop waits for an admitted deletion to finish). If the deletion
 fails after your request has already ended, the outcome is not lost: it is
 logged, shown under rTorrent on the box's torrents tab until you dismiss
-it, and raised as an alert. Two limits remain.
+it, and raised as an alert. Before any removal is sent to rTorrent, the
+dashboard records it in its own database, so a lost answer or a restart in
+the wrong instant cannot hand the removed torrent's pending label to a later
+unlabelled add of the same hash; the record is kept for a day. If a removal
+is refused with "could not record the removal before sending it", the
+dashboard could not write that record: check the dashboard's disk and
+database, not the box. Two limits remain.
 A hard kill of the dashboard process after the removal and before the
 deletion has completed leaves the torrent gone and all or part of its files
 behind; those files are visible on the box and can be cleaned up by hand.

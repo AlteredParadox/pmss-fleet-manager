@@ -575,7 +575,7 @@ function viewBox() {
   const b = curBox();
   if (!b) return `<button class="crumb" data-go="/fleet">← fleet</button><div class="empty">box not found</div>`;
   const tabs = [['overview', 'overview'], ['traffic', 'traffic']];
-  if (b.qbt.enabled || b.qbt.installed || b.rtorrent?.enabled || b.rtorrent?.process_up || b.rtorrent?.disabled) tabs.push(['torrents', 'torrents']); // the stopped-on-purpose note lives there too
+  if (pfmView.torrentsTab(b)) tabs.push(['torrents', 'torrents']); // the stopped-on-purpose note and a removal notice live there too
   if (b.docker.enabled || b.docker.socket_up) tabs.push(['containers', 'containers']);
   tabs.push(['services', 'services'], ['logs', 'logs'], ['storage', 'storage'], ['host', 'host']);
   if (!tabs.some(([k]) => k === S.tab)) S.tab = 'overview';
@@ -850,8 +850,8 @@ function niceMax(v) {
 const CLIENT_LABEL = { qbt: 'qBittorrent', rtorrent: 'rTorrent' };
 function boxClients(b) {
   const out = [];
-  if (b.qbt?.enabled) out.push({ key: 'qbt', label: 'qBittorrent', st: b.qbt });
-  if (b.rtorrent?.enabled) out.push({ key: 'rtorrent', label: 'rTorrent', st: b.rtorrent });
+  if (pfmView.showClient(b, 'qbt')) out.push({ key: 'qbt', label: 'qBittorrent', st: b.qbt });
+  if (pfmView.showClient(b, 'rtorrent')) out.push({ key: 'rtorrent', label: 'rTorrent', st: b.rtorrent }); // monitored, or carrying a removal notice
   return out;
 }
 function tabTorrents(b) {
@@ -879,8 +879,17 @@ function clientSection(b, c, f, grouped, first) {
   const addOpen = !avail.stopped && S.torAdd && (S.torAdd.client || 'qbt') === c.key;
   // A remove-with-data that failed after its request had ended: the job
   // recorded it on the box (it also raised an alert); shown here until
-  // dismissed, since a later success says nothing about these files.
-  const removeFailed = c.key === 'rtorrent' && q.remove_failed ? `<div class="meta"><span class="bad" title="${q.remove_failed_at ? esc(fmtAgo(q.remove_failed_at)) + '. ' : ''}The torrent was removed from rTorrent but its files were not (all) deleted; check the download folder on the box.">remove with files failed: ${esc(q.remove_failed)}</span> <button class="small ghost" data-act="rt:dismiss-failure" title="remove this notice (the alert resolves with it)">dismiss</button></div>` : '';
+  // dismissed, since a later success says nothing about these files. The
+  // button names the notice it shows (its time), so it cannot dismiss a
+  // newer one that replaced it meanwhile (daybreak blue re-review of #123).
+  const removeFailed = c.key === 'rtorrent' && q.remove_failed ? `<div class="meta"><span class="bad" title="${q.remove_failed_at ? esc(fmtAgo(q.remove_failed_at)) + '. ' : ''}The torrent was removed from rTorrent but its files were not (all) deleted; check the download folder on the box.">remove with files failed: ${esc(q.remove_failed)}</span> <button class="small ghost" data-act="rt:dismiss-failure" data-at="${esc(q.remove_failed_at || '')}" title="remove this notice (the alert resolves with it)">dismiss</button></div>` : '';
+  if (!q.enabled) {
+    // Monitoring is off: only the notice is left to show (and dismiss); no
+    // counts, no controls, nothing to add to.
+    return `<div class="thead-tools"${grouped && !first ? ' style="border-top:1px solid var(--line)"' : ''}>
+      <div style="font-size:12px"><b>${c.label}</b> <span class="muted">· monitoring is off</span>${removeFailed}</div>
+    </div>`;
+  }
   return `<div class="thead-tools"${grouped && !first ? ' style="border-top:1px solid var(--line)"' : ''}>
       <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span>${removeFailed}</div>
       <div class="actions">
@@ -1085,7 +1094,7 @@ function torAddForm(b, list, c) {
 // names the size so the two cannot be mistaken for each other.
 function torrentButtons(b, t) {
   if (!t.hash) return '';
-  const client = t.client || 'qbt', label = CLIENT_LABEL[client] || client;
+  const client = t.client || 'qbt', label = esc(CLIENT_LABEL[client] || client); // a closed set today; escaped so the attribute sink stays safe if another client is added
   const off = b.status === 'disabled' ? ' disabled title="polling is disabled for this box; enable it to run actions"'
     : !pfmView.clientActionable(b, client) ? ` disabled title="${label} is stopped on purpose on this box (~/.rtorrentDisable); this row is from before it stopped"` : '';
   const h = `data-hash="${esc(t.hash)}" data-box="${b.id}" data-client="${esc(client)}"${off}`;
@@ -1924,7 +1933,7 @@ async function runAction(a, act) {
   if (a === 'refresh-all' || a === 'refresh' || a === 'rescan-logs' || a === 'du' || a === 'remove') await boxAction(a);
   else if (a.startsWith('qbt:')) await qbtAction(a, act);
   else if (a.startsWith('tor:')) await torrentAction(a, act);
-  else if (a === 'rt:dismiss-failure') { act.disabled = true; await api('POST', `${BASE}/api/boxes/${S.selId}/rtorrent/remove-failure/dismiss`); toast('notice dismissed', 'ok'); await loadDetail(S.selId); }
+  else if (a === 'rt:dismiss-failure') { act.disabled = true; await api('POST', `${BASE}/api/boxes/${S.selId}/rtorrent/remove-failure/dismiss`, { at: act.dataset.at }); toast('notice dismissed', 'ok'); await loadDetail(S.selId); }
   else if (a.startsWith('tor-add:')) await torAddAction(a, act);
   else if (a.startsWith('disc:')) await discoveryAction(a, act);
   else if (a.startsWith('ctr:')) await containerAction(a, act);

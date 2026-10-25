@@ -111,7 +111,8 @@ test('the confirmation and action markup of a row carry the client (snapshot of 
 
 test('an intentionally stopped rTorrent stays visible with monitoring off (Codex on #124)', () => {
   const app = readFileSync(new URL('./static/app.js', import.meta.url), 'utf8');
-  assert.match(app, /b\.rtorrent\?\.disabled\) tabs\.push\(\['torrents'/, 'the torrents tab shows for the marker alone');
+  assert.match(app, /pfmView\.torrentsTab\(b\)\) tabs\.push\(\['torrents'/, 'the torrents tab visibility is the pure helper');
+  assert.equal(V.torrentsTab({ qbt: {}, rtorrent: { enabled: false, disabled: true } }), true, 'the torrents tab shows for the marker alone');
   assert.match(app, /stopped on purpose · monitoring off/, 'the overview names the marker when monitoring is off');
 });
 
@@ -132,4 +133,20 @@ test('a client stopped on purpose offers no live controls, and an open add draft
   const app = readFileSync(new URL('./static/app.js', import.meta.url), 'utf8');
   assert.match(app, /if \(avail\.stopped && S\.torAdd && \(S\.torAdd\.client \|\| 'qbt'\) === c\.key && !S\.torAdd\.busy\) S\.torAdd = null/, 'an open draft is dropped when its client stops on purpose');
   assert.match(app, /!pfmView\.clientActionable\(b, client\) \? ` disabled title=/, 'row buttons are disabled with a reason for a stopped client');
+});
+
+test('a removal notice keeps the rTorrent section and the torrents tab reachable with monitoring off (daybreak blue re-review of #124)', () => {
+  const off = { qbt: { enabled: false }, rtorrent: { enabled: false, process_up: false, disabled: false, remove_failed: 'Alpha (43519d14…): disk says no' } };
+  assert.equal(V.showClient(off, 'rtorrent'), true, 'the notice must stay visible and dismissable');
+  assert.equal(V.showClient(off, 'qbt'), false);
+  assert.equal(V.torrentsTab(off), true, 'no client monitored, yet the tab must exist for the notice');
+  const quiet = { qbt: { enabled: false }, rtorrent: { enabled: false, process_up: false, disabled: false, remove_failed: '' } };
+  assert.equal(V.showClient(quiet, 'rtorrent'), false);
+  assert.equal(V.torrentsTab(quiet), false);
+  assert.equal(V.torrentsTab({ qbt: { enabled: false, installed: true }, rtorrent: {} }), true, 'an installed client gets the tab');
+  assert.equal(V.torrentsTab({ qbt: {}, rtorrent: { disabled: true } }), true, 'stopped on purpose is shown there');
+  assert.equal(V.showClient({ qbt: { enabled: true }, rtorrent: { enabled: true, remove_failed: 'x' } }, 'qbt'), true);
+  assert.equal(V.showClient(undefined, 'rtorrent'), false);
+  // With monitoring off the row controls stay off even while the notice shows.
+  assert.equal(V.clientActionable(off, 'rtorrent'), false);
 });

@@ -119,5 +119,25 @@ function clientActionable(b, client) {
   return !clientAvailability(st).stopped;
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable };
+// showClient says whether box b's client `key` gets a section on the
+// torrents tab: when it is monitored, or, for rTorrent, when it carries the
+// recorded outcome of a failed remove-with-data, which must stay visible and
+// dismissable until dismissed even after monitoring was switched off
+// (daybreak blue re-review of #124).
+function showClient(b, key) {
+  const st = key === 'rtorrent' ? b?.rtorrent : b?.qbt;
+  if (!st) return false;
+  if (st.enabled) return true;
+  return key === 'rtorrent' && !!st.remove_failed;
+}
+
+// torrentsTab says whether the box gets a torrents tab at all: a monitored
+// or installed client, rTorrent seen running or stopped on purpose, or a
+// removal notice still to dismiss.
+function torrentsTab(b) {
+  const q = b?.qbt || {}, r = b?.rtorrent || {};
+  return !!(q.enabled || q.installed || r.enabled || r.process_up || r.disabled || r.remove_failed);
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab };
 })();
