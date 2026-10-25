@@ -442,4 +442,58 @@ func TestForwardedStreamCloseIsBounded(t *testing.T) {
 	}
 	px.frozen.Store(false)
 	goroutinesSettle(t, base)
+	// A Read after Close (no I/O in flight when the context ended: the
+	// decoder was busy with buffered bytes) must not enter the channel and
+	// block without a watchdog (fred on PR 123): it fails at once.
+	px2 := newProxy(t, srv)
+	c2 := dialTest(t, px2.addr)
+	conn, err = c2.DialTCP(context.Background(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	px2.frozen.Store(true)
+	start = time.Now()
+	conn.Close() // nothing in flight; the close packet goes into the buffer and no answer comes
+	if _, err := conn.Read(buf); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("a read after Close: %v", err)
+	}
+	if _, err := conn.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("a write after Close: %v", err)
+	}
+	if took := time.Since(start); took > graceWait+time.Second {
+		t.Fatalf("close plus read took %v", took)
+	}
+	px2.frozen.Store(false)
+	// Admission races Close: many readers take turns (an ssh channel has
+	// one reader at a time, as the SCGI round trip uses it) as Close
+	// begins; each either got in (and is ended by the watchdog) or was
+	// refused; none hangs.
+	px3 := newProxy(t, srv)
+	c3 := dialTest(t, px3.addr)
+	conn, err = c3.DialTCP(context.Background(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	px3.frozen.Store(true)
+	var wg sync.WaitGroup
+	var turn sync.Mutex
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			turn.Lock()
+			defer turn.Unlock()
+			conn.Read(make([]byte, 4))
+		}()
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); conn.Close() }() // joined below: the test's cleanup resets graceWait
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(graceWait + 2*time.Second):
+		t.Fatal("reads racing Close were left hanging")
+	}
+	px3.frozen.Store(false)
 }

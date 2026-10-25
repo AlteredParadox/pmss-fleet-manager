@@ -32,7 +32,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -561,37 +560,47 @@ func (c *Client) dial(ctx context.Context, network, addr string) (net.Conn, erro
 
 // boundedConn is a forwarded stream whose Close is guaranteed to end it.
 // An x/crypto/ssh channel supports no deadline (SetDeadline is refused),
-// and its Close is a write to the peer that may block, so a stream whose
-// peer stopped answering would hold a Read forever, and with it the poll,
-// the edit, the removal or the shutdown waiting on that poll (daybreak
-// blue re-review 6 of PR 123). Close therefore gives an in-flight Read or
-// Write, and the channel close itself, graceWait to finish on their own;
-// past that the owning transport is wedged (see wedged), which fails them.
-// The poller reconnects at its next use, as for any other wedged
-// operation.
+// and its Close only sends a close packet: it neither unblocks a pending
+// Read nor stops a later one, so a stream whose peer stopped answering
+// would hold a Read forever, and with it the poll, the edit, the removal
+// or the shutdown waiting on that poll (daybreak blue re-review 6 of PR
+// 123). Close therefore closes admission first, under the same lock the
+// I/O paths take, so no Read or Write enters after it began (they fail
+// with net.ErrClosed; fred on PR 123); then it gives the I/O already in
+// flight, and the channel close itself, graceWait to finish; past that
+// the owning transport is wedged (see wedged), which fails them. The
+// poller reconnects at its next use, as for any other wedged operation.
 type boundedConn struct {
 	net.Conn
-	c        *Client
-	cli      *ssh.Client
-	inflight atomic.Int32
+	c   *Client
+	cli *ssh.Client
+	mu  sync.Mutex
+	// closing is set by Close before anything else; inflight counts the
+	// Reads and Writes admitted and not yet returned; idle is signalled
+	// when the last of them returns after closing was set.
+	closing  bool
+	inflight int
 	idle     chan struct{}
-	once     sync.Once
 }
 
-func (b *boundedConn) Read(p []byte) (int, error) {
-	b.inflight.Add(1)
-	defer b.done()
-	return b.Conn.Read(p)
+// enter admits one I/O operation, or refuses it once Close began.
+func (b *boundedConn) enter() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closing {
+		return false
+	}
+	b.inflight++
+	return true
 }
 
-func (b *boundedConn) Write(p []byte) (int, error) {
-	b.inflight.Add(1)
-	defer b.done()
-	return b.Conn.Write(p)
-}
-
-func (b *boundedConn) done() {
-	if b.inflight.Add(-1) == 0 {
+// leave retires one admitted operation.
+func (b *boundedConn) leave() {
+	b.mu.Lock()
+	b.inflight--
+	last := b.closing && b.inflight == 0
+	b.mu.Unlock()
+	if last {
 		select {
 		case b.idle <- struct{}{}:
 		default:
@@ -599,30 +608,54 @@ func (b *boundedConn) done() {
 	}
 }
 
+func (b *boundedConn) Read(p []byte) (int, error) {
+	if !b.enter() {
+		return 0, net.ErrClosed
+	}
+	defer b.leave()
+	return b.Conn.Read(p)
+}
+
+func (b *boundedConn) Write(p []byte) (int, error) {
+	if !b.enter() {
+		return 0, net.ErrClosed
+	}
+	defer b.leave()
+	return b.Conn.Write(p)
+}
+
 // Close ends the stream: bounded by graceWait, after which the transport
 // is wedged. Idempotent; a second Close returns at once.
 func (b *boundedConn) Close() error {
-	b.once.Do(func() {
-		closed := make(chan struct{})
-		go func() { b.Conn.Close(); close(closed) }()
-		timer := time.NewTimer(graceWait)
-		defer timer.Stop()
-		isClosed := false
-		for {
-			if isClosed && b.inflight.Load() == 0 {
-				return // ended on its own: the transport is fine
+	b.mu.Lock()
+	if b.closing {
+		b.mu.Unlock()
+		return nil
+	}
+	b.closing = true
+	busy := b.inflight > 0
+	b.mu.Unlock()
+	closed := make(chan struct{})
+	go func() { b.Conn.Close(); close(closed) }()
+	timer := time.NewTimer(graceWait)
+	defer timer.Stop()
+	for {
+		select {
+		case <-closed:
+			closed = nil // observed once; never readable again (Codex on PR 123)
+			if !busy {
+				return nil // the close went through and nothing was in flight: the transport is fine
 			}
-			select {
-			case <-closed:
-				isClosed = true
-			case <-b.idle:
-			case <-timer.C:
-				b.c.wedged(b.cli)
-				return
+		case <-b.idle:
+			busy = false
+			if closed == nil {
+				return nil
 			}
+		case <-timer.C:
+			b.c.wedged(b.cli)
+			return nil
 		}
-	})
-	return nil
+	}
 }
 
 // SetDeadline and friends are refused by the channel; they are no-ops
