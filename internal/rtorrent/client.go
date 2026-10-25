@@ -724,7 +724,8 @@ type AddRequest struct {
 // AddResult counts what was accepted. rTorrent answers a load command
 // before it knows whether the torrent is valid, so Added is what it took,
 // not what it will keep. Unlabelled counts loaded torrents whose label
-// could not then be set (rTorrent refused the d.custom1.set).
+// could not be applied or confirmed: rTorrent refused the d.custom1.set,
+// or its answer was lost, in which case the label may well be set.
 type AddResult struct {
 	Added      int
 	Failed     int
@@ -798,20 +799,19 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 		}
 		if e.hash != "" {
 			// A literal XML-RPC string: rTorrent's command parser never sees
-			// it. A fault here (the hash not present yet, which rTorrent
-			// does not do for a synchronous load) leaves the torrent loaded
-			// without its label and is counted.
+			// it. The torrent is loaded whatever happens here: a fault (the
+			// hash not present yet, which rTorrent does not do for a
+			// synchronous load) or a lost answer leaves it loaded with its
+			// label unconfirmed, which is counted, never reported as a
+			// failed add (fred on PR 122). A magnet keeps owing its label
+			// either way: rTorrent rebuilds the torrent when the metadata
+			// arrives and drops custom1, so the label is set again then
+			// (reconciled by Torrents), which also settles an unconfirmed
+			// placeholder label.
 			if err := c.setLabel(ctx, e.hash, label); err != nil {
-				if isFault(err) {
-					res.Unlabelled++
-					continue
-				}
-				return res, err
+				res.Unlabelled++
 			}
 			if e.magnet {
-				// Set on the metadata placeholder only: rTorrent rebuilds the
-				// torrent when the metadata arrives and drops custom1, so the
-				// label is owed again then (reconciled by Torrents).
 				c.remember(e.hash, label)
 				res.Deferred++
 			}

@@ -1683,7 +1683,8 @@ func TestLabelSetterContract(t *testing.T) {
 	if err != nil || rows[0].Label != "tv" || len(c.Pending()) != 0 {
 		t.Fatalf("reconcile: %v %+v pending %d", err, rows, len(c.Pending()))
 	}
-	// Wrong answers are refused (and a magnet then owes nothing: the add failed).
+	// Wrong answers are refused by the setter; the add itself still
+	// succeeded (the torrent is loaded) and reports the label unconfirmed.
 	for _, m := range []string{"zero", "other"} {
 		mode = m
 		f.on(func(m2 string, p []string) string {
@@ -1696,8 +1697,11 @@ func TestLabelSetterContract(t *testing.T) {
 			return resp(i8(0))
 		})
 		d := New(f.dial)
-		if _, err := d.Add(ctx, AddRequest{Files: [][]byte{[]byte(torrent)}, Label: "tv"}); !errors.Is(err, ErrUnexpected) {
-			t.Fatalf("%s: %v", m, err)
+		if err := d.setLabel(ctx, hashA, "tv"); !errors.Is(err, ErrUnexpected) {
+			t.Fatalf("%s: setter contract: %v", m, err)
+		}
+		if res, err := d.Add(ctx, AddRequest{Files: [][]byte{[]byte(torrent)}, Label: "tv"}); err != nil || res.Added != 1 || res.Unlabelled != 1 {
+			t.Fatalf("%s: added with the label unconfirmed, not failed: %+v %v", m, res, err)
 		}
 	}
 }
@@ -1830,5 +1834,40 @@ func TestRetire(t *testing.T) {
 	close(gate)
 	if err := <-addDone; err != nil {
 		t.Fatalf("the operation in flight completes: %v", err)
+	}
+}
+
+// fred on PR 122: a torrent whose load was acknowledged but whose label
+// setter lost its answer is reported as added with the label unconfirmed
+// (Unlabelled), never as a failed add; a magnet in that state still owes
+// its label and gets it on the next listing.
+func TestLostLabelAnswerIsAddedUnlabelled(t *testing.T) {
+	f := newFake(t)
+	torrent := "d8:announce9:http://x/4:infod4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee"
+	f.on(func(m string, p []string) string {
+		if m == "d.custom1.set" {
+			return "" // the peer never answers: the call times out
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	c.timeout = 150 * time.Millisecond
+	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Files: [][]byte{[]byte(torrent)}, Label: "tv"})
+	if err != nil || res.Added != 2 || res.Failed != 0 || res.Unlabelled != 2 || res.Deferred != 1 {
+		t.Fatalf("a lost setter answer is a label warning, not a failed add: %+v %v", res, err)
+	}
+	if len(c.Pending()) != 1 {
+		t.Fatalf("the magnet still owes its label: %d", len(c.Pending()))
+	}
+	// A genuine load failure is still a failure.
+	f.on(func(m string, p []string) string {
+		if strings.HasPrefix(m, "load.") {
+			return `<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>-501</i4></value></member><member><name>faultString</name><value><string>Could not create download</string></value></member></struct></value></fault></methodResponse>`
+		}
+		return resp(str(p[len(p)-1]))
+	})
+	res, err = c.Add(context.Background(), AddRequest{Files: [][]byte{[]byte(torrent)}, Label: "tv"})
+	if err == nil || res.Added != 0 || res.Failed != 1 {
+		t.Fatalf("a refused load stays a failure: %+v %v", res, err)
 	}
 }
