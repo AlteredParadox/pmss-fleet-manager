@@ -359,7 +359,10 @@ box itself resolved the path through symlinks and found it strictly inside
 rTorrent's download root, which must itself be strictly inside the home.
 The removal and the deletion then run under the dashboard's own deadlines:
 closing the browser, editing the box or stopping the dashboard does not cut
-them (a stop waits for an admitted deletion to finish). Two limits remain.
+them (a stop waits for an admitted deletion to finish). If the deletion
+fails after your request has already ended, the outcome is not lost: it is
+logged, shown under rTorrent on the box's torrents tab until you dismiss
+it, and raised as an alert. Two limits remain.
 A hard kill of the dashboard process after the removal and before the
 deletion has completed leaves the torrent gone and all or part of its files
 behind; those files are visible on the box and can be cleaned up by hand.

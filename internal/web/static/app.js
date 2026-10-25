@@ -877,8 +877,12 @@ function clientSection(b, c, f, grouped, first) {
   const avail = pfmView.clientAvailability(q); // stopped on purpose is expected: no warning, nothing to add to
   if (avail.stopped && S.torAdd && (S.torAdd.client || 'qbt') === c.key && !S.torAdd.busy) S.torAdd = null; // an open draft for a client that just stopped is dropped
   const addOpen = !avail.stopped && S.torAdd && (S.torAdd.client || 'qbt') === c.key;
+  // A remove-with-data that failed after its request had ended: the job
+  // recorded it on the box (it also raised an alert); shown here until
+  // dismissed, since a later success says nothing about these files.
+  const removeFailed = c.key === 'rtorrent' && q.remove_failed ? `<div class="meta"><span class="bad" title="${q.remove_failed_at ? esc(fmtAgo(q.remove_failed_at)) + '. ' : ''}The torrent was removed from rTorrent but its files were not (all) deleted; check the download folder on the box.">remove with files failed: ${esc(q.remove_failed)}</span> <button class="small ghost" data-act="rt:dismiss-failure" title="remove this notice (the alert resolves with it)">dismiss</button></div>` : '';
   return `<div class="thead-tools"${grouped && !first ? ' style="border-top:1px solid var(--line)"' : ''}>
-      <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span></div>
+      <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span>${removeFailed}</div>
       <div class="actions">
         ${first ? `<input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">` : ''}
         ${c.key === 'qbt' ? `<button class="small" data-act="qbt:pause" data-confirm="Pause all torrents in qBittorrent on ${esc(b.name)}?">pause all</button>
@@ -1920,6 +1924,7 @@ async function runAction(a, act) {
   if (a === 'refresh-all' || a === 'refresh' || a === 'rescan-logs' || a === 'du' || a === 'remove') await boxAction(a);
   else if (a.startsWith('qbt:')) await qbtAction(a, act);
   else if (a.startsWith('tor:')) await torrentAction(a, act);
+  else if (a === 'rt:dismiss-failure') { act.disabled = true; await api('POST', `${BASE}/api/boxes/${S.selId}/rtorrent/remove-failure/dismiss`); toast('notice dismissed', 'ok'); await loadDetail(S.selId); }
   else if (a.startsWith('tor-add:')) await torAddAction(a, act);
   else if (a.startsWith('disc:')) await discoveryAction(a, act);
   else if (a.startsWith('ctr:')) await containerAction(a, act);
