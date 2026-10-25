@@ -1373,3 +1373,42 @@ func TestPlaceholderLabelEdits(t *testing.T) {
 		t.Fatalf("a cleared label must stay clear: %q", label)
 	}
 }
+
+// Removing a labelled magnet before its label settled retires the owed
+// label: a later add of the same hash without a label stays unlabelled
+// (Codex on PR 122).
+func TestRemoveRetiresPendingLabel(t *testing.T) {
+	f := newFake(t)
+	var sets []string
+	f.on(func(m string, p []string) string {
+		if m == "d.custom1.set" {
+			sets = append(sets, p[1])
+		}
+		if m == "d.multicall2" {
+			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	ctx := context.Background()
+	if _, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Action(ctx, ActionRemove, hashA); err != nil || len(c.Pending()) != 0 {
+		t.Fatalf("%v pending %d", err, len(c.Pending()))
+	}
+	if _, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Torrents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(sets, ",") != "old" {
+		t.Fatalf("the re-added torrent inherited a label: %v", sets)
+	}
+	// Stop and start do not touch the owed label.
+	c.remember(hashA, "tv")
+	if err := c.Action(ctx, ActionStop, hashA); err != nil || len(c.Pending()) != 1 {
+		t.Fatal("stop must keep the owed label")
+	}
+}

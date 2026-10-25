@@ -591,6 +591,13 @@ func (c *Client) Action(ctx context.Context, action, hash string) error {
 			return err
 		}
 	}
+	if action == ActionRemove {
+		// A removed magnet owes nothing any more: a later add of the same
+		// hash without a label must not inherit the old one (Codex on PR 122).
+		c.pendMu.Lock()
+		delete(c.pending, hash)
+		c.pendMu.Unlock()
+	}
 	return nil
 }
 
