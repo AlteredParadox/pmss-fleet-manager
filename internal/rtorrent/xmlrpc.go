@@ -1,3 +1,19 @@
+// pmss-fleet-manager — a single-pane dashboard for Pulsed Media seedboxes.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // Package rtorrent talks to one rTorrent instance over its SCGI XML-RPC
 // endpoint, reached through a caller-supplied dialer (the SSH channel to
 // the tenant's ~/.rtorrent.socket on a PMSS box, a TCP loopback port on
@@ -10,12 +26,14 @@
 package rtorrent
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -227,55 +245,7 @@ func (dec *decoder) valueAt(depth int) (Value, error) {
 	if err := dec.expectStart("value"); err != nil {
 		return Value{}, err
 	}
-	// A <value> may hold a typed element or bare text (an untyped string).
-	tok, err := dec.token()
-	if err != nil {
-		return Value{}, err
-	}
-	var v Value
-	switch t := tok.(type) {
-	case xml.CharData:
-		text := string(t)
-		// Bare text: either an untyped string ending at </value>, or
-		// whitespace before a typed element.
-		nxt, err := dec.token()
-		if err != nil {
-			return Value{}, err
-		}
-		switch n := nxt.(type) {
-		case xml.EndElement:
-			if n.Name.Local != "value" {
-				return Value{}, ErrMalformed
-			}
-			return Value{Kind: KindString, Str: clip(text, maxString)}, nil
-		case xml.StartElement:
-			if strings.TrimSpace(text) != "" {
-				return Value{}, ErrMalformed
-			}
-			v, err = dec.typed(n.Name.Local, depth)
-			if err != nil {
-				return Value{}, err
-			}
-		default:
-			return Value{}, ErrMalformed
-		}
-	case xml.StartElement:
-		v, err = dec.typed(t.Name.Local, depth)
-		if err != nil {
-			return Value{}, err
-		}
-	case xml.EndElement:
-		if t.Name.Local != "value" {
-			return Value{}, ErrMalformed
-		}
-		return Value{Kind: KindString}, nil
-	default:
-		return Value{}, ErrMalformed
-	}
-	if err := dec.expectEnd("value"); err != nil {
-		return Value{}, err
-	}
-	return v, nil
+	return dec.valueBody(depth)
 }
 
 // typed decodes the body of a typed element whose start was just read.
@@ -483,7 +453,14 @@ func (dec *decoder) text(name string) (string, error) {
 		}
 		switch t := tok.(type) {
 		case xml.CharData:
-			if b.Len() < maxString*4 { // bytes; clipped to runes by the caller
+			// One token may be the whole string (encoding/xml returns a run
+			// of character data as a single token), so each write is bounded
+			// by the room left, not just gated on it: a 16 MiB name would
+			// otherwise sit in the builder behind a 400-rune clip.
+			if room := maxString*4 - b.Len(); room > 0 { // bytes; clipped to runes by the caller
+				if len(t) > room {
+					t = t[:room]
+				}
 				b.Write(t)
 			}
 		case xml.EndElement:
@@ -506,11 +483,15 @@ func (dec *decoder) token() (xml.Token, error) {
 			if errors.Is(err, io.EOF) {
 				return nil, ErrMalformed
 			}
-			var se *xml.SyntaxError
-			if errors.As(err, &se) {
-				return nil, ErrMalformed
+			// Only the socket's own errors pass through (they are
+			// attributed to the deadline by the caller); everything the
+			// decoder itself objects to, a syntax error or a charset the
+			// CharsetReader refused, is a malformed response.
+			var ne net.Error
+			if errors.As(err, &ne) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return nil, err
 			}
-			return nil, err // a read error from the socket
+			return nil, ErrMalformed
 		}
 		switch tok.(type) {
 		case xml.Comment, xml.ProcInst, xml.Directive:
@@ -594,7 +575,7 @@ func clip(s string, n int) string {
 		cut += w
 		runes++
 	}
-	return s[:cut]
+	return strings.Clone(s[:cut]) // its own allocation: the rest of s is garbage
 }
 
 // utf8Buffered replaces invalid UTF-8 with U+FFFD on the way in. rTorrent

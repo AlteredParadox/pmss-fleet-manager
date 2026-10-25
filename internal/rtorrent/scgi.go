@@ -1,3 +1,19 @@
+// pmss-fleet-manager — a single-pane dashboard for Pulsed Media seedboxes.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 package rtorrent
 
 import (
@@ -42,15 +58,17 @@ func scgiRequest(body []byte) []byte {
 
 // roundTrip sends one framed request over a fresh connection (rTorrent
 // answers exactly one request per connection and closes) and returns a
-// reader positioned at the response body, capped at maxResponse bytes.
-// The connection is closed when ctx ends or when the caller is done with
-// the returned closer.
-func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes int64, body []byte) (io.Reader, func(), error) {
+// reader positioned at the response body, capped at maxBytes, with the
+// context the round trip runs under (the caller's, bounded by timeout) so
+// a decode error can be attributed to that deadline. The connection is
+// closed when the context ends or when the caller calls the returned
+// closer.
+func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes int64, body []byte) (io.Reader, context.Context, func(), error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	conn, err := dial(ctx)
 	if err != nil {
 		cancel()
-		return nil, nil, err
+		return nil, nil, nil, deadlineErr(ctx, err)
 	}
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
@@ -62,8 +80,9 @@ func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes
 		cancel()
 	}
 	if _, err := conn.Write(scgiRequest(body)); err != nil {
+		err = deadlineErr(ctx, err)
 		done()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// rTorrent reads to CONTENT_LENGTH, so no half-close is needed; some
 	// servers wait for one, and a unix socket supports it.
@@ -74,9 +93,9 @@ func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes
 	if err := skipHeaders(br); err != nil {
 		err = deadlineErr(ctx, err)
 		done()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return br, done, nil
+	return br, ctx, done, nil
 }
 
 // skipHeaders consumes the CGI-style header block ("Status: 200 OK",

@@ -1,3 +1,19 @@
+// pmss-fleet-manager — a single-pane dashboard for Pulsed Media seedboxes.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 package rtorrent
 
 import (
@@ -609,6 +625,162 @@ func TestPathLookups(t *testing.T) {
 		t.Fatal(dd, err)
 	}
 	if _, err := c.BasePath(context.Background(), "nope"); !errors.Is(err, ErrBadHash) {
+		t.Fatal(err)
+	}
+}
+
+func TestDecodeKinds(t *testing.T) {
+	f := newFake(t)
+	cases := []struct {
+		body string
+		want func(Value) bool
+	}{
+		{resp(`<double>1.5</double>`), func(v Value) bool { return v.Kind == KindFloat && v.Float == 1.5 }},
+		{resp(`<boolean>1</boolean>`), func(v Value) bool { return v.Kind == KindBool && v.Bool }},
+		{resp(`<boolean>false</boolean>`), func(v Value) bool { return v.Kind == KindBool && !v.Bool }},
+		{resp("<base64>AA\n EC</base64>"), func(v Value) bool { return v.Kind == KindBytes && string(v.Bytes) == "\x00\x01\x02" }},
+		{resp(`<nil/>`), func(v Value) bool { return v.Kind == KindNil }},
+		{resp(`<ex:i8>-7</ex:i8>`), func(v Value) bool { return v.Kind == KindInt && v.Int == -7 }},
+		{resp(`untyped text`), func(v Value) bool { return v.Kind == KindString && v.Str == "untyped text" }},
+		{resp(``), func(v Value) bool { return v.Kind == KindString && v.Str == "" }},
+		{resp(" \n <i4>3</i4> \n "), func(v Value) bool { return v.Kind == KindInt && v.Int == 3 }},
+		{resp(`<struct> <member><name>a</name><value><i8>1</i8></value></member> <member><name>b</name><value><struct><member><name>c</name><value>x</value></member></struct></value></member></struct>`),
+			func(v Value) bool {
+				return v.Kind == KindStruct && v.Struct["a"].Int == 1 && v.Struct["b"].Struct["c"].Str == "x"
+			}},
+		{resp(`<array><data> <value><i8>1</i8></value> <value><string>s</string></value> </data></array>`),
+			func(v Value) bool { return v.Kind == KindArray && len(v.Array) == 2 && v.Array[1].Str == "s" }},
+		{`<?xml version="1.0"?><!-- c --><?pi x?><methodResponse><params><param><value><i8>9</i8></value></param></params></methodResponse>`,
+			func(v Value) bool { return v.Int == 9 }},
+	}
+	c := New(f.dial)
+	for _, tc := range cases {
+		f.on(func(m string, p []string) string { return tc.body })
+		v, err := c.call(context.Background(), 0, "x", "")
+		if err != nil || !tc.want(v) {
+			t.Errorf("%s: %+v %v", tc.body[:min(60, len(tc.body))], v, err)
+		}
+	}
+	for _, body := range []string{
+		resp(`<boolean>yes</boolean>`), resp(`<double>NaN</double>`), resp(`<double>x</double>`), resp(`<base64>!!</base64>`),
+		resp(`<unknown>1</unknown>`), resp(`text<i8>1</i8>`), resp(`<array><data>junk</data></array>`), resp(`<array><data><i8>1</i8></data></array>`),
+		resp(`<array><i8>1</i8></array>`), resp(`<struct><value/></struct>`), resp(`<struct><member><value/></member></struct>`),
+		resp(`<struct>junk</struct>`), resp(`<i8>1</i8><i8>2</i8>`), resp(`<string><b>x</b></string>`),
+		`<?xml version="1.0" encoding="ISO-8859-1"?><methodResponse><params><param><value>x</value></param></params></methodResponse>`,
+		`<?xml version="1.0"?><methodResponse><fault><value><string>not a struct</string></value></fault></methodResponse>`,
+		`<?xml version="1.0"?><methodResponse><other/></methodResponse>`,
+		`<?xml version="1.0"?><methodResponse>text<params/></methodResponse>`,
+	} {
+		f.on(func(m string, p []string) string { return body })
+		if _, err := c.call(context.Background(), 0, "x", ""); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v", body[:min(70, len(body))], err)
+		}
+	}
+	// A struct keeps at most 256 members; the rest are read and dropped.
+	var b strings.Builder
+	b.WriteString("<struct>")
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(&b, "<member><name>k%d</name><value><i8>%d</i8></value></member>", i, i)
+	}
+	b.WriteString("</struct>")
+	f.on(func(m string, p []string) string { return resp(b.String()) })
+	v, err := c.call(context.Background(), 0, "x", "")
+	if err != nil || len(v.Struct) != 256 {
+		t.Fatalf("members %d %v", len(v.Struct), err)
+	}
+	if (&Fault{Code: 1, String: "x"}).Error() != "rtorrent fault 1: x" {
+		t.Fatal("fault text")
+	}
+}
+
+func TestOneHugeTokenIsBounded(t *testing.T) {
+	// encoding/xml hands a run of character data over as one token; the
+	// retained string must be the clip, not a slice of the whole token.
+	f := newFake(t)
+	huge := strings.Repeat("n", 2<<20)
+	f.on(func(m string, p []string) string { return resp(str(huge)) })
+	v, err := New(f.dial).Version(context.Background())
+	if err != nil || len(v) != maxVersion {
+		t.Fatalf("%d %v", len(v), err)
+	}
+	if got := clip(huge, 10); len(got) != 10 || cap([]byte(got)) > 64 {
+		t.Fatalf("clip must not pin the source: len %d cap %d", len(got), cap([]byte(got)))
+	}
+}
+
+func TestStalledBodyIsADeadline(t *testing.T) {
+	// Headers and the start of the body arrive, then nothing: the client's
+	// own deadline must surface as such, whichever of the context timer and
+	// the socket deadline fires first (Codex on PR 122).
+	f := newFake(t)
+	f.onRaw(func(conn net.Conn) {
+		io.WriteString(conn, "Status: 200 OK\r\n\r\n<?xml version=\"1.0\"?><methodResponse><params><param><value><string>")
+		time.Sleep(2 * time.Second)
+	})
+	c := New(f.dial)
+	c.timeout = 120 * time.Millisecond
+	for i := 0; i < 5; i++ {
+		if _, err := c.Version(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	// A dial that never completes is a deadline too.
+	slow := New(func(ctx context.Context) (net.Conn, error) { <-ctx.Done(); return nil, ctx.Err() })
+	slow.timeout = 50 * time.Millisecond
+	if _, err := slow.Version(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+}
+
+func TestEncodeNested(t *testing.T) {
+	b, err := encodeCall("system.multicall", []any{map[string]any{"methodName": "a", "params": []any{"", int64(2), true, false}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `<params><param><value><array><data><value><struct><member><name>methodName</name><value><string>a</string></value></member><member><name>params</name><value><array><data><value><string></string></value><value><i8>2</i8></value><value><boolean>1</boolean></value><value><boolean>0</boolean></value></data></array></value></member></struct></value></data></array></value></param></params>`
+	if !strings.Contains(string(b), want) {
+		t.Fatalf("%s", b)
+	}
+	if _, err := encodeCall("x", []any{1.5}); err == nil {
+		t.Fatal("nested float")
+	}
+	if _, err := encodeCall("x", map[string]any{"methodName": 1.5}); err == nil {
+		t.Fatal("struct float")
+	}
+}
+
+func TestRowValuesClamped(t *testing.T) {
+	f := newFake(t)
+	neg := "<i8>-5</i8>"
+	f.on(func(m string, p []string) string {
+		return resp(`<array><data>` + torrentRow(hashA, "n", neg, neg, neg, neg, neg, i8(0), i8(0), i8(0), neg, i8(0), str(""), str(""), neg, neg, neg, neg, neg, i8(0)) + `</data></array>`)
+	})
+	ts, err := New(f.dial).Torrents(context.Background())
+	if err != nil || len(ts) != 1 {
+		t.Fatal(err)
+	}
+	r := ts[0]
+	if r.Size != 0 || r.Completed != 0 || r.DownRate != 0 || r.UpRate != 0 || r.Ratio != 0 || r.Hashing != 0 || r.Finished != 0 || r.Peers != 0 || r.Seeds != 0 || r.UpTotal != 0 || r.DownTotal != 0 {
+		t.Fatalf("%+v", r)
+	}
+	if r.State() != "closed" || r.String() != hashA+` "n"` {
+		t.Fatal(r.State(), r.String())
+	}
+	if (Torrent{Open: true}).State() != "stopped" || (Torrent{Hashing: 2}).State() != "checking" {
+		t.Fatal("state")
+	}
+	f.on(func(m string, p []string) string { return resp(i8(1)) })
+	c := New(f.dial)
+	if _, err := c.BasePath(context.Background(), hashA); !errors.Is(err, ErrUnexpected) {
+		t.Fatal(err)
+	}
+	if _, err := c.DefaultDirectory(context.Background()); !errors.Is(err, ErrUnexpected) {
+		t.Fatal(err)
+	}
+	if _, err := c.Version(context.Background()); !errors.Is(err, ErrUnexpected) {
+		t.Fatal(err)
+	}
+	if _, err := c.Stats(context.Background()); !errors.Is(err, ErrUnexpected) {
 		t.Fatal(err)
 	}
 }
