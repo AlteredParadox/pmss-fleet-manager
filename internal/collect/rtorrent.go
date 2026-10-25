@@ -140,7 +140,10 @@ func (p *poller) onRetired(ctx context.Context, cli *rtorrent.Client, fn func(*r
 	}
 	cur, _, _, rerr := p.rtReady(ctx)
 	if rerr != nil {
-		return rerr
+		// Nothing was sent on either attempt: the caller's own error (its
+		// code for the API) still carries the unsent mark, so an erase
+		// intent recorded ahead of the call is withdrawn (Codex on PR 123).
+		return fmt.Errorf("%w (%w)", rerr, rtorrent.ErrNotSent)
 	}
 	return fn(cur)
 }
@@ -664,6 +667,11 @@ func ValidRtAction(a string) bool {
 // up and, for a loopback endpoint, the port verified as this account's
 // right now.
 func (p *poller) rtReady(ctx context.Context) (*rtorrent.Client, *sshx.Client, BoxState, error) {
+	if p.readyHook != nil {
+		if err := p.readyHook(); err != nil {
+			return nil, nil, BoxState{}, err
+		}
+	}
 	if !p.box.RtEnabled {
 		return nil, nil, BoxState{}, errors.New("rTorrent is not enabled for this box")
 	}

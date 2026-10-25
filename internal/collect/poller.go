@@ -95,8 +95,10 @@ type poller struct {
 	// jobTimeout overrides rtRemoveSetupTimeout in tests.
 	jobTimeout time.Duration
 	// beforeRecord, when set (tests), runs between an add's remote work and
-	// its persistence of the owed labels.
+	// its persistence of the owed labels; readyHook, when set, runs first
+	// in rtReady and can fail it.
 	beforeRecord func()
+	readyHook    func() error
 	dialRt       func(ep string) rtorrent.Dialer
 	// dialDetached is the test hook for the destructive phase's own
 	// transport (see detachedTransport).

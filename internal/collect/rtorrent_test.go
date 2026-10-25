@@ -2653,7 +2653,31 @@ func TestUnsentEraseWithdrawsTombstone(t *testing.T) {
 	if _, err := m.st.GetCache(context.Background(), p.box.ID, rtTombsCacheKind, &row); err != nil || len(row.Tombs) != 1 || row.Tombs[0].Hash != rtHashB || !row.Tombs[0].Settled {
 		t.Fatalf("durable: %v %+v", err, row)
 	}
-	// A live magnet owed a label keeps it through all this.
+	// The client was retired by an edit between resolving it and the call,
+	// and resolving the replacement fails locally: nothing was sent on
+	// either attempt, the API error keeps its code, and the intent is
+	// withdrawn all the same (Codex on PR 123).
+	p.dialRt = f.dialer
+	retired, _ := p.rtClient(context.Background(), nil, "unix:/x")
+	retired.Retire(context.Background())
+	calls := 0
+	p.readyHook = func() error {
+		calls++
+		if calls == 2 {
+			return ErrNotReady
+		}
+		return nil
+	}
+	if err := p.rtTorrentAction(context.Background(), rtHashA, rtorrent.ActionRemove); !errors.Is(err, ErrNotReady) || !rtorrent.NotSent(err) {
+		t.Fatalf("retired then unresolvable: %v", err)
+	}
+	p.readyHook = nil
+	if _, had := m.rtTombSnapshot(p.box.ID, rtHashA); had {
+		t.Fatal("an erase that could not be sent on either attempt must leave no record")
+	}
+	// A live magnet owed a label keeps it through all this (on a fresh
+	// client: the one above was retired by hand).
+	p.closeConns()
 	cli, _ := p.rtClient(context.Background(), nil, "unix:/x")
 	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "live", Until: time.Now().Add(time.Hour)}})
 	p.settleRtTombs(context.Background(), true)
