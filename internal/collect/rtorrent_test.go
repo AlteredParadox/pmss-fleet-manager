@@ -2534,3 +2534,76 @@ func TestSettleWaitsForDurableLabelRow(t *testing.T) {
 		t.Fatal("the erased torrent's label reached its unlabelled re-add")
 	}
 }
+
+// TestFailedSettlementIsRetried (fred on PR 123): a settlement whose
+// durable write fails stays open in memory and on disk, so the next poll
+// retries it; while it is open an add on the box is refused rather than
+// acknowledged over records it could not persist; once writes work again
+// the settle succeeds, a labelled magnet of the same hash is added, its new
+// pending label is persisted, and a restart restores it.
+func TestFailedSettlementIsRetried(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, snap := rtFixture(t, f)
+	m := p.m
+	readyRt(t, p, "unix:/x")
+	cli, _ := p.rtClient(context.Background(), nil, "unix:/x")
+	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
+	p.recordRtLabels(context.Background())
+	if err := m.rtTombstone(p.box.ID, p.generation(), rtHashA); err != nil {
+		t.Fatal(err)
+	}
+	// Storage fails for the tombstone write: the label row is cleaned, the
+	// settlement is not durable, the tombstone stays open everywhere.
+	var failing atomic.Bool
+	failing.Store(true)
+	m.cacheFault = func(kind string) error {
+		if kind == rtTombsCacheKind && failing.Load() {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	p.settleRtTombs(context.Background(), true)
+	if got := m.restoredRtLabels(p.box); len(got) != 0 {
+		t.Fatalf("label row: %+v", got)
+	}
+	if n := len(m.rtTombList(p.box.ID, p.generation())); n != 1 {
+		t.Fatalf("a settlement that could not be written must stay open: %d", n)
+	}
+	var row rtTombsCache
+	if _, err := m.st.GetCache(context.Background(), p.box.ID, rtTombsCacheKind, &row); err != nil || len(row.Tombs) != 1 || row.Tombs[0].Settled {
+		t.Fatalf("durable tombstone: %v %+v", err, row)
+	}
+	// An add on the box is refused while a tombstone cannot be settled.
+	if _, err := p.rtAddTorrents(context.Background(), qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Category: "new"}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("add over an unsettled tombstone: %v", err)
+	}
+	if n := countCalls(f, "load.start"); n != 0 {
+		t.Fatalf("the add must not reach rTorrent: %d loads", n)
+	}
+	// Storage recovers: the same add settles the tombstone, loads the magnet,
+	// remembers and persists its new label; a restart restores that label.
+	failing.Store(false)
+	res, err := p.rtAddTorrents(context.Background(), qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Category: "new"})
+	if err != nil || res.Added != 1 || res.Deferred != 1 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if n := len(m.rtTombList(p.box.ID, p.generation())); n != 0 {
+		t.Fatalf("settled once writes work: %d open", n)
+	}
+	if got := m.restoredRtLabels(p.box); len(got) != 1 || got[0].Label != "new" {
+		t.Fatalf("the new label must be persisted: %+v", got)
+	}
+	m2 := New(m.st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m2.restoreRtTombs(p.box)
+	kept := 0
+	for _, l := range m2.restoredRtLabels(p.box) {
+		if !m2.rtTombed(p.box.ID, boxGeneration(p.box), l.Hash) && l.Label == "new" {
+			kept++
+		}
+	}
+	if kept != 1 {
+		t.Fatal("a restart must restore the new label, not filter it as erased")
+	}
+	_ = snap
+}

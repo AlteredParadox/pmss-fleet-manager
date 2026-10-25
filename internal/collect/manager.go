@@ -95,6 +95,8 @@ type Manager struct {
 	// lateWG counts late handoff adoptions (poller.adoptLate) so Stop can
 	// wait for them before its final label flush.
 	lateWG sync.WaitGroup
+	// cacheFault, when set (tests), fails a cache write of the given kind.
+	cacheFault func(kind string) error
 	// watchMu serialises SetAppWatch's read-modify-write of a box's watch
 	// list: two toggles at once would otherwise each save a list missing
 	// the other's change.
@@ -361,17 +363,21 @@ func (m *Manager) rtTombstone(id int64, gen, hash string) error {
 
 // rtSettleTomb marks the tombstone for hash settled: its label is known
 // gone from the current owner. The erase stays on record (rtErasedSince).
+// Durably first, then in memory: a settlement whose write failed stays open
+// in memory too, so the next poll retries it (fred on PR 123); only a
+// durable settlement can take the hash off the open list.
 func (m *Manager) rtSettleTomb(id int64, hash string) {
-	m.leaseMu.Lock()
 	hash = strings.ToUpper(hash)
+	if err := m.saveRtTombs(id, hash); err != nil {
+		m.log.Warn("cache rtorrent tombstones; settlement retried by the next poll", "box", id, "err", err)
+		return
+	}
+	m.leaseMu.Lock()
 	if t, ok := m.rtTombs[id][hash]; ok {
 		t.settled = true
 		m.rtTombs[id][hash] = t
 	}
 	m.leaseMu.Unlock()
-	if err := m.saveRtTombs(id); err != nil {
-		m.log.Warn("cache rtorrent tombstones", "box", id, "err", err)
-	}
 }
 
 // rtTombsCacheKind is the box_cache kind holding a box's erase tombstones
@@ -393,17 +399,30 @@ type rtTombRec struct {
 	Settled    bool      `json:"settled,omitempty"`
 }
 
-// saveRtTombs writes the box's tombstones. Under the box's label guard, so
-// two writers' snapshots reach the store in the order they were taken; the
-// snapshot itself is taken under leaseMu and the write under neither.
-func (m *Manager) saveRtTombs(id int64) error {
+// saveRtTombs writes the box's tombstones, with those named in settling
+// written as settled (the memory copy follows once the write succeeded).
+// Under the box's label guard, so two writers' snapshots reach the store in
+// the order they were taken; the snapshot itself is taken under leaseMu and
+// the write under neither. Tests inject a write failure through cacheFault.
+func (m *Manager) saveRtTombs(id int64, settling ...string) error {
 	g := m.labelGuard(id)
 	g.Lock()
 	defer g.Unlock()
+	if m.cacheFault != nil {
+		if err := m.cacheFault(rtTombsCacheKind); err != nil {
+			return err
+		}
+	}
 	m.leaseMu.Lock()
 	c := rtTombsCache{Tombs: make([]rtTombRec, 0, len(m.rtTombs[id]))}
 	for h, t := range m.rtTombs[id] {
-		c.Tombs = append(c.Tombs, rtTombRec{Hash: h, Generation: t.gen, At: t.at, Settled: t.settled})
+		settled := t.settled
+		for _, s := range settling {
+			if s == h {
+				settled = true
+			}
+		}
+		c.Tombs = append(c.Tombs, rtTombRec{Hash: h, Generation: t.gen, At: t.at, Settled: settled})
 	}
 	m.leaseMu.Unlock()
 	sort.Slice(c.Tombs, func(i, j int) bool { return c.Tombs[i].Hash < c.Tombs[j].Hash })

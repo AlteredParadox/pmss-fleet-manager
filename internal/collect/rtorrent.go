@@ -1058,8 +1058,15 @@ func (p *poller) rtAddTorrents(ctx context.Context, req qbt.AddRequest) (rtorren
 	}
 	defer release()
 	// Tombstoned hashes are settled first, under the lease: a re-add of an
-	// erased hash gets the label it asks for now, not the one it had.
+	// erased hash gets the label it asks for now, not the one it had. A
+	// settlement that could not be made durable leaves the tombstone open,
+	// and an add over an open tombstone would persist nothing for that hash
+	// (recordRtLabels skips tombstoned hashes) while answering OK: refused
+	// instead, until the records can be written again (fred on PR 123).
 	p.settleRtTombs(actx, true)
+	if open := p.m.rtTombList(p.box.ID, p.generation()); len(open) > 0 {
+		return rtorrent.AddResult{}, fmt.Errorf("%w: a previous removal on this box is not yet settled in the dashboard's records (its database could not be written); nothing was added, try again shortly", ErrNotReady)
+	}
 	r := rtorrent.AddRequest{URLs: req.URLs, Label: req.Category, Stopped: req.Stopped}
 	for _, f := range req.Files {
 		r.Files = append(r.Files, f.Data)
