@@ -1452,3 +1452,42 @@ func TestRecordRtLabelsRace(t *testing.T) {
 		}
 	}
 }
+
+// TestForgetRtLabelSurvivesReconnect (Codex on PR 123): while Forget waits
+// for the client's operation token, a reconnect copies the still-pending
+// label into the saved set and a replacement client restores it; the
+// forget must clear that copy and the new client too.
+func TestForgetRtLabelSurvivesReconnect(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	c1, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	c1.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
+	// Hold c1's operation token: the forget on it has to wait.
+	hold, err := c1.Hold(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { p.forgetRtLabel(context.Background(), rtHashA, false); close(done) }()
+	time.Sleep(50 * time.Millisecond) // the forget is waiting on c1
+	// A reconnect: the label moves from c1 into the saved copy, and a new
+	// client inherits it.
+	p.closeConns()
+	c2, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	if len(c2.Pending()) != 1 {
+		t.Fatal("fixture: the replacement should have inherited the label")
+	}
+	hold()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("forget did not finish")
+	}
+	p.mu.Lock()
+	n := len(p.rtLabels)
+	p.mu.Unlock()
+	if n != 0 || len(c2.Pending()) != 0 {
+		t.Fatalf("label survived the reconnect: saved %d, new client %d", n, len(c2.Pending()))
+	}
+}

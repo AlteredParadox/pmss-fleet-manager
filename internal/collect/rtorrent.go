@@ -189,23 +189,35 @@ func (p *poller) dropRtLocked() {
 // additions made since).
 func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
 	hash = strings.ToUpper(hash)
-	p.mu.Lock()
-	cli := p.rt
-	if len(p.rtLabels) > 0 {
-		kept := make([]rtorrent.PendingLabel, 0, len(p.rtLabels)) // a new slice: a snapshot in flight keeps its own
-		for _, l := range p.rtLabels {
-			if strings.ToUpper(l.Hash) != hash {
-				kept = append(kept, l)
+	// The saved copy and the client are two homes for the same label, and a
+	// reconnect (dropRtLocked) moves it from the client to the copy at any
+	// moment, including while Forget below waits for the client's operation
+	// token: strip the copy, forget on the client, then strip the copy
+	// again and forget on whatever client is current now, until nothing
+	// moved (Codex on PR 123).
+	var done *rtorrent.Client
+	for i := 0; i < 3; i++ {
+		p.mu.Lock()
+		if len(p.rtLabels) > 0 {
+			kept := make([]rtorrent.PendingLabel, 0, len(p.rtLabels)) // a new slice: a snapshot in flight keeps its own
+			for _, l := range p.rtLabels {
+				if strings.ToUpper(l.Hash) != hash {
+					kept = append(kept, l)
+				}
 			}
+			p.rtLabels = kept
 		}
-		p.rtLabels = kept
-	}
-	p.mu.Unlock()
-	if cli != nil {
+		cli := p.rt
+		p.mu.Unlock()
+		if cli == nil || cli == done {
+			break
+		}
 		// Outside p.mu: Forget waits for the client's operation token.
 		if err := cli.Forget(ctx, hash); err != nil {
 			p.m.log.Warn("forget rtorrent label", "box", p.box.Name, "err", err)
+			break
 		}
+		done = cli
 	}
 	if persist {
 		p.recordRtLabels(ctx)
