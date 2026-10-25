@@ -19,6 +19,7 @@ package rtorrent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,10 +67,11 @@ type Client struct {
 var ErrRetired = errors.New("rtorrent: client retired; resolve the current client")
 
 // ErrNotSent wraps a failure before any byte of the request reached the
-// peer (the dial failed): the call provably did not happen, so a caller
-// that recorded an intent ahead of it may withdraw that record. A failure
-// after the write (a lost answer, a cut stream) is never wrapped in it:
-// the command may have run.
+// peer (the dial failed, the request could not be encoded, the context
+// ended while waiting for the operation token): the call provably did not
+// happen, so a caller that recorded an intent ahead of it may withdraw that
+// record. A failure after the write (a lost answer, a cut stream) is never
+// wrapped in it: the command may have run.
 var ErrNotSent = errors.New("rtorrent: request not sent")
 
 // NotSent reports whether err means the request never reached the peer:
@@ -116,7 +118,8 @@ func (c *Client) acquire(ctx context.Context) (release func(), err error) {
 		}
 		return func() { c.ops <- struct{}{} }, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		// Still waiting for the token: nothing was sent (Codex on PR 123).
+		return nil, fmt.Errorf("%w: %w", ErrNotSent, ctx.Err())
 	}
 }
 
@@ -253,7 +256,7 @@ const (
 func (c *Client) call(ctx context.Context, maxRows, budget int, method string, params ...any) (Value, error) {
 	body, err := encodeCall(method, params...)
 	if err != nil {
-		return Value{}, err
+		return Value{}, fmt.Errorf("%w: %w", ErrNotSent, err)
 	}
 	r, rctx, done, err := roundTrip(ctx, c.dial, c.timeout, c.maxBytes, body)
 	if err != nil {

@@ -2016,6 +2016,30 @@ func TestNotSent(t *testing.T) {
 	if err := c.Action(context.Background(), ActionRemove, hashA); err == nil || NotSent(err) {
 		t.Fatalf("a request the peer read and dropped may have run: %v", err)
 	}
+	// Waiting for the operation token when the context ends: nothing sent,
+	// and the context error is still recognisable (Codex on PR 123).
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f2 := newFake(t)
+	f2.on(func(m string, p []string) string {
+		if m == "d.multicall2" {
+			entered <- struct{}{}
+			<-gate
+		}
+		return resp(i8(0))
+	})
+	busy := New(f2.dial)
+	go func() { busy.Torrents(context.Background()) }()
+	<-entered
+	cctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	dials := 0
+	busy.dial = func(ctx context.Context) (net.Conn, error) { dials++; return f2.dial(ctx) }
+	err := busy.Action(cctx, ActionRemove, hashA)
+	close(gate)
+	if !NotSent(err) || !errors.Is(err, context.DeadlineExceeded) || dials != 0 {
+		t.Fatalf("cancelled while queued: %v (dials %d)", err, dials)
+	}
 	c.Retire(context.Background())
 	if err := c.Action(context.Background(), ActionRemove, hashA); !NotSent(err) {
 		t.Fatalf("retired: %v", err)
