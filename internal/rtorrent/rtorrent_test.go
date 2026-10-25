@@ -295,7 +295,7 @@ func TestStatsFaultMemberIsZero(t *testing.T) {
 	f.on(func(m string, p []string) string {
 		return resp(`<array><data>` + row(str("0.9.8")) + row(str("0.13.8")) + row(i8(1)) + row(i8(2)) +
 			`<value><struct><member><name>faultCode</name><value><i4>-506</i4></value></member><member><name>faultString</name><value><string>Method 'network.listen.port' not defined</string></value></member></struct></value>` +
-			row(str("x")) + `</data></array>`)
+			`<value><array><data><value><struct><member><name>dht</name><value><string>off</string></value></member><member><name>active</name><value><i8>0</i8></value></member></struct></value></data></array></value>` + `</data></array>`)
 	})
 	st, err := New(f.dial).Stats(context.Background())
 	if err != nil || st.ListenPort != 0 || st.DHT {
@@ -516,6 +516,9 @@ func TestActions(t *testing.T) {
 	if err := c.Action(ctx, "remove-data", hashA); !errors.Is(err, ErrBadAction) {
 		t.Fatal(err)
 	}
+	if !ValidAction(ActionStop) || !ValidAction(ActionStart) || !ValidAction(ActionRemove) || ValidAction("remove-data") || ValidAction("") {
+		t.Fatal("ValidAction")
+	}
 	if err := c.Action(ctx, ActionStop, "../x"); !errors.Is(err, ErrBadHash) {
 		t.Fatal(err)
 	}
@@ -661,15 +664,16 @@ func TestTimeoutAndSerialisation(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
 		t.Fatalf("%v after %v", err, time.Since(start))
 	}
-	// A second caller waits for the token rather than opening another channel.
+	// A second caller waits for the operation token rather than opening
+	// another channel.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	<-c.calls // hold the token
+	<-c.ops // hold the token
 	_, err = c.Version(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("%v", err)
 	}
-	c.calls <- struct{}{}
+	c.ops <- struct{}{}
 }
 
 func TestEncodeCall(t *testing.T) {
@@ -1113,5 +1117,259 @@ func TestListWithoutIsMeta(t *testing.T) {
 	}
 	if !unknownMethodFault(&Fault{Code: -506, String: "d.is_meta"}, "d.is_meta") || unknownMethodFault(errors.New("x"), "d.is_meta") {
 		t.Fatal("code -506 with the name counts; a non-fault does not")
+	}
+}
+
+// Daybreak blue review of PR 122, finding 1: a wide inner array or a huge
+// number of small values must fail fast, not after the whole response was
+// retained.
+func TestNestedAllocationBounded(t *testing.T) {
+	f := newFake(t)
+	wide := func(n int) string {
+		var b strings.Builder
+		b.WriteString(`<?xml version="1.0"?><methodResponse><params><param><value><array><data><value><array><data>`)
+		for i := 0; i < n; i++ {
+			b.WriteString(`<value><i8>1</i8></value>`)
+		}
+		b.WriteString(`</data></array></value></data></array></value></param></params></methodResponse>`)
+		return b.String()
+	}
+	f.on(func(m string, p []string) string { return wide(maxInner + 1) })
+	if _, err := New(f.dial).Torrents(context.Background()); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("wide inner array: %v", err)
+	}
+	// The retained-value budget applies across all nesting: 60 rows of 20
+	// values pass a budget of 2000 but not one of 1000.
+	rows := func(n int) string {
+		var b strings.Builder
+		b.WriteString(`<?xml version="1.0"?><methodResponse><params><param><value><array><data>`)
+		for i := 0; i < n; i++ {
+			b.WriteString(torrentRow(hashA, "n"))
+		}
+		b.WriteString(`</data></array></value></param></params></methodResponse>`)
+		return b.String()
+	}
+	f.on(func(m string, p []string) string { return rows(60) })
+	c := New(f.dial)
+	c.maxValues = 1000
+	if _, err := c.Torrents(context.Background()); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("budget: %v", err)
+	}
+	c.maxValues = 2000
+	if _, err := c.Torrents(context.Background()); err != nil {
+		t.Fatalf("within budget: %v", err)
+	}
+	// Struct members count too.
+	var b strings.Builder
+	b.WriteString("<struct>")
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "<member><name>k%d</name><value><i8>%d</i8></value></member>", i, i)
+	}
+	b.WriteString("</struct>")
+	f.on(func(m string, p []string) string { return resp(b.String()) })
+	c.maxValues = 100
+	if _, err := c.call(context.Background(), 0, "x", ""); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("struct budget: %v", err)
+	}
+}
+
+// Finding 2: operations are serialised as a whole. A Stop whose first call
+// is in flight holds off a Start entirely, so the box never sees
+// d.stop, d.open, d.close, d.start.
+func TestOperationsDoNotInterleave(t *testing.T) {
+	f := newFake(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f.on(func(m string, p []string) string {
+		if m == "d.stop" {
+			entered <- struct{}{}
+			<-gate
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	ctx := context.Background()
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- c.Action(ctx, ActionStop, hashA) }()
+	<-entered // Stop holds the operation and is blocked inside d.stop
+	startDone := make(chan error, 1)
+	go func() { startDone <- c.Action(ctx, ActionStart, hashA) }()
+	time.Sleep(50 * time.Millisecond) // Start must be waiting, not calling
+	if got := f.methods(); len(got) != 1 {
+		t.Fatalf("Start ran while Stop was in flight: %v", got)
+	}
+	close(gate)
+	if err := <-stopDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-startDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.methods(), ","); got != "d.stop,d.close,d.open,d.start" {
+		t.Fatalf("order %s", got)
+	}
+	// Two Adds of the same magnet with labels A then B: whole operations in
+	// sequence, so the pending label is the later one, matching the box.
+	gate2 := make(chan struct{})
+	entered2 := make(chan struct{}, 2)
+	var last string
+	f.on(func(m string, p []string) string {
+		switch m {
+		case "load.start":
+			entered2 <- struct{}{}
+			<-gate2
+		case "d.custom1.set":
+			last = p[1]
+		}
+		return resp(i8(0))
+	})
+	done := make(chan struct{}, 2)
+	go func() {
+		c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}, Label: "A"})
+		done <- struct{}{}
+	}()
+	<-entered2
+	go func() {
+		c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}, Label: "B"})
+		done <- struct{}{}
+	}()
+	time.Sleep(30 * time.Millisecond)
+	close(gate2)
+	<-done
+	<-done
+	pend := c.Pending()
+	var owed string
+	for _, p := range pend {
+		if p.Hash == strings.ToUpper(hashB) {
+			owed = p.Label
+		}
+	}
+	if owed != last || owed == "" {
+		t.Fatalf("box has %q, pending owes %q", last, owed)
+	}
+}
+
+// Finding 3: a value of the wrong kind in a successful row or multicall
+// member is not rTorrent's answer; in particular a wrong-kind d.is_meta
+// never reads as a known false.
+func TestColumnKindsChecked(t *testing.T) {
+	f := newFake(t)
+	wrong := func(col int) string {
+		vals := []string{str(hashA), str("n"), i8(1), i8(1), i8(0), i8(0), i8(0), i8(1), i8(1), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)}
+		if columnKinds[col] == KindString {
+			vals[col] = i8(7)
+		} else {
+			vals[col] = str("7")
+		}
+		return resp(`<array><data>` + row(vals...) + `</data></array>`)
+	}
+	c := New(f.dial)
+	for col := range torrentFields {
+		f.on(func(m string, p []string) string { return wrong(col) })
+		rows, err := c.Torrents(context.Background())
+		if !errors.Is(err, ErrUnexpected) {
+			t.Errorf("column %d (%v): %v %+v", col, torrentFields[col], err, rows)
+		}
+	}
+	// Stats: a member of the wrong kind fails; a per-member fault is zero.
+	bad := func(i int, v string) string {
+		parts := []string{row(str("0.9.8")), row(str("0.13.8")), row(i8(1)), row(i8(2)), row(i8(3)), `<value><array><data><value><struct><member><name>active</name><value><i8>1</i8></value></member></struct></value></data></array></value>`}
+		parts[i] = v
+		return resp(`<array><data>` + strings.Join(parts, "") + `</data></array>`)
+	}
+	for i, v := range map[int]string{0: row(i8(1)), 2: row(str("x")), 4: row(str("5000")), 5: row(str("s")), 1: `<value><string>flat</string></value>`} {
+		f.on(func(m string, p []string) string { return bad(i, v) })
+		if _, err := c.Stats(context.Background()); !errors.Is(err, ErrUnexpected) {
+			t.Errorf("stats member %d: %v", i, err)
+		}
+	}
+	f.on(func(m string, p []string) string {
+		return bad(5, `<value><array><data><value><struct><member><name>active</name><value><string>yes</string></value></member></struct></value></data></array></value>`)
+	})
+	if _, err := c.Stats(context.Background()); !errors.Is(err, ErrUnexpected) {
+		t.Fatalf("dht active of the wrong kind: %v", err)
+	}
+	// A fault with an untyped code or string is malformed, not a Fault.
+	for _, body := range []string{
+		`<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><string>-1</string></value></member><member><name>faultString</name><value><string>x</string></value></member></struct></value></fault></methodResponse>`,
+		`<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>-1</i4></value></member><member><name>faultString</name><value><i4>2</i4></value></member></struct></value></fault></methodResponse>`,
+	} {
+		f.on(func(m string, p []string) string { return body })
+		if _, err := c.Version(context.Background()); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%v", err)
+		}
+	}
+}
+
+// Finding 5: the envelope must be complete and followed by nothing.
+func TestEnvelopeComplete(t *testing.T) {
+	f := newFake(t)
+	c := New(f.dial)
+	for _, body := range []string{
+		resp(str("ok")) + `<extra/>`,
+		resp(str("ok")) + `garbage`,
+		`<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>-506</i4></value></member><member><name>faultString</name><value><string>Method 'd.is_meta' not defined</string></value></member></struct></value>`,
+		`<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>-506</i4></value></member><member><name>faultString</name><value><string>x</string></value></member></struct></value></fault>`,
+	} {
+		f.on(func(m string, p []string) string { return body })
+		_, err := c.Version(context.Background())
+		if !errors.Is(err, ErrMalformed) {
+			t.Errorf("%.60s: %v", body, err)
+		}
+		if c.noMeta.Load() {
+			t.Fatal("a truncated -506 must not flip the compatibility switch")
+		}
+	}
+	// Trailing whitespace and a comment are fine; a namespaced i8 decodes.
+	f.on(func(m string, p []string) string { return resp(str("ok")) + "\n<!-- bye -->\n" })
+	if v, err := c.Version(context.Background()); err != nil || v != "ok" {
+		t.Fatal(v, err)
+	}
+	f.on(func(m string, p []string) string {
+		return `<?xml version="1.0"?><methodResponse xmlns:ex="http://ws.apache.org/xmlrpc/namespaces/extensions"><params><param><value><ex:i8>42</ex:i8></value></param></params></methodResponse>`
+	})
+	if v, err := c.call(context.Background(), 0, "x", ""); err != nil || v.Int != 42 {
+		t.Fatalf("namespaced i8: %+v %v", v, err)
+	}
+}
+
+// Finding 4: an edit of the placeholder's label in ruTorrent is honoured.
+func TestPlaceholderLabelEdits(t *testing.T) {
+	f := newFake(t)
+	var label string
+	meta := int64(1)
+	f.on(func(m string, p []string) string {
+		if m == "d.custom1.set" {
+			label = p[1]
+			return resp(i8(0))
+		}
+		if m == "d.multicall2" {
+			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(label), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(meta)) + `</data></array>`)
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	if _, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"}); err != nil {
+		t.Fatal(err)
+	}
+	// The user renames the placeholder's label: the owed label follows.
+	label = "films"
+	if _, err := c.Torrents(context.Background()); err != nil || c.Pending()[0].Label != "films" {
+		t.Fatalf("%v %+v", err, c.Pending())
+	}
+	meta = 0
+	label = ""
+	if _, err := c.Torrents(context.Background()); err != nil || label != "films" {
+		t.Fatalf("rebuilt torrent must get the renamed label: %v %q", err, label)
+	}
+	// The user clears the placeholder's label: nothing is owed any more.
+	meta, label = 1, ""
+	c.remember(hashA, "tv")
+	if _, err := c.Torrents(context.Background()); err != nil || len(c.Pending()) != 0 {
+		t.Fatalf("cleared on the placeholder: %v pending %d", err, len(c.Pending()))
+	}
+	meta = 0
+	if _, err := c.Torrents(context.Background()); err != nil || label != "" {
+		t.Fatalf("a cleared label must stay clear: %q", label)
 	}
 }

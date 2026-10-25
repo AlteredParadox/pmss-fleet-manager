@@ -26,15 +26,19 @@ import (
 	"time"
 )
 
-// Client talks to one rTorrent instance. Calls are serialised: rTorrent
-// serves RPC on its single main loop, and one slow answer must not turn
-// into a pile of open channels on the SSH transport.
+// Client talks to one rTorrent instance. Operations are serialised as a
+// whole, not call by call: rTorrent serves RPC on its single main loop, one
+// slow answer must not turn into a pile of open channels on the SSH
+// transport, and a two-call transition (stop = d.stop + d.close) must not
+// interleave with another (start = d.open + d.start) into a state that is
+// neither.
 type Client struct {
-	dial     Dialer
-	timeout  time.Duration
-	maxBytes int64         // response byte cap, maxResponse outside tests
-	maxRows  int           // torrent list cap, MaxTorrents outside tests
-	calls    chan struct{} // capacity 1: the call token
+	dial      Dialer
+	timeout   time.Duration
+	maxBytes  int64         // response byte cap, maxResponse outside tests
+	maxRows   int           // torrent list cap, MaxTorrents outside tests
+	maxValues int           // retained-value budget per response, maxValues outside tests
+	ops       chan struct{} // capacity 1: the operation token
 
 	// pending are labels set on a magnet's metadata placeholder that must
 	// be set again on the torrent rTorrent builds once the metadata
@@ -65,9 +69,21 @@ const (
 
 // New returns a client over dial.
 func New(dial Dialer) *Client {
-	c := &Client{dial: dial, timeout: callTimeout, maxBytes: maxResponse, maxRows: MaxTorrents, calls: make(chan struct{}, 1), pending: map[string]pendingLabel{}, now: time.Now}
-	c.calls <- struct{}{}
+	c := &Client{dial: dial, timeout: callTimeout, maxBytes: maxResponse, maxRows: MaxTorrents, maxValues: maxValues, ops: make(chan struct{}, 1), pending: map[string]pendingLabel{}, now: time.Now}
+	c.ops <- struct{}{}
 	return c
+}
+
+// acquire takes the operation token for one public operation; release
+// returns it. Internal helpers never acquire, so an operation's calls are
+// one unit against every other operation on the client.
+func (c *Client) acquire(ctx context.Context) (release func(), err error) {
+	select {
+	case <-c.ops:
+		return func() { c.ops <- struct{}{} }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // MaxTorrents is the most torrents one list may hold; a longer list is an
@@ -151,8 +167,16 @@ const (
 	ActionRemove = "remove"
 )
 
-// TorrentActions is the set Action accepts.
-var TorrentActions = map[string]bool{ActionStop: true, ActionStart: true, ActionRemove: true}
+// ValidAction reports whether a is one of the actions Action runs. A
+// closed switch rather than a map: nothing can add a key that validates
+// but matches no case.
+func ValidAction(a string) bool {
+	switch a {
+	case ActionStop, ActionStart, ActionRemove:
+		return true
+	}
+	return false
+}
 
 var (
 	// ErrBadAction is an action outside TorrentActions.
@@ -178,25 +202,20 @@ func ValidHash(h string) bool {
 	return true
 }
 
-// call performs one XML-RPC method call. Every rTorrent command takes a
-// target as its first parameter ("" for global commands, the hash for d.*);
-// 0.16 refuses calls without one, so callers always pass it.
+// call performs one XML-RPC method call under the operation the caller
+// holds. Every rTorrent command takes a target as its first parameter (""
+// for global commands, the hash for d.*); 0.16 refuses calls without one,
+// so callers always pass it.
 func (c *Client) call(ctx context.Context, maxRows int, method string, params ...any) (Value, error) {
 	body, err := encodeCall(method, params...)
 	if err != nil {
 		return Value{}, err
 	}
-	select {
-	case <-c.calls:
-	case <-ctx.Done():
-		return Value{}, ctx.Err()
-	}
-	defer func() { c.calls <- struct{}{} }()
 	r, rctx, done, err := roundTrip(ctx, c.dial, c.timeout, c.maxBytes, body)
 	if err != nil {
 		return Value{}, err
 	}
-	v, err := decodeResponse(r, maxRows)
+	v, err := decodeResponseBudget(r, maxRows, c.maxValues)
 	// Against the round trip's own context: its deadline, not only the
 	// caller's, is what cuts a stalled body, and the cut then decodes as
 	// malformed. Checked before done() cancels that context.
@@ -215,6 +234,11 @@ func (c *Client) BasePath(ctx context.Context, hash string) (string, error) {
 	if !ValidHash(hash) {
 		return "", ErrBadHash
 	}
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	v, err := c.call(ctx, 0, "d.base_path", strings.ToUpper(hash))
 	if err != nil {
 		return "", err
@@ -228,6 +252,11 @@ func (c *Client) BasePath(ctx context.Context, hash string) (string, error) {
 // DefaultDirectory returns directory.default, the download root
 // (~/data on PMSS).
 func (c *Client) DefaultDirectory(ctx context.Context) (string, error) {
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	v, err := c.call(ctx, 0, "directory.default", "")
 	if err != nil {
 		return "", err
@@ -240,6 +269,11 @@ func (c *Client) DefaultDirectory(ctx context.Context) (string, error) {
 
 // Version returns system.client_version.
 func (c *Client) Version(ctx context.Context) (string, error) {
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	v, err := c.call(ctx, 0, "system.client_version", "")
 	if err != nil {
 		return "", err
@@ -252,6 +286,11 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 
 // Stats fetches the client-wide numbers in one system.multicall.
 func (c *Client) Stats(ctx context.Context) (*Stats, error) {
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	calls := []any{
 		mc("system.client_version"), mc("system.library_version"),
 		mc("throttle.global_down.rate"), mc("throttle.global_up.rate"),
@@ -262,33 +301,48 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 		return nil, err
 	}
 	// Each result is a one-element array holding the value, or a fault
-	// struct; a fault in one member leaves that field zero.
+	// struct (a method this build lacks): a fault leaves the field zero,
+	// a value of the wrong kind is not rTorrent and fails the whole call.
 	if v.Kind != KindArray || len(v.Array) != len(calls) {
 		return nil, ErrUnexpected
 	}
-	one := func(i int) Value {
+	member := func(i int, want Kind) (Value, error) {
 		e := v.Array[i]
-		if e.Kind == KindArray && len(e.Array) == 1 {
-			return e.Array[0]
+		if e.Kind == KindStruct && e.Struct["faultCode"].Kind == KindInt {
+			return Value{}, nil // this method is missing on the build
 		}
-		return Value{}
+		if e.Kind != KindArray || len(e.Array) != 1 {
+			return Value{}, ErrUnexpected
+		}
+		if e.Array[0].Kind != want {
+			return Value{}, ErrUnexpected
+		}
+		return e.Array[0], nil
 	}
-	st := &Stats{
-		Version: clip(one(0).Str, maxVersion),
-		Library: clip(one(1).Str, maxVersion),
-		DownBPS: nonNeg(one(2).Int),
-		UpBPS:   nonNeg(one(3).Int),
+	var st Stats
+	var vals [6]Value
+	for i, want := range []Kind{KindString, KindString, KindInt, KindInt, KindInt, KindStruct} {
+		var err error
+		if vals[i], err = member(i, want); err != nil {
+			return nil, err
+		}
 	}
-	if p := one(4).Int; p > 0 && p <= 65535 {
+	st.Version, st.Library = clip(vals[0].Str, maxVersion), clip(vals[1].Str, maxVersion)
+	st.DownBPS, st.UpBPS = nonNeg(vals[2].Int), nonNeg(vals[3].Int)
+	if p := vals[4].Int; p > 0 && p <= 65535 {
 		st.ListenPort = int(p)
 	}
-	if d := one(5); d.Kind == KindStruct {
+	if d := vals[5]; d.Kind == KindStruct {
 		// dht.statistics: "active" says whether DHT is running now; the
 		// "dht" mode string has disable/off/auto/on and would read "off" as
-		// on (Codex on PR 122).
-		st.DHT = d.Struct["active"].Int == 1
+		// on (Codex on PR 122). A non-integer active is not rTorrent.
+		a, ok := d.Struct["active"]
+		if ok && a.Kind != KindInt {
+			return nil, ErrUnexpected
+		}
+		st.DHT = ok && a.Int == 1
 	}
-	return st, nil
+	return &st, nil
 }
 
 // mc is one system.multicall member: method with the empty target.
@@ -301,6 +355,11 @@ func mc(method string) map[string]any {
 // Add): a listed torrent with an empty label and a pending entry gets the
 // label set, by hash, as a literal call; the rows returned already carry it.
 func (c *Client) Torrents(ctx context.Context) ([]Torrent, error) {
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	out, err := c.list(ctx)
 	if err != nil {
 		return nil, err
@@ -308,6 +367,21 @@ func (c *Client) Torrents(ctx context.Context) ([]Torrent, error) {
 	c.reconcileLabels(ctx, out)
 	return out, nil
 }
+
+// columnKinds are the XML-RPC kinds of torrentFields, in order: a value of
+// another kind in a row is not rTorrent's answer and fails the listing
+// rather than reading as zero (a false d.is_meta = 0 would otherwise spend
+// a pending label on the placeholder).
+var columnKinds = func() []Kind {
+	k := make([]Kind, len(torrentFields))
+	for i := range k {
+		k[i] = KindInt
+	}
+	for _, i := range []int{0, 1, 12, 13} { // hash, name, message, label
+		k[i] = KindString
+	}
+	return k
+}()
 
 func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 	fields := torrentFields
@@ -335,6 +409,11 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 			return nil, ErrUnexpected
 		}
 		r := row.Array
+		for i, e := range r {
+			if e.Kind != columnKinds[i] {
+				return nil, ErrUnexpected
+			}
+		}
 		h := strings.ToUpper(r[0].Str)
 		if !ValidHash(h) {
 			continue // not a torrent row; whatever it is, it gets no buttons and no slot
@@ -392,7 +471,17 @@ func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
 			continue // not listed yet (or removed): keep until it expires
 		}
 		if rows[i].Meta {
-			continue // still the placeholder: the rebuild is yet to come
+			// Still the placeholder. The user may have edited its label in
+			// ruTorrent meanwhile: a cleared label retires the entry, a
+			// changed one becomes what is owed after the rebuild.
+			switch rows[i].Label {
+			case p.label:
+			case "":
+				delete(c.pending, h)
+			default:
+				c.pending[h] = pendingLabel{label: rows[i].Label, until: p.until}
+			}
+			continue
 		}
 		if rows[i].Label != "" {
 			if rows[i].MetaKnown {
@@ -474,14 +563,19 @@ func (c *Client) remember(hash, label string) {
 	c.pending[hash] = pendingLabel{label: label, until: c.now().Add(pendingTTL)}
 }
 
-// Action runs one of TorrentActions on hash.
+// Action runs one of the valid actions (see ValidAction) on hash.
 func (c *Client) Action(ctx context.Context, action, hash string) error {
-	if !TorrentActions[action] {
+	if !ValidAction(action) {
 		return ErrBadAction
 	}
 	if !ValidHash(hash) {
 		return ErrBadHash
 	}
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	hash = strings.ToUpper(hash)
 	var seq []string
 	switch action {
@@ -537,6 +631,11 @@ type AddResult struct {
 // Add loads every entry; one refused entry does not stop the rest.
 func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 	var res AddResult
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return res, err
+	}
+	defer release()
 	label := clip(req.Label, maxLabel)
 	type entry struct {
 		method     string

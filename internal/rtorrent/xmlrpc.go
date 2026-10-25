@@ -50,6 +50,14 @@ const (
 	maxElements = 4_000_000
 	maxDepth    = 16
 	maxString   = 4096
+	// maxValues bounds the Values retained from one response, whatever
+	// their nesting (a byte limit is not an allocation limit: four million
+	// empty <value/> entries in one inner array are 32 MiB on the wire and
+	// hundreds of MiB retained); maxInner bounds any array below the
+	// outermost one, where a torrent row has 21 entries and a multicall
+	// member one.
+	maxValues = 600_000
+	maxInner  = 1024
 )
 
 // Value is one decoded XML-RPC value. Exactly one field is meaningful,
@@ -175,9 +183,20 @@ func encodeValue(b *strings.Builder, p any) error {
 
 // decoder walks one methodResponse as a token stream.
 type decoder struct {
-	d        *xml.Decoder
-	elements int
-	maxRows  int // entries allowed in the outermost array; 0 = no cap
+	d         *xml.Decoder
+	elements  int
+	values    int // Values retained so far, against maxValues
+	maxRows   int // entries allowed in the outermost array; 0 = no cap
+	maxValues int
+}
+
+// retain counts one more retained Value against the budget.
+func (dec *decoder) retain() error {
+	dec.values++
+	if dec.values > dec.maxValues {
+		return ErrTooLarge
+	}
+	return nil
 }
 
 // decodeResponse reads a methodResponse from r (already capped by the
@@ -185,6 +204,12 @@ type decoder struct {
 // maxRows caps the outermost array (the torrent list); more is an error,
 // never a silently truncated view.
 func decodeResponse(r io.Reader, maxRows int) (Value, error) {
+	return decodeResponseBudget(r, maxRows, maxValues)
+}
+
+// decodeResponseBudget is decodeResponse with the retained-value budget
+// given (tests shrink it).
+func decodeResponseBudget(r io.Reader, maxRows, budget int) (Value, error) {
 	d := xml.NewDecoder(newUTF8Reader(r))
 	d.Strict = true
 	// Entities other than the five predefined ones are refused by Strict
@@ -195,7 +220,7 @@ func decodeResponse(r io.Reader, maxRows int) (Value, error) {
 		}
 		return in, nil
 	}
-	dec := &decoder{d: d, maxRows: maxRows}
+	dec := &decoder{d: d, maxRows: maxRows, maxValues: budget}
 	if err := dec.expectStart("methodResponse"); err != nil {
 		return Value{}, err
 	}
@@ -217,8 +242,15 @@ func decodeResponse(r io.Reader, maxRows int) (Value, error) {
 				return Value{}, err
 			}
 		}
+		if err := dec.eof(); err != nil {
+			return Value{}, err
+		}
 		return v, nil
 	case "fault":
+		// A fault is a struct with a typed code and string, inside a
+		// complete envelope: a truncated fault is a malformed response, not
+		// a fault (it could otherwise flip the client's compatibility
+		// switch, see list).
 		v, err := dec.value()
 		if err != nil {
 			return Value{}, err
@@ -226,10 +258,48 @@ func decodeResponse(r io.Reader, maxRows int) (Value, error) {
 		if v.Kind != KindStruct {
 			return Value{}, ErrMalformed
 		}
-		f := &Fault{Code: v.Struct["faultCode"].Int, String: clip(v.Struct["faultString"].Str, 300)}
-		return Value{}, f
+		code, str := v.Struct["faultCode"], v.Struct["faultString"]
+		if code.Kind != KindInt || str.Kind != KindString {
+			return Value{}, ErrMalformed
+		}
+		for _, n := range []string{"fault", "methodResponse"} {
+			if err := dec.expectEnd(n); err != nil {
+				return Value{}, err
+			}
+		}
+		if err := dec.eof(); err != nil {
+			return Value{}, err
+		}
+		return Value{}, &Fault{Code: code.Int, String: clip(str.Str, 300)}
 	}
 	return Value{}, ErrMalformed
+}
+
+// eof requires that nothing but whitespace, comments and processing
+// instructions follow the envelope.
+func (dec *decoder) eof() error {
+	for {
+		tok, err := dec.d.Token()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			var ne net.Error
+			if errors.As(err, &ne) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return err
+			}
+			return ErrMalformed
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(t)) != "" {
+				return ErrMalformed
+			}
+		case xml.Comment, xml.ProcInst:
+		default:
+			return ErrMalformed // a second element after the envelope
+		}
+	}
 }
 
 // value decodes one <value>; the decoder is positioned before its start
@@ -251,7 +321,7 @@ func (dec *decoder) valueAt(depth int) (Value, error) {
 // typed decodes the body of a typed element whose start was just read.
 func (dec *decoder) typed(name string, depth int) (Value, error) {
 	switch name {
-	case "i4", "i8", "int", "ex:i8":
+	case "i4", "i8", "int": // a namespaced ex:i8 arrives as Local "i8"
 		s, err := dec.text(name)
 		if err != nil {
 			return Value{}, err
@@ -329,6 +399,12 @@ func (dec *decoder) typed(name string, depth int) (Value, error) {
 				if depth == 0 && dec.maxRows > 0 && len(v.Array) >= dec.maxRows {
 					return Value{}, ErrTooLarge
 				}
+				if depth > 0 && len(v.Array) >= maxInner {
+					return Value{}, ErrTooLarge
+				}
+				if err := dec.retain(); err != nil {
+					return Value{}, err
+				}
 				e, err := dec.valueBody(depth + 1)
 				if err != nil {
 					return Value{}, err
@@ -374,13 +450,16 @@ func (dec *decoder) typed(name string, depth int) (Value, error) {
 					return Value{}, err
 				}
 				if len(v.Struct) < 256 {
+					if err := dec.retain(); err != nil {
+						return Value{}, err
+					}
 					v.Struct[clip(name, 64)] = e
 				}
 			default:
 				return Value{}, ErrMalformed
 			}
 		}
-	case "nil", "ex:nil":
+	case "nil":
 		if err := dec.expectEnd(name); err != nil {
 			return Value{}, err
 		}
