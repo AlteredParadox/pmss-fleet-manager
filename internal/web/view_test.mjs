@@ -121,3 +121,15 @@ test('the rTorrent header names the folder "+ files" may delete under, and refus
   assert.match(app, /plain remove always works/, 'the note says what to do instead');
   assert.match(app, /throw Object\.assign\(new Error\(\(data\?\.error/, 'an action error carries the server message, which the toast shows');
 });
+
+test('a client stopped on purpose offers no live controls, and an open add draft for it is dropped (daybreak blue re-review of #124)', () => {
+  const stopped = { qbt: { enabled: true, reachable: true }, rtorrent: { enabled: true, reachable: false, disabled: true } };
+  assert.equal(V.clientActionable(stopped, 'rtorrent'), false, 'rTorrent rows carried from before the stop have no live buttons');
+  assert.equal(V.clientActionable(stopped, 'qbt'), true, 'the other client is unaffected');
+  assert.equal(V.clientActionable({ rtorrent: { enabled: false, disabled: true } }, 'rtorrent'), false, 'unmonitored: nothing to act on');
+  assert.equal(V.clientActionable({ rtorrent: { enabled: true, reachable: false, disabled: false } }, 'rtorrent'), true, 'merely down is still actionable (the request will say so)');
+  assert.equal(V.clientActionable(undefined, 'qbt'), false);
+  const app = readFileSync(new URL('./static/app.js', import.meta.url), 'utf8');
+  assert.match(app, /if \(avail\.stopped && S\.torAdd && \(S\.torAdd\.client \|\| 'qbt'\) === c\.key && !S\.torAdd\.busy\) S\.torAdd = null/, 'an open draft is dropped when its client stops on purpose');
+  assert.match(app, /!pfmView\.clientActionable\(b, client\) \? ` disabled title=/, 'row buttons are disabled with a reason for a stopped client');
+});

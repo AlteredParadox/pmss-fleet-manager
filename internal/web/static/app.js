@@ -873,9 +873,10 @@ function clientSection(b, c, f, grouped, first) {
   let list = q.torrents || [];
   if (f) list = list.filter((t) => torrentMatches(t, f));
   const shown = list.slice(0, 300);
-  const addOpen = S.torAdd && (S.torAdd.client || 'qbt') === c.key;
   const notes = c.key === 'qbt' ? `${discoveryNote(q, b)}${connectionNote(q)}` : rtNote(q);
   const avail = pfmView.clientAvailability(q); // stopped on purpose is expected: no warning, nothing to add to
+  if (avail.stopped && S.torAdd && (S.torAdd.client || 'qbt') === c.key && !S.torAdd.busy) S.torAdd = null; // an open draft for a client that just stopped is dropped
+  const addOpen = !avail.stopped && S.torAdd && (S.torAdd.client || 'qbt') === c.key;
   return `<div class="thead-tools"${grouped && !first ? ' style="border-top:1px solid var(--line)"' : ''}>
       <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span></div>
       <div class="actions">
@@ -1081,7 +1082,8 @@ function torAddForm(b, list, c) {
 function torrentButtons(b, t) {
   if (!t.hash) return '';
   const client = t.client || 'qbt', label = CLIENT_LABEL[client] || client;
-  const off = b.status === 'disabled' ? ' disabled title="polling is disabled for this box; enable it to run actions"' : '';
+  const off = b.status === 'disabled' ? ' disabled title="polling is disabled for this box; enable it to run actions"'
+    : !pfmView.clientActionable(b, client) ? ` disabled title="${label} is stopped on purpose on this box (~/.rtorrentDisable); this row is from before it stopped"` : '';
   const h = `data-hash="${esc(t.hash)}" data-box="${b.id}" data-client="${esc(client)}"${off}`;
   const name = esc(t.name);
   const files = client === 'rtorrent'

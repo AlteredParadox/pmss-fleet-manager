@@ -351,6 +351,13 @@ remove with data, add. Remove with data asks rTorrent for the
 torrent's path, erases the torrent, then deletes on the box only after the
 box itself resolved the path through symlinks and found it strictly inside
 rTorrent's download root, which must itself be strictly inside the home.
+The removal and the deletion then run under the dashboard's own deadline:
+closing the browser, editing the box or stopping the dashboard does not cut
+them (a stop waits for an admitted deletion to finish). Two limits remain:
+a hard kill of the dashboard process between the two steps leaves the
+torrent gone and its files behind, and a same-account process renaming the
+very directory being removed at that instant can swap in another one; both
+are visible on the box and recoverable by hand.
 
 ### qBittorrent access
 

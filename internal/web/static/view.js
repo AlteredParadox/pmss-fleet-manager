@@ -109,5 +109,15 @@ function clientAvailability(st) {
   return { down: !st.disabled, stopped: !!st.disabled };
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability };
+// clientActionable says whether a torrent in client `client` of box b may be
+// acted on right now: the client is monitored and not stopped on purpose.
+// A row carried over from an earlier poll while the client is stopped keeps
+// no live controls (daybreak blue re-review of #124).
+function clientActionable(b, client) {
+  const st = client === 'rtorrent' ? b?.rtorrent : b?.qbt;
+  if (!st || !st.enabled) return false;
+  return !clientAvailability(st).stopped;
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable };
 })();
