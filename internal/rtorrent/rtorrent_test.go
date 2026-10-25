@@ -1872,3 +1872,69 @@ func TestRetireIsTerminal(t *testing.T) {
 		t.Fatalf("second retire: %+v %v (Restore after retire must add nothing)", l, err)
 	}
 }
+
+// Codex on PR 122: a predecessor's late snapshot must not revive a label
+// for a torrent this client erased since. Remove, re-add unlabelled, adopt
+// the old snapshot, list: no setter call; and the barrier is bounded.
+func TestAdoptRespectsErase(t *testing.T) {
+	f := newFake(t)
+	var mu sync.Mutex
+	sets := 0
+	f.on(func(m string, p []string) string {
+		switch m {
+		case "d.custom1.set":
+			mu.Lock()
+			sets++
+			mu.Unlock()
+			return resp(str(p[1]))
+		case "d.multicall2":
+			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	ctx := context.Background()
+	old := []PendingLabel{{Hash: hashA, Label: "old", Until: time.Now().Add(time.Hour)}}
+	if err := c.Action(ctx, ActionRemove, hashA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}}); err != nil {
+		t.Fatal(err)
+	}
+	c.Adopt(old)
+	if len(c.Pending()) != 0 {
+		t.Fatalf("the erased hash came back: %+v", c.Pending())
+	}
+	if _, err := c.Torrents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	n := sets
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("the stale label was applied: %d setter calls", n)
+	}
+	// A hash never erased here is adopted; one erased, then owed again by
+	// a labelled re-add, keeps the new label.
+	c.Adopt([]PendingLabel{{Hash: hashB, Label: "late", Until: time.Now().Add(time.Hour)}})
+	c.remember(hashA, "new")
+	c.Adopt(old)
+	got := map[string]string{}
+	for _, l := range c.Pending() {
+		got[l.Hash] = l.Label
+	}
+	if got[strings.ToUpper(hashB)] != "late" || got[hashA] != "new" {
+		t.Fatalf("%v", got)
+	}
+	// The barrier is bounded: pendingMax entries, oldest out.
+	d := New(f.dial)
+	for i := 0; i < pendingMax+3; i++ {
+		d.eraseLocked(fmt.Sprintf("%040X", i))
+	}
+	d.pendMu.Lock()
+	n, first := len(d.erased), d.erasedLocked(fmt.Sprintf("%040X", 0))
+	d.pendMu.Unlock()
+	if n != pendingMax || first {
+		t.Fatalf("erased set %d, oldest kept %v", n, first)
+	}
+}

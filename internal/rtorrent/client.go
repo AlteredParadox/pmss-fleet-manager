@@ -54,6 +54,11 @@ type Client struct {
 	// every operation fails with ErrRetired, so a caller still holding this
 	// client after a handoff cannot change state the successor never sees.
 	retired bool
+	// erased are the hashes this client removed (d.erase), with the time:
+	// a barrier against a predecessor's late snapshot (Adopt) reviving a
+	// label for a torrent erased since (Codex on PR 122). Bounded like
+	// pending: pendingTTL, pendingMax entries, oldest out.
+	erased map[string]time.Time
 }
 
 // ErrRetired is an operation on a client after Retire: the caller must
@@ -597,8 +602,11 @@ func (c *Client) Retire(ctx context.Context) ([]PendingLabel, error) {
 
 // Adopt adds owed labels arriving late from a retired predecessor (its
 // Retire outlived the handoff's wait): only hashes this client does not
-// owe yet, so a label set since is never overwritten; a retired client
-// takes nothing.
+// owe yet, so a label set since is never overwritten, and none this client
+// erased since, so a snapshot older than the erase cannot revive the label
+// (Codex on PR 122); a retired client takes nothing. The caller is
+// expected to apply the same barrier across clients (an erase through a
+// predecessor of this one is not known here).
 func (c *Client) Adopt(labels []PendingLabel) {
 	now := c.now()
 	c.pendMu.Lock()
@@ -612,6 +620,9 @@ func (c *Client) Adopt(labels []PendingLabel) {
 			continue
 		}
 		if _, owed := c.pending[h]; owed {
+			continue
+		}
+		if c.erasedLocked(h) {
 			continue
 		}
 		c.setPendingLocked(h, pendingLabel{label: clip(l.Label, maxLabel), until: l.Until})
@@ -707,9 +718,44 @@ func (c *Client) Action(ctx context.Context, action, hash string) error {
 		}
 	}
 	if action == ActionRemove {
-		c.forgetLocked(hash) // a removed magnet owes nothing any more (Codex on PR 122)
+		c.eraseLocked(hash) // a removed magnet owes nothing any more, now or from a late snapshot (Codex on PR 122)
 	}
 	return nil
+}
+
+// eraseLocked forgets hash and records the erase as a barrier for Adopt.
+func (c *Client) eraseLocked(hash string) {
+	hash = strings.ToUpper(hash)
+	now := c.now()
+	c.pendMu.Lock()
+	defer c.pendMu.Unlock()
+	delete(c.pending, hash)
+	if c.erased == nil {
+		c.erased = map[string]time.Time{}
+	}
+	if _, ok := c.erased[hash]; !ok && len(c.erased) >= pendingMax {
+		var oldest string
+		for h, t := range c.erased {
+			if now.Sub(t) > pendingTTL {
+				delete(c.erased, h)
+				continue
+			}
+			if oldest == "" || t.Before(c.erased[oldest]) {
+				oldest = h
+			}
+		}
+		if len(c.erased) >= pendingMax && oldest != "" {
+			delete(c.erased, oldest)
+		}
+	}
+	c.erased[hash] = now
+}
+
+// erasedLocked reports whether hash was erased through this client within
+// pendingTTL (the longest a late snapshot could still owe it a label).
+func (c *Client) erasedLocked(hash string) bool {
+	t, ok := c.erased[hash]
+	return ok && c.now().Sub(t) <= pendingTTL
 }
 
 // Forget drops any label still owed to hash: for a torrent removed through
