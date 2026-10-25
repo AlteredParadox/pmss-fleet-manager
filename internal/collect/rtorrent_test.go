@@ -2165,6 +2165,10 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 		return rtReplies(m, b)
 	}
 	p, snap := rtFixture(t, f)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
 	p.m.mu.Lock()
 	p.m.pollers[p.box.ID] = p
 	p.m.mu.Unlock()
@@ -2213,16 +2217,54 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 		t.Fatal("a poll in flight must not resurrect a dismissed record")
 	}
 	// A failure reported for another generation (the record was moved to
-	// another machine while the job ran) is logged but not attached.
+	// another machine while the job ran) is logged but not attached, in
+	// memory or durably.
 	p.reportRtRemove("other-generation", rtHashA, target, errors.New("boom"))
 	p.m.mu.RLock()
 	gotMsg := p.m.states[p.box.ID].Rt.RemoveFailed
 	p.m.mu.RUnlock()
-	if strings.Contains(gotMsg, "boom") {
-		t.Fatal("another generation's failure must not be attached")
+	if msg, _, ok := p.m.restoredRtRemove(p.box); strings.Contains(gotMsg, "boom") || !ok || strings.Contains(msg, "boom") {
+		t.Fatalf("another generation's failure must not be attached: %q / %q", gotMsg, msg)
+	}
+	// A restart: the state cache was written by the poll before the merge
+	// (or never, during Stop's drain), yet the notice is restored from its
+	// own row, for this generation only (fred on PR 123).
+	stale.Rt.RemoveFailed = ""
+	if err := p.m.st.SetCache(context.Background(), p.box.ID, "state", stale.Summary()); err != nil {
+		t.Fatal(err)
+	}
+	m2 := New(p.m.st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var cached BoxState
+	if _, err := m2.st.GetCache(context.Background(), p.box.ID, "state", &cached); err != nil || cached.Rt.RemoveFailed != "" {
+		t.Fatalf("fixture: the state cache should carry no notice: %v %q", err, cached.Rt.RemoveFailed)
+	}
+	m2.applyRtRemove(p.box, &cached)
+	if !strings.Contains(cached.Rt.RemoveFailed, "disk says no") || cached.Rt.RemoveFailedAt.IsZero() {
+		t.Fatalf("the notice must survive a restart: %q", cached.Rt.RemoveFailed)
+	}
+	moved := *p.box
+	moved.Host = "elsewhere.example"
+	if _, _, ok := m2.restoredRtRemove(&moved); ok {
+		t.Fatal("another generation must not restore the notice")
+	}
+	// Dismiss, then a restart without any poll in between: the stale state
+	// cache (which still carries the notice) does not resurrect it.
+	p.m.mu.RLock()
+	live := *p.m.states[p.box.ID] // still carries the notice
+	p.m.mu.RUnlock()
+	if err := p.m.st.SetCache(context.Background(), p.box.ID, "state", live.Summary()); err != nil {
+		t.Fatal(err)
 	}
 	if err := p.m.DismissRtRemoveFailure(p.box.ID); err != nil {
 		t.Fatal(err)
+	}
+	cached = BoxState{}
+	if _, err := m2.st.GetCache(context.Background(), p.box.ID, "state", &cached); err != nil || cached.Rt.RemoveFailed == "" {
+		t.Fatalf("fixture: the state cache should still carry the notice: %v", err)
+	}
+	m2.applyRtRemove(p.box, &cached)
+	if cached.Rt.RemoveFailed != "" || !cached.Rt.RemoveFailedAt.IsZero() {
+		t.Fatalf("a dismissed notice came back after a restart: %q", cached.Rt.RemoveFailed)
 	}
 	p.m.mu.RLock()
 	cleared := p.m.states[p.box.ID].Rt.RemoveFailed == "" && p.m.states[p.box.ID].Rt.RemoveFailedAt.IsZero()

@@ -547,6 +547,10 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	// at once. The failure count stays: it feeds the offline/degraded
 	// decision, and a box down for hours must not dip to "degraded".
 	st.NextPoll, st.Backoff = time.Time{}, false
+	// The recorded outcome of a failed detached removal is kept in a cache
+	// row of its own, written and deleted as it happens; the state cache's
+	// copy may predate either, so the row decides (fred on PR 123).
+	m.applyRtRemove(b, &st)
 	auth, authKnown := m.restoredAuth(b)
 	rtLabels := m.restoredRtLabels(b)
 	if !b.Enabled {
@@ -777,7 +781,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 		// The old machine's alerts resolve, except the renewal alert, which
 		// is the record's and would otherwise come back unacknowledged.
 		prev = nil
-		if err := m.st.DeleteCache(sctx, b.ID, "state", "du", rtLabelsCacheKind); err != nil {
+		if err := m.st.DeleteCache(sctx, b.ID, "state", "du", rtLabelsCacheKind, rtRemoveCacheKind); err != nil {
 			m.log.Warn("drop cache of moved box", "box", fresh.Name, "err", err)
 		}
 		if n, err := m.st.ResolveBoxAlerts(sctx, b.ID, "renewal"); err != nil {
@@ -1026,10 +1030,21 @@ func (m *Manager) RtTorrentAction(ctx context.Context, id int64, hash, action st
 }
 
 // DismissRtRemoveFailure clears the recorded outcome of a failed detached
-// remove-with-data (RtState.RemoveFailed) once the user has seen it.
+// remove-with-data (RtState.RemoveFailed) once the user has seen it: the
+// durable row first, then the live state, under the same per-box guard as
+// the recording, so neither can undo the other.
 func (m *Manager) DismissRtRemoveFailure(id int64) error {
-	if m.poller(id) == nil {
+	p := m.poller(id)
+	if p == nil {
 		return store.ErrNotFound
+	}
+	g := m.labelGuard(id)
+	g.Lock()
+	defer g.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := m.st.DeleteCache(ctx, id, rtRemoveCacheKind); err != nil {
+		return err
 	}
 	m.commit(id, func(st *BoxState) *BoxState {
 		if st == nil {
@@ -1040,6 +1055,38 @@ func (m *Manager) DismissRtRemoveFailure(id int64) error {
 		return &next
 	}, commitOpts{hooks: true, publish: true})
 	return nil
+}
+
+// rtRemoveCacheKind is the box_cache kind holding the recorded outcome of
+// a failed detached remove-with-data (rtRemoveCache) across restarts.
+const rtRemoveCacheKind = "rt_remove"
+
+// rtRemoveCache is the persisted form, scoped to the box's generation like
+// the owed labels: a record moved to another machine carries no notice.
+type rtRemoveCache struct {
+	Generation string    `json:"generation"`
+	Message    string    `json:"message"`
+	At         time.Time `json:"at"`
+}
+
+// restoredRtRemove loads the recorded failure for this box's current
+// generation, if any.
+func (m *Manager) restoredRtRemove(b *store.Box) (msg string, at time.Time, ok bool) {
+	ctx := m.ctx
+	if ctx == nil { // before Start (tests)
+		ctx = context.Background()
+	}
+	var c rtRemoveCache
+	if _, err := m.st.GetCache(ctx, b.ID, rtRemoveCacheKind, &c); err != nil || c.Generation != boxGeneration(b) || c.Message == "" {
+		return "", time.Time{}, false
+	}
+	return clip(c.Message, 400), c.At, true
+}
+
+// applyRtRemove sets or clears the state's recorded removal failure from
+// the durable row, whatever the state cache carried.
+func (m *Manager) applyRtRemove(b *store.Box, st *BoxState) {
+	st.Rt.RemoveFailed, st.Rt.RemoveFailedAt, _ = m.restoredRtRemove(b)
 }
 
 // RtAddTorrents adds links and/or .torrent files to the box's rTorrent.

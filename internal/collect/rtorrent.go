@@ -898,6 +898,27 @@ func (p *poller) reportRtRemove(gen, hash, base string, err error) {
 	p.m.log.Warn("rtorrent remove-with-data failed", "box", p.box.Name, "hash", hash, "path", base, "err", err)
 	msg := clip(fmt.Sprintf("%s (%s…): %v", filepath.Base(base), strings.ToLower(hash[:8]), err), 400)
 	now := time.Now()
+	// Under the box's guard with the dismiss, and the durable row before the
+	// live state: a restart finds the row whatever the state cache's copy
+	// says (a poll writes that copy before it merges; fred on PR 123), and
+	// Stop's drain, whose manager context is gone, writes it too (own
+	// context). The row is written only when the live state still belongs
+	// to gen, like the state itself.
+	g := p.m.labelGuard(p.box.ID)
+	g.Lock()
+	defer g.Unlock()
+	p.m.mu.RLock()
+	stored := p.m.states[p.box.ID]
+	same := stored != nil && stored.generation() == gen
+	p.m.mu.RUnlock()
+	if !same {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.m.st.SetCache(ctx, p.box.ID, rtRemoveCacheKind, rtRemoveCache{Generation: gen, Message: msg, At: now}); err != nil {
+		p.m.log.Warn("cache rtorrent removal outcome", "box", p.box.Name, "err", err)
+	}
 	p.m.commit(p.box.ID, func(st *BoxState) *BoxState {
 		if st == nil || st.generation() != gen {
 			return nil
