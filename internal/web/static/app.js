@@ -1009,6 +1009,7 @@ function addToast(r, stopped, client) {
     const parts = [`${r?.added || 0} sent to rTorrent${tail}`];
     if (r?.failed) parts.push(`${r.failed} refused (not a magnet/http(s) link or not a torrent)`);
     if (r?.unlabelled) parts.push(`${r.unlabelled} loaded without the label`);
+    if (r?.deferred) parts.push(`${r.deferred} magnet label${r.deferred === 1 ? '' : 's'} set again once the metadata arrives`);
     return parts.join(', ');
   }
   if (!r?.counted) {
