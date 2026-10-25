@@ -142,7 +142,7 @@ func rtReplies(method, body string) string {
 	switch method {
 	case "system.multicall":
 		return xmlResp(`<array><data>` + xmlRow(xs("0.9.8")) + xmlRow(xs("0.13.8")) + xmlRow(i8(54197410)) + xmlRow(i8(140945)) + xmlRow(i8(59112)) +
-			`<value><array><data><value><struct><member><name>dht</name><value><string>auto</string></value></member></struct></value></data></array></value></data></array>`)
+			`<value><array><data><value><struct><member><name>dht</name><value><string>auto</string></value></member><member><name>active</name><value><i8>1</i8></value></member></struct></value></data></array></value></data></array>`)
 	case "d.multicall2":
 		row := func(hash, name string, size, done, down, up, ratio, state, complete, active, msg, label string) string {
 			return xmlRow(xs(hash), xs(name), i8(mustInt(size)), i8(mustInt(done)), i8(mustInt(down)), i8(mustInt(up)), i8(mustInt(ratio)), i8(mustInt(state)), i8(mustInt(complete)), i8(mustInt(active)), i8(0), i8(mustInt(state)), xs(msg), xs(label), i8(0), i8(48), i8(40), i8(1000), i8(2000), i8(0))
