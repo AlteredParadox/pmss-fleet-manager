@@ -329,15 +329,17 @@ const rtTombTTL = 24 * time.Hour
 // rtTombMax caps the tombstones kept per box; beyond it the oldest goes.
 const rtTombMax = 1000
 
-// rtTombstone records that hash was erased on the box of generation gen.
-// Every path that forgets a label records it first, and settles it only
-// once the forget is known complete on the box's current owner; a poll
-// settles whatever is left (settleRtTombs). Recording again (the hash was
-// re-added and erased once more) reopens it with the new time.
-func (m *Manager) rtTombstone(id int64, gen, hash string) {
+// rtTombstone records that hash was erased, or is about to be, on the box
+// of generation gen, in memory and durably (rtTombsCacheKind), and reports
+// whether the record is durable. Every erase records it before the command
+// goes out, every path that forgets a label records it first, and it is
+// settled only once the forget is known complete on the box's current
+// owner; a poll settles whatever is left (settleRtTombs). Recording again
+// (the hash was re-added and erased once more) reopens it with the new
+// time.
+func (m *Manager) rtTombstone(id int64, gen, hash string) error {
 	hash = strings.ToUpper(hash)
 	m.leaseMu.Lock()
-	defer m.leaseMu.Unlock()
 	tombs := m.rtTombs[id]
 	if tombs == nil {
 		tombs = map[string]rtTomb{}
@@ -353,17 +355,92 @@ func (m *Manager) rtTombstone(id int64, gen, hash string) {
 		delete(tombs, oldest)
 	}
 	tombs[hash] = rtTomb{gen: gen, at: time.Now()}
+	m.leaseMu.Unlock()
+	return m.saveRtTombs(id)
 }
 
 // rtSettleTomb marks the tombstone for hash settled: its label is known
 // gone from the current owner. The erase stays on record (rtErasedSince).
 func (m *Manager) rtSettleTomb(id int64, hash string) {
 	m.leaseMu.Lock()
-	defer m.leaseMu.Unlock()
 	hash = strings.ToUpper(hash)
 	if t, ok := m.rtTombs[id][hash]; ok {
 		t.settled = true
 		m.rtTombs[id][hash] = t
+	}
+	m.leaseMu.Unlock()
+	if err := m.saveRtTombs(id); err != nil {
+		m.log.Warn("cache rtorrent tombstones", "box", id, "err", err)
+	}
+}
+
+// rtTombsCacheKind is the box_cache kind holding a box's erase tombstones
+// (rtTombsCache) across restarts, so an erase whose answer was lost, or
+// that the process did not outlive, is still known on restart (daybreak
+// blue re-review 5 of PR 123).
+const rtTombsCacheKind = "rt_tombs"
+
+// rtTombsCache is the persisted form.
+type rtTombsCache struct {
+	Tombs []rtTombRec `json:"tombs"`
+}
+
+// rtTombRec is one persisted tombstone.
+type rtTombRec struct {
+	Hash       string    `json:"hash"`
+	Generation string    `json:"generation"`
+	At         time.Time `json:"at"`
+	Settled    bool      `json:"settled,omitempty"`
+}
+
+// saveRtTombs writes the box's tombstones. Under the box's label guard, so
+// two writers' snapshots reach the store in the order they were taken; the
+// snapshot itself is taken under leaseMu and the write under neither.
+func (m *Manager) saveRtTombs(id int64) error {
+	g := m.labelGuard(id)
+	g.Lock()
+	defer g.Unlock()
+	m.leaseMu.Lock()
+	c := rtTombsCache{Tombs: make([]rtTombRec, 0, len(m.rtTombs[id]))}
+	for h, t := range m.rtTombs[id] {
+		c.Tombs = append(c.Tombs, rtTombRec{Hash: h, Generation: t.gen, At: t.at, Settled: t.settled})
+	}
+	m.leaseMu.Unlock()
+	sort.Slice(c.Tombs, func(i, j int) bool { return c.Tombs[i].Hash < c.Tombs[j].Hash })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return m.st.SetCache(ctx, id, rtTombsCacheKind, c)
+}
+
+// restoreRtTombs loads the persisted tombstones of this box's current
+// generation into memory (an entry already in memory wins), dropping
+// expired ones and those of another generation.
+func (m *Manager) restoreRtTombs(b *store.Box) {
+	ctx := m.ctx
+	if ctx == nil { // before Start (tests)
+		ctx = context.Background()
+	}
+	var c rtTombsCache
+	if _, err := m.st.GetCache(ctx, b.ID, rtTombsCacheKind, &c); err != nil {
+		return
+	}
+	gen := boxGeneration(b)
+	now := time.Now()
+	m.leaseMu.Lock()
+	defer m.leaseMu.Unlock()
+	tombs := m.rtTombs[b.ID]
+	for _, r := range c.Tombs {
+		if r.Generation != gen || now.Sub(r.At) > rtTombTTL || !rtorrent.ValidHash(r.Hash) {
+			continue
+		}
+		if tombs == nil {
+			tombs = map[string]rtTomb{}
+			m.rtTombs[b.ID] = tombs
+		}
+		if _, ok := tombs[strings.ToUpper(r.Hash)]; ok || len(tombs) >= rtTombMax {
+			continue
+		}
+		tombs[strings.ToUpper(r.Hash)] = rtTomb{gen: r.Generation, at: r.At, settled: r.Settled}
 	}
 }
 
@@ -548,7 +625,20 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	// decision, and a box down for hours must not dip to "degraded".
 	st.NextPoll, st.Backoff = time.Time{}, false
 	auth, authKnown := m.restoredAuth(b)
+	// Erase tombstones first: an owed label whose torrent was erased (the
+	// erase's answer lost, or the process gone before the forget) must not
+	// come back with the restored labels; the first poll settles the rest.
+	m.restoreRtTombs(b)
 	rtLabels := m.restoredRtLabels(b)
+	if len(rtLabels) > 0 {
+		kept := rtLabels[:0:0]
+		for _, l := range rtLabels {
+			if !m.rtTombed(b.ID, boxGeneration(b), l.Hash) {
+				kept = append(kept, l)
+			}
+		}
+		rtLabels = kept
+	}
 	if !b.Enabled {
 		st.Status, st.StatusReason, st.Failures = "disabled", "", 0 // nothing to retry; the reason belonged to the last poll
 	}
@@ -787,7 +877,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 		// The old machine's alerts resolve, except the renewal alert, which
 		// is the record's and would otherwise come back unacknowledged.
 		prev = nil
-		if err := m.st.DeleteCache(sctx, b.ID, "state", "du", rtLabelsCacheKind, rtRemoveCacheKind); err != nil {
+		if err := m.st.DeleteCache(sctx, b.ID, "state", "du", rtLabelsCacheKind, rtRemoveCacheKind, rtTombsCacheKind); err != nil {
 			m.log.Warn("drop cache of moved box", "box", fresh.Name, "err", err)
 		}
 		if n, err := m.st.ResolveBoxAlerts(sctx, b.ID, "renewal"); err != nil {
@@ -1035,11 +1125,18 @@ func (m *Manager) RtTorrentAction(ctx context.Context, id int64, hash, action st
 	return err
 }
 
+// ErrStaleNotice is a dismiss for a removal notice that is no longer the
+// one on record: a newer failure replaced it, and the user has not seen
+// that one.
+var ErrStaleNotice = errors.New("the notice has changed since it was shown; reload to see the current one")
+
 // DismissRtRemoveFailure clears the recorded outcome of a failed detached
 // remove-with-data (RtState.RemoveFailed) once the user has seen it: the
 // durable row first, then the live state, under the same per-box guard as
-// the recording, so neither can undo the other.
-func (m *Manager) DismissRtRemoveFailure(id int64) error {
+// the recording, so neither can undo the other. at identifies the notice
+// the user saw (RtState.RemoveFailedAt); a notice recorded since is left
+// alone and ErrStaleNotice returned (daybreak blue re-review 5 of PR 123).
+func (m *Manager) DismissRtRemoveFailure(id int64, at time.Time) error {
 	p := m.poller(id)
 	if p == nil {
 		return store.ErrNotFound
@@ -1049,6 +1146,10 @@ func (m *Manager) DismissRtRemoveFailure(id int64) error {
 	defer g.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	var cur rtRemoveCache
+	if _, err := m.st.GetCache(ctx, id, rtRemoveCacheKind, &cur); err == nil && !cur.At.Equal(at) {
+		return ErrStaleNotice
+	}
 	if err := m.st.DeleteCache(ctx, id, rtRemoveCacheKind); err != nil {
 		return err
 	}

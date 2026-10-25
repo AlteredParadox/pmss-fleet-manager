@@ -921,13 +921,20 @@ func TestRtRoutesAndSettings(t *testing.T) {
 		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/..%%2F/stop", id), 400},
 		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/remove-data", id, strings.Repeat("A", 40)), 409}, // valid, but the box was never probed: not ready
 		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/stop", 999, strings.Repeat("a", 40)), 404},
-		{fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", id), 200},
-		{fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", 999), 404},
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", id), 400}, // the notice time is required
 	} {
 		code, body := do(t, s, "POST", tc.path, "", hdr)
 		if code != tc.want {
 			t.Errorf("%s: %d %s", tc.path, code, body)
 		}
+	}
+	// A dismiss names the notice it saw (none on record here: nothing to
+	// compare, the row is simply absent); an unknown box is 404.
+	if code, body := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", id), `{"at":"2026-10-25T10:00:00Z"}`, hdr); code != 200 {
+		t.Errorf("dismiss: %d %s", code, body)
+	}
+	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", 999), `{"at":"2026-10-25T10:00:00Z"}`, hdr); code != 404 {
+		t.Errorf("dismiss unknown box: %d", code)
 	}
 	// Add: the shared form validation applies; a never-probed box is 409.
 	code, body = do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/torrents", id), "", hdr)

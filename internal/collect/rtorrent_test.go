@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,6 +103,9 @@ func (f *fakeSCGI) serve(c net.Conn) {
 	reply := f.reply
 	f.mu.Unlock()
 	resp := reply(method, s)
+	if resp == closeConn {
+		return // the peer read the request and went away without answering
+	}
 	if method == "d.custom1.set" && resp == xmlResp(i8(0)) {
 		// Real rTorrent answers a string variable's setter with the string it
 		// assigned (fred on PR 122): a reply that did not care gets that.
@@ -126,6 +130,9 @@ func (f *fakeSCGI) called() []string {
 	defer f.mu.Unlock()
 	return append([]string(nil), f.methods...)
 }
+
+// closeConn, returned by a reply, closes the connection without an answer.
+const closeConn = "\x00close"
 
 func xmlResp(inner string) string {
 	return `<?xml version="1.0"?><methodResponse><params><param><value>` + inner + `</value></param></params></methodResponse>`
@@ -185,8 +192,18 @@ func rtFixture(t *testing.T, f *fakeSCGI) (*poller, *probe.Snapshot) {
 	}
 	t.Cleanup(func() { st.Close() })
 	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p := newPoller(m, &store.Box{ID: 1, Name: "x", User: "u", RtEnabled: true})
+	// The box exists in the store (cache rows hang off it: labels, erase
+	// tombstones, removal notices) and the poller is the box's current one
+	// (the only one that persists labels).
+	box := &store.Box{ID: 1, Name: "x", Host: "box.example", User: "u", RtEnabled: true}
+	if err := st.CreateBox(context.Background(), box); err != nil {
+		t.Fatal(err)
+	}
+	p := newPoller(m, box)
 	p.dialRt = f.dialer
+	m.mu.Lock()
+	m.pollers[p.box.ID] = p
+	m.mu.Unlock()
 	// The destructive phase's own transport: the same fake SCGI server and a
 	// runner that cannot run anything (tests that delete install their own).
 	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
@@ -525,6 +542,9 @@ func TestManagerRtGuards(t *testing.T) {
 	p, _ := rtFixture(t, f)
 	m := p.m
 	ctx := context.Background()
+	m.mu.Lock()
+	delete(m.pollers, 1) // not registered yet: unknown box
+	m.mu.Unlock()
 	if err := m.RtTorrentAction(ctx, 1, rtHashA, "stop"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatal(err)
 	}
@@ -663,10 +683,6 @@ func TestRtPendingLabelsSurviveTransportAndRestart(t *testing.T) {
 	// record persists them for this generation; a restarted manager finds
 	// them for the same record and not for a moved one. (box_cache rows
 	// belong to a stored box, so the record is created first.)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	p.recordRtLabels(context.Background())
 	got := p.m.restoredRtLabels(p.box)
 	if len(got) != 1 || got[0].Hash != rtHashA || got[0].Label != "tv" {
@@ -727,10 +743,6 @@ func TestRtLabelsHandedOverOnEdit(t *testing.T) {
 	f := newFakeSCGI(t)
 	f.reply = rtReplies
 	p, _ := rtFixture(t, f)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	c, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	c.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "tv", Until: time.Now().Add(time.Hour)}})
 	// What UpdateBox does after stopAndWait: the client is torn down and the
@@ -1059,10 +1071,6 @@ func TestRtRemoveDataForgetsLabelOnCurrentOwner(t *testing.T) {
 		return rtReplies(m, b)
 	}
 	p, _ := rtFixture(t, f)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	p.m.mu.Lock()
 	p.m.pollers[p.box.ID] = p
 	p.m.mu.Unlock()
@@ -1082,10 +1090,10 @@ func TestRtRemoveDataForgetsLabelOnCurrentOwner(t *testing.T) {
 	box := *p.box
 	p2 := newPoller(p.m, &box)
 	p2.dialRt = f.dialer
+	// The erase intent was recorded before the erase went out, so the flush
+	// already kept the label out of the cache (daybreak blue re-review 5 of
+	// PR 123); the replacement starts without it either way.
 	p2.rtLabels = p.m.restoredRtLabels(&box)
-	if len(p2.rtLabels) != 1 {
-		t.Fatalf("replacement should start with the owed label: %+v", p2.rtLabels)
-	}
 	p.m.mu.Lock()
 	p.m.pollers[box.ID] = p2
 	p.m.mu.Unlock()
@@ -1145,10 +1153,6 @@ func TestRtRemoveDataCleanupSerialisedWithEdit(t *testing.T) {
 		return rtReplies(m, b)
 	}
 	p, _ := rtFixture(t, f)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	m := p.m
 	m.mu.Lock()
 	m.pollers[p.box.ID] = p
@@ -1438,10 +1442,6 @@ func TestRecordRtLabelsRace(t *testing.T) {
 	f := newFakeSCGI(t)
 	f.reply = rtReplies
 	p, _ := rtFixture(t, f)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	p.m.mu.Lock()
 	p.m.pollers[p.box.ID] = p
 	p.m.mu.Unlock()
@@ -1600,10 +1600,6 @@ func TestPostEraseLockIsBounded(t *testing.T) {
 		return rtReplies(m, b)
 	}
 	p, snap := rtFixture(t, f)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	p.m.mu.Lock()
 	p.m.pollers[p.box.ID] = p
 	p.m.mu.Unlock()
@@ -1840,10 +1836,6 @@ func TestRtRetireTimeoutAdoptsLate(t *testing.T) {
 		return rtReplies(m, b)
 	}
 	p, _ := rtFixture(t, f)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	p.m.mu.Lock()
 	p.m.pollers[p.box.ID] = p // the late set goes to the box's current poller
 	p.m.mu.Unlock()
@@ -1935,10 +1927,6 @@ func TestRtLateAdoptionGoesToCurrentPoller(t *testing.T) {
 		return rtReplies(m, b)
 	}
 	p, _ := rtFixture(t, f)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	p.m.mu.Lock()
 	p.m.pollers[p.box.ID] = p
 	p.m.mu.Unlock()
@@ -2031,10 +2019,6 @@ func TestRtEmptySnapshotIsAuthoritative(t *testing.T) {
 	f := newFakeSCGI(t)
 	f.reply = rtReplies
 	p, _ := rtFixture(t, f)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	c, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	c.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "tv", Until: time.Now().Add(time.Hour)}})
 	p.recordRtLabels(context.Background())
@@ -2069,10 +2053,6 @@ func TestRtPlainRemovePersistsAtOnce(t *testing.T) {
 	f := newFakeSCGI(t)
 	f.reply = rtReplies
 	p, snap := rtFixture(t, f)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	readyRt(t, p, "unix:/x")
 	if _, err := p.rtAddTorrents(context.Background(), qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Category: "tv"}); err != nil {
 		t.Fatal(err)
@@ -2165,10 +2145,6 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 		return rtReplies(m, b)
 	}
 	p, snap := rtFixture(t, f)
-	p.box.Host = "box.example"
-	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
-		t.Fatal(err)
-	}
 	p.m.mu.Lock()
 	p.m.pollers[p.box.ID] = p
 	p.m.mu.Unlock()
@@ -2255,7 +2231,7 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 	if err := p.m.st.SetCache(context.Background(), p.box.ID, "state", live.Summary()); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.m.DismissRtRemoveFailure(p.box.ID); err != nil {
+	if err := p.m.DismissRtRemoveFailure(p.box.ID, live.Rt.RemoveFailedAt); err != nil {
 		t.Fatal(err)
 	}
 	cached = BoxState{}
@@ -2272,7 +2248,38 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 	if !cleared {
 		t.Fatal("dismiss must clear the record")
 	}
-	if err := p.m.DismissRtRemoveFailure(999); !errors.Is(err, store.ErrNotFound) {
+	// A dismiss names the notice it saw; a newer notice recorded since is
+	// left alone and the dismiss refused (daybreak blue re-review 5 of PR
+	// 123): report A, report B over it, dismiss A → stale, B stays;
+	// dismiss B → gone.
+	p.reportRtRemove(p.generation(), rtHashA, target, errors.New("first failure"))
+	p.m.mu.RLock()
+	seenA := p.m.states[p.box.ID].Rt.RemoveFailedAt
+	p.m.mu.RUnlock()
+	time.Sleep(2 * time.Millisecond)
+	p.reportRtRemove(p.generation(), rtHashB, filepath.Join(data, "Beta"), errors.New("second failure"))
+	p.m.mu.RLock()
+	seenB, msgB := p.m.states[p.box.ID].Rt.RemoveFailedAt, p.m.states[p.box.ID].Rt.RemoveFailed
+	p.m.mu.RUnlock()
+	if !strings.Contains(msgB, "Beta") || !seenB.After(seenA) {
+		t.Fatalf("fixture: %q %v %v", msgB, seenA, seenB)
+	}
+	if err := p.m.DismissRtRemoveFailure(p.box.ID, seenA); !errors.Is(err, ErrStaleNotice) {
+		t.Fatalf("dismissing the old notice: %v", err)
+	}
+	p.m.mu.RLock()
+	still := p.m.states[p.box.ID].Rt.RemoveFailed
+	p.m.mu.RUnlock()
+	if msgR, _, ok := p.m.restoredRtRemove(p.box); still != msgB || !ok || !strings.Contains(msgR, "Beta") {
+		t.Fatalf("the newer notice must survive a stale dismiss: %q / %q", still, msgR)
+	}
+	if err := p.m.DismissRtRemoveFailure(p.box.ID, seenB); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := p.m.restoredRtRemove(p.box); ok {
+		t.Fatal("dismissed")
+	}
+	if err := p.m.DismissRtRemoveFailure(999, seenB); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("%v", err)
 	}
 }
@@ -2314,5 +2321,140 @@ func TestStartPollerPublishesNoticeUnderGuard(t *testing.T) {
 	m.mu.RUnlock()
 	if got != "Alpha: boom" {
 		t.Fatalf("published notice %q", got)
+	}
+}
+
+// TestOldAddCannotOverwriteSuccessorLabels (daybreak blue re-review 5 of PR
+// 123, finding 1): an add's persistence runs on a poller an edit has
+// replaced meanwhile; the successor has since spent the label and persisted
+// an empty set; the old writer must not put its snapshot over that.
+func TestOldAddCannotOverwriteSuccessorLabels(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	readyRt(t, p, "unix:/x")
+	entered, release := make(chan struct{}), make(chan struct{})
+	p.beforeRecord = func() { close(entered); <-release }
+	addDone := make(chan error, 1)
+	go func() {
+		_, err := p.rtAddTorrents(context.Background(), qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Category: "tv"})
+		addDone <- err
+	}()
+	<-entered // the label is remembered on the client; the write has not run
+	// The edit: the old poller is torn down and flushed (still current, so
+	// the flush passes), the successor restores the label and is published.
+	p.closeConns()
+	p.recordRtLabels(context.Background())
+	if got := p.m.restoredRtLabels(p.box); len(got) != 1 {
+		t.Fatalf("fixture: the edit's flush should persist the label: %+v", got)
+	}
+	box := *p.box
+	p2 := newPoller(p.m, &box)
+	p2.dialRt = f.dialer
+	p2.rtLabels = p.m.restoredRtLabels(&box)
+	p.m.mu.Lock()
+	p.m.pollers[box.ID] = p2
+	p.m.mu.Unlock()
+	// The successor spends the label and persists the empty set.
+	c2, _ := p2.rtClient(context.Background(), nil, "unix:/x")
+	if err := c2.Forget(context.Background(), rtHashA); err != nil {
+		t.Fatal(err)
+	}
+	p2.recordRtLabels(context.Background())
+	if got := p.m.restoredRtLabels(&box); len(got) != 0 {
+		t.Fatalf("fixture: %+v", got)
+	}
+	// The old add resumes and writes: nothing must change.
+	close(release)
+	if err := <-addDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := p.m.restoredRtLabels(&box); len(got) != 0 {
+		t.Fatalf("the retired poller overwrote the successor's snapshot: %+v", got)
+	}
+	m2 := New(p.m.st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if got := m2.restoredRtLabels(&box); len(got) != 0 {
+		t.Fatalf("after a restart: %+v", got)
+	}
+}
+
+// TestRtEraseIntentIsDurable (daybreak blue re-review 5 of PR 123, finding
+// 2): the erase is on record before the command is sent, so a lost answer
+// (the peer read the request and closed) or a process gone before the
+// forget still leaves a restart knowing the hash was erased: the restored
+// labels skip it, a fresh poller's first poll settles it, and an
+// unlabelled re-add gets no label.
+func TestRtEraseIntentIsDurable(t *testing.T) {
+	f := newFakeSCGI(t)
+	var lost atomic.Bool
+	lost.Store(true)
+	f.reply = func(m, b string) string {
+		if m == "d.erase" && lost.Load() {
+			return closeConn
+		}
+		return rtReplies(m, b)
+	}
+	p, snap := rtFixture(t, f)
+	readyRt(t, p, "unix:/x")
+	cli, _ := p.rtClient(context.Background(), nil, "unix:/x")
+	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
+	p.recordRtLabels(context.Background())
+	if err := p.rtTorrentAction(context.Background(), rtHashA, rtorrent.ActionRemove); err == nil {
+		t.Fatal("a lost answer must surface as an error")
+	}
+	if !p.m.rtTombed(p.box.ID, p.generation(), rtHashA) {
+		t.Fatal("the erase intent must be on record although the answer was lost")
+	}
+	// The old label row is still there (nothing persisted after the error),
+	// as after a hard exit; a restart restores the tombstone and skips it.
+	if got := p.m.restoredRtLabels(p.box); len(got) != 1 {
+		t.Fatalf("fixture: %+v", got)
+	}
+	m2 := New(p.m.st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m2.restoreRtTombs(p.box)
+	if !m2.rtTombed(p.box.ID, boxGeneration(p.box), rtHashA) {
+		t.Fatal("the tombstone must survive a restart")
+	}
+	kept := 0 // what startPoller does with the restored labels
+	for _, l := range m2.restoredRtLabels(p.box) {
+		if !m2.rtTombed(p.box.ID, boxGeneration(p.box), l.Hash) {
+			kept++
+		}
+	}
+	if kept != 0 {
+		t.Fatal("a restored label for an erased hash must be skipped")
+	}
+	// A fresh poller on the restarted manager settles it on its first poll
+	// and an unlabelled re-add stays unlabelled.
+	p2 := newPoller(m2, p.box)
+	p2.dialRt = f.dialer
+	m2.mu.Lock()
+	m2.pollers[p.box.ID] = p2
+	m2.mu.Unlock()
+	p2.rtLabels = []rtorrent.PendingLabel{} // as startPoller leaves it after the skip
+	lost.Store(false)
+	var st BoxState
+	p2.pollRt(context.Background(), &st, snap)
+	if st.Rt.Error != "" || len(m2.rtTombList(p.box.ID, p2.generation())) != 0 {
+		t.Fatalf("settle: %q %v", st.Rt.Error, m2.rtTombList(p.box.ID, p2.generation()))
+	}
+	c2, _ := p2.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
+	before := countCalls(f, "d.custom1.set")
+	if _, err := c2.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Torrents(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if countCalls(f, "d.custom1.set") != before {
+		t.Fatal("the erased torrent's label reached its unlabelled re-add")
+	}
+	// Another generation restores nothing.
+	moved := *p.box
+	moved.Host = "elsewhere.example"
+	m3 := New(p.m.st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m3.restoreRtTombs(&moved)
+	if m3.rtTombed(moved.ID, boxGeneration(&moved), rtHashA) {
+		t.Fatal("another generation's tombstone restored")
 	}
 }

@@ -891,7 +891,7 @@ func actionCode(err error) int {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return 404
-	case errors.Is(err, collect.ErrDisabled), errors.Is(err, collect.ErrNotReady):
+	case errors.Is(err, collect.ErrDisabled), errors.Is(err, collect.ErrNotReady), errors.Is(err, collect.ErrStaleNotice):
 		return 409
 	}
 	return 502
@@ -1197,7 +1197,14 @@ func (s *Server) handleRtDismissRemoveFailure(w http.ResponseWriter, r *http.Req
 		writeErr(w, 400, err)
 		return
 	}
-	if err := s.m.DismissRtRemoveFailure(id); err != nil {
+	var body struct {
+		At time.Time `json:"at"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil || body.At.IsZero() {
+		writeErr(w, 400, errors.New("the notice time (at) is required"))
+		return
+	}
+	if err := s.m.DismissRtRemoveFailure(id, body.At); err != nil {
 		writeErr(w, actionCode(err), err)
 		return
 	}

@@ -94,7 +94,10 @@ type poller struct {
 	rtEpoch  uint64                  // bumped on every client handoff (see forgetRtLabel)
 	// jobTimeout overrides rtRemoveSetupTimeout in tests.
 	jobTimeout time.Duration
-	dialRt     func(ep string) rtorrent.Dialer
+	// beforeRecord, when set (tests), runs between an add's remote work and
+	// its persistence of the owed labels.
+	beforeRecord func()
+	dialRt       func(ep string) rtorrent.Dialer
 	// dialDetached is the test hook for the destructive phase's own
 	// transport (see detachedTransport).
 	dialDetached func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error)

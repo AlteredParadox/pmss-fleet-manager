@@ -311,7 +311,9 @@ func (p *poller) adoptLate(cli *rtorrent.Client, retiredAt time.Time) {
 // poll settles it (settleRtTombs).
 func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) (settled bool) {
 	hash = strings.ToUpper(hash)
-	p.m.rtTombstone(p.box.ID, p.generation(), hash)
+	if err := p.m.rtTombstone(p.box.ID, p.generation(), hash); err != nil {
+		p.m.log.Warn("cache rtorrent tombstones", "box", p.box.Name, "err", err)
+	}
 	// The saved copy and the client are two homes for the same label, and a
 	// reconnect (dropRtLocked) moves it from the client to the copy at any
 	// moment, including while Forget below waits for the client's operation
@@ -435,6 +437,14 @@ func (p *poller) recordRtLabels(ctx context.Context) {
 	g := p.m.labelGuard(p.box.ID)
 	g.Lock()
 	defer g.Unlock()
+	// Only the box's current poller writes: a retired one (an edit replaced
+	// it while one of its requests was between its remote work and this
+	// write) would put its older snapshot over the successor's newer one
+	// (daybreak blue re-review 5 of PR 123). UpdateBox's own flush of the
+	// retiring poller runs before the successor is published, so it passes.
+	if p.m.poller(p.box.ID) != p {
+		return
+	}
 	p.mu.Lock()
 	cli := p.rt
 	var saved []rtorrent.PendingLabel
@@ -714,6 +724,16 @@ func (p *poller) rtTorrentAction(ctx context.Context, hash, action string) error
 		return p.rtRemoveData(ctx, cli, sshRunner(sshc), st.Rt.Endpoint, st.Rt.DataDir, hash, release)
 	}
 	defer release()
+	if action == rtorrent.ActionRemove {
+		// The erase intent is on record, durably, before the irreversible
+		// command goes out: should the answer be lost or the process die
+		// after rTorrent acted, the restart still knows the hash was
+		// erased and settles its label before anything can apply it
+		// (daybreak blue re-review 5 of PR 123). Not recordable: not sent.
+		if err := p.m.rtTombstone(p.box.ID, p.generation(), hash); err != nil {
+			return fmt.Errorf("could not record the removal before sending it; nothing was changed: %w", err)
+		}
+	}
 	if err := p.onRetired(actx, cli, func(c *rtorrent.Client) error { return c.Action(actx, action, hash) }); err != nil {
 		return err
 	}
@@ -814,6 +834,12 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		dcli := rtorrent.New(ddial)
 		ectx, ecancel := context.WithTimeout(dctx, apiTimeout)
 		defer ecancel()
+		// The erase intent goes on record, durably, before the erase is
+		// sent (see rtTorrentAction); the tombstone work below then
+		// reopens it with the time of the erase itself.
+		if err := p.m.rtTombstone(p.box.ID, gen, hash); err != nil {
+			return fmt.Errorf("could not record the removal before sending it; nothing was changed: %w", err)
+		}
 		if err := dcli.Action(ectx, rtorrent.ActionRemove, hash); err != nil {
 			return fmt.Errorf("rTorrent refused to remove the torrent; nothing was deleted: %w", err)
 		}
@@ -1025,6 +1051,9 @@ func (p *poller) rtAddTorrents(ctx context.Context, req qbt.AddRequest) (rtorren
 	}
 	var res rtorrent.AddResult
 	err = p.onRetired(actx, cli, func(c *rtorrent.Client) (err error) { res, err = c.Add(actx, r); return err })
+	if p.beforeRecord != nil {
+		p.beforeRecord()
+	}
 	// The labels now owed to magnets are persisted at once, whatever the
 	// outcome: a shutdown before the next poll must not lose them
 	// (daybreak blue review of PR 123).
