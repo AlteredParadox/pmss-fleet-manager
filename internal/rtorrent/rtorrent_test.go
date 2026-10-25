@@ -720,10 +720,6 @@ func TestPathLookups(t *testing.T) {
 	if err != nil || bp != "/home/u/data/Alpha" {
 		t.Fatal(bp, err)
 	}
-	dd, err := c.DefaultDirectory(context.Background())
-	if err != nil || dd != "/home/u/data" {
-		t.Fatal(dd, err)
-	}
 	if _, err := c.BasePath(context.Background(), "nope"); !errors.Is(err, ErrBadHash) {
 		t.Fatal(err)
 	}
@@ -756,7 +752,7 @@ func TestDecodeKinds(t *testing.T) {
 	c := New(f.dial)
 	for _, tc := range cases {
 		f.on(func(m string, p []string) string { return tc.body })
-		v, err := c.call(context.Background(), 0, "x", "")
+		v, err := c.call(context.Background(), 8, 4096, "x", "")
 		if err != nil || !tc.want(v) {
 			t.Errorf("%s: %+v %v", tc.body[:min(60, len(tc.body))], v, err)
 		}
@@ -772,7 +768,7 @@ func TestDecodeKinds(t *testing.T) {
 		`<?xml version="1.0"?><methodResponse>text<params/></methodResponse>`,
 	} {
 		f.on(func(m string, p []string) string { return body })
-		if _, err := c.call(context.Background(), 0, "x", ""); !errors.Is(err, ErrMalformed) {
+		if _, err := c.call(context.Background(), 8, 4096, "x", ""); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v", body[:min(70, len(body))], err)
 		}
 	}
@@ -784,7 +780,7 @@ func TestDecodeKinds(t *testing.T) {
 	}
 	b.WriteString("</struct>")
 	f.on(func(m string, p []string) string { return resp(b.String()) })
-	v, err := c.call(context.Background(), 0, "x", "")
+	v, err := c.call(context.Background(), 8, 4096, "x", "")
 	if err != nil || len(v.Struct) != 256 {
 		t.Fatalf("members %d %v", len(v.Struct), err)
 	}
@@ -863,8 +859,8 @@ func TestRowValuesClamped(t *testing.T) {
 	if r.Size != 0 || r.Completed != 0 || r.DownRate != 0 || r.UpRate != 0 || r.Ratio != 0 || r.Hashing != 0 || r.Finished != 0 || r.Peers != 0 || r.Seeds != 0 || r.UpTotal != 0 || r.DownTotal != 0 {
 		t.Fatalf("%+v", r)
 	}
-	if r.State() != "closed" || r.String() != hashA+` "n"` {
-		t.Fatal(r.State(), r.String())
+	if r.State() != "closed" {
+		t.Fatal(r.State())
 	}
 	if (Torrent{Open: true}).State() != "stopped" || (Torrent{Hashing: 2}).State() != "checking" {
 		t.Fatal("state")
@@ -872,9 +868,6 @@ func TestRowValuesClamped(t *testing.T) {
 	f.on(func(m string, p []string) string { return resp(i8(1)) })
 	c := New(f.dial)
 	if _, err := c.BasePath(context.Background(), hashA); !errors.Is(err, ErrUnexpected) {
-		t.Fatal(err)
-	}
-	if _, err := c.DefaultDirectory(context.Background()); !errors.Is(err, ErrUnexpected) {
 		t.Fatal(err)
 	}
 	if _, err := c.Version(context.Background()); !errors.Is(err, ErrUnexpected) {
@@ -1167,8 +1160,7 @@ func TestNestedAllocationBounded(t *testing.T) {
 	}
 	b.WriteString("</struct>")
 	f.on(func(m string, p []string) string { return resp(b.String()) })
-	c.maxValues = 100
-	if _, err := c.call(context.Background(), 0, "x", ""); !errors.Is(err, ErrTooLarge) {
+	if _, err := c.call(context.Background(), 8, 100, "x", ""); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("struct budget: %v", err)
 	}
 }
@@ -1328,7 +1320,7 @@ func TestEnvelopeComplete(t *testing.T) {
 	f.on(func(m string, p []string) string {
 		return `<?xml version="1.0"?><methodResponse xmlns:ex="http://ws.apache.org/xmlrpc/namespaces/extensions"><params><param><value><ex:i8>42</ex:i8></value></param></params></methodResponse>`
 	})
-	if v, err := c.call(context.Background(), 0, "x", ""); err != nil || v.Int != 42 {
+	if v, err := c.call(context.Background(), 8, 4096, "x", ""); err != nil || v.Int != 42 {
 		t.Fatalf("namespaced i8: %+v %v", v, err)
 	}
 }
@@ -1410,5 +1402,208 @@ func TestRemoveRetiresPendingLabel(t *testing.T) {
 	c.remember(hashA, "tv")
 	if err := c.Action(ctx, ActionStop, hashA); err != nil || len(c.Pending()) != 1 {
 		t.Fatal("stop must keep the owed label")
+	}
+}
+
+// Daybreak blue re-review of PR 122, finding 1: every call states the shape
+// of its answer, so a wide root array fails fast on scalar, stats and
+// command calls too, and a command's answer must be rTorrent's integer.
+func TestRootArrayBounded(t *testing.T) {
+	f := newFake(t)
+	wide := func(n int) string {
+		var b strings.Builder
+		b.WriteString(`<?xml version="1.0"?><methodResponse><params><param><value><array><data>`)
+		for i := 0; i < n; i++ {
+			b.WriteString(`<value><i8>1</i8></value>`)
+		}
+		b.WriteString(`</data></array></value></param></params></methodResponse>`)
+		return b.String()
+	}
+	c := New(f.dial)
+	ctx := context.Background()
+	f.on(func(m string, p []string) string { return wide(scalarRows + 1) })
+	if _, err := c.Version(ctx); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("version: %v", err)
+	}
+	if _, err := c.BasePath(ctx, hashA); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("base path: %v", err)
+	}
+	if err := c.Action(ctx, ActionStop, hashA); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("action: %v", err)
+	}
+	if _, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}}); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("add: %v", err)
+	}
+	f.on(func(m string, p []string) string { return wide(statsRows + 1) })
+	if _, err := c.Stats(ctx); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("stats: %v", err)
+	}
+	// A small root array passes the cap and then fails the shape check, as
+	// before; a command answering a string instead of its status is refused.
+	f.on(func(m string, p []string) string { return wide(2) })
+	if _, err := c.Version(ctx); !errors.Is(err, ErrUnexpected) {
+		t.Fatalf("small array: %v", err)
+	}
+	f.on(func(m string, p []string) string { return resp(str("ok")) })
+	if err := c.Action(ctx, ActionStop, hashA); !errors.Is(err, ErrUnexpected) {
+		t.Fatalf("command answer kind: %v", err)
+	}
+	// The value budget of a scalar call is small too.
+	var b strings.Builder
+	b.WriteString("<struct>")
+	for i := 0; i < scalarValues+10; i++ {
+		fmt.Fprintf(&b, "<member><name>k%d</name><value><i8>%d</i8></value></member>", i, i)
+	}
+	b.WriteString("</struct>")
+	f.on(func(m string, p []string) string { return resp(b.String()) })
+	if _, err := c.Version(ctx); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("scalar budget: %v", err)
+	}
+}
+
+// Finding 2: Forget is an operation like the others. Paused between an
+// Add's label setter and its remember, a concurrent Forget waits, so the
+// result is linear: the later Forget wins and nothing stays owed.
+func TestForgetIsSerialised(t *testing.T) {
+	f := newFake(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f.on(func(m string, p []string) string {
+		if m == "d.custom1.set" {
+			entered <- struct{}{}
+			<-gate // Add is mid-operation here, before remember
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	ctx := context.Background()
+	addDone := make(chan error, 1)
+	go func() {
+		_, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
+		addDone <- err
+	}()
+	<-entered
+	forgetDone := make(chan error, 1)
+	go func() { forgetDone <- c.Forget(ctx, hashA) }()
+	select {
+	case <-forgetDone:
+		t.Fatal("Forget ran inside the Add operation")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(gate)
+	if err := <-addDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-forgetDone; err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Pending()) != 0 {
+		t.Fatalf("the later Forget must win: %+v", c.Pending())
+	}
+	// Forget honours its context while waiting.
+	<-c.ops
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+	if err := c.Forget(cctx, hashA); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	c.ops <- struct{}{}
+}
+
+// Finding 3: a multicall fault reads as "missing" only when it is a typed
+// unknown-method fault on an optional member.
+func TestStatsFaultsStrict(t *testing.T) {
+	f := newFake(t)
+	c := New(f.dial)
+	ctx := context.Background()
+	fault := func(code, msg string) string {
+		return `<value><struct><member><name>faultCode</name><value><i4>` + code + `</i4></value></member><member><name>faultString</name><value><string>` + msg + `</string></value></member></struct></value>`
+	}
+	members := func(i int, v string) string {
+		parts := []string{row(str("0.9.8")), row(str("0.13.8")), row(i8(1)), row(i8(2)), row(i8(3)), `<value><array><data><value><struct><member><name>active</name><value><i8>1</i8></value></member></struct></value></data></array></value>`}
+		parts[i] = v
+		return resp(`<array><data>` + strings.Join(parts, "") + `</data></array>`)
+	}
+	// Optional members with an unknown-method fault: zero, no error.
+	f.on(func(m string, p []string) string {
+		return members(4, fault("-506", "Method 'network.listen.port' not defined"))
+	})
+	if st, err := c.Stats(ctx); err != nil || st.ListenPort != 0 || !st.DHT {
+		t.Fatalf("%+v %v", st, err)
+	}
+	f.on(func(m string, p []string) string {
+		return members(5, fault("-506", "Method 'dht.statistics' not defined"))
+	})
+	if st, err := c.Stats(ctx); err != nil || st.DHT {
+		t.Fatalf("%+v %v", st, err)
+	}
+	// A fault on a mandatory member surfaces as the fault.
+	for i := 0; i < 4; i++ {
+		f.on(func(m string, p []string) string { return members(i, fault("-506", "Method not defined")) })
+		if _, err := c.Stats(ctx); !isFault(err) {
+			t.Errorf("mandatory member %d: %v", i, err)
+		}
+	}
+	// An optional member's fault that is not "unknown method" surfaces too.
+	f.on(func(m string, p []string) string { return members(4, fault("-501", "Could not find info-hash.")) })
+	if _, err := c.Stats(ctx); !isFault(err) {
+		t.Fatalf("non-unknown optional fault: %v", err)
+	}
+	// Malformed faults are not faults.
+	for _, bad := range []string{
+		`<value><struct><member><name>faultCode</name><value><string>-506</string></value></member><member><name>faultString</name><value><string>x</string></value></member></struct></value>`,
+		`<value><struct><member><name>faultCode</name><value><i4>-506</i4></value></member></struct></value>`,
+		`<value><struct><member><name>faultCode</name><value><i4>-506</i4></value></member><member><name>faultString</name><value><i4>1</i4></value></member></struct></value>`,
+	} {
+		f.on(func(m string, p []string) string { return members(4, bad) })
+		if _, err := c.Stats(ctx); !errors.Is(err, ErrUnexpected) {
+			t.Errorf("malformed fault: %v", err)
+		}
+	}
+}
+
+// Finding 4: updating an existing pending entry at capacity evicts nothing,
+// and Restore updates an existing hash regardless of capacity.
+func TestPendingCapacityUpdates(t *testing.T) {
+	c := New(func(ctx context.Context) (net.Conn, error) { return nil, errors.New("unused") })
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	hashes := make([]string, pendingMax)
+	for i := range hashes {
+		hashes[i] = fmt.Sprintf("%040X", i+1)
+		c.remember(hashes[i], "l")
+		now = now.Add(time.Second) // distinct expiries
+	}
+	// Update an existing hash at capacity: the count stays, nothing goes.
+	c.remember(hashes[0], "renamed")
+	pend := c.Pending()
+	if len(pend) != pendingMax {
+		t.Fatalf("update evicted: %d", len(pend))
+	}
+	seen := map[string]string{}
+	for _, p := range pend {
+		seen[p.Hash] = p.Label
+	}
+	if seen[hashes[0]] != "renamed" || seen[hashes[1]] == "" {
+		t.Fatal("update lost or evicted a neighbour")
+	}
+	// Restore of an existing hash at capacity updates it.
+	c.Restore([]PendingLabel{{Hash: hashes[2], Label: "restored", Until: now.Add(time.Hour)}})
+	seen = map[string]string{}
+	for _, p := range c.Pending() {
+		seen[p.Hash] = p.Label
+	}
+	if seen[hashes[2]] != "restored" || len(c.Pending()) != pendingMax {
+		t.Fatal("restore of an existing hash at capacity")
+	}
+	// A new hash at capacity evicts exactly one, the nearest expiry: the
+	// restored entry, whose deadline is an hour away (the others have a day).
+	c.remember(fmt.Sprintf("%040X", 5000), "new")
+	seen = map[string]string{}
+	for _, p := range c.Pending() {
+		seen[p.Hash] = p.Label
+	}
+	if len(seen) != pendingMax || seen[hashes[2]] != "" || seen[hashes[0]] != "renamed" || seen[hashes[1]] != "l" || seen[fmt.Sprintf("%040X", 5000)] != "new" {
+		t.Fatalf("new entry eviction: %d, third %q", len(seen), seen[hashes[2]])
 	}
 }

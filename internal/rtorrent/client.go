@@ -19,7 +19,6 @@ package rtorrent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -202,11 +201,21 @@ func ValidHash(h string) bool {
 	return true
 }
 
+// Per-call answer shapes: how many entries the outermost array may hold
+// and how many Values the whole answer may retain. A scalar answer (a
+// version, a path, a command's 0) needs neither an array nor more than a
+// few values; the stats multicall has exactly six members; only the torrent
+// listing needs the large ceilings (daybreak blue re-review of PR 122).
+const (
+	scalarRows, scalarValues = 4, 64
+	statsRows, statsValues   = 6, 256
+)
+
 // call performs one XML-RPC method call under the operation the caller
 // holds. Every rTorrent command takes a target as its first parameter (""
 // for global commands, the hash for d.*); 0.16 refuses calls without one,
-// so callers always pass it.
-func (c *Client) call(ctx context.Context, maxRows int, method string, params ...any) (Value, error) {
+// so callers always pass it. maxRows and budget are the answer's shape.
+func (c *Client) call(ctx context.Context, maxRows, budget int, method string, params ...any) (Value, error) {
 	body, err := encodeCall(method, params...)
 	if err != nil {
 		return Value{}, err
@@ -215,7 +224,7 @@ func (c *Client) call(ctx context.Context, maxRows int, method string, params ..
 	if err != nil {
 		return Value{}, err
 	}
-	v, err := decodeResponseBudget(r, maxRows, c.maxValues)
+	v, err := decodeResponse(r, maxRows, budget)
 	// Against the round trip's own context: its deadline, not only the
 	// caller's, is what cuts a stalled body, and the cut then decodes as
 	// malformed. Checked before done() cancels that context.
@@ -225,6 +234,19 @@ func (c *Client) call(ctx context.Context, maxRows int, method string, params ..
 		return Value{}, err
 	}
 	return v, nil
+}
+
+// command runs a method whose answer is rTorrent's integer status (0 for a
+// command that ran); anything else is not rTorrent's answer.
+func (c *Client) command(ctx context.Context, method string, params ...any) error {
+	v, err := c.call(ctx, scalarRows, scalarValues, method, params...)
+	if err != nil {
+		return err
+	}
+	if v.Kind != KindInt {
+		return ErrUnexpected
+	}
+	return nil
 }
 
 // BasePath returns d.base_path for hash: the directory (or single file)
@@ -239,25 +261,7 @@ func (c *Client) BasePath(ctx context.Context, hash string) (string, error) {
 		return "", err
 	}
 	defer release()
-	v, err := c.call(ctx, 0, "d.base_path", strings.ToUpper(hash))
-	if err != nil {
-		return "", err
-	}
-	if v.Kind != KindString {
-		return "", ErrUnexpected
-	}
-	return clip(v.Str, maxPath), nil
-}
-
-// DefaultDirectory returns directory.default, the download root
-// (~/data on PMSS).
-func (c *Client) DefaultDirectory(ctx context.Context) (string, error) {
-	release, err := c.acquire(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer release()
-	v, err := c.call(ctx, 0, "directory.default", "")
+	v, err := c.call(ctx, scalarRows, scalarValues, "d.base_path", strings.ToUpper(hash))
 	if err != nil {
 		return "", err
 	}
@@ -274,7 +278,7 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 		return "", err
 	}
 	defer release()
-	v, err := c.call(ctx, 0, "system.client_version", "")
+	v, err := c.call(ctx, scalarRows, scalarValues, "system.client_version", "")
 	if err != nil {
 		return "", err
 	}
@@ -296,20 +300,32 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 		mc("throttle.global_down.rate"), mc("throttle.global_up.rate"),
 		mc("network.listen.port"), mc("dht.statistics"),
 	}
-	v, err := c.call(ctx, 0, "system.multicall", calls)
+	v, err := c.call(ctx, statsRows, statsValues, "system.multicall", calls)
 	if err != nil {
 		return nil, err
 	}
 	// Each result is a one-element array holding the value, or a fault
-	// struct (a method this build lacks): a fault leaves the field zero,
-	// a value of the wrong kind is not rTorrent and fails the whole call.
+	// struct. Only an unknown-method fault, with its typed code and string,
+	// and only for the two members a build may lack (the listen port and
+	// DHT statistics) reads as "missing"; a fault on the version or the
+	// rates, or a malformed fault, is an error, not a zero (daybreak blue
+	// re-review of PR 122). A value of the wrong kind fails the call.
 	if v.Kind != KindArray || len(v.Array) != len(calls) {
 		return nil, ErrUnexpected
 	}
-	member := func(i int, want Kind) (Value, error) {
+	methods := []string{"system.client_version", "system.library_version", "throttle.global_down.rate", "throttle.global_up.rate", "network.listen.port", "dht.statistics"}
+	member := func(i int, want Kind, optional bool) (Value, error) {
 		e := v.Array[i]
-		if e.Kind == KindStruct && e.Struct["faultCode"].Kind == KindInt {
-			return Value{}, nil // this method is missing on the build
+		if e.Kind == KindStruct {
+			code, str := e.Struct["faultCode"], e.Struct["faultString"]
+			if code.Kind != KindInt || str.Kind != KindString {
+				return Value{}, ErrUnexpected // not a fault, not a value
+			}
+			f := &Fault{Code: code.Int, String: clip(str.Str, 300)}
+			if optional && unknownMethodFault(f, methods[i]) {
+				return Value{}, nil // this method is missing on the build
+			}
+			return Value{}, f
 		}
 		if e.Kind != KindArray || len(e.Array) != 1 {
 			return Value{}, ErrUnexpected
@@ -323,7 +339,7 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 	var vals [6]Value
 	for i, want := range []Kind{KindString, KindString, KindInt, KindInt, KindInt, KindStruct} {
 		var err error
-		if vals[i], err = member(i, want); err != nil {
+		if vals[i], err = member(i, want, i >= 4); err != nil {
 			return nil, err
 		}
 	}
@@ -388,14 +404,14 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 	if c.noMeta.Load() {
 		fields = torrentFields[:metaField]
 	}
-	v, err := c.call(ctx, c.maxRows, "d.multicall2", append([]any{"", "main"}, fields...)...)
+	v, err := c.call(ctx, c.maxRows, c.maxValues, "d.multicall2", append([]any{"", "main"}, fields...)...)
 	if err != nil && !c.noMeta.Load() && unknownMethodFault(err, "d.is_meta") {
 		// A build without d.is_meta refuses the whole listing with an
 		// unknown-method fault naming it: ask once more without it and
 		// remember. Any other fault stands (fred on PR 122).
 		c.noMeta.Store(true)
 		fields = torrentFields[:metaField]
-		v, err = c.call(ctx, c.maxRows, "d.multicall2", append([]any{"", "main"}, fields...)...)
+		v, err = c.call(ctx, c.maxRows, c.maxValues, "d.multicall2", append([]any{"", "main"}, fields...)...)
 	}
 	if err != nil {
 		return nil, err
@@ -497,7 +513,7 @@ func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
 	}
 	c.pendMu.Unlock()
 	for _, t := range set {
-		if _, err := c.call(ctx, 0, "d.custom1.set", t.hash, t.label); err != nil {
+		if err := c.command(ctx, "d.custom1.set", t.hash, t.label); err != nil {
 			continue // kept: tried again next poll; expiry bounds it
 		}
 		c.pendMu.Lock()
@@ -530,7 +546,8 @@ func (c *Client) Pending() []PendingLabel {
 }
 
 // Restore adds persisted pending labels (expired ones and malformed hashes
-// are dropped; the cap applies).
+// are dropped; the cap applies to new entries, an existing hash is updated
+// regardless).
 func (c *Client) Restore(labels []PendingLabel) {
 	now := c.now()
 	for _, l := range labels {
@@ -538,29 +555,33 @@ func (c *Client) Restore(labels []PendingLabel) {
 			continue
 		}
 		c.pendMu.Lock()
-		if len(c.pending) < pendingMax {
-			c.pending[strings.ToUpper(l.Hash)] = pendingLabel{label: clip(l.Label, maxLabel), until: l.Until}
-		}
+		c.setPendingLocked(strings.ToUpper(l.Hash), pendingLabel{label: clip(l.Label, maxLabel), until: l.Until})
 		c.pendMu.Unlock()
 	}
 }
 
-// remember records a label owed to hash (a magnet's). The oldest entry
-// goes when the map is full.
+// remember records a label owed to hash (a magnet's).
 func (c *Client) remember(hash, label string) {
 	c.pendMu.Lock()
 	defer c.pendMu.Unlock()
-	if len(c.pending) >= pendingMax {
+	c.setPendingLocked(strings.ToUpper(hash), pendingLabel{label: label, until: c.now().Add(pendingTTL)})
+}
+
+// setPendingLocked stores an entry; only a NEW hash at capacity evicts the
+// entry nearest expiry (updating an existing one at capacity must not drop
+// an unrelated label; daybreak blue re-review of PR 122). pendMu held.
+func (c *Client) setPendingLocked(hash string, p pendingLabel) {
+	if _, exists := c.pending[hash]; !exists && len(c.pending) >= pendingMax {
 		var oldest string
 		var at time.Time
-		for h, p := range c.pending {
-			if oldest == "" || p.until.Before(at) {
-				oldest, at = h, p.until
+		for h, e := range c.pending {
+			if oldest == "" || e.until.Before(at) {
+				oldest, at = h, e.until
 			}
 		}
 		delete(c.pending, oldest)
 	}
-	c.pending[hash] = pendingLabel{label: label, until: c.now().Add(pendingTTL)}
+	c.pending[hash] = p
 }
 
 // Action runs one of the valid actions (see ValidAction) on hash.
@@ -587,20 +608,34 @@ func (c *Client) Action(ctx context.Context, action, hash string) error {
 		seq = []string{"d.erase"}
 	}
 	for _, m := range seq {
-		if _, err := c.call(ctx, 0, m, hash); err != nil {
+		if err := c.command(ctx, m, hash); err != nil {
 			return err
 		}
 	}
 	if action == ActionRemove {
-		c.Forget(hash) // a removed magnet owes nothing any more (Codex on PR 122)
+		c.forgetLocked(hash) // a removed magnet owes nothing any more (Codex on PR 122)
 	}
 	return nil
 }
 
 // Forget drops any label still owed to hash: for a torrent removed through
 // another client over the same box, so a later add of the same hash
-// without a label does not inherit the old one.
-func (c *Client) Forget(hash string) {
+// without a label does not inherit the old one. A public operation like
+// the others, it waits for the operation token, so it cannot slip between
+// an Add's label setter and its remember (daybreak blue re-review of PR
+// 122): whichever of the two runs later decides.
+func (c *Client) Forget(ctx context.Context, hash string) error {
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	c.forgetLocked(hash)
+	return nil
+}
+
+// forgetLocked is Forget for a caller that already holds the operation.
+func (c *Client) forgetLocked(hash string) {
 	c.pendMu.Lock()
 	delete(c.pending, strings.ToUpper(hash))
 	c.pendMu.Unlock()
@@ -690,7 +725,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 	}
 	var lastErr error
 	for _, e := range entries {
-		if _, err := c.call(ctx, 0, e.method, "", e.arg); err != nil {
+		if err := c.command(ctx, e.method, "", e.arg); err != nil {
 			if isFault(err) {
 				res.Failed++
 				lastErr = err
@@ -707,7 +742,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 			// it. A fault here (the hash not present yet, which rTorrent
 			// does not do for a synchronous load) leaves the torrent loaded
 			// without its label and is counted.
-			if _, err := c.call(ctx, 0, "d.custom1.set", e.hash, label); err != nil {
+			if err := c.command(ctx, "d.custom1.set", e.hash, label); err != nil {
 				if isFault(err) {
 					res.Unlabelled++
 					continue
@@ -801,6 +836,3 @@ func (t Torrent) State() string {
 		return "downloading"
 	}
 }
-
-// String is for logs.
-func (t Torrent) String() string { return fmt.Sprintf("%s %q", t.Hash, t.Name) }

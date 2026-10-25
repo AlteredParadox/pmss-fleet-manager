@@ -201,15 +201,11 @@ func (dec *decoder) retain() error {
 
 // decodeResponse reads a methodResponse from r (already capped by the
 // caller) and returns its single parameter, or the Fault it carried.
-// maxRows caps the outermost array (the torrent list); more is an error,
-// never a silently truncated view.
-func decodeResponse(r io.Reader, maxRows int) (Value, error) {
-	return decodeResponseBudget(r, maxRows, maxValues)
-}
-
-// decodeResponseBudget is decodeResponse with the retained-value budget
-// given (tests shrink it).
-func decodeResponseBudget(r io.Reader, maxRows, budget int) (Value, error) {
+// maxRows caps the outermost array and budget the Values retained from the
+// whole response: every call states what its answer may hold (a scalar a
+// handful, the torrent list its row ceiling), so the schema sets the
+// allocation and more is an error, never a silently truncated view.
+func decodeResponse(r io.Reader, maxRows, budget int) (Value, error) {
 	d := xml.NewDecoder(newUTF8Reader(r))
 	d.Strict = true
 	// Entities other than the five predefined ones are refused by Strict
@@ -396,7 +392,7 @@ func (dec *decoder) typed(name string, depth int) (Value, error) {
 				if t.Name.Local != "value" {
 					return Value{}, ErrMalformed
 				}
-				if depth == 0 && dec.maxRows > 0 && len(v.Array) >= dec.maxRows {
+				if depth == 0 && len(v.Array) >= dec.maxRows {
 					return Value{}, ErrTooLarge
 				}
 				if depth > 0 && len(v.Array) >= maxInner {
