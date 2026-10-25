@@ -1045,3 +1045,44 @@ func TestPendingLabelsPersist(t *testing.T) {
 		}
 	}
 }
+
+// TestListWithoutIsMeta: a build that does not know d.is_meta refuses the
+// whole listing; the client asks again without it, remembers, and tells
+// the placeholder by its one-byte file instead.
+func TestListWithoutIsMeta(t *testing.T) {
+	f := newFake(t)
+	var lists int
+	f.on(func(m string, p []string) string {
+		if m != "d.multicall2" {
+			return resp(i8(0))
+		}
+		lists++
+		for _, x := range p {
+			if x == "d.is_meta=" {
+				return fault(-506, "Method 'd.is_meta' not defined")
+			}
+		}
+		// 20 fields: a placeholder (one byte, incomplete) and a real torrent.
+		short := func(hash, name string, size, complete int64) string {
+			return row(str(hash), str(name), i8(size), i8(0), i8(0), i8(0), i8(0), i8(1), i8(complete), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0))
+		}
+		return resp(`<array><data>` + short(hashA, "placeholder", 1, 0) + short(hashB, "real", 1000, 0) + `</data></array>`)
+	})
+	c := New(f.dial)
+	rows, err := c.Torrents(context.Background())
+	if err != nil || len(rows) != 2 || lists != 2 {
+		t.Fatalf("%v rows %d lists %d", err, len(rows), lists)
+	}
+	if !rows[0].Meta || rows[1].Meta {
+		t.Fatalf("meta by size: %+v", rows)
+	}
+	// Remembered: the next listing goes without the getter at once.
+	if _, err := c.Torrents(context.Background()); err != nil || lists != 3 {
+		t.Fatalf("%v lists %d", err, lists)
+	}
+	// Any other fault still surfaces.
+	f.on(func(m string, p []string) string { return fault(-501, "no") })
+	if _, err := New(f.dial).Torrents(context.Background()); !isFault(err) {
+		t.Fatal(err)
+	}
+}

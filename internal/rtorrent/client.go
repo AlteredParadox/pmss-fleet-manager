@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,6 +42,11 @@ type Client struct {
 	pendMu  sync.Mutex
 	pending map[string]pendingLabel
 	now     func() time.Time
+
+	// noMeta is set once a build refused the listing with d.is_meta in it
+	// (a d.multicall2 is all or nothing): later listings leave the getter
+	// out and the placeholder is told by its one-byte file instead.
+	noMeta atomic.Bool
 }
 
 // pendingLabel is a label owed to a hash until it is seen set or expires.
@@ -105,13 +111,19 @@ const (
 	maxPath    = 4096
 )
 
-// torrentFields are the d.multicall2 getters, in Torrent field order.
+// torrentFields are the d.multicall2 getters, in Torrent field order. The
+// last one, d.is_meta, is the only one not confirmed on every rTorrent
+// build PMSS tenants may run (0.9.8 answers it; 0.16 registers it too, but
+// no 0.16 box was available): see list for the fallback without it.
 var torrentFields = []any{
 	"d.hash=", "d.name=", "d.size_bytes=", "d.completed_bytes=", "d.down.rate=", "d.up.rate=",
 	"d.ratio=", "d.state=", "d.complete=", "d.is_active=", "d.hashing=", "d.is_open=",
 	"d.message=", "d.custom1=", "d.timestamp.finished=", "d.peers_connected=", "d.peers_complete=",
 	"d.up.total=", "d.down.total=", "d.is_private=", "d.is_meta=",
 }
+
+// metaField is the index of d.is_meta in torrentFields.
+const metaField = 20
 
 // Stats is the client-wide picture.
 type Stats struct {
@@ -293,8 +305,18 @@ func (c *Client) Torrents(ctx context.Context) ([]Torrent, error) {
 }
 
 func (c *Client) list(ctx context.Context) ([]Torrent, error) {
-	params := append([]any{"", "main"}, torrentFields...)
-	v, err := c.call(ctx, c.maxRows, "d.multicall2", params...)
+	fields := torrentFields
+	if c.noMeta.Load() {
+		fields = torrentFields[:metaField]
+	}
+	v, err := c.call(ctx, c.maxRows, "d.multicall2", append([]any{"", "main"}, fields...)...)
+	if err != nil && isFault(err) && !c.noMeta.Load() {
+		// A build without d.is_meta refuses the whole listing: ask once
+		// more without it and remember. Any other fault stands.
+		c.noMeta.Store(true)
+		fields = torrentFields[:metaField]
+		v, err = c.call(ctx, c.maxRows, "d.multicall2", append([]any{"", "main"}, fields...)...)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +325,7 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 	}
 	out := make([]Torrent, 0, len(v.Array))
 	for _, row := range v.Array {
-		if row.Kind != KindArray || len(row.Array) != len(torrentFields) {
+		if row.Kind != KindArray || len(row.Array) != len(fields) {
 			return nil, ErrUnexpected
 		}
 		r := row.Array
@@ -319,8 +341,16 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 			Hashing: nonNeg(r[10].Int), Open: r[11].Int == 1,
 			Message: clip(r[12].Str, maxMessage), Label: clip(r[13].Str, maxLabel),
 			Finished: nonNeg(r[14].Int), Peers: nonNeg(r[15].Int), Seeds: nonNeg(r[16].Int),
-			UpTotal: nonNeg(r[17].Int), DownTotal: nonNeg(r[18].Int), Private: r[19].Int == 1, Meta: r[20].Int == 1,
+			UpTotal: nonNeg(r[17].Int), DownTotal: nonNeg(r[18].Int), Private: r[19].Int == 1,
 		})
+		t := &out[len(out)-1]
+		if len(r) > metaField {
+			t.Meta = r[metaField].Int == 1
+		} else {
+			// Without d.is_meta the one-byte file libtorrent gives a metadata
+			// download is the tell; a real one-byte torrent is vanishingly rare.
+			t.Meta = t.Size <= 1 && !t.Complete
+		}
 	}
 	return out, nil
 }
