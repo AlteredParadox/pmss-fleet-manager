@@ -1914,8 +1914,22 @@ func TestAdoptRespectsErase(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("the stale label was applied: %d setter calls", n)
 	}
+	// A removal through another path reaches this client as a Forget: the
+	// same barrier.
+	c.remember(hashB, "x")
+	if err := c.Forget(ctx, hashB); err != nil {
+		t.Fatal(err)
+	}
+	c.Adopt([]PendingLabel{{Hash: hashB, Label: "stale", Until: time.Now().Add(time.Hour)}})
+	if len(c.Pending()) != 0 {
+		t.Fatalf("a forgotten hash came back through Adopt: %+v", c.Pending())
+	}
 	// A hash never erased here is adopted; one erased, then owed again by
 	// a labelled re-add, keeps the new label.
+	d2 := New(f.dial)
+	c = d2
+	c.remember(hashA, "old")
+	c.Action(ctx, ActionRemove, hashA)
 	c.Adopt([]PendingLabel{{Hash: hashB, Label: "late", Until: time.Now().Add(time.Hour)}})
 	c.remember(hashA, "new")
 	c.Adopt(old)

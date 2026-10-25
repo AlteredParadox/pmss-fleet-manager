@@ -770,16 +770,14 @@ func (c *Client) Forget(ctx context.Context, hash string) error {
 		return err
 	}
 	defer release()
-	c.forgetLocked(hash)
+	// A Forget means the torrent was removed through another path (another
+	// client, a detached job): the same barrier applies, or a late
+	// predecessor snapshot could restore the label (Codex on PR 122).
+	c.eraseLocked(hash)
 	return nil
 }
 
 // forgetLocked is Forget for a caller that already holds the operation.
-func (c *Client) forgetLocked(hash string) {
-	c.pendMu.Lock()
-	delete(c.pending, strings.ToUpper(hash))
-	c.pendMu.Unlock()
-}
 
 // AddRequest is a batch of torrents to load: URLs (magnet or http(s), which
 // rTorrent fetches itself) and .torrent file contents. Label sets
