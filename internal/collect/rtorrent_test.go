@@ -2458,3 +2458,79 @@ func TestRtEraseIntentIsDurable(t *testing.T) {
 		t.Fatal("another generation's tombstone restored")
 	}
 }
+
+// TestSettleWaitsForDurableLabelRow (fred on PR 123): a tombstone is
+// settled durably only after the cleaned label row is durable. A settle
+// whose label write fails leaves the tombstone open; and a restart from
+// the only reachable between-writes state (row cleaned, tombstone still
+// open) finds the hash tombstoned, restores no label for it, and an
+// unlabelled re-add gets none.
+func TestSettleWaitsForDurableLabelRow(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, snap := rtFixture(t, f)
+	m := p.m
+	// The ordinary case: both rows end up consistent.
+	cli, _ := p.rtClient(context.Background(), nil, "unix:/x")
+	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
+	p.recordRtLabels(context.Background())
+	if err := m.rtTombstone(p.box.ID, p.generation(), rtHashA); err != nil {
+		t.Fatal(err)
+	}
+	p.settleRtTombs(context.Background(), true)
+	var tombs rtTombsCache
+	if _, err := m.st.GetCache(context.Background(), p.box.ID, rtTombsCacheKind, &tombs); err != nil || len(tombs.Tombs) != 1 || !tombs.Tombs[0].Settled {
+		t.Fatalf("settled row: %v %+v", err, tombs)
+	}
+	if got := m.restoredRtLabels(p.box); len(got) != 0 {
+		t.Fatalf("label row not cleaned: %+v", got)
+	}
+	// A poller whose label row cannot be written (no box row: the store
+	// refuses the cache write) must not settle: the tombstone stays open.
+	orphan := newPoller(m, &store.Box{ID: 2, Name: "y", Host: "y.example", User: "u", RtEnabled: true})
+	orphan.dialRt = f.dialer
+	m.mu.Lock()
+	m.pollers[2] = orphan
+	m.mu.Unlock()
+	orphan.rtLabels = []rtorrent.PendingLabel{{Hash: rtHashB, Label: "x", Until: time.Now().Add(time.Hour)}}
+	m.rtTombstone(2, orphan.generation(), rtHashB) // the durable write fails too; the memory record stands
+	orphan.settleRtTombs(context.Background(), true)
+	if n := len(m.rtTombList(2, orphan.generation())); n != 1 {
+		t.Fatalf("a settle whose label write failed must leave the tombstone open: %d open", n)
+	}
+	// Restart from the reachable between-writes state: the cleaned label
+	// row is durable, the tombstone is still open on disk.
+	if err := m.st.SetCache(context.Background(), p.box.ID, rtLabelsCacheKind, rtLabelsCache{Generation: boxGeneration(p.box), Labels: []rtorrent.PendingLabel{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.st.SetCache(context.Background(), p.box.ID, rtTombsCacheKind, rtTombsCache{Tombs: []rtTombRec{{Hash: rtHashA, Generation: boxGeneration(p.box), At: time.Now()}}}); err != nil {
+		t.Fatal(err)
+	}
+	m2 := New(m.st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m2.restoreRtTombs(p.box)
+	if !m2.rtTombed(p.box.ID, boxGeneration(p.box), rtHashA) || len(m2.restoredRtLabels(p.box)) != 0 {
+		t.Fatal("restart: the hash must be tombstoned and owe nothing")
+	}
+	p2 := newPoller(m2, p.box)
+	p2.dialRt = f.dialer
+	m2.mu.Lock()
+	m2.pollers[p.box.ID] = p2
+	m2.mu.Unlock()
+	p2.rtLabels = []rtorrent.PendingLabel{}
+	var st BoxState
+	p2.pollRt(context.Background(), &st, snap)
+	if st.Rt.Error != "" || len(m2.rtTombList(p.box.ID, p2.generation())) != 0 {
+		t.Fatalf("first poll must settle: %q %v", st.Rt.Error, m2.rtTombList(p.box.ID, p2.generation()))
+	}
+	c2, _ := p2.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
+	before := countCalls(f, "d.custom1.set")
+	if _, err := c2.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Torrents(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if countCalls(f, "d.custom1.set") != before {
+		t.Fatal("the erased torrent's label reached its unlabelled re-add")
+	}
+}

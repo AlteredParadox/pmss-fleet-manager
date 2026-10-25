@@ -400,12 +400,22 @@ func (p *poller) settleRtTombs(ctx context.Context, leased bool) {
 		defer release()
 	}
 	// Re-read under the lease: an add may have settled and lifted some.
+	// The cleaned label row goes to the store first; only once it is durable
+	// are the tombstones settled durably, or a restart between the two
+	// writes would restore the old row with nothing left to settle it
+	// (fred on PR 123). Settled in memory and on disk only after that
+	// write, so a failed write leaves them for the next poll.
+	var done []string
 	for _, h := range p.m.rtTombList(p.box.ID, gen) {
 		if p.forgetRtLabel(ctx, h, false) {
+			done = append(done, h)
+		}
+	}
+	if p.recordRtLabels(ctx) {
+		for _, h := range done {
 			p.m.rtSettleTomb(p.box.ID, h)
 		}
 	}
-	p.recordRtLabels(ctx)
 }
 
 // rtLabelsCacheKind is the box_cache kind holding the labels owed to
@@ -420,12 +430,14 @@ type rtLabelsCache struct {
 	Labels     []rtorrent.PendingLabel `json:"labels"`
 }
 
-// recordRtLabels writes the owed labels to the cache: the client's while
+// recordRtLabels writes the owed labels to the cache and reports whether
+// the write succeeded (a tombstone is settled durably only after it has;
+// fred on PR 123): the client's while
 // one is up (an empty list when there is none, so a settled label does not
 // come back), else the ones saved from the last client by dropRtLocked, so
 // a box that stays offline across a dashboard restart does not lose them
 // (Codex on PR 123). With neither, the cache is left as it is.
-func (p *poller) recordRtLabels(ctx context.Context) {
+func (p *poller) recordRtLabels(ctx context.Context) (written bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -443,7 +455,7 @@ func (p *poller) recordRtLabels(ctx context.Context) {
 	// (daybreak blue re-review 5 of PR 123). UpdateBox's own flush of the
 	// retiring poller runs before the successor is published, so it passes.
 	if p.m.poller(p.box.ID) != p {
-		return
+		return false
 	}
 	p.mu.Lock()
 	cli := p.rt
@@ -459,7 +471,7 @@ func (p *poller) recordRtLabels(ctx context.Context) {
 	case saved != nil:
 		labels = saved // an empty saved copy is known-empty and is written as such
 	default:
-		return
+		return false
 	}
 	// Never persist a label whose torrent was erased: a tombstone outlives
 	// a skipped cleanup, the written copy must not.
@@ -473,7 +485,9 @@ func (p *poller) recordRtLabels(ctx context.Context) {
 	c := rtLabelsCache{Generation: gen, Labels: kept}
 	if err := p.m.st.SetCache(ctx, p.box.ID, rtLabelsCacheKind, c); err != nil {
 		p.m.log.Warn("cache rtorrent labels", "box", p.box.Name, "err", err)
+		return false
 	}
+	return true
 }
 
 // restoredRtLabels loads the owed labels recorded for this box's current
@@ -863,17 +877,18 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		// time for late handoffs (adoptLate).
 		p.m.rtTombstone(p.box.ID, gen, hash)
 		if unlock, ok := lockWithin(dctx, &p.m.boxMu); ok {
+			// The cleaned label row is persisted by the current owner before
+			// the tombstone is settled durably (fred on PR 123).
 			settled := p.forgetRtLabel(dctx, hash, false)
 			if cur := p.m.poller(p.box.ID); cur == p {
-				if settled {
+				if p.recordRtLabels(dctx) && settled {
 					p.m.rtSettleTomb(p.box.ID, hash)
 				}
-				p.recordRtLabels(dctx)
 			} else if cur != nil && cur.generation() == gen {
-				if cur.forgetRtLabel(dctx, hash, false) && settled {
+				onCur := cur.forgetRtLabel(dctx, hash, false)
+				if cur.recordRtLabels(dctx) && settled && onCur {
 					p.m.rtSettleTomb(p.box.ID, hash)
 				}
-				cur.recordRtLabels(dctx)
 			}
 			unlock()
 		} else {
