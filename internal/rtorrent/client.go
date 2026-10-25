@@ -802,16 +802,21 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 			// it. The torrent is loaded whatever happens here: a fault (the
 			// hash not present yet, which rTorrent does not do for a
 			// synchronous load) or a lost answer leaves it loaded with its
-			// label unconfirmed, which is counted, never reported as a
-			// failed add (fred on PR 122). A magnet keeps owing its label
-			// either way: rTorrent rebuilds the torrent when the metadata
-			// arrives and drops custom1, so the label is set again then
-			// (reconciled by Torrents), which also settles an unconfirmed
-			// placeholder label.
+			// label unconfirmed, which is counted and reported as such,
+			// never as a failed add (fred on PR 122). Nothing more is owed
+			// for it then: a pending label is remembered only for a magnet
+			// whose placeholder label was confirmed set, since the listing
+			// treats an empty placeholder label as the user clearing it
+			// (Codex on PR 122), and the user was told the label is
+			// unconfirmed.
 			if err := c.setLabel(ctx, e.hash, label); err != nil {
 				res.Unlabelled++
+				continue
 			}
 			if e.magnet {
+				// Set on the metadata placeholder only: rTorrent rebuilds the
+				// torrent when the metadata arrives and drops custom1, so the
+				// label is owed again then (reconciled by Torrents).
 				c.remember(e.hash, label)
 				res.Deferred++
 			}

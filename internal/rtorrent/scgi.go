@@ -77,9 +77,12 @@ func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes
 	}
 	// A plain socket honours the deadline; a stream forwarded over SSH
 	// supports none (x/crypto/ssh channels refuse SetDeadline), and then
-	// the dialer's Close is what must end a stalled read: sshx's forwarded
-	// streams wedge their transport after a grace when closed with I/O in
-	// flight, so the AfterFunc below is sufficient either way.
+	// the dialer's Close is what must end a stalled read. That is the
+	// contract a Dialer must meet for this package's timeouts to hold: the
+	// collector's SSH dialer meets it by wedging the transport after a
+	// grace when a stream is closed with I/O in flight (sshx.boundedConn),
+	// so the AfterFunc below is sufficient there; this package itself has
+	// no production dialer.
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}

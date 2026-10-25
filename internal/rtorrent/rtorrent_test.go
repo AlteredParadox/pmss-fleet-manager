@@ -1853,11 +1853,14 @@ func TestLostLabelAnswerIsAddedUnlabelled(t *testing.T) {
 	c := New(f.dial)
 	c.timeout = 150 * time.Millisecond
 	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Files: [][]byte{[]byte(torrent)}, Label: "tv"})
-	if err != nil || res.Added != 2 || res.Failed != 0 || res.Unlabelled != 2 || res.Deferred != 1 {
+	if err != nil || res.Added != 2 || res.Failed != 0 || res.Unlabelled != 2 || res.Deferred != 0 {
 		t.Fatalf("a lost setter answer is a label warning, not a failed add: %+v %v", res, err)
 	}
-	if len(c.Pending()) != 1 {
-		t.Fatalf("the magnet still owes its label: %d", len(c.Pending()))
+	// Nothing is owed for an unconfirmed placeholder label: the listing
+	// would read the empty placeholder as the user clearing it and drop the
+	// obligation anyway (Codex on PR 122); the user was told.
+	if len(c.Pending()) != 0 {
+		t.Fatalf("an unconfirmed magnet label is not remembered: %d", len(c.Pending()))
 	}
 	// A genuine load failure is still a failure.
 	f.on(func(m string, p []string) string {
