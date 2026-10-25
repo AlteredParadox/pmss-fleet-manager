@@ -1209,8 +1209,6 @@ func (s *Server) handleRtAddTorrents(w http.ResponseWriter, r *http.Request) {
 		var f *rtorrent.Fault
 		if errors.As(err, &f) {
 			code = 422 // rTorrent refused the torrent
-		} else if errors.Is(err, rtorrent.ErrLabelNeedsHash) {
-			code = 400 // a label on an http(s) link: the request, not the box
 		}
 		writeErr(w, code, err)
 		return
