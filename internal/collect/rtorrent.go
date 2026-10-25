@@ -218,6 +218,10 @@ func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot)
 	})
 }
 
+// rtRemoveTimeout bounds the rm of a torrent's data on the box: a large
+// tree on a slow disk takes a while, and the API handler allows 90 s.
+const rtRemoveTimeout = 75 * time.Second
+
 // RtActionRemoveData is the one torrent action rTorrent has no command
 // for: remove the torrent, then delete its data. See rtRemoveData.
 const RtActionRemoveData = "remove-data"
@@ -274,7 +278,10 @@ func (p *poller) rtTorrentAction(ctx context.Context, hash, action string) error
 		return err
 	}
 	if action == RtActionRemoveData {
-		return rtRemoveData(actx, cli, sshc, hash)
+		// The caller's context: the rm inside gets its own, longer deadline
+		// than the RPC phase (a cut rm leaves a half-deleted tree behind an
+		// already erased torrent).
+		return rtRemoveData(ctx, cli, sshc, hash)
 	}
 	return cli.Action(actx, action, hash)
 }
@@ -286,12 +293,18 @@ func (p *poller) rtTorrentAction(ctx context.Context, hash, action string) error
 // symlink resolution: the root must be strictly inside the home and the
 // path strictly inside the root. A torrent client is not trusted with a
 // path; the box's own view of the filesystem is what decides.
+//
+// ctx is the caller's: the RPC calls run under apiTimeout within it, the
+// rm under rtRemoveTimeout (Codex on PR 123: a deletion capped by the RPC
+// deadline could be cut mid-way).
 func rtRemoveData(ctx context.Context, cli *rtorrent.Client, sshc *sshx.Client, hash string) error {
-	base, err := cli.BasePath(ctx, hash)
+	actx, cancel := context.WithTimeout(ctx, apiTimeout)
+	defer cancel()
+	base, err := cli.BasePath(actx, hash)
 	if err != nil {
 		return err
 	}
-	root, err := cli.DefaultDirectory(ctx)
+	root, err := cli.DefaultDirectory(actx)
 	if err != nil {
 		return err
 	}
@@ -306,11 +319,11 @@ func rtRemoveData(ctx context.Context, cli *rtorrent.Client, sshc *sshx.Client, 
 	if sshc == nil {
 		return errors.New("no SSH connection to the box")
 	}
-	if err := cli.Action(ctx, rtorrent.ActionRemove, hash); err != nil {
+	if err := cli.Action(actx, rtorrent.ActionRemove, hash); err != nil {
 		return err
 	}
-	rctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
+	rctx, rcancel := context.WithTimeout(ctx, rtRemoveTimeout)
+	defer rcancel()
 	// The paths ride as quoted assignments ahead of the script (the shell
 	// may buffer stdin past the script, so they cannot follow it as data).
 	out, stderr, err := sshc.Run(rctx, "sh", strings.NewReader("root="+shellQuote(root)+"\ntarget="+shellQuote(base)+"\n"+rtRemoveDataScript))

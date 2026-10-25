@@ -652,3 +652,11 @@ func TestDetectRt(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestRtRemoveDataDeletionOutlivesRPCDeadline(t *testing.T) {
+	// The RPC phase is bounded by apiTimeout, the rm by rtRemoveTimeout from
+	// the caller's context (Codex on PR 123).
+	if rtRemoveTimeout <= apiTimeout {
+		t.Fatalf("rtRemoveTimeout %v must exceed apiTimeout %v", rtRemoveTimeout, apiTimeout)
+	}
+}
