@@ -592,13 +592,18 @@ func (c *Client) Action(ctx context.Context, action, hash string) error {
 		}
 	}
 	if action == ActionRemove {
-		// A removed magnet owes nothing any more: a later add of the same
-		// hash without a label must not inherit the old one (Codex on PR 122).
-		c.pendMu.Lock()
-		delete(c.pending, hash)
-		c.pendMu.Unlock()
+		c.Forget(hash) // a removed magnet owes nothing any more (Codex on PR 122)
 	}
 	return nil
+}
+
+// Forget drops any label still owed to hash: for a torrent removed through
+// another client over the same box, so a later add of the same hash
+// without a label does not inherit the old one.
+func (c *Client) Forget(hash string) {
+	c.pendMu.Lock()
+	delete(c.pending, strings.ToUpper(hash))
+	c.pendMu.Unlock()
 }
 
 // AddRequest is a batch of torrents to load: URLs (magnet or http(s), which
