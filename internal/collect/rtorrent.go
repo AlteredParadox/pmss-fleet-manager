@@ -190,11 +190,9 @@ func (p *poller) dropRtLocked() {
 func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
 	hash = strings.ToUpper(hash)
 	p.mu.Lock()
-	if p.rt != nil {
-		p.rt.Forget(hash)
-	}
+	cli := p.rt
 	if len(p.rtLabels) > 0 {
-		kept := p.rtLabels[:0]
+		kept := make([]rtorrent.PendingLabel, 0, len(p.rtLabels)) // a new slice: a snapshot in flight keeps its own
 		for _, l := range p.rtLabels {
 			if strings.ToUpper(l.Hash) != hash {
 				kept = append(kept, l)
@@ -203,6 +201,12 @@ func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
 		p.rtLabels = kept
 	}
 	p.mu.Unlock()
+	if cli != nil {
+		// Outside p.mu: Forget waits for the client's operation token.
+		if err := cli.Forget(ctx, hash); err != nil {
+			p.m.log.Warn("forget rtorrent label", "box", p.box.Name, "err", err)
+		}
+	}
 	if persist {
 		p.recordRtLabels(ctx)
 	}
@@ -229,8 +233,20 @@ func (p *poller) recordRtLabels(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Snapshot and write under the box's label guard, so two writers'
+	// snapshots reach the store in the order they were taken and an older
+	// one cannot resurrect a retired label; the saved slice is copied under
+	// p.mu, since forgetRtLabel rewrites it (daybreak blue re-review of PR
+	// 123, race detector).
+	g := p.m.labelGuard(p.box.ID)
+	g.Lock()
+	defer g.Unlock()
 	p.mu.Lock()
-	cli, saved := p.rt, p.rtLabels
+	cli := p.rt
+	var saved []rtorrent.PendingLabel
+	if p.rtLabels != nil {
+		saved = append([]rtorrent.PendingLabel{}, p.rtLabels...)
+	}
 	p.mu.Unlock()
 	var labels []rtorrent.PendingLabel
 	switch {
@@ -241,7 +257,7 @@ func (p *poller) recordRtLabels(ctx context.Context) {
 	default:
 		return
 	}
-	c := rtLabelsCache{Generation: boxGeneration(p.box), Labels: labels}
+	c := rtLabelsCache{Generation: p.generation(), Labels: labels}
 	if err := p.m.st.SetCache(ctx, p.box.ID, rtLabelsCacheKind, c); err != nil {
 		p.m.log.Warn("cache rtorrent labels", "box", p.box.Name, "err", err)
 	}
@@ -379,9 +395,14 @@ func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot)
 	})
 }
 
-// rtRemoveTimeout bounds the rm of a torrent's data on the box: a large
-// tree on a slow disk takes a while, and the API handler allows 90 s.
-const rtRemoveTimeout = 75 * time.Second
+// rtRemoveTimeout bounds the rm of a torrent's data on the box, as a fresh
+// deadline started after the erase and its bookkeeping: a large tree on a
+// slow disk takes a while. rtRemoveJobTimeout bounds the whole detached
+// job (connection, erase, bookkeeping, then the rm with its own budget).
+const (
+	rtRemoveTimeout    = 75 * time.Second
+	rtRemoveJobTimeout = 150 * time.Second
+)
 
 // RtActionRemoveData is the one torrent action rTorrent has no command
 // for: remove the torrent, then delete its data. See rtRemoveData.
@@ -451,11 +472,19 @@ func (p *poller) rtTorrentAction(ctx context.Context, hash, action string) error
 	if err != nil {
 		return err
 	}
+	// One rTorrent mutation at a time per box: a remove-with-data holds the
+	// lease for its whole life, including the detached phase, so an add of
+	// the same hash cannot land between its erase and its deletion.
+	release, err := p.m.rtLease(p.box.ID).Acquire(actx)
+	if err != nil {
+		return err
+	}
 	if action == RtActionRemoveData {
 		// The caller's context: the deletion inside runs under the
-		// manager's own deadline, not the request's.
-		return p.rtRemoveData(ctx, cli, sshRunner(sshc), st.Rt.Endpoint, st.Rt.DataDir, hash)
+		// manager's own deadline, not the request's; release travels with it.
+		return p.rtRemoveData(ctx, cli, sshRunner(sshc), st.Rt.Endpoint, st.Rt.DataDir, hash, release)
 	}
+	defer release()
 	return cli.Action(actx, action, hash)
 }
 
@@ -481,7 +510,16 @@ type scriptRunner interface {
 // failure) can cut it between the two steps. The caller gets the outcome
 // when it is known, or, if its own context ends first, word that the
 // deletion continues.
-func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scriptRunner, ep, root, hash string) error {
+func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scriptRunner, ep, root, hash string, release func()) (err error) {
+	if release == nil {
+		release = func() {}
+	}
+	detachedOwnsLease := false
+	defer func() {
+		if !detachedOwnsLease {
+			release() // refused or failed before the detached phase took it over
+		}
+	}()
 	if run == nil {
 		return errors.New("no SSH connection to the box")
 	}
@@ -515,8 +553,16 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		return fmt.Errorf("refusing to delete, the torrent was left in place: %s", clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300))
 	}
 	// 2. Erase, then delete, detached from the request and on a transport
-	// of their own.
-	res := p.m.detached(rtRemoveTimeout, func(dctx context.Context) error {
+	// of their own. The lease travels with the job and is released when it
+	// ends, so no other rTorrent mutation on this box runs meanwhile.
+	detachedOwnsLease = true
+	res := p.m.detached(rtRemoveJobTimeout, func(dctx context.Context) (err error) {
+		defer release()
+		defer func() {
+			if err != nil && errors.Is(dctx.Err(), context.Canceled) {
+				err = fmt.Errorf("interrupted by the dashboard shutting down: %w", err)
+			}
+		}()
 		drun, ddial, dclose, err := p.detachedTransport(dctx, ep)
 		if err != nil {
 			return fmt.Errorf("could not open a connection for the deletion; nothing was changed: %w", err)
@@ -526,7 +572,7 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		ectx, ecancel := context.WithTimeout(dctx, apiTimeout)
 		defer ecancel()
 		if err := dcli.Action(ectx, rtorrent.ActionRemove, hash); err != nil {
-			return err // nothing deleted
+			return fmt.Errorf("rTorrent refused to remove the torrent; nothing was deleted: %w", err)
 		}
 		// The removed torrent is owed nothing any more, wherever the box's
 		// pending labels live by now: this poller's client or its saved
@@ -544,9 +590,17 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 			cur.forgetRtLabel(dctx, hash, true)
 		}
 		p.m.boxMu.Unlock()
-		out, stderr, err := drun.Run(dctx, "sh", strings.NewReader(rtRemoveDataVars("delete", root, base)+rtRemoveDataScript))
+		// The rm gets its own, full budget from here: the connection, the
+		// erase and the bookkeeping above have spent theirs.
+		rmctx, rmcancel := context.WithTimeout(dctx, rtRemoveTimeout)
+		defer rmcancel()
+		out, stderr, err := drun.Run(rmctx, "sh", strings.NewReader(rtRemoveDataVars("delete", root, base)+rtRemoveDataScript))
 		if err != nil {
-			return fmt.Errorf("the torrent was removed from rTorrent but its files were not deleted: %s", clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300))
+			why := clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300)
+			if errors.Is(rmctx.Err(), context.DeadlineExceeded) && dctx.Err() == nil {
+				why = fmt.Sprintf("the deletion did not finish within %s", rtRemoveTimeout)
+			}
+			return fmt.Errorf("the torrent was removed from rTorrent but its files were not (all) deleted: %s", why)
 		}
 		return nil
 	})
@@ -600,6 +654,11 @@ func (p *poller) rtAddTorrents(ctx context.Context, req qbt.AddRequest) (rtorren
 	if err != nil {
 		return rtorrent.AddResult{}, err
 	}
+	release, err := p.m.rtLease(p.box.ID).Acquire(actx)
+	if err != nil {
+		return rtorrent.AddResult{}, err
+	}
+	defer release()
 	r := rtorrent.AddRequest{URLs: req.URLs, Label: req.Category, Stopped: req.Stopped}
 	for _, f := range req.Files {
 		r.Files = append(r.Files, f.Data)

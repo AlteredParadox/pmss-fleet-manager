@@ -834,7 +834,7 @@ func TestRtRemoveDataBoundary(t *testing.T) {
 	// A hostile peer naming a path outside the download root: refused by
 	// the box before anything, torrent left in place.
 	base = filepath.Join(keys, "f")
-	err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA)
+	err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA, nil)
 	if err == nil || !strings.Contains(err.Error(), "left in place") || !strings.Contains(err.Error(), "not inside the download root") || erased() != 0 || !exists(base) {
 		t.Fatalf("%v erased %d exists %v", err, erased(), exists(base))
 	}
@@ -843,29 +843,29 @@ func TestRtRemoveDataBoundary(t *testing.T) {
 	}
 	// The root itself, a missing path and no root at all are refused too.
 	base = data
-	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err == nil || erased() != 0 {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA, nil); err == nil || erased() != 0 {
 		t.Fatalf("root itself: %v", err)
 	}
 	base = filepath.Join(data, "gone")
-	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err == nil || erased() != 0 || !strings.Contains(err.Error(), "does not exist") {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA, nil); err == nil || erased() != 0 || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("missing: %v", err)
 	}
-	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", "", rtHashA); err == nil || erased() != 0 || !strings.Contains(err.Error(), "download directory is not known") {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", "", rtHashA, nil); err == nil || erased() != 0 || !strings.Contains(err.Error(), "download directory is not known") {
 		t.Fatalf("no root: %v", err)
 	}
-	if err := p.rtRemoveData(ctx, cli, nil, "unix:/x", data, rtHashA); err == nil || erased() != 0 {
+	if err := p.rtRemoveData(ctx, cli, nil, "unix:/x", data, rtHashA, nil); err == nil || erased() != 0 {
 		t.Fatalf("no runner: %v", err)
 	}
 	// A torrent that never started has no path: said so, nothing erased.
 	base = ""
-	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err == nil || !strings.Contains(err.Error(), "no download path") || erased() != 0 {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA, nil); err == nil || !strings.Contains(err.Error(), "no download path") || erased() != 0 {
 		t.Fatalf("empty path: %v", err)
 	}
 	// Inside the root: check, erase, delete, in that order; the tree is gone.
 	target := mk("data/Alpha")
 	base = target
 	run.runs = nil
-	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err != nil || erased() != 1 || exists(target) {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA, nil); err != nil || erased() != 1 || exists(target) {
 		t.Fatalf("%v erased %d exists %v", err, erased(), exists(target))
 	}
 	if got := run.modes(); strings.Join(got, ",") != "check,delete" {
@@ -875,13 +875,13 @@ func TestRtRemoveDataBoundary(t *testing.T) {
 	link := filepath.Join(data, "link")
 	os.Symlink(keys, link)
 	base = link
-	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err == nil || erased() != 1 || !exists(filepath.Join(keys, "f")) {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA, nil); err == nil || erased() != 1 || !exists(filepath.Join(keys, "f")) {
 		t.Fatalf("symlink: %v", err)
 	}
 	// Metacharacters in a path stay a path.
 	odd := mk("data/it's $(touch " + filepath.Join(home, "pwned") + ") x")
 	base = odd
-	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err != nil || exists(odd) || exists(filepath.Join(home, "pwned")) {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA, nil); err != nil || exists(odd) || exists(filepath.Join(home, "pwned")) {
 		t.Fatalf("metacharacters: %v", err)
 	}
 }
@@ -914,7 +914,7 @@ func TestRtRemoveDataOutlivesRequest(t *testing.T) {
 	}
 	rctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- p.rtRemoveData(rctx, cli, run, "unix:/x", data, rtHashA) }()
+	go func() { done <- p.rtRemoveData(rctx, cli, run, "unix:/x", data, rtHashA, nil) }()
 	// Wait for the delete run to be held, then end the request.
 	for i := 0; i < 200; i++ {
 		if m := run.modes(); len(m) == 2 {
@@ -931,7 +931,7 @@ func TestRtRemoveDataOutlivesRequest(t *testing.T) {
 		t.Fatal("deleted before the gate opened")
 	}
 	close(run.gate)
-	p.m.wg.Wait() // Stop waits the same way
+	p.m.jobWG.Wait() // Stop waits the same way
 	if _, statErr := os.Stat(target); statErr == nil {
 		t.Fatal("the deletion must complete after the request ended")
 	}
@@ -970,7 +970,7 @@ func TestRtRemoveDataOwnTransport(t *testing.T) {
 		return detached, f.dialer(ep), func() { closed++ }, nil
 	}
 	done := make(chan error, 1)
-	go func() { done <- p.rtRemoveData(context.Background(), pollerCli, check, "unix:/x", data, rtHashA) }()
+	go func() { done <- p.rtRemoveData(context.Background(), pollerCli, check, "unix:/x", data, rtHashA, nil) }()
 	for i := 0; i < 200 && len(detached.modes()) == 0; i++ {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1000,7 +1000,7 @@ func TestRtRemoveDataOwnTransport(t *testing.T) {
 			n++
 		}
 	}
-	err := p.rtRemoveData(context.Background(), pollerCli, check, "unix:/x", data, rtHashA)
+	err := p.rtRemoveData(context.Background(), pollerCli, check, "unix:/x", data, rtHashA, nil)
 	m := 0
 	for _, x := range f.called() {
 		if x == "d.erase" {
@@ -1062,7 +1062,7 @@ func TestRtRemoveDataForgetsLabelOnCurrentOwner(t *testing.T) {
 		return run, f.dialer(ep), func() {}, nil
 	}
 	done := make(chan error, 1)
-	go func() { done <- p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA) }()
+	go func() { done <- p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA, nil) }()
 	<-eraseEntered // the detached erase is in flight
 	// An edit: the poller is torn down (its owed labels saved), recorded,
 	// and replaced by a poller that restores them from the cache.
@@ -1149,7 +1149,7 @@ func TestRtRemoveDataCleanupSerialisedWithEdit(t *testing.T) {
 		return run, f.dialer(ep), func() {}, nil
 	}
 	done := make(chan error, 1)
-	go func() { done <- p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA) }()
+	go func() { done <- p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA, nil) }()
 	<-eraseEntered
 	// The edit transaction begins and holds the lock: the retiring poller
 	// is stopped and recorded, the replacement built with the restored
@@ -1200,7 +1200,7 @@ func TestRtRemoveDataCleanupSerialisedWithEdit(t *testing.T) {
 		}
 		return rtReplies(m, b)
 	}
-	if err := p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA); err != nil {
+	if err := p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA, nil); err != nil {
 		t.Fatal(err)
 	}
 	p3.mu.Lock()
@@ -1208,5 +1208,247 @@ func TestRtRemoveDataCleanupSerialisedWithEdit(t *testing.T) {
 	p3.mu.Unlock()
 	if kept != 1 {
 		t.Fatal("another generation's owed label must not be cleared")
+	}
+}
+
+// TestStopDrainsDetachedDeletion (daybreak blue re-review of PR 123,
+// finding 1): a deletion admitted before Stop keeps its context and
+// completes before Stop returns; a job asked for after Stop began is
+// refused and changes nothing.
+func TestStopDrainsDetachedDeletion(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	target := filepath.Join(data, "Alpha")
+	os.MkdirAll(target, 0o755)
+	os.WriteFile(filepath.Join(target, "f"), []byte("x"), 0o600)
+	f := newFakeSCGI(t)
+	f.reply = func(m, b string) string {
+		if m == "d.base_path" {
+			return xmlResp(xs(target))
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	cli := rtorrent.New(f.dialer(""))
+	run := &localRunner{home: home, gate: make(chan struct{}), block: true}
+	var seen context.Context
+	var seenMu sync.Mutex
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		seenMu.Lock()
+		seen = ctx
+		seenMu.Unlock()
+		return run, f.dialer(ep), func() {}, nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA, nil) }()
+	for i := 0; i < 300 && len(run.modes()) < 2; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	stopped := make(chan struct{})
+	go func() { p.m.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while a deletion was in flight")
+	case <-time.After(300 * time.Millisecond):
+	}
+	seenMu.Lock()
+	jobCtx := seen
+	seenMu.Unlock()
+	if jobCtx == nil || jobCtx.Err() != nil {
+		t.Fatalf("the deletion's context was cancelled by Stop: %v", jobCtx)
+	}
+	close(run.gate)
+	<-stopped
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Fatal("the deletion must complete before Stop returns")
+	}
+	// After Stop, nothing destructive is admitted.
+	os.MkdirAll(target, 0o755)
+	err := p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA, nil)
+	if !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("%v", err)
+	}
+	if _, statErr := os.Stat(target); statErr != nil {
+		t.Fatal("a refused job must change nothing")
+	}
+}
+
+// TestRmGetsFreshBudget (finding 2): the delete runner sees a deadline of
+// (about) rtRemoveTimeout even after a slow connection and erase.
+func TestRmGetsFreshBudget(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	target := filepath.Join(data, "Alpha")
+	os.MkdirAll(target, 0o755)
+	f := newFakeSCGI(t)
+	f.reply = func(m, b string) string {
+		switch m {
+		case "d.base_path":
+			return xmlResp(xs(target))
+		case "d.erase":
+			time.Sleep(500 * time.Millisecond) // a slow erase eats into the job budget, not the rm's
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	cli := rtorrent.New(f.dialer(""))
+	var remaining time.Duration
+	run := &deadlineRunner{inner: &localRunner{home: home}, onDelete: func(ctx context.Context) {
+		if dl, ok := ctx.Deadline(); ok {
+			remaining = time.Until(dl)
+		}
+	}}
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		time.Sleep(500 * time.Millisecond) // a slow connection too
+		return run, f.dialer(ep), func() {}, nil
+	}
+	if err := p.rtRemoveData(context.Background(), cli, run.inner, "unix:/x", data, rtHashA, nil); err != nil {
+		t.Fatal(err)
+	}
+	if remaining < rtRemoveTimeout-2*time.Second || remaining > rtRemoveTimeout {
+		t.Fatalf("rm budget %v, want about %v", remaining, rtRemoveTimeout)
+	}
+}
+
+// deadlineRunner records the context the delete run sees.
+type deadlineRunner struct {
+	inner    *localRunner
+	onDelete func(ctx context.Context)
+}
+
+func (d *deadlineRunner) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
+	script, _ := io.ReadAll(stdin)
+	if strings.HasPrefix(string(script), "mode='delete'") {
+		d.onDelete(ctx)
+	}
+	return d.inner.Run(ctx, cmd, bytes.NewReader(script))
+}
+
+// TestRtLeaseSerialisesMutations (finding 3): an add of the same box waits
+// while a remove-with-data holds the lease, through its detached phase.
+func TestRtLeaseSerialisesMutations(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	target := filepath.Join(data, "Alpha")
+	os.MkdirAll(target, 0o755)
+	f := newFakeSCGI(t)
+	eraseGate := make(chan struct{})
+	eraseEntered := make(chan struct{}, 1)
+	f.reply = func(m, b string) string {
+		switch m {
+		case "d.base_path":
+			return xmlResp(xs(target))
+		case "d.erase":
+			eraseEntered <- struct{}{}
+			<-eraseGate
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	readyRt(t, p, "unix:/home/u/.rtorrent.socket")
+	// The state must carry the download root for remove-data.
+	st := BoxState{ID: p.box.ID, Ready: true, Rt: RtState{Enabled: true, Endpoint: "unix:/home/u/.rtorrent.socket", Reachable: true, DataDir: data}}
+	p.m.mu.Lock()
+	p.m.states[p.box.ID] = &st
+	p.m.mu.Unlock()
+	run := &localRunner{home: home}
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		return run, f.dialer(ep), func() {}, nil
+	}
+	// Give the poller's client a transport-free path for the check: the
+	// sshc is nil under the dial hook, so hand the check runner in by
+	// running rtRemoveData directly with the lease taken as the action does.
+	cli, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	release, err := p.m.rtLease(p.box.ID).Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA, release) }()
+	<-eraseEntered
+	// An add now must wait for the removal, not interleave with it.
+	addDone := make(chan error, 1)
+	go func() {
+		_, err := p.rtAddTorrents(context.Background(), qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}})
+		addDone <- err
+	}()
+	select {
+	case err := <-addDone:
+		t.Fatalf("add ran during the removal: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(eraseGate)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-addDone; err != nil {
+		t.Fatal(err)
+	}
+	methods := f.called()
+	erase, load := -1, -1
+	for i, m := range methods {
+		if m == "d.erase" {
+			erase = i
+		}
+		if m == "load.start" {
+			load = i
+		}
+	}
+	if erase < 0 || load < 0 || load < erase {
+		t.Fatalf("order %v", methods)
+	}
+	// A waiter gives up with its context.
+	release2, _ := p.m.rtLease(p.box.ID).Acquire(context.Background())
+	cctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := p.rtTorrentAction(cctx, rtHashA, "stop"); err == nil || !strings.Contains(err.Error(), "another rTorrent change") {
+		t.Fatalf("%v", err)
+	}
+	release2()
+}
+
+// TestRecordRtLabelsRace (finding 4): recording and forgetting run
+// concurrently without a data race, and the cache never holds a retired
+// label after a forget that persisted.
+func TestRecordRtLabelsRace(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
+	p.m.mu.Lock()
+	p.m.pollers[p.box.ID] = p
+	p.m.mu.Unlock()
+	var wg sync.WaitGroup
+	for round := 0; round < 20; round++ {
+		p.mu.Lock()
+		p.rt, p.rtSSH = nil, nil
+		p.rtLabels = []rtorrent.PendingLabel{{Hash: rtHashA, Label: "a", Until: time.Now().Add(time.Hour)}, {Hash: rtHashB, Label: "b", Until: time.Now().Add(time.Hour)}}
+		p.mu.Unlock()
+		wg.Add(2)
+		go func() { defer wg.Done(); p.recordRtLabels(context.Background()) }()
+		go func() { defer wg.Done(); p.forgetRtLabel(context.Background(), rtHashA, true) }()
+		wg.Wait()
+		// The last writer was the forget (it persists after the record under
+		// the same guard, or the record ran after it with the forgotten set).
+		for _, l := range p.m.restoredRtLabels(p.box) {
+			if l.Hash == rtHashA {
+				t.Fatalf("round %d: retired label came back", round)
+			}
+		}
 	}
 }

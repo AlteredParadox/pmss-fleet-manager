@@ -68,6 +68,25 @@ type Manager struct {
 	latest latestRelease
 
 	boxMu sync.Mutex // serialises AddBox/UpdateBox/RemoveBox
+
+	// Destructive jobs (remove-with-data's erase and deletion) run under a
+	// context of their own, not the one Start was given: that one is the
+	// process's shutdown signal, cancelled before Stop even runs, and a
+	// deletion admitted before shutdown must finish (daybreak blue
+	// re-review of PR 123). jobMu guards admission; once closed, nothing new
+	// starts, and Stop drains jobWG before cancelling jobCtx.
+	jobCtx     context.Context
+	jobCancel  context.CancelFunc
+	jobWG      sync.WaitGroup
+	jobMu      sync.Mutex
+	jobsClosed bool
+	// rtLeases are per-box mutation leases for rTorrent (add, actions,
+	// remove-with-data for its whole life): one mutation at a time per box,
+	// whatever client or poller carries it. labelGuards serialise the
+	// snapshot-and-write of a box's owed labels.
+	leaseMu     sync.Mutex
+	rtLeases    map[int64]chan struct{}
+	labelGuards map[int64]*sync.Mutex
 	// watchMu serialises SetAppWatch's read-modify-write of a box's watch
 	// list: two toggles at once would otherwise each save a list missing
 	// the other's change.
@@ -118,9 +137,12 @@ type Manager struct {
 // New creates a Manager. Call Start to begin polling.
 func New(st *store.Store, log *slog.Logger) *Manager {
 	m := &Manager{st: st, bus: NewBus(), log: log, states: map[int64]*BoxState{}, pollers: map[int64]*poller{},
-		pmapi:      &pmapi.Client{URL: os.Getenv("PMSS_PMAPI_URL")}, // URL overrides are for testing against a mock
-		pmdb:       &pmdb.Client{URL: os.Getenv("PMSS_PMDB_URL")},
-		pmdbWakeCh: make(chan struct{}, 1)}
+		pmapi:       &pmapi.Client{URL: os.Getenv("PMSS_PMAPI_URL")}, // URL overrides are for testing against a mock
+		pmdb:        &pmdb.Client{URL: os.Getenv("PMSS_PMDB_URL")},
+		pmdbWakeCh:  make(chan struct{}, 1),
+		rtLeases:    map[int64]chan struct{}{},
+		labelGuards: map[int64]*sync.Mutex{}}
+	m.jobCtx, m.jobCancel = context.WithCancel(context.Background())
 	def := store.DefaultSettings()
 	m.settings.Store(&def)
 	return m
@@ -232,6 +254,10 @@ func (m *Manager) Stop() {
 	if m.cancel != nil {
 		m.cancel()
 	}
+	// No new destructive job from here on; the admitted ones finish below.
+	m.jobMu.Lock()
+	m.jobsClosed = true
+	m.jobMu.Unlock()
 	m.mu.Lock()
 	ps := make([]*poller, 0, len(m.pollers))
 	for _, p := range m.pollers {
@@ -248,26 +274,81 @@ func (m *Manager) Stop() {
 		fcancel()
 	}
 	m.wg.Wait()
+	// Admitted destructive jobs complete under their own deadlines before
+	// their context goes: a deletion after an erase is never cut by a
+	// shutdown, only by a hard kill of the process (documented).
+	m.jobWG.Wait()
+	m.jobCancel()
 }
 
+// ErrShuttingDown refuses a destructive job once Stop began.
+var ErrShuttingDown = errors.New("the dashboard is shutting down; nothing was changed")
+
 // detached runs fn under a context the manager owns (bounded by timeout and
-// by the manager's lifetime, never by an HTTP request) and returns the
-// channel its result arrives on. Stop waits for it. For work that must not
-// be cut because the caller went away, such as a deletion after an erase.
+// by the destructive-job lifetime, never by an HTTP request or the
+// shutdown signal) and returns the channel its result arrives on. Stop
+// drains these jobs before cancelling their context. Once Stop began, the
+// channel carries ErrShuttingDown and fn does not run.
 func (m *Manager) detached(timeout time.Duration, fn func(ctx context.Context) error) <-chan error {
-	base := m.ctx
-	if base == nil {
-		base = context.Background() // before Start (tests)
-	}
-	ctx, cancel := context.WithTimeout(base, timeout)
 	res := make(chan error, 1)
-	m.wg.Add(1)
+	m.jobMu.Lock()
+	if m.jobsClosed {
+		m.jobMu.Unlock()
+		res <- ErrShuttingDown
+		return res
+	}
+	m.jobWG.Add(1)
+	m.jobMu.Unlock()
+	ctx, cancel := context.WithTimeout(m.jobCtx, timeout)
 	go func() {
-		defer m.wg.Done()
+		defer m.jobWG.Done()
 		defer cancel()
 		res <- fn(ctx)
 	}()
 	return res
+}
+
+// rtLease is the per-box mutation lease for rTorrent: one add, action or
+// remove-with-data at a time per box, whatever client or poller carries it,
+// so a removal's erase-and-delete cannot interleave with an add of the same
+// hash (daybreak blue re-review of PR 123). Acquire honours ctx.
+func (m *Manager) rtLease(id int64) *boxLease {
+	m.leaseMu.Lock()
+	defer m.leaseMu.Unlock()
+	ch, ok := m.rtLeases[id]
+	if !ok {
+		ch = make(chan struct{}, 1)
+		ch <- struct{}{}
+		m.rtLeases[id] = ch
+	}
+	return &boxLease{ch: ch}
+}
+
+type boxLease struct{ ch chan struct{} }
+
+// Acquire takes the lease or gives up with ctx; the returned release must
+// be called exactly once.
+func (l *boxLease) Acquire(ctx context.Context) (release func(), err error) {
+	select {
+	case <-l.ch:
+		var once sync.Once
+		return func() { once.Do(func() { l.ch <- struct{}{} }) }, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("another rTorrent change on this box is still running: %w", ctx.Err())
+	}
+}
+
+// labelGuard serialises the snapshot-and-write of a box's owed labels, so
+// an older snapshot can never be written after a newer one.
+func (m *Manager) labelGuard(id int64) *sync.Mutex {
+	m.leaseMu.Lock()
+	defer m.leaseMu.Unlock()
+	g, ok := m.labelGuards[id]
+	if !ok {
+		g = &sync.Mutex{}
+		m.labelGuards[id] = g
+	}
+	return g
 }
 
 func (m *Manager) housekeeping() {
