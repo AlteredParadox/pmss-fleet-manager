@@ -325,11 +325,14 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 // reconcileLabels applies pending labels to the listed torrents that lost
 // theirs (rTorrent's process_meta_download builds a fresh download when a
 // magnet's metadata arrives and does not copy custom1: fred and Codex on
-// PR 122). An entry lives through the placeholder phase (no size) and is
-// spent the first time its torrent is listed with metadata: the label is
-// set then if the torrent has none, and the entry goes whatever the label
-// is, so a label the user changed or cleared in ruTorrent afterwards is
-// left alone. Entries also expire after pendingTTL.
+// PR 122). An entry lives through the placeholder phase (no size). The
+// first time its torrent is listed with metadata: a torrent that already
+// carries a label (ours or one the user set) spends the entry untouched,
+// so a label changed or cleared in ruTorrent afterwards is left alone; a
+// torrent without one gets the label, and the entry is spent only once
+// that set succeeded, so a failed call (deadline, dropped connection) is
+// retried next poll (Codex on PR 122). Entries also expire after
+// pendingTTL.
 func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
 	c.pendMu.Lock()
 	if len(c.pending) == 0 {
@@ -355,16 +358,20 @@ func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
 		if rows[i].Size == 0 {
 			continue // still the placeholder: the rebuild is yet to come
 		}
-		delete(c.pending, h) // the real torrent: one chance, taken now or not needed
-		if rows[i].Label == "" {
-			set = append(set, todo{h, p.label})
+		if rows[i].Label != "" {
+			delete(c.pending, h) // the real torrent carries a label: nothing owed
+			continue
 		}
+		set = append(set, todo{h, p.label})
 	}
 	c.pendMu.Unlock()
 	for _, t := range set {
 		if _, err := c.call(ctx, 0, "d.custom1.set", t.hash, t.label); err != nil {
-			continue // tried again next poll; expiry bounds it
+			continue // kept: tried again next poll; expiry bounds it
 		}
+		c.pendMu.Lock()
+		delete(c.pending, t.hash) // spent on success only
+		c.pendMu.Unlock()
 		if i, ok := seen[t.hash]; ok {
 			rows[i].Label = t.label
 		}

@@ -963,13 +963,39 @@ func TestMagnetLabelSurvivesMetadata(t *testing.T) {
 	if _, err := c.Torrents(context.Background()); err != nil || sets != 2 || label != "films" {
 		t.Fatalf("other label overwritten: %v sets %d %q", err, sets, label)
 	}
+	// A setter that fails keeps the entry for the next poll (Codex on PR 122).
+	c.remember(hashA, "tv")
+	label = ""
+	failSet := true
+	f.on(func(m string, p []string) string {
+		switch m {
+		case "d.custom1.set":
+			if failSet {
+				return fault(-501, "busy")
+			}
+			sets++
+			label = p[1]
+			return resp(i8(0))
+		case "d.multicall2":
+			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(label), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
+		}
+		return resp(i8(0))
+	})
+	if _, err := c.Torrents(context.Background()); err != nil || label != "" || len(c.Pending()) != 1 {
+		t.Fatalf("failed setter must keep the entry: %v %q pending %d", err, label, len(c.Pending()))
+	}
+	failSet = false
+	if _, err := c.Torrents(context.Background()); err != nil || label != "tv" || sets != 3 || len(c.Pending()) != 0 {
+		t.Fatalf("retry: %v %q sets %d pending %d", err, label, sets, len(c.Pending()))
+	}
 	// Expired entries are dropped without a call.
+	base := sets
 	c.remember(hashB, "x")
 	now = now.Add(pendingTTL + time.Minute)
 	phase = "rebuilt"
 	label = ""
-	if _, err := c.Torrents(context.Background()); err != nil || sets != 2 {
-		t.Fatalf("expired: %v sets %d", err, sets)
+	if _, err := c.Torrents(context.Background()); err != nil || sets != base {
+		t.Fatalf("expired: %v sets %d (base %d)", err, sets, base)
 	}
 	c.pendMu.Lock()
 	n := len(c.pending)
