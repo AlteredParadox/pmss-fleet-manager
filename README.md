@@ -364,18 +364,7 @@ closing the browser, editing the box or stopping the dashboard does not cut
 them (a stop waits for an admitted deletion to finish). If the deletion
 fails after your request has already ended, the outcome is not lost: it is
 logged, shown under rTorrent on the box's torrents tab until you dismiss
-it, and raised as an alert. Before any removal is sent to rTorrent, the
-dashboard records it in its own database, so a lost answer or a restart in
-the wrong instant cannot hand the removed torrent's pending label to a later
-unlabelled add of the same hash; the record is kept for a day. If a removal
-is refused with "could not record the removal before sending it", the
-dashboard could not write that record: check the dashboard's disk and
-database, not the box. The same applies to an add refused with "a previous
-removal on this box is not yet settled in the dashboard's records": a
-removal's follow-up write failed (a full disk, a locked database), the
-record is still open, and adds on that box wait until it can be written,
-which the next poll retries. Both are dashboard-side conditions; rTorrent
-itself is fine. Two limits remain.
+it, and raised as an alert. Two limits remain.
 A hard kill of the dashboard process after the removal and before the
 deletion has completed leaves the torrent gone and all or part of its files
 behind; those files are visible on the box and can be cleaned up by hand.
@@ -383,6 +372,19 @@ And a process of the same account that renames another directory into the
 very name being removed, in the instant between the check and the removal,
 can have that directory deleted instead; that data is only recoverable from
 a backup.
+
+**Labels on magnets.** A label (ruTorrent's `custom1`) set on a `.torrent`
+file is applied as the torrent is loaded. A magnet gets its label on the
+placeholder straight away, but rTorrent drops it when the metadata arrives
+and rebuilds the torrent, so the dashboard remembers the label and sets it
+again on the next poll after that. That memory lives in the dashboard
+process only: if the dashboard restarts, or reconnects to the box, before a
+magnet's metadata has arrived, the label is dropped and the torrent shows
+without one (set it in ruTorrent). The add's answer says how many labels
+are still pending ("applied when the metadata arrives"). Labels are a
+convenience, and the dashboard does not guard them beyond this; what it
+guards without compromise is deleting files, acting on the right machine
+and account, and bounded operations against the box.
 
 ### qBittorrent access
 
