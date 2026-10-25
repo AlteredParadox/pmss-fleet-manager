@@ -73,8 +73,15 @@ func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes
 	if err != nil {
 		err = deadlineErr(ctx, err) // before cancel(), or every dial failure would read as Canceled
 		cancel()
-		return nil, nil, nil, err
+		// Nothing reached the peer: the caller may undo what it recorded
+		// in anticipation of the call (daybreak blue re-review 6 of PR 123).
+		return nil, nil, nil, fmt.Errorf("%w: %w", ErrNotSent, err)
 	}
+	// A plain socket honours the deadline; a stream forwarded over SSH
+	// supports none (x/crypto/ssh channels refuse SetDeadline), and then
+	// the dialer's Close is what must end a stalled read: sshx's forwarded
+	// streams wedge their transport after a grace when closed with I/O in
+	// flight, so the AfterFunc below is sufficient either way.
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}

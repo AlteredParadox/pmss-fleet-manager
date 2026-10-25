@@ -62,8 +62,21 @@ type Client struct {
 }
 
 // ErrRetired is an operation on a client after Retire: the caller must
-// resolve the current client and decide whether to retry.
+// resolve the current client and decide whether to retry. Nothing was sent.
 var ErrRetired = errors.New("rtorrent: client retired; resolve the current client")
+
+// ErrNotSent wraps a failure before any byte of the request reached the
+// peer (the dial failed): the call provably did not happen, so a caller
+// that recorded an intent ahead of it may withdraw that record. A failure
+// after the write (a lost answer, a cut stream) is never wrapped in it:
+// the command may have run.
+var ErrNotSent = errors.New("rtorrent: request not sent")
+
+// NotSent reports whether err means the request never reached the peer:
+// a dial failure, or a retired client refusing the call.
+func NotSent(err error) bool {
+	return errors.Is(err, ErrNotSent) || errors.Is(err, ErrRetired)
+}
 
 // pendingLabel is a label owed to a hash until it is seen set or expires.
 type pendingLabel struct {

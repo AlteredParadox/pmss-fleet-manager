@@ -2001,3 +2001,23 @@ func TestResponseCapIsExact(t *testing.T) {
 		t.Fatalf("an oversized d.is_meta fault must not flip the fallback: %v noMeta=%v", err, c.noMeta.Load())
 	}
 }
+
+// Daybreak blue re-review 6 of PR 123: a failure before the request left the
+// process is NotSent (a dial failure, a retired client); a failure after
+// the write (the peer read the request and went away) is not.
+func TestNotSent(t *testing.T) {
+	bad := New(func(ctx context.Context) (net.Conn, error) { return nil, errors.New("ssh: not connected") })
+	if err := bad.Action(context.Background(), ActionRemove, hashA); !NotSent(err) || !errors.Is(err, ErrNotSent) {
+		t.Fatalf("dial failure: %v", err)
+	}
+	f := newFake(t)
+	f.onRaw(func(conn net.Conn) { conn.Close() })
+	c := New(f.dial)
+	if err := c.Action(context.Background(), ActionRemove, hashA); err == nil || NotSent(err) {
+		t.Fatalf("a request the peer read and dropped may have run: %v", err)
+	}
+	c.Retire(context.Background())
+	if err := c.Action(context.Background(), ActionRemove, hashA); !NotSent(err) {
+		t.Fatalf("retired: %v", err)
+	}
+}
