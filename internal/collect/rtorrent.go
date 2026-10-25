@@ -104,25 +104,9 @@ func (p *poller) rtClient(cli *sshx.Client, ep string) (*rtorrent.Client, error)
 	if p.rt != nil && p.rtEP == ep && p.rtSSH == cli {
 		return p.rt, nil
 	}
-	var dial rtorrent.Dialer
-	switch {
-	case p.dialRt != nil:
-		dial = p.dialRt(ep)
-	case cli == nil:
-		return nil, errors.New("rtorrent: no SSH connection")
-	case strings.HasPrefix(ep, "unix:"):
-		path := ep[len("unix:"):]
-		dial = func(ctx context.Context) (netConn, error) { return cli.DialUnix(ctx, path) }
-	case strings.HasPrefix(ep, "tcp:"):
-		hp := ep[len("tcp:"):]
-		_, portStr, _ := strings.Cut(hp, ":")
-		port, err := strconv.Atoi(portStr)
-		if err != nil {
-			return nil, errors.New("rtorrent: bad endpoint port")
-		}
-		dial = rtorrent.Dialer(verifiedDial(cli, hp, port))
-	default:
-		return nil, errors.New("rtorrent: no SCGI endpoint known (set one under edit, or check ~/.rtorrent.rc)")
+	dial, err := p.rtDialer(cli, ep)
+	if err != nil {
+		return nil, err
 	}
 	nc := rtorrent.New(dial)
 	// Labels still owed to magnets (see rtorrent.Client.Pending) belong to
@@ -136,6 +120,53 @@ func (p *poller) rtClient(cli *sshx.Client, ep string) (*rtorrent.Client, error)
 	}
 	p.rt, p.rtEP, p.rtSSH = nc, ep, cli
 	return p.rt, nil
+}
+
+// rtDialer builds the SCGI dialer for ep over the transport cli (or the
+// test hook).
+func (p *poller) rtDialer(cli *sshx.Client, ep string) (rtorrent.Dialer, error) {
+	switch {
+	case p.dialRt != nil:
+		return p.dialRt(ep), nil
+	case cli == nil:
+		return nil, errors.New("rtorrent: no SSH connection")
+	case strings.HasPrefix(ep, "unix:"):
+		path := ep[len("unix:"):]
+		return func(ctx context.Context) (netConn, error) { return cli.DialUnix(ctx, path) }, nil
+	case strings.HasPrefix(ep, "tcp:"):
+		hp := ep[len("tcp:"):]
+		_, portStr, _ := strings.Cut(hp, ":")
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return nil, errors.New("rtorrent: bad endpoint port")
+		}
+		return rtorrent.Dialer(verifiedDial(cli, hp, port)), nil
+	}
+	return nil, errors.New("rtorrent: no SCGI endpoint known (set one under edit, or check ~/.rtorrent.rc)")
+}
+
+// detachedTransport opens the SSH connection the destructive phase of
+// remove-with-data runs on: its own, not the poller's, which an edit
+// (stopAndWait), a reconnect or a probe failure may close at any moment
+// (fred on PR 123: a transport closed between the erase and the rm leaves
+// the files behind). Returns the script runner, the SCGI dialer over it,
+// and the close function. Tests replace it through p.dialDetached.
+func (p *poller) detachedTransport(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+	if p.dialDetached != nil {
+		return p.dialDetached(ctx, ep)
+	}
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	cli, err := sshx.Dial(cctx, sshConfig(p.box))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dial, err := p.rtDialer(cli, ep)
+	if err != nil {
+		cli.Close()
+		return nil, nil, nil, err
+	}
+	return cli, dial, func() { cli.Close() }, nil
 }
 
 // dropRtLocked forgets the rTorrent client (its dialer is bound to a
@@ -398,7 +429,7 @@ func (p *poller) rtTorrentAction(ctx context.Context, hash, action string) error
 	if action == RtActionRemoveData {
 		// The caller's context: the deletion inside runs under the
 		// manager's own deadline, not the request's.
-		return p.rtRemoveData(ctx, cli, sshRunner(sshc), st.Rt.DataDir, hash)
+		return p.rtRemoveData(ctx, cli, sshRunner(sshc), st.Rt.Endpoint, st.Rt.DataDir, hash)
 	}
 	return cli.Action(actx, action, hash)
 }
@@ -420,9 +451,12 @@ type scriptRunner interface {
 // then is the torrent erased and the tree deleted, both under a deadline
 // owned by the manager rather than the HTTP request, so a browser that
 // goes away or a slow disk cannot cut the deletion between the two steps.
-// The caller gets the outcome when it is known, or, if its own context
-// ends first, word that the deletion continues.
-func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scriptRunner, root, hash string) error {
+// The destructive phase (erase, then rm) runs on an SSH connection of its
+// own, so nothing that closes the poller's (an edit, a reconnect, a probe
+// failure) can cut it between the two steps. The caller gets the outcome
+// when it is known, or, if its own context ends first, word that the
+// deletion continues.
+func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scriptRunner, ep, root, hash string) error {
 	if run == nil {
 		return errors.New("no SSH connection to the box")
 	}
@@ -455,14 +489,22 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 	if err != nil {
 		return fmt.Errorf("refusing to delete, the torrent was left in place: %s", clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300))
 	}
-	// 2. Erase, then delete, detached from the request.
+	// 2. Erase, then delete, detached from the request and on a transport
+	// of their own.
 	res := p.m.detached(rtRemoveTimeout, func(dctx context.Context) error {
+		drun, ddial, dclose, err := p.detachedTransport(dctx, ep)
+		if err != nil {
+			return fmt.Errorf("could not open a connection for the deletion; nothing was changed: %w", err)
+		}
+		defer dclose()
+		dcli := rtorrent.New(ddial)
 		ectx, ecancel := context.WithTimeout(dctx, apiTimeout)
 		defer ecancel()
-		if err := cli.Action(ectx, rtorrent.ActionRemove, hash); err != nil {
+		if err := dcli.Action(ectx, rtorrent.ActionRemove, hash); err != nil {
 			return err // nothing deleted
 		}
-		out, stderr, err := run.Run(dctx, "sh", strings.NewReader(rtRemoveDataVars("delete", root, base)+rtRemoveDataScript))
+		cli.Forget(hash) // the poller's client owes this torrent nothing any more
+		out, stderr, err := drun.Run(dctx, "sh", strings.NewReader(rtRemoveDataVars("delete", root, base)+rtRemoveDataScript))
 		if err != nil {
 			return fmt.Errorf("the torrent was removed from rTorrent but its files were not deleted: %s", clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300))
 		}

@@ -178,6 +178,11 @@ func rtFixture(t *testing.T, f *fakeSCGI) (*poller, *probe.Snapshot) {
 	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	p := newPoller(m, &store.Box{ID: 1, Name: "x", User: "u", RtEnabled: true})
 	p.dialRt = f.dialer
+	// The destructive phase's own transport: the same fake SCGI server and a
+	// runner that cannot run anything (tests that delete install their own).
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		return &localRunner{home: "/nonexistent"}, f.dialer(ep), func() {}, nil
+	}
 	snap := &probe.Snapshot{UID: 1001, Home: "/home/u", ProcsKnown: true, Procs: []probe.ProcInfo{{PID: 7500, Comm: "rtorrent main"}},
 		Rt: probe.RtInfo{ConfFound: true, SCGI: "unix:/home/u/.rtorrent.socket"}}
 	return p, snap
@@ -813,6 +818,9 @@ func TestRtRemoveDataBoundary(t *testing.T) {
 	p, _ := rtFixture(t, f)
 	cli := rtorrent.New(f.dialer(""))
 	run := &localRunner{home: home}
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		return run, f.dialer(ep), func() {}, nil
+	}
 	ctx := context.Background()
 	erased := func() int {
 		n := 0
@@ -826,7 +834,7 @@ func TestRtRemoveDataBoundary(t *testing.T) {
 	// A hostile peer naming a path outside the download root: refused by
 	// the box before anything, torrent left in place.
 	base = filepath.Join(keys, "f")
-	err := p.rtRemoveData(ctx, cli, run, data, rtHashA)
+	err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA)
 	if err == nil || !strings.Contains(err.Error(), "left in place") || !strings.Contains(err.Error(), "not inside the download root") || erased() != 0 || !exists(base) {
 		t.Fatalf("%v erased %d exists %v", err, erased(), exists(base))
 	}
@@ -835,29 +843,29 @@ func TestRtRemoveDataBoundary(t *testing.T) {
 	}
 	// The root itself, a missing path and no root at all are refused too.
 	base = data
-	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err == nil || erased() != 0 {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err == nil || erased() != 0 {
 		t.Fatalf("root itself: %v", err)
 	}
 	base = filepath.Join(data, "gone")
-	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err == nil || erased() != 0 || !strings.Contains(err.Error(), "does not exist") {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err == nil || erased() != 0 || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("missing: %v", err)
 	}
-	if err := p.rtRemoveData(ctx, cli, run, "", rtHashA); err == nil || erased() != 0 || !strings.Contains(err.Error(), "download directory is not known") {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", "", rtHashA); err == nil || erased() != 0 || !strings.Contains(err.Error(), "download directory is not known") {
 		t.Fatalf("no root: %v", err)
 	}
-	if err := p.rtRemoveData(ctx, cli, nil, data, rtHashA); err == nil || erased() != 0 {
+	if err := p.rtRemoveData(ctx, cli, nil, "unix:/x", data, rtHashA); err == nil || erased() != 0 {
 		t.Fatalf("no runner: %v", err)
 	}
 	// A torrent that never started has no path: said so, nothing erased.
 	base = ""
-	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err == nil || !strings.Contains(err.Error(), "no download path") || erased() != 0 {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err == nil || !strings.Contains(err.Error(), "no download path") || erased() != 0 {
 		t.Fatalf("empty path: %v", err)
 	}
 	// Inside the root: check, erase, delete, in that order; the tree is gone.
 	target := mk("data/Alpha")
 	base = target
 	run.runs = nil
-	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err != nil || erased() != 1 || exists(target) {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err != nil || erased() != 1 || exists(target) {
 		t.Fatalf("%v erased %d exists %v", err, erased(), exists(target))
 	}
 	if got := run.modes(); strings.Join(got, ",") != "check,delete" {
@@ -867,13 +875,13 @@ func TestRtRemoveDataBoundary(t *testing.T) {
 	link := filepath.Join(data, "link")
 	os.Symlink(keys, link)
 	base = link
-	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err == nil || erased() != 1 || !exists(filepath.Join(keys, "f")) {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err == nil || erased() != 1 || !exists(filepath.Join(keys, "f")) {
 		t.Fatalf("symlink: %v", err)
 	}
 	// Metacharacters in a path stay a path.
 	odd := mk("data/it's $(touch " + filepath.Join(home, "pwned") + ") x")
 	base = odd
-	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err != nil || exists(odd) || exists(filepath.Join(home, "pwned")) {
+	if err := p.rtRemoveData(ctx, cli, run, "unix:/x", data, rtHashA); err != nil || exists(odd) || exists(filepath.Join(home, "pwned")) {
 		t.Fatalf("metacharacters: %v", err)
 	}
 }
@@ -901,9 +909,12 @@ func TestRtRemoveDataOutlivesRequest(t *testing.T) {
 	p, _ := rtFixture(t, f)
 	cli := rtorrent.New(f.dialer(""))
 	run := &localRunner{home: home, gate: make(chan struct{}), block: true}
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		return run, f.dialer(ep), func() {}, nil
+	}
 	rctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- p.rtRemoveData(rctx, cli, run, data, rtHashA) }()
+	go func() { done <- p.rtRemoveData(rctx, cli, run, "unix:/x", data, rtHashA) }()
 	// Wait for the delete run to be held, then end the request.
 	for i := 0; i < 200; i++ {
 		if m := run.modes(); len(m) == 2 {
@@ -923,5 +934,80 @@ func TestRtRemoveDataOutlivesRequest(t *testing.T) {
 	p.m.wg.Wait() // Stop waits the same way
 	if _, statErr := os.Stat(target); statErr == nil {
 		t.Fatal("the deletion must complete after the request ended")
+	}
+}
+
+// TestRtRemoveDataOwnTransport: the destructive phase runs on a transport
+// of its own, so closing the poller's connections (what an edit's
+// stopAndWait, a reconnect or a probe failure do) between the box check
+// and the deletion changes nothing: the erase and the rm complete on the
+// detached transport (fred on PR 123). The poller's client also forgets
+// the label it owed the removed torrent.
+func TestRtRemoveDataOwnTransport(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	target := filepath.Join(data, "Alpha")
+	os.MkdirAll(target, 0o755)
+	os.WriteFile(filepath.Join(target, "f"), []byte("x"), 0o600)
+	f := newFakeSCGI(t)
+	f.reply = func(m, b string) string {
+		if m == "d.base_path" {
+			return xmlResp(xs(target))
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	pollerCli, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	pollerCli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "tv", Until: time.Now().Add(time.Hour)}})
+	check := &localRunner{home: home} // the poller's transport: used for the check only
+	detached := &localRunner{home: home, gate: make(chan struct{}), block: true}
+	var opened, closed int
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		opened++
+		return detached, f.dialer(ep), func() { closed++ }, nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.rtRemoveData(context.Background(), pollerCli, check, "unix:/x", data, rtHashA) }()
+	for i := 0; i < 200 && len(detached.modes()) == 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	// An edit lands now: the poller's connections go away.
+	p.closeConns()
+	close(detached.gate)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Fatal("deletion must complete on the detached transport")
+	}
+	if strings.Join(check.modes(), ",") != "check" || strings.Join(detached.modes(), ",") != "delete" || opened != 1 || closed != 1 {
+		t.Fatalf("check %v detached %v opened %d closed %d", check.modes(), detached.modes(), opened, closed)
+	}
+	if len(pollerCli.Pending()) != 0 {
+		t.Fatal("the poller's client must forget the removed torrent's label")
+	}
+	// A transport that cannot be opened changes nothing.
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		return nil, nil, nil, errors.New("ssh: dial failed")
+	}
+	os.MkdirAll(target, 0o755)
+	n := 0
+	for _, m := range f.called() {
+		if m == "d.erase" {
+			n++
+		}
+	}
+	err := p.rtRemoveData(context.Background(), pollerCli, check, "unix:/x", data, rtHashA)
+	m := 0
+	for _, x := range f.called() {
+		if x == "d.erase" {
+			m++
+		}
+	}
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") || m != n {
+		t.Fatalf("%v erases %d → %d", err, n, m)
 	}
 }

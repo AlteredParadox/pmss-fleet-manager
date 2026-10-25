@@ -92,6 +92,9 @@ type poller struct {
 	rtSSH    *sshx.Client            // the transport rt's dialer is bound to; a new one means a new client
 	rtLabels []rtorrent.PendingLabel // owed magnet labels restored from the cache, handed to the first client
 	dialRt   func(ep string) rtorrent.Dialer
+	// dialDetached is the test hook for the destructive phase's own
+	// transport (see detachedTransport).
+	dialDetached func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error)
 
 	duMu      sync.Mutex
 	duRunning bool
