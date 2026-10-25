@@ -1034,7 +1034,7 @@ function addToast(r, stopped, client) {
   if (client === 'rtorrent') {
     const parts = [`${r?.added || 0} sent to rTorrent${tail}`];
     if (r?.failed) parts.push(`${r.failed} refused (not a magnet/http(s) link or not a torrent)`);
-    if (r?.unlabelled) parts.push(`${r.unlabelled} loaded without the label`);
+    if (r?.unlabelled) parts.push(`${r.unlabelled} loaded, label not applied or confirmed`);
     if (r?.deferred) parts.push(`${r.deferred} magnet label${r.deferred === 1 ? '' : 's'} applied when the metadata arrives (not kept across a dashboard restart or reconnect)`);
     return parts.join(', ');
   }

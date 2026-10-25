@@ -381,8 +381,11 @@ again on the next poll after that. That memory lives in the dashboard
 process only: if the dashboard restarts, or reconnects to the box, before a
 magnet's metadata has arrived, the label is dropped and the torrent shows
 without one (set it in ruTorrent). The add's answer says how many labels
-are still pending ("applied when the metadata arrives"). Labels are a
-convenience, and the dashboard does not guard them beyond this; what it
+are still pending ("applied when the metadata arrives"), and how many were
+loaded with the label not applied or confirmed (rTorrent refused the label,
+or its answer was lost, so the label may or may not be set: check
+ruTorrent). Labels are a convenience, and the dashboard does not guard them
+beyond this; what it
 guards without compromise is deleting files, acting on the right machine
 and account, and bounded operations against the box.
 
