@@ -289,13 +289,13 @@ var ErrShuttingDown = errors.New("the dashboard is shutting down; nothing was ch
 // shutdown signal) and returns the channel its result arrives on. Stop
 // drains these jobs before cancelling their context. Once Stop began, the
 // channel carries ErrShuttingDown and fn does not run.
-func (m *Manager) detached(timeout time.Duration, fn func(ctx context.Context) error) <-chan error {
-	res := make(chan error, 1)
+func (m *Manager) detached(timeout time.Duration, fn func(ctx context.Context) error) (res <-chan error, admitted bool) {
+	ch := make(chan error, 1)
 	m.jobMu.Lock()
 	if m.jobsClosed {
 		m.jobMu.Unlock()
-		res <- ErrShuttingDown
-		return res
+		ch <- ErrShuttingDown
+		return ch, false
 	}
 	m.jobWG.Add(1)
 	m.jobMu.Unlock()
@@ -303,10 +303,14 @@ func (m *Manager) detached(timeout time.Duration, fn func(ctx context.Context) e
 	go func() {
 		defer m.jobWG.Done()
 		defer cancel()
-		res <- fn(ctx)
+		ch <- fn(ctx)
 	}()
-	return res
+	return ch, true
 }
+
+// jobBase is the destructive-job context itself, for a phase that needs a
+// deadline of its own rather than the remainder of its job's.
+func (m *Manager) jobBase() context.Context { return m.jobCtx }
 
 // rtLease is the per-box mutation lease for rTorrent: one add, action or
 // remove-with-data at a time per box, whatever client or poller carries it,

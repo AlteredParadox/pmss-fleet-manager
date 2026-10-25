@@ -24,6 +24,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"pmss-fleet-manager/internal/probe"
@@ -174,13 +176,30 @@ func (p *poller) detachedTransport(ctx context.Context, ep string) (scriptRunner
 // client inherits them; p.mu must be held. Without this a reconnect would
 // lose the only in-memory copy and the next poll would persist an empty
 // list over the cached one (Codex on PR 123).
-func (p *poller) dropRtLocked() {
-	if p.rt != nil {
-		if owed := p.rt.Pending(); len(owed) > 0 {
-			p.rtLabels = owed
-		}
-	}
+func (p *poller) dropRtLocked(ctx context.Context) {
+	cli := p.rt
 	p.rt, p.rtSSH = nil, nil
+	if cli == nil {
+		return
+	}
+	// Retire waits for the operation in flight on the client to complete
+	// its remote and local steps before snapshotting, so an Add's label set
+	// on the box but not yet remembered, or a remove's erase not yet
+	// forgotten, cannot be lost or kept (daybreak blue re-review of PR 123).
+	// Bounded by ctx; a client whose transport just died fails fast.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rctx, cancel := context.WithTimeout(ctx, apiTimeout)
+	defer cancel()
+	owed, err := cli.Retire(rctx)
+	if err != nil {
+		owed = cli.Pending() // the operation did not finish in time: what is there now
+	}
+	if len(owed) > 0 {
+		p.rtLabels = append(p.rtLabels[:0:0], owed...)
+	}
+	p.rtEpoch++
 }
 
 // forgetRtLabel drops any label owed to hash from this poller's client and
@@ -195,8 +214,10 @@ func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
 	// token: strip the copy, forget on the client, then strip the copy
 	// again and forget on whatever client is current now, until nothing
 	// moved (Codex on PR 123).
-	var done *rtorrent.Client
-	for i := 0; i < 3; i++ {
+	// Until stable: a forget on the current client, then a locked look that
+	// finds the same client epoch (no handoff happened meanwhile) and the
+	// saved copy clear. The context bounds a reconnect storm.
+	for {
 		p.mu.Lock()
 		if len(p.rtLabels) > 0 {
 			kept := make([]rtorrent.PendingLabel, 0, len(p.rtLabels)) // a new slice: a snapshot in flight keeps its own
@@ -207,9 +228,9 @@ func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
 			}
 			p.rtLabels = kept
 		}
-		cli := p.rt
+		cli, epoch := p.rt, p.rtEpoch
 		p.mu.Unlock()
-		if cli == nil || cli == done {
+		if cli == nil {
 			break
 		}
 		// Outside p.mu: Forget waits for the client's operation token.
@@ -217,7 +238,27 @@ func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
 			p.m.log.Warn("forget rtorrent label", "box", p.box.Name, "err", err)
 			break
 		}
-		done = cli
+		p.mu.Lock()
+		stable := p.rt == cli && p.rtEpoch == epoch
+		p.mu.Unlock()
+		if stable || ctx.Err() != nil {
+			if stable {
+				// One last strip: a handoff cannot have happened, but the
+				// copy is cheap to clear again.
+				p.mu.Lock()
+				if len(p.rtLabels) > 0 {
+					kept := make([]rtorrent.PendingLabel, 0, len(p.rtLabels))
+					for _, l := range p.rtLabels {
+						if strings.ToUpper(l.Hash) != hash {
+							kept = append(kept, l)
+						}
+					}
+					p.rtLabels = kept
+				}
+				p.mu.Unlock()
+			}
+			break
+		}
 	}
 	if persist {
 		p.recordRtLabels(ctx)
@@ -566,15 +607,11 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 	}
 	// 2. Erase, then delete, detached from the request and on a transport
 	// of their own. The lease travels with the job and is released when it
-	// ends, so no other rTorrent mutation on this box runs meanwhile.
-	detachedOwnsLease = true
-	res := p.m.detached(rtRemoveJobTimeout, func(dctx context.Context) (err error) {
+	// ends, so no other rTorrent mutation on this box runs meanwhile. The
+	// job's deadline bounds the connection, the erase and the bookkeeping;
+	// the rm then gets its own, from the job context itself.
+	res, admitted := p.m.detached(p.rmJobTimeout(), func(dctx context.Context) (err error) {
 		defer release()
-		defer func() {
-			if err != nil && errors.Is(dctx.Err(), context.Canceled) {
-				err = fmt.Errorf("interrupted by the dashboard shutting down: %w", err)
-			}
-		}()
 		drun, ddial, dclose, err := p.detachedTransport(dctx, ep)
 		if err != nil {
 			return fmt.Errorf("could not open a connection for the deletion; nothing was changed: %w", err)
@@ -592,36 +629,87 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		// poller's (which also persists the result). Under the edit lock,
 		// so the cleanup cannot fall between an edit's restore of the owed
 		// labels and its publish of the replacement poller, and only for a
-		// poller of the same generation: a record moved to another machine
-		// may owe the same hash a label of its own (fred on PR 123).
-		p.m.boxMu.Lock()
-		p.forgetRtLabel(dctx, hash, false)
-		if cur := p.m.poller(p.box.ID); cur == p {
-			p.recordRtLabels(dctx)
-		} else if cur != nil && boxGeneration(cur.box) == boxGeneration(p.box) {
-			cur.forgetRtLabel(dctx, hash, true)
+		// poller of the same generation (compared through each poller's
+		// synchronised view: conn pins the host key under its lock); fred
+		// and the daybreak blue re-reviews on PR 123. The lock is waited
+		// for under the job's deadline: an edit holding it past that means
+		// the bookkeeping is skipped (the next poll settles the label) and
+		// the rm still runs.
+		if unlock, ok := lockWithin(dctx, &p.m.boxMu); ok {
+			p.forgetRtLabel(dctx, hash, false)
+			if cur := p.m.poller(p.box.ID); cur == p {
+				p.recordRtLabels(dctx)
+			} else if cur != nil && cur.generation() == p.generation() {
+				cur.forgetRtLabel(dctx, hash, true)
+			}
+			unlock()
+		} else {
+			p.m.log.Warn("rtorrent remove-with-data: the edit lock was not free in time; label bookkeeping left to the next poll", "box", p.box.Name)
 		}
-		p.m.boxMu.Unlock()
-		// The rm gets its own, full budget from here: the connection, the
-		// erase and the bookkeeping above have spent theirs.
-		rmctx, rmcancel := context.WithTimeout(dctx, rtRemoveTimeout)
+		// The rm gets its own, full budget from here, from the job context
+		// itself rather than this job's deadline, which the connection, the
+		// erase and the bookkeeping above have spent.
+		rmctx, rmcancel := context.WithTimeout(p.m.jobBase(), rtRemoveTimeout)
 		defer rmcancel()
 		out, stderr, err := drun.Run(rmctx, "sh", strings.NewReader(rtRemoveDataVars("delete", root, base)+rtRemoveDataScript))
 		if err != nil {
 			why := clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300)
-			if errors.Is(rmctx.Err(), context.DeadlineExceeded) && dctx.Err() == nil {
+			if errors.Is(rmctx.Err(), context.DeadlineExceeded) {
 				why = fmt.Sprintf("the deletion did not finish within %s", rtRemoveTimeout)
 			}
 			return fmt.Errorf("the torrent was removed from rTorrent but its files were not (all) deleted: %s", why)
 		}
 		return nil
 	})
+	if !admitted {
+		// Stop has begun: the job did not start, so the lease is still ours
+		// to give back, and the answer is final whatever the request did.
+		return <-res
+	}
+	detachedOwnsLease = true
 	select {
 	case err := <-res:
 		return err
 	case <-ctx.Done():
 		return fmt.Errorf("the request ended before the deletion finished; it continues on the box and the next poll shows the result: %w", ctx.Err())
 	}
+}
+
+// lockWithin takes mu unless ctx ends first. A mutex cannot be waited on
+// with a context, so the lock is taken on a helper goroutine that hands it
+// over only if the caller is still waiting, and lets go at once otherwise.
+func lockWithin(ctx context.Context, mu *sync.Mutex) (unlock func(), ok bool) {
+	got := make(chan struct{}, 1)
+	var gaveUp atomic.Bool
+	go func() {
+		mu.Lock()
+		if gaveUp.Load() {
+			mu.Unlock() // the caller gave up before the lock came
+			return
+		}
+		got <- struct{}{} // the caller takes ownership (buffered: never blocks)
+	}()
+	select {
+	case <-got:
+		return mu.Unlock, true
+	case <-ctx.Done():
+		gaveUp.Store(true)
+		select {
+		case <-got: // the lock arrived at the same moment: it is ours after all
+			return mu.Unlock, true
+		default:
+			return nil, false
+		}
+	}
+}
+
+// rmJobTimeout is the detached job's deadline for connection, erase and
+// bookkeeping (rtRemoveJobTimeout outside tests).
+func (p *poller) rmJobTimeout() time.Duration {
+	if p.jobTimeout > 0 {
+		return p.jobTimeout
+	}
+	return rtRemoveJobTimeout
 }
 
 // rtRemoveDataVars renders the script's inputs as shell-quoted assignments

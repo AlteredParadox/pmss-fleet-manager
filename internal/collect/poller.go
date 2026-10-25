@@ -91,7 +91,10 @@ type poller struct {
 	rtEP     string
 	rtSSH    *sshx.Client            // the transport rt's dialer is bound to; a new one means a new client
 	rtLabels []rtorrent.PendingLabel // owed magnet labels restored from the cache, handed to the first client
-	dialRt   func(ep string) rtorrent.Dialer
+	rtEpoch  uint64                  // bumped on every client handoff (see forgetRtLabel)
+	// jobTimeout overrides rtRemoveJobTimeout in tests.
+	jobTimeout time.Duration
+	dialRt     func(ep string) rtorrent.Dialer
 	// dialDetached is the test hook for the destructive phase's own
 	// transport (see detachedTransport).
 	dialDetached func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error)
@@ -349,7 +352,7 @@ func (p *poller) closeConns() {
 		p.dk.Close()
 		p.dk = nil
 	}
-	p.dropRtLocked()
+	p.dropRtLocked(context.Background())
 	if p.ssh != nil {
 		p.ssh.Close()
 		p.ssh = nil
@@ -428,7 +431,7 @@ func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
 			p.dk.Close()
 			p.dk = nil
 		}
-		p.dropRtLocked() // its dialer held the closed transport (Codex on PR 123)
+		p.dropRtLocked(ctx) // its dialer held the closed transport (Codex on PR 123)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -565,7 +568,7 @@ func (p *poller) poll(ctx context.Context) {
 			p.ssh.Close()
 			p.ssh = nil
 		}
-		p.dropRtLocked()
+		p.dropRtLocked(ctx)
 		p.mu.Unlock()
 		p.inventoryFailed(inventory)
 		p.fail(ctx, &st, fmt.Errorf("probe: %w %s", explainSessionError(err), strings.TrimSpace(string(stderr))), start)

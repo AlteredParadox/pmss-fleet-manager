@@ -1463,22 +1463,32 @@ func TestForgetRtLabelSurvivesReconnect(t *testing.T) {
 	p, _ := rtFixture(t, f)
 	c1, _ := p.rtClient(&sshx.Client{}, "unix:/x")
 	c1.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
-	// Hold c1's operation token: the forget on it has to wait.
-	hold, err := c1.Hold(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	// Keep c1 busy with a real operation (a listing held inside the fake):
+	// the forget on it has to wait.
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f.reply = func(m, b string) string {
+		if m == "d.multicall2" {
+			entered <- struct{}{}
+			<-gate
+		}
+		return rtReplies(m, b)
 	}
+	go func() { c1.Torrents(context.Background()) }()
+	<-entered
 	done := make(chan struct{})
 	go func() { p.forgetRtLabel(context.Background(), rtHashA, false); close(done) }()
 	time.Sleep(50 * time.Millisecond) // the forget is waiting on c1
-	// A reconnect: the label moves from c1 into the saved copy, and a new
-	// client inherits it.
-	p.closeConns()
+	// A reconnect: the handoff (Retire) waits for c1's operation too, so it
+	// runs on its own goroutine; once the listing ends, the label moves
+	// into the saved copy and a new client inherits it, and the forget's
+	// stability loop clears both.
+	closed := make(chan struct{})
+	go func() { p.closeConns(); close(closed) }()
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	<-closed
 	c2, _ := p.rtClient(&sshx.Client{}, "unix:/x")
-	if len(c2.Pending()) != 1 {
-		t.Fatal("fixture: the replacement should have inherited the label")
-	}
-	hold()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -1489,5 +1499,168 @@ func TestForgetRtLabelSurvivesReconnect(t *testing.T) {
 	p.mu.Unlock()
 	if n != 0 || len(c2.Pending()) != 0 {
 		t.Fatalf("label survived the reconnect: saved %d, new client %d", n, len(c2.Pending()))
+	}
+}
+
+// TestHandoffWaitsForInFlightAdd (daybreak blue re-review of PR 123,
+// finding 2): a reconnect during an Add paused between its remote label
+// setter and its remember hands the label over; the mirror remove paused
+// after its erase hands nothing over.
+func TestHandoffWaitsForInFlightAdd(t *testing.T) {
+	f := newFakeSCGI(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f.reply = func(m, b string) string {
+		if m == "d.custom1.set" || m == "d.erase" {
+			entered <- struct{}{}
+			<-gate
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	c1, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	addDone := make(chan error, 1)
+	go func() {
+		_, err := c1.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Label: "tv"})
+		addDone <- err
+	}()
+	<-entered // the label is set on the box, not yet remembered
+	closed := make(chan struct{})
+	go func() { p.closeConns(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("the handoff snapshotted during the Add")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(gate)
+	if err := <-addDone; err != nil {
+		t.Fatal(err)
+	}
+	<-closed
+	p.mu.Lock()
+	saved := append([]rtorrent.PendingLabel(nil), p.rtLabels...)
+	p.mu.Unlock()
+	if len(saved) != 1 || saved[0].Hash != rtHashA || saved[0].Label != "tv" {
+		t.Fatalf("the owed label must survive the handoff: %+v", saved)
+	}
+	// Mirror: a remove paused after its erase; the handoff must not keep it.
+	gate = make(chan struct{})
+	c2, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	if len(c2.Pending()) != 1 {
+		t.Fatal("fixture: the new client should hold the label")
+	}
+	rmDone := make(chan error, 1)
+	go func() { rmDone <- c2.Action(context.Background(), rtorrent.ActionRemove, rtHashA) }()
+	<-entered
+	closed = make(chan struct{})
+	go func() { p.closeConns(); close(closed) }()
+	time.Sleep(100 * time.Millisecond)
+	close(gate)
+	if err := <-rmDone; err != nil {
+		t.Fatal(err)
+	}
+	<-closed
+	p.mu.Lock()
+	n := len(p.rtLabels)
+	p.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("a removed torrent's label survived the handoff: %d", n)
+	}
+}
+
+// TestPostEraseLockIsBounded (finding 1): an edit holding the global lock
+// past the job's deadline does not hold the job, Stop, or the rm: the
+// bookkeeping is skipped and the deletion still runs with its own budget.
+func TestPostEraseLockIsBounded(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	target := filepath.Join(data, "Alpha")
+	os.MkdirAll(target, 0o755)
+	os.WriteFile(filepath.Join(target, "f"), []byte("x"), 0o600)
+	f := newFakeSCGI(t)
+	f.reply = func(m, b string) string {
+		if m == "d.base_path" {
+			return xmlResp(xs(target))
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	p.jobTimeout = 500 * time.Millisecond // the whole setup-and-bookkeeping budget
+	cli := rtorrent.New(f.dialer(""))
+	var rmDeadline time.Duration
+	run := &deadlineRunner{inner: &localRunner{home: home}, onDelete: func(ctx context.Context) {
+		if dl, ok := ctx.Deadline(); ok {
+			rmDeadline = time.Until(dl)
+		}
+	}}
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		return run, f.dialer(ep), func() {}, nil
+	}
+	// An edit holds the lock for longer than the job's deadline.
+	p.m.boxMu.Lock()
+	start := time.Now()
+	err := p.rtRemoveData(context.Background(), cli, run.inner, "unix:/x", data, rtHashA, nil)
+	took := time.Since(start)
+	p.m.boxMu.Unlock()
+	if err != nil {
+		t.Fatalf("the deletion must still run: %v", err)
+	}
+	if took > 3*time.Second {
+		t.Fatalf("the job waited on the lock for %v", took)
+	}
+	if _, statErr := os.Stat(target); statErr == nil {
+		t.Fatal("the files must be gone")
+	}
+	if rmDeadline < rtRemoveTimeout-2*time.Second {
+		t.Fatalf("the rm must get its own budget even after the job deadline passed: %v", rmDeadline)
+	}
+	// The helper goroutine let the lock go: it can be taken again at once.
+	p.m.boxMu.Lock()
+	p.m.boxMu.Unlock()
+}
+
+// TestRefusedJobReleasesLease (finding 5): a remove-with-data refused at
+// admission (Stop began) gives the per-box lease back and answers
+// ErrShuttingDown whatever the request context did.
+func TestRefusedJobReleasesLease(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	target := filepath.Join(data, "Alpha")
+	os.MkdirAll(target, 0o755)
+	f := newFakeSCGI(t)
+	f.reply = func(m, b string) string {
+		if m == "d.base_path" {
+			return xmlResp(xs(target))
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	cli := rtorrent.New(f.dialer(""))
+	run := &localRunner{home: home}
+	p.m.jobMu.Lock()
+	p.m.jobsClosed = true
+	p.m.jobMu.Unlock()
+	release, err := p.m.rtLease(p.box.ID).Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA, release); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("%v", err)
+	}
+	lctx, lcancel := context.WithTimeout(context.Background(), time.Second)
+	defer lcancel()
+	release2, err := p.m.rtLease(p.box.ID).Acquire(lctx)
+	if err != nil {
+		t.Fatal("the lease leaked on a refused job")
+	}
+	release2()
+	if _, statErr := os.Stat(target); statErr != nil {
+		t.Fatal("a refused job must change nothing")
 	}
 }
