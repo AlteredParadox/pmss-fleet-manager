@@ -1,0 +1,653 @@
+// Package rtorrent talks to one rTorrent instance over its SCGI XML-RPC
+// endpoint, reached through a caller-supplied dialer (the SSH channel to
+// the tenant's ~/.rtorrent.socket on a PMSS box, a TCP loopback port on
+// other setups).
+//
+// Everything that comes back is treated as hostile: a compromised box can
+// answer with anything. Responses are decoded as a stream behind byte,
+// element, depth and entry caps, strings are clipped as they are read, and
+// no value is retained before it passed its check.
+package rtorrent
+
+import (
+	"encoding/base64"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
+
+// Limits on what one response may hold. maxResponse bounds the bytes read
+// from the socket for a single call; the decoder streams, so this is a
+// bandwidth cap, not an allocation. maxElements and maxDepth stop a
+// hostile peer from making the decoder walk forever or recurse; maxString
+// is the longest string kept from any value (names are clipped tighter by
+// the callers that know what they hold).
+const (
+	maxResponse = 64 << 20
+	maxElements = 4_000_000
+	maxDepth    = 16
+	maxString   = 4096
+)
+
+// Value is one decoded XML-RPC value. Exactly one field is meaningful,
+// chosen by Kind.
+type Value struct {
+	Kind   Kind
+	Int    int64
+	Str    string
+	Bool   bool
+	Float  float64
+	Bytes  []byte
+	Array  []Value
+	Struct map[string]Value
+}
+
+// Kind tags the XML-RPC type of a Value.
+type Kind uint8
+
+// The XML-RPC value kinds rTorrent emits.
+const (
+	KindNil Kind = iota
+	KindInt
+	KindString
+	KindBool
+	KindFloat
+	KindBytes
+	KindArray
+	KindStruct
+)
+
+// Fault is an XML-RPC fault returned by rTorrent (an unknown method, a bad
+// hash, a refused command).
+type Fault struct {
+	Code   int64
+	String string
+}
+
+func (f *Fault) Error() string { return fmt.Sprintf("rtorrent fault %d: %s", f.Code, f.String) }
+
+var (
+	// ErrTooLarge is a response past maxResponse, maxElements or maxDepth.
+	ErrTooLarge = errors.New("rtorrent response too large")
+	// ErrMalformed is a response that is not an XML-RPC methodResponse.
+	ErrMalformed = errors.New("rtorrent response malformed")
+)
+
+// encodeCall renders one methodCall. Parameters may be string, int, int64,
+// bool or []byte (base64); anything else is a programming error.
+func encodeCall(method string, params ...any) ([]byte, error) {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><methodCall><methodName>`)
+	if err := xml.EscapeText(&b, []byte(method)); err != nil {
+		return nil, err
+	}
+	b.WriteString(`</methodName><params>`)
+	for _, p := range params {
+		b.WriteString(`<param>`)
+		if err := encodeValue(&b, p); err != nil {
+			return nil, err
+		}
+		b.WriteString(`</param>`)
+	}
+	b.WriteString(`</params></methodCall>`)
+	return []byte(b.String()), nil
+}
+
+func encodeValue(b *strings.Builder, p any) error {
+	b.WriteString(`<value>`)
+	switch v := p.(type) {
+	case string:
+		b.WriteString(`<string>`)
+		if err := xml.EscapeText(b, []byte(v)); err != nil {
+			return err
+		}
+		b.WriteString(`</string>`)
+	case int:
+		fmt.Fprintf(b, `<i8>%d</i8>`, v)
+	case int64:
+		fmt.Fprintf(b, `<i8>%d</i8>`, v)
+	case bool:
+		if v {
+			b.WriteString(`<boolean>1</boolean>`)
+		} else {
+			b.WriteString(`<boolean>0</boolean>`)
+		}
+	case []byte:
+		b.WriteString(`<base64>`)
+		b.WriteString(base64.StdEncoding.EncodeToString(v))
+		b.WriteString(`</base64>`)
+	case []any:
+		b.WriteString(`<array><data>`)
+		for _, e := range v {
+			if err := encodeValue(b, e); err != nil {
+				return err
+			}
+		}
+		b.WriteString(`</data></array>`)
+	case map[string]any:
+		// system.multicall takes an array of {methodName, params} structs.
+		b.WriteString(`<struct>`)
+		for _, k := range []string{"methodName", "params"} {
+			e, ok := v[k]
+			if !ok {
+				continue
+			}
+			b.WriteString(`<member><name>`)
+			if err := xml.EscapeText(b, []byte(k)); err != nil {
+				return err
+			}
+			b.WriteString(`</name>`)
+			if err := encodeValue(b, e); err != nil {
+				return err
+			}
+			b.WriteString(`</member>`)
+		}
+		b.WriteString(`</struct>`)
+	default:
+		return fmt.Errorf("rtorrent: unsupported parameter type %T", p)
+	}
+	b.WriteString(`</value>`)
+	return nil
+}
+
+// decoder walks one methodResponse as a token stream.
+type decoder struct {
+	d        *xml.Decoder
+	elements int
+	maxRows  int // entries allowed in the outermost array; 0 = no cap
+}
+
+// decodeResponse reads a methodResponse from r (already capped by the
+// caller) and returns its single parameter, or the Fault it carried.
+// maxRows caps the outermost array (the torrent list); more is an error,
+// never a silently truncated view.
+func decodeResponse(r io.Reader, maxRows int) (Value, error) {
+	d := xml.NewDecoder(newUTF8Reader(r))
+	d.Strict = true
+	// Entities other than the five predefined ones are refused by Strict
+	// mode; encoding/xml never fetches external entities or DTDs.
+	d.CharsetReader = func(charset string, in io.Reader) (io.Reader, error) {
+		if !strings.EqualFold(charset, "utf-8") && !strings.EqualFold(charset, "us-ascii") {
+			return nil, fmt.Errorf("unsupported charset %q", charset)
+		}
+		return in, nil
+	}
+	dec := &decoder{d: d, maxRows: maxRows}
+	if err := dec.expectStart("methodResponse"); err != nil {
+		return Value{}, err
+	}
+	name, err := dec.nextStart()
+	if err != nil {
+		return Value{}, err
+	}
+	switch name {
+	case "params":
+		if err := dec.expectStart("param"); err != nil {
+			return Value{}, err
+		}
+		v, err := dec.value()
+		if err != nil {
+			return Value{}, err
+		}
+		for _, n := range []string{"param", "params", "methodResponse"} {
+			if err := dec.expectEnd(n); err != nil {
+				return Value{}, err
+			}
+		}
+		return v, nil
+	case "fault":
+		v, err := dec.value()
+		if err != nil {
+			return Value{}, err
+		}
+		if v.Kind != KindStruct {
+			return Value{}, ErrMalformed
+		}
+		f := &Fault{Code: v.Struct["faultCode"].Int, String: clip(v.Struct["faultString"].Str, 300)}
+		return Value{}, f
+	}
+	return Value{}, ErrMalformed
+}
+
+// value decodes one <value>; the decoder is positioned before its start
+// element.
+func (dec *decoder) value() (Value, error) {
+	return dec.valueAt(0)
+}
+
+func (dec *decoder) valueAt(depth int) (Value, error) {
+	if depth > maxDepth {
+		return Value{}, ErrTooLarge
+	}
+	if err := dec.expectStart("value"); err != nil {
+		return Value{}, err
+	}
+	// A <value> may hold a typed element or bare text (an untyped string).
+	tok, err := dec.token()
+	if err != nil {
+		return Value{}, err
+	}
+	var v Value
+	switch t := tok.(type) {
+	case xml.CharData:
+		text := string(t)
+		// Bare text: either an untyped string ending at </value>, or
+		// whitespace before a typed element.
+		nxt, err := dec.token()
+		if err != nil {
+			return Value{}, err
+		}
+		switch n := nxt.(type) {
+		case xml.EndElement:
+			if n.Name.Local != "value" {
+				return Value{}, ErrMalformed
+			}
+			return Value{Kind: KindString, Str: clip(text, maxString)}, nil
+		case xml.StartElement:
+			if strings.TrimSpace(text) != "" {
+				return Value{}, ErrMalformed
+			}
+			v, err = dec.typed(n.Name.Local, depth)
+			if err != nil {
+				return Value{}, err
+			}
+		default:
+			return Value{}, ErrMalformed
+		}
+	case xml.StartElement:
+		v, err = dec.typed(t.Name.Local, depth)
+		if err != nil {
+			return Value{}, err
+		}
+	case xml.EndElement:
+		if t.Name.Local != "value" {
+			return Value{}, ErrMalformed
+		}
+		return Value{Kind: KindString}, nil
+	default:
+		return Value{}, ErrMalformed
+	}
+	if err := dec.expectEnd("value"); err != nil {
+		return Value{}, err
+	}
+	return v, nil
+}
+
+// typed decodes the body of a typed element whose start was just read.
+func (dec *decoder) typed(name string, depth int) (Value, error) {
+	switch name {
+	case "i4", "i8", "int", "ex:i8":
+		s, err := dec.text(name)
+		if err != nil {
+			return Value{}, err
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil {
+			return Value{}, ErrMalformed
+		}
+		return Value{Kind: KindInt, Int: n}, nil
+	case "string":
+		s, err := dec.text(name)
+		if err != nil {
+			return Value{}, err
+		}
+		return Value{Kind: KindString, Str: clip(s, maxString)}, nil
+	case "boolean":
+		s, err := dec.text(name)
+		if err != nil {
+			return Value{}, err
+		}
+		switch strings.TrimSpace(s) {
+		case "0", "false":
+			return Value{Kind: KindBool}, nil
+		case "1", "true":
+			return Value{Kind: KindBool, Bool: true}, nil
+		}
+		return Value{}, ErrMalformed
+	case "double":
+		s, err := dec.text(name)
+		if err != nil {
+			return Value{}, err
+		}
+		f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			return Value{}, ErrMalformed
+		}
+		return Value{Kind: KindFloat, Float: f}, nil
+	case "base64":
+		s, err := dec.text(name)
+		if err != nil {
+			return Value{}, err
+		}
+		b, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), ""))
+		if err != nil {
+			return Value{}, ErrMalformed
+		}
+		return Value{Kind: KindBytes, Bytes: b}, nil
+	case "array":
+		if err := dec.expectStart("data"); err != nil {
+			return Value{}, err
+		}
+		v := Value{Kind: KindArray}
+		for {
+			tok, err := dec.token()
+			if err != nil {
+				return Value{}, err
+			}
+			switch t := tok.(type) {
+			case xml.CharData:
+				if strings.TrimSpace(string(t)) != "" {
+					return Value{}, ErrMalformed
+				}
+			case xml.EndElement:
+				if t.Name.Local != "data" {
+					return Value{}, ErrMalformed
+				}
+				if err := dec.expectEnd("array"); err != nil {
+					return Value{}, err
+				}
+				return v, nil
+			case xml.StartElement:
+				if t.Name.Local != "value" {
+					return Value{}, ErrMalformed
+				}
+				if depth == 0 && dec.maxRows > 0 && len(v.Array) >= dec.maxRows {
+					return Value{}, ErrTooLarge
+				}
+				e, err := dec.valueBody(depth + 1)
+				if err != nil {
+					return Value{}, err
+				}
+				v.Array = append(v.Array, e)
+			default:
+				return Value{}, ErrMalformed
+			}
+		}
+	case "struct":
+		v := Value{Kind: KindStruct, Struct: map[string]Value{}}
+		for {
+			tok, err := dec.token()
+			if err != nil {
+				return Value{}, err
+			}
+			switch t := tok.(type) {
+			case xml.CharData:
+				if strings.TrimSpace(string(t)) != "" {
+					return Value{}, ErrMalformed
+				}
+			case xml.EndElement:
+				if t.Name.Local != "struct" {
+					return Value{}, ErrMalformed
+				}
+				return v, nil
+			case xml.StartElement:
+				if t.Name.Local != "member" {
+					return Value{}, ErrMalformed
+				}
+				if err := dec.expectStart("name"); err != nil {
+					return Value{}, err
+				}
+				name, err := dec.text("name")
+				if err != nil {
+					return Value{}, err
+				}
+				e, err := dec.valueAt(depth + 1)
+				if err != nil {
+					return Value{}, err
+				}
+				if err := dec.expectEnd("member"); err != nil {
+					return Value{}, err
+				}
+				if len(v.Struct) < 256 {
+					v.Struct[clip(name, 64)] = e
+				}
+			default:
+				return Value{}, ErrMalformed
+			}
+		}
+	case "nil", "ex:nil":
+		if err := dec.expectEnd(name); err != nil {
+			return Value{}, err
+		}
+		return Value{Kind: KindNil}, nil
+	}
+	return Value{}, ErrMalformed
+}
+
+// valueBody decodes a <value> whose start element was already consumed.
+func (dec *decoder) valueBody(depth int) (Value, error) {
+	if depth > maxDepth {
+		return Value{}, ErrTooLarge
+	}
+	tok, err := dec.token()
+	if err != nil {
+		return Value{}, err
+	}
+	var v Value
+	switch t := tok.(type) {
+	case xml.CharData:
+		text := string(t)
+		nxt, err := dec.token()
+		if err != nil {
+			return Value{}, err
+		}
+		switch n := nxt.(type) {
+		case xml.EndElement:
+			if n.Name.Local != "value" {
+				return Value{}, ErrMalformed
+			}
+			return Value{Kind: KindString, Str: clip(text, maxString)}, nil
+		case xml.StartElement:
+			if strings.TrimSpace(text) != "" {
+				return Value{}, ErrMalformed
+			}
+			v, err = dec.typed(n.Name.Local, depth)
+			if err != nil {
+				return Value{}, err
+			}
+		default:
+			return Value{}, ErrMalformed
+		}
+	case xml.StartElement:
+		v, err = dec.typed(t.Name.Local, depth)
+		if err != nil {
+			return Value{}, err
+		}
+	case xml.EndElement:
+		if t.Name.Local != "value" {
+			return Value{}, ErrMalformed
+		}
+		return Value{Kind: KindString}, nil
+	default:
+		return Value{}, ErrMalformed
+	}
+	if err := dec.expectEnd("value"); err != nil {
+		return Value{}, err
+	}
+	return v, nil
+}
+
+// text reads character data up to the end of element name, clipped so a
+// hostile peer cannot make one string hold the whole response.
+func (dec *decoder) text(name string) (string, error) {
+	var b strings.Builder
+	for {
+		tok, err := dec.token()
+		if err != nil {
+			return "", err
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			if b.Len() < maxString*4 { // bytes; clipped to runes by the caller
+				b.Write(t)
+			}
+		case xml.EndElement:
+			if t.Name.Local != name {
+				return "", ErrMalformed
+			}
+			return b.String(), nil
+		default:
+			return "", ErrMalformed
+		}
+	}
+}
+
+// token reads the next token, skipping comments and processing
+// instructions, and counts elements against maxElements.
+func (dec *decoder) token() (xml.Token, error) {
+	for {
+		tok, err := dec.d.Token()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, ErrMalformed
+			}
+			var se *xml.SyntaxError
+			if errors.As(err, &se) {
+				return nil, ErrMalformed
+			}
+			return nil, err // a read error from the socket
+		}
+		switch tok.(type) {
+		case xml.Comment, xml.ProcInst, xml.Directive:
+			dec.elements++
+			if dec.elements > maxElements {
+				return nil, ErrTooLarge
+			}
+			continue
+		case xml.StartElement:
+			dec.elements++
+			if dec.elements > maxElements {
+				return nil, ErrTooLarge
+			}
+		}
+		return tok, nil
+	}
+}
+
+// nextStart skips whitespace and returns the next start element's name.
+func (dec *decoder) nextStart() (string, error) {
+	for {
+		tok, err := dec.token()
+		if err != nil {
+			return "", err
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(t)) != "" {
+				return "", ErrMalformed
+			}
+		case xml.StartElement:
+			return t.Name.Local, nil
+		default:
+			return "", ErrMalformed
+		}
+	}
+}
+
+func (dec *decoder) expectStart(name string) error {
+	got, err := dec.nextStart()
+	if err != nil {
+		return err
+	}
+	if got != name {
+		return ErrMalformed
+	}
+	return nil
+}
+
+func (dec *decoder) expectEnd(name string) error {
+	for {
+		tok, err := dec.token()
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(t)) != "" {
+				return ErrMalformed
+			}
+		case xml.EndElement:
+			if t.Name.Local != name {
+				return ErrMalformed
+			}
+			return nil
+		default:
+			return ErrMalformed
+		}
+	}
+}
+
+// clip keeps at most n runes of s, with invalid UTF-8 already replaced by
+// utf8Reader.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut, runes := 0, 0
+	for cut < len(s) && runes < n {
+		_, w := utf8.DecodeRuneInString(s[cut:])
+		cut += w
+		runes++
+	}
+	return s[:cut]
+}
+
+// utf8Buffered replaces invalid UTF-8 with U+FFFD on the way in. rTorrent
+// emits torrent names as the raw bytes it was given (the tinyxml2 backend
+// validates nothing), and encoding/xml rejects a malformed sequence, which
+// would hide a whole list behind one odd name. A rune split across two
+// reads stays pending until the next read completes it.
+type utf8Buffered struct {
+	r       io.Reader
+	pending []byte // bytes read but not yet validated (at most 3)
+	out     []byte // sanitised bytes not yet handed out
+	err     error
+}
+
+func newUTF8Reader(r io.Reader) io.Reader { return &utf8Buffered{r: r} }
+
+func (b *utf8Buffered) Read(p []byte) (int, error) {
+	for len(b.out) == 0 {
+		if b.err != nil {
+			if len(b.pending) > 0 { // a truncated rune at the very end
+				b.out = append(b.out, "�"...)
+				b.pending = nil
+				break
+			}
+			return 0, b.err
+		}
+		buf := make([]byte, 4096)
+		n, err := b.r.Read(buf)
+		b.err = err
+		b.pending = append(b.pending, buf[:n]...)
+		b.sanitise(err != nil)
+	}
+	n := copy(p, b.out)
+	b.out = b.out[n:]
+	return n, nil
+}
+
+// sanitise moves complete runes from pending to out, replacing invalid
+// bytes; unless final, a trailing partial rune stays pending.
+func (b *utf8Buffered) sanitise(final bool) {
+	i := 0
+	for i < len(b.pending) {
+		r, w := utf8.DecodeRune(b.pending[i:])
+		if r == utf8.RuneError && w <= 1 {
+			if !final && !utf8.FullRune(b.pending[i:]) && len(b.pending)-i < utf8.UTFMax {
+				break // maybe the rest of this rune is in the next read
+			}
+			b.out = append(b.out, "�"...)
+			i++
+			continue
+		}
+		b.out = append(b.out, b.pending[i:i+w]...)
+		i += w
+	}
+	b.pending = b.pending[i:]
+}
