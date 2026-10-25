@@ -450,6 +450,24 @@ func TestRtRemoveDataSSHFailureIsReported(t *testing.T) {
 	if err := rtRemoveData(context.Background(), cli, &sshx.Client{}, rtHashA); !errors.As(err, &fe) {
 		t.Fatalf("%v", err)
 	}
+	// A fault on either path lookup stops everything before the erase.
+	for _, failing := range []string{"d.base_path", "directory.default"} {
+		f.reply = func(m, b string) string {
+			if m == failing {
+				return `<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>-506</i4></value></member><member><name>faultString</name><value><string>no</string></value></member></struct></value></fault></methodResponse>`
+			}
+			return rtReplies(m, b)
+		}
+		n := len(f.called())
+		if err := rtRemoveData(context.Background(), cli, &sshx.Client{}, rtHashA); !errors.As(err, &fe) {
+			t.Fatalf("%s: %v", failing, err)
+		}
+		for _, m := range f.called()[n:] {
+			if m == "d.erase" {
+				t.Fatalf("%s failed but erase ran", failing)
+			}
+		}
+	}
 }
 
 // readyRt seeds a Ready state with rTorrent's endpoint for p, as a poll
