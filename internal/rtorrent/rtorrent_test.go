@@ -144,6 +144,11 @@ func (f *fakeRT) one(conn net.Conn) {
 	f.calls = append(f.calls, call{method, params})
 	f.mu.Unlock()
 	resp := handle(method, params)
+	if method == "d.custom1.set" && resp == `<?xml version="1.0" encoding="UTF-8"?><methodResponse><params><param><value><i8>0</i8></value></param></params></methodResponse>` && len(params) == 2 {
+		// Real rTorrent answers a string variable's setter with the string it
+		// assigned (fred on PR 122); a handler that did not care gets that.
+		resp = `<?xml version="1.0" encoding="UTF-8"?><methodResponse><params><param><value><string>` + params[1] + `</string></value></param></params></methodResponse>`
+	}
 	if resp == "" {
 		time.Sleep(2 * time.Second)
 		return
@@ -1685,13 +1690,21 @@ func TestRetireWaitsForOperation(t *testing.T) {
 	if l := <-retired; len(l) != 1 || l[0].Label != "tv" {
 		t.Fatalf("retired snapshot %+v", l)
 	}
-	// The mirror: a remove paused in d.erase; the snapshot after it has
+	// The mirror, on the successor (the retired client takes no more
+	// operations): a remove paused in d.erase; the snapshot after it has
 	// nothing for the hash.
+	c2 := New(f.dial)
+	c2.Restore(<-func() chan []PendingLabel {
+		ch := make(chan []PendingLabel, 1)
+		l, _ := c.Retire(ctx)
+		ch <- l
+		return ch
+	}())
 	gate = make(chan struct{})
 	rmDone := make(chan error, 1)
-	go func() { rmDone <- c.Action(ctx, ActionRemove, hashA) }()
+	go func() { rmDone <- c2.Action(ctx, ActionRemove, hashA) }()
 	<-entered
-	go func() { l, _ := c.Retire(ctx); retired <- l }()
+	go func() { l, _ := c2.Retire(ctx); retired <- l }()
 	close(gate)
 	if err := <-rmDone; err != nil {
 		t.Fatal(err)
@@ -1699,14 +1712,163 @@ func TestRetireWaitsForOperation(t *testing.T) {
 	if l := <-retired; len(l) != 0 {
 		t.Fatalf("a removed torrent must not be in the retired snapshot: %+v", l)
 	}
-	// Retire honours its context while an operation holds the token.
+	// Retire honours its context while an operation holds the token, and
+	// the client is retired from the Retire on: the operation in flight
+	// completes, nothing new starts, and a later Retire collects the final
+	// snapshot (the handoff's late delivery).
+	c3 := New(f.dial)
 	gate = make(chan struct{})
-	go func() { c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}, Label: "x"}) }()
+	addDone = make(chan error, 1)
+	go func() {
+		_, err := c3.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}, Label: "x"})
+		addDone <- err
+	}()
 	<-entered
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
 	defer cancel()
-	if _, err := c.Retire(cctx); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := c3.Retire(cctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
+	if !c3.Retired() {
+		t.Fatal("a timed-out Retire still retires the client")
+	}
+	if _, err := c3.Version(ctx); !errors.Is(err, ErrRetired) {
+		t.Fatalf("new operation after a timed-out Retire: %v", err)
+	}
 	close(gate)
+	if err := <-addDone; err != nil {
+		t.Fatalf("the operation in flight completes: %v", err)
+	}
+	if l, err := c3.Retire(ctx); err != nil || len(l) != 1 || !strings.EqualFold(l[0].Hash, hashB) {
+		t.Fatalf("late snapshot: %+v %v", l, err)
+	}
+	// Adopt adds what is missing on a live client, never overwrites, and
+	// does nothing on a retired one.
+	c4 := New(f.dial)
+	c4.remember(hashB, "mine")
+	c4.Adopt([]PendingLabel{{Hash: hashA, Label: "late", Until: time.Now().Add(time.Hour)}, {Hash: hashB, Label: "old", Until: time.Now().Add(time.Hour)}})
+	got := map[string]string{}
+	for _, l := range c4.Pending() {
+		got[l.Hash] = l.Label
+	}
+	if got[hashA] != "late" || got[strings.ToUpper(hashB)] != "mine" {
+		t.Fatalf("adopt: %v", got)
+	}
+	c3.Adopt([]PendingLabel{{Hash: hashA, Label: "late", Until: time.Now().Add(time.Hour)}})
+	if l, _ := c3.Retire(ctx); len(l) != 1 {
+		t.Fatalf("adopt on a retired client: %+v", l)
+	}
+}
+
+// fred and the daybreak blue re-review on PR 122: d.custom1.set answers with
+// the assigned string on real rTorrent. A labelled add succeeds on exactly
+// that answer, and the reconcile too; a status integer, another string or
+// another kind is not rTorrent's answer.
+func TestLabelSetterContract(t *testing.T) {
+	f := newFake(t)
+	torrent := "d8:announce9:http://x/4:infod4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee"
+	mode := "echo"
+	f.on(func(m string, p []string) string {
+		if m == "d.custom1.set" {
+			switch mode {
+			case "echo":
+				return resp(str(p[1]))
+			case "zero":
+				return resp("<i4>0</i4>")
+			case "other":
+				return resp(str("something else"))
+			}
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	ctx := context.Background()
+	res, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Files: [][]byte{[]byte(torrent)}, Label: "tv"})
+	if err != nil || res.Added != 2 || res.Deferred != 1 || len(c.Pending()) != 1 {
+		t.Fatalf("real contract: %+v %v pending %d", res, err, len(c.Pending()))
+	}
+	// Reconcile sets the label the same way.
+	f.on(func(m string, p []string) string {
+		switch m {
+		case "d.custom1.set":
+			return resp(str(p[1]))
+		case "d.multicall2":
+			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
+		}
+		return resp(i8(0))
+	})
+	rows, err := c.Torrents(ctx)
+	if err != nil || rows[0].Label != "tv" || len(c.Pending()) != 0 {
+		t.Fatalf("reconcile: %v %+v pending %d", err, rows, len(c.Pending()))
+	}
+	// Wrong answers are refused (and a magnet then owes nothing: the add failed).
+	for _, m := range []string{"zero", "other"} {
+		mode = m
+		f.on(func(m2 string, p []string) string {
+			if m2 == "d.custom1.set" {
+				if mode == "zero" {
+					return resp("<i4>0</i4>") // the status an action answers with, which this setter never does
+				}
+				return resp(str("something else"))
+			}
+			return resp(i8(0))
+		})
+		d := New(f.dial)
+		if _, err := d.Add(ctx, AddRequest{Files: [][]byte{[]byte(torrent)}, Label: "tv"}); !errors.Is(err, ErrUnexpected) {
+			t.Fatalf("%s: %v", m, err)
+		}
+	}
+}
+
+// Daybreak blue re-review of PR 122, finding 2: Retire is terminal. An
+// operation after it, queued or later, fails with ErrRetired; Restore adds
+// nothing; Retire again returns the same snapshot.
+func TestRetireIsTerminal(t *testing.T) {
+	f := newFake(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f.on(func(m string, p []string) string {
+		if m == "d.multicall2" {
+			entered <- struct{}{}
+			<-gate
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	ctx := context.Background()
+	c.remember(hashA, "tv")
+	// An operation in flight, a retire waiting on it, and another operation
+	// queued behind the retire.
+	go func() { c.Torrents(ctx) }()
+	<-entered
+	retired := make(chan []PendingLabel, 1)
+	go func() { l, _ := c.Retire(ctx); retired <- l }()
+	time.Sleep(30 * time.Millisecond)
+	queued := make(chan error, 1)
+	go func() { queued <- c.Action(ctx, ActionStop, hashA) }()
+	time.Sleep(30 * time.Millisecond)
+	close(gate)
+	if l := <-retired; len(l) != 1 {
+		t.Fatalf("snapshot %+v", l)
+	}
+	if err := <-queued; !errors.Is(err, ErrRetired) {
+		t.Fatalf("queued operation after retire: %v", err)
+	}
+	if !c.Retired() {
+		t.Fatal("Retired")
+	}
+	for _, err := range []error{
+		func() error { _, e := c.Version(ctx); return e }(),
+		func() error { _, e := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}}); return e }(),
+		c.Forget(ctx, hashA),
+		func() error { _, e := c.Torrents(ctx); return e }(),
+	} {
+		if !errors.Is(err, ErrRetired) {
+			t.Fatalf("%v", err)
+		}
+	}
+	c.Restore([]PendingLabel{{Hash: hashB, Label: "x", Until: time.Now().Add(time.Hour)}})
+	if l, err := c.Retire(ctx); err != nil || len(l) != 1 || l[0].Hash != hashA {
+		t.Fatalf("second retire: %+v %v (Restore after retire must add nothing)", l, err)
+	}
 }

@@ -50,7 +50,15 @@ type Client struct {
 	// with an unknown-method fault (a d.multicall2 is all or nothing): later
 	// listings leave the getter out and Torrent.MetaKnown is false.
 	noMeta atomic.Bool
+	// retired is set by Retire, under the operation token: from then on
+	// every operation fails with ErrRetired, so a caller still holding this
+	// client after a handoff cannot change state the successor never sees.
+	retired bool
 }
+
+// ErrRetired is an operation on a client after Retire: the caller must
+// resolve the current client and decide whether to retry.
+var ErrRetired = errors.New("rtorrent: client retired; resolve the current client")
 
 // pendingLabel is a label owed to a hash until it is seen set or expires.
 type pendingLabel struct {
@@ -77,8 +85,17 @@ func New(dial Dialer) *Client {
 // returns it. Internal helpers never acquire, so an operation's calls are
 // one unit against every other operation on the client.
 func (c *Client) acquire(ctx context.Context) (release func(), err error) {
+	if c.Retired() {
+		return nil, ErrRetired // no point queueing behind the operation in flight
+	}
 	select {
 	case <-c.ops:
+		// Checked again after taking the token: a caller queued behind the
+		// Retire itself must see the retirement too.
+		if c.Retired() {
+			c.ops <- struct{}{}
+			return nil, ErrRetired
+		}
 		return func() { c.ops <- struct{}{} }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -234,6 +251,22 @@ func (c *Client) call(ctx context.Context, maxRows, budget int, method string, p
 		return Value{}, err
 	}
 	return v, nil
+}
+
+// setLabel runs d.custom1.set by hash. rTorrent registers d.custom1 as a
+// string variable, and a string variable's setter answers with the string
+// it assigned, not a status (fred and the daybreak blue re-review on PR
+// 122: a status check here rejected every real labelled add). The answer
+// must be exactly the label sent; anything else is not rTorrent's answer.
+func (c *Client) setLabel(ctx context.Context, hash, label string) error {
+	v, err := c.call(ctx, scalarRows, scalarValues, "d.custom1.set", hash, label)
+	if err != nil {
+		return err
+	}
+	if v.Kind != KindString || v.Str != label {
+		return ErrUnexpected
+	}
+	return nil
 }
 
 // command runs a method whose answer is rTorrent's integer status, 0 for a
@@ -515,7 +548,7 @@ func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
 	}
 	c.pendMu.Unlock()
 	for _, t := range set {
-		if err := c.command(ctx, "d.custom1.set", t.hash, t.label); err != nil {
+		if err := c.setLabel(ctx, t.hash, t.label); err != nil {
 			continue // kept: tried again next poll; expiry bounds it
 		}
 		c.pendMu.Lock()
@@ -536,20 +569,60 @@ type PendingLabel struct {
 	Until time.Time `json:"until"`
 }
 
-// Retire ends the client's use: it waits for the operation in flight, if
-// any, to complete its remote and local steps, then returns the labels
-// still owed so the caller can hand them to the next client. Without the
-// wait, a reconnect could snapshot between an Add's remote label setter and
-// its remember (losing the obligation) or between a remove's erase and its
-// forget (keeping a dead one): daybreak blue re-review of PR 123. The
-// client stays usable afterwards; its owner simply stops using it.
+// Retire ends the client: it marks the client retired, waits for the
+// operation in flight, if any, to complete its remote and local steps, and
+// returns the labels still owed so the caller can hand them to the next
+// client. Without the wait, a reconnect could snapshot between
+// an Add's remote label setter and its remember (losing the obligation) or
+// between a remove's erase and its forget (keeping a dead one); without the
+// terminal mark, a caller still holding the client could change state
+// after the snapshot (daybreak blue re-reviews of PR 122/123). Every later
+// operation, Restore included, fails with ErrRetired. Retire itself is
+// idempotent and returns the snapshot again.
 func (c *Client) Retire(ctx context.Context) ([]PendingLabel, error) {
-	release, err := c.acquire(ctx)
-	if err != nil {
-		return nil, err
+	// Retired first, then the wait: should the wait give up, the client is
+	// still closed to new operations, the one in flight completes, and a
+	// later Retire collects the final snapshot.
+	c.pendMu.Lock()
+	c.retired = true
+	c.pendMu.Unlock()
+	select {
+	case <-c.ops:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	defer release()
+	defer func() { c.ops <- struct{}{} }()
 	return c.Pending(), nil
+}
+
+// Adopt adds owed labels arriving late from a retired predecessor (its
+// Retire outlived the handoff's wait): only hashes this client does not
+// owe yet, so a label set since is never overwritten; a retired client
+// takes nothing.
+func (c *Client) Adopt(labels []PendingLabel) {
+	now := c.now()
+	c.pendMu.Lock()
+	defer c.pendMu.Unlock()
+	if c.retired {
+		return
+	}
+	for _, l := range labels {
+		h := strings.ToUpper(l.Hash)
+		if !ValidHash(l.Hash) || l.Label == "" || !now.Before(l.Until) {
+			continue
+		}
+		if _, owed := c.pending[h]; owed {
+			continue
+		}
+		c.setPendingLocked(h, pendingLabel{label: clip(l.Label, maxLabel), until: l.Until})
+	}
+}
+
+// Retired reports whether Retire has run.
+func (c *Client) Retired() bool {
+	c.pendMu.Lock()
+	defer c.pendMu.Unlock()
+	return c.retired
 }
 
 // Pending returns the labels still owed, for the caller to persist.
@@ -565,16 +638,19 @@ func (c *Client) Pending() []PendingLabel {
 
 // Restore adds persisted pending labels (expired ones and malformed hashes
 // are dropped; the cap applies to new entries, an existing hash is updated
-// regardless).
+// regardless). A retired client takes nothing.
 func (c *Client) Restore(labels []PendingLabel) {
 	now := c.now()
+	c.pendMu.Lock()
+	defer c.pendMu.Unlock()
+	if c.retired {
+		return
+	}
 	for _, l := range labels {
 		if !ValidHash(l.Hash) || l.Label == "" || !now.Before(l.Until) {
 			continue
 		}
-		c.pendMu.Lock()
 		c.setPendingLocked(strings.ToUpper(l.Hash), pendingLabel{label: clip(l.Label, maxLabel), until: l.Until})
-		c.pendMu.Unlock()
 	}
 }
 
@@ -760,7 +836,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 			// it. A fault here (the hash not present yet, which rTorrent
 			// does not do for a synchronous load) leaves the torrent loaded
 			// without its label and is counted.
-			if err := c.command(ctx, "d.custom1.set", e.hash, label); err != nil {
+			if err := c.setLabel(ctx, e.hash, label); err != nil {
 				if isFault(err) {
 					res.Unlabelled++
 					continue
