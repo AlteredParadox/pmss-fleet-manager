@@ -334,7 +334,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 	var res AddResult
 	var cmds []any
 	if req.Label != "" {
-		cmds = append(cmds, "d.custom1.set="+sanitizeArg(clip(req.Label, maxLabel)))
+		cmds = append(cmds, "d.custom1.set="+quoteArg(clip(req.Label, maxLabel)))
 	}
 	urlMethod, rawMethod := "load.start", "load.raw_start"
 	if req.Stopped {
@@ -381,17 +381,31 @@ func validURL(u string) bool {
 	return strings.HasPrefix(l, "magnet:?") || strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
 }
 
-// sanitizeArg keeps a command argument from closing its own quoting:
-// rTorrent splits "d.custom1.set=value" on commas and quotes, so those are
-// dropped from a label rather than letting a label inject a second command.
-func sanitizeArg(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case ',', '"', '\'', '\\', ';', '{', '}', '=', '\n', '\r', 0:
-			return -1
+// quoteArg renders s as one literal string argument in rTorrent's command
+// syntax: the commands that ride along a load ("d.custom1.set=...") are
+// parsed by rTorrent's own parser, which splits unquoted arguments on
+// commas, treats a leading "(" as a function call to evaluate (so a label
+// "(d.stop)" would stop the torrent, Codex on PR 122) and reads a quoted
+// string as text with backslash escapes. Quoting is therefore the literal
+// encoding; a blacklist of punctuation is not. Backslashes and quotes are
+// escaped, control characters dropped (the parser has no escape for them
+// and a newline ends a command).
+func quoteArg(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '\\' || r == '"':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			// dropped
+		default:
+			b.WriteRune(r)
 		}
-		return r
-	}, s)
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 func isFault(err error) bool {

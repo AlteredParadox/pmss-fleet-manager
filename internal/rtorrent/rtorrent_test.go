@@ -523,7 +523,7 @@ func TestAdd(t *testing.T) {
 	res, err := c.Add(context.Background(), AddRequest{
 		URLs:  []string{"magnet:?xt=urn:btih:" + hashA, "https://bad.example/x.torrent", "/etc/passwd", "file:///x"},
 		Files: [][]byte{[]byte("d8:announcee")},
-		Label: `tv,"d.directory.set=/tmp"`,
+		Label: `(d.stop) tv,"d.directory.set=/tmp" back\slash` + "\n\x01",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -535,8 +535,9 @@ func TestAdd(t *testing.T) {
 	if strings.Join(methods, ",") != "load.start,load.start,load.raw_start" {
 		t.Fatalf("methods %v (paths and file: URLs never reach the box)", methods)
 	}
-	// The label cannot smuggle a second command.
-	if got := f.last().params[2]; got != "d.custom1.set=tvd.directory.set/tmp" {
+	// The label is one quoted literal: no second command, no function call
+	// from a leading "(", control characters gone.
+	if got := f.last().params[2]; got != `d.custom1.set="(d.stop) tv,\"d.directory.set=/tmp\" back\\slash"` {
 		t.Fatalf("label arg %q", got)
 	}
 	// Stopped uses the non-starting loaders.
@@ -792,5 +793,20 @@ func TestDialErrorIsReported(t *testing.T) {
 	c := New(func(ctx context.Context) (net.Conn, error) { return nil, sentinel })
 	if _, err := c.Version(context.Background()); !errors.Is(err, sentinel) {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestQuoteArg(t *testing.T) {
+	for in, want := range map[string]string{
+		"tv":             `"tv"`,
+		"(d.stop)":       `"(d.stop)"`,
+		`a"b\c`:          `"a\"b\\c"`,
+		"x,y;z={w}":      `"x,y;z={w}"`,
+		"nl\nx\x00\x7fy": `"nlxy"`,
+		"ünï":            `"ünï"`,
+	} {
+		if got := quoteArg(in); got != want {
+			t.Errorf("quoteArg(%q) = %s want %s", in, got, want)
+		}
 	}
 }
