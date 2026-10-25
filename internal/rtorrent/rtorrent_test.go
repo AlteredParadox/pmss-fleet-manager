@@ -272,6 +272,18 @@ func TestStatsMulticall(t *testing.T) {
 	if st.Version != "0.16.25" || st.Library != "0.16.1" || st.DownBPS != 123 || st.UpBPS != 456 || st.ListenPort != 50123 || !st.DHT {
 		t.Fatalf("%+v", st)
 	}
+	// The mode string is not the state: "off" (and "auto" before any node
+	// answered) with active=0 is DHT off (Codex on PR 122).
+	for _, mode := range []string{"off", "auto", "disable", "on"} {
+		f.on(func(m string, p []string) string {
+			return resp(`<array><data>` + row(str("0.9.8")) + row(str("0.13.8")) + row(i8(1)) + row(i8(2)) + row(i8(3)) +
+				`<value><array><data><value><struct><member><name>dht</name><value><string>` + mode + `</string></value></member><member><name>active</name><value><i8>0</i8></value></member></struct></value></data></array></value></data></array>`)
+		})
+		st, err := New(f.dial).Stats(context.Background())
+		if err != nil || st.DHT {
+			t.Fatalf("mode %s active=0: %+v %v", mode, st, err)
+		}
+	}
 	// Every member carries the empty target.
 	if got := f.last().params[0]; strings.Count(got, "methodName") != 6 {
 		t.Fatalf("multicall params %q", got)
@@ -876,5 +888,94 @@ func TestDialErrorIsReported(t *testing.T) {
 	c := New(func(ctx context.Context) (net.Conn, error) { return nil, sentinel })
 	if _, err := c.Version(context.Background()); !errors.Is(err, sentinel) {
 		t.Fatalf("%v", err)
+	}
+}
+
+// TestMagnetLabelSurvivesMetadata: on a magnet, Add labels the metadata
+// placeholder; when rTorrent rebuilds the torrent from the metadata the
+// label is gone and Torrents sets it again, by hash, as a literal call
+// (fred and Codex on PR 122). Pending entries settle when seen set, and
+// expire.
+func TestMagnetLabelSurvivesMetadata(t *testing.T) {
+	f := newFake(t)
+	var label string // what the box holds for hashA's custom1
+	var sets int
+	phase := "placeholder"
+	f.on(func(m string, p []string) string {
+		switch m {
+		case "d.custom1.set":
+			sets++
+			label = p[1]
+			return resp(i8(0))
+		case "d.multicall2":
+			lbl, size := label, int64(0) // the placeholder has no size
+			if phase == "rebuilt" {
+				lbl = "" // the fresh download does not carry custom1
+				phase = "rebuilt-listed"
+			}
+			if phase != "placeholder" {
+				size = 1000
+			}
+			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(size), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(lbl), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	if _, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"}); err != nil || label != "tv" || sets != 1 {
+		t.Fatalf("add: %v label %q sets %d", err, label, sets)
+	}
+	// Still the placeholder (no size): the label shows, nothing to do, and
+	// the entry must survive, since the rebuild is still to come.
+	rows, err := c.Torrents(context.Background())
+	if err != nil || rows[0].Label != "tv" || sets != 1 {
+		t.Fatalf("placeholder listing: %v %+v sets %d", err, rows, sets)
+	}
+	c.pendMu.Lock()
+	_, kept := c.pending[hashA]
+	c.pendMu.Unlock()
+	if !kept {
+		t.Fatal("a label seen on the placeholder must not settle the entry")
+	}
+	// Metadata arrived: rTorrent rebuilt the torrent without custom1.
+	phase = "rebuilt"
+	rows, err = c.Torrents(context.Background())
+	if err != nil || rows[0].Label != "tv" || label != "tv" || sets != 2 {
+		t.Fatalf("after rebuild: %v %+v box %q sets %d", err, rows, label, sets)
+	}
+	// Seen on the real torrent: settled, no further calls.
+	if _, err := c.Torrents(context.Background()); err != nil || sets != 2 {
+		t.Fatalf("settle: %v sets %d", err, sets)
+	}
+	c.pendMu.Lock()
+	_, kept = c.pending[hashA]
+	c.pendMu.Unlock()
+	if kept {
+		t.Fatal("entry must settle once the label is on the torrent with metadata")
+	}
+	// Expired entries are dropped without a call.
+	c.remember(hashB, "x")
+	now = now.Add(pendingTTL + time.Minute)
+	phase = "rebuilt"
+	label = ""
+	if _, err := c.Torrents(context.Background()); err != nil || sets != 2 {
+		t.Fatalf("expired: %v sets %d", err, sets)
+	}
+	c.pendMu.Lock()
+	n := len(c.pending)
+	c.pendMu.Unlock()
+	if n != 0 {
+		t.Fatalf("pending %d after expiry", n)
+	}
+	// The map is bounded.
+	for i := 0; i < pendingMax+5; i++ {
+		c.remember(fmt.Sprintf("%040X", i), "l")
+	}
+	c.pendMu.Lock()
+	n = len(c.pending)
+	c.pendMu.Unlock()
+	if n != pendingMax {
+		t.Fatalf("pending %d, cap %d", n, pendingMax)
 	}
 }

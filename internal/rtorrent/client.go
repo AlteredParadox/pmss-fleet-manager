@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,11 +34,32 @@ type Client struct {
 	maxBytes int64         // response byte cap, maxResponse outside tests
 	maxRows  int           // torrent list cap, MaxTorrents outside tests
 	calls    chan struct{} // capacity 1: the call token
+
+	// pending are labels set on a magnet's metadata placeholder that must
+	// be set again on the torrent rTorrent builds once the metadata
+	// arrives (see Add); Torrents reconciles them. Guarded by pendMu.
+	pendMu  sync.Mutex
+	pending map[string]pendingLabel
+	now     func() time.Time
 }
+
+// pendingLabel is a label owed to a hash until it is seen set or expires.
+type pendingLabel struct {
+	label string
+	until time.Time
+}
+
+// Bounds on pending labels: a magnet whose metadata never arrives would
+// otherwise hold its entry forever, and a flood of adds must not grow the
+// map without limit.
+const (
+	pendingTTL = 24 * time.Hour
+	pendingMax = 1000
+)
 
 // New returns a client over dial.
 func New(dial Dialer) *Client {
-	c := &Client{dial: dial, timeout: callTimeout, maxBytes: maxResponse, maxRows: MaxTorrents, calls: make(chan struct{}, 1)}
+	c := &Client{dial: dial, timeout: callTimeout, maxBytes: maxResponse, maxRows: MaxTorrents, calls: make(chan struct{}, 1), pending: map[string]pendingLabel{}, now: time.Now}
 	c.calls <- struct{}{}
 	return c
 }
@@ -241,7 +263,10 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 		st.ListenPort = int(p)
 	}
 	if d := one(5); d.Kind == KindStruct {
-		st.DHT = d.Struct["dht"].Str != "disable" && d.Struct["dht"].Str != ""
+		// dht.statistics: "active" says whether DHT is running now; the
+		// "dht" mode string has disable/off/auto/on and would read "off" as
+		// on (Codex on PR 122).
+		st.DHT = d.Struct["active"].Int == 1
 	}
 	return st, nil
 }
@@ -251,8 +276,20 @@ func mc(method string) map[string]any {
 	return map[string]any{"methodName": method, "params": []any{""}}
 }
 
-// Torrents lists the main view.
+// Torrents lists the main view, then settles any label still owed to a
+// magnet whose torrent has meanwhile been rebuilt from its metadata (see
+// Add): a listed torrent with an empty label and a pending entry gets the
+// label set, by hash, as a literal call; the rows returned already carry it.
 func (c *Client) Torrents(ctx context.Context) ([]Torrent, error) {
+	out, err := c.list(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.reconcileLabels(ctx, out)
+	return out, nil
+}
+
+func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 	params := append([]any{"", "main"}, torrentFields...)
 	v, err := c.call(ctx, c.maxRows, "d.multicall2", params...)
 	if err != nil {
@@ -283,6 +320,71 @@ func (c *Client) Torrents(ctx context.Context) ([]Torrent, error) {
 		})
 	}
 	return out, nil
+}
+
+// reconcileLabels applies pending labels to the listed torrents that lost
+// theirs (rTorrent's process_meta_download builds a fresh download when a
+// magnet's metadata arrives and does not copy custom1: fred and Codex on
+// PR 122). An entry settles once the label is seen on a torrent that has
+// its metadata (a size: the placeholder has none, and showing the label
+// there proves nothing), or expires after pendingTTL.
+func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
+	c.pendMu.Lock()
+	if len(c.pending) == 0 {
+		c.pendMu.Unlock()
+		return
+	}
+	now := c.now()
+	type todo struct{ hash, label string }
+	var set []todo
+	seen := map[string]int{}
+	for i, r := range rows {
+		seen[r.Hash] = i
+	}
+	for h, p := range c.pending {
+		if now.After(p.until) {
+			delete(c.pending, h)
+			continue
+		}
+		i, ok := seen[h]
+		if !ok {
+			continue // not listed yet (or removed): keep until it expires
+		}
+		if rows[i].Label == p.label && rows[i].Size > 0 {
+			delete(c.pending, h) // settled on the real torrent
+			continue
+		}
+		if rows[i].Label == "" {
+			set = append(set, todo{h, p.label})
+		}
+	}
+	c.pendMu.Unlock()
+	for _, t := range set {
+		if _, err := c.call(ctx, 0, "d.custom1.set", t.hash, t.label); err != nil {
+			continue // tried again next poll; expiry bounds it
+		}
+		if i, ok := seen[t.hash]; ok {
+			rows[i].Label = t.label
+		}
+	}
+}
+
+// remember records a label owed to hash (a magnet's). The oldest entry
+// goes when the map is full.
+func (c *Client) remember(hash, label string) {
+	c.pendMu.Lock()
+	defer c.pendMu.Unlock()
+	if len(c.pending) >= pendingMax {
+		var oldest string
+		var at time.Time
+		for h, p := range c.pending {
+			if oldest == "" || p.until.Before(at) {
+				oldest, at = h, p.until
+			}
+		}
+		delete(c.pending, oldest)
+	}
+	c.pending[hash] = pendingLabel{label: label, until: c.now().Add(pendingTTL)}
 }
 
 // Action runs one of TorrentActions on hash.
@@ -351,6 +453,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 		arg        any    // the URL or the file bytes
 		hash       string // for the label; "" when none is wanted or known
 		unlabelled bool   // a label was asked for but cannot be set by hash
+		magnet     bool   // the label must be set again once the metadata arrives
 	}
 	urlMethod, rawMethod := "load.start", "load.raw_start"
 	if req.Stopped {
@@ -365,7 +468,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 		e := entry{method: urlMethod, arg: u}
 		if label != "" {
 			if h, err := MagnetHash(u); err == nil {
-				e.hash = h
+				e.hash, e.magnet = h, true
 			} else {
 				e.unlabelled = true // an http(s) link: loaded, label left to ruTorrent
 			}
@@ -402,13 +505,19 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 			// A literal XML-RPC string: rTorrent's command parser never sees
 			// it. A fault here (the hash not present yet, which rTorrent
 			// does not do for a synchronous load) leaves the torrent loaded
-			// without its label and is reported.
+			// without its label and is counted.
 			if _, err := c.call(ctx, 0, "d.custom1.set", e.hash, label); err != nil {
 				if isFault(err) {
 					res.Unlabelled++
 					continue
 				}
 				return res, err
+			}
+			if e.magnet {
+				// Set on the metadata placeholder only: rTorrent rebuilds the
+				// torrent when the metadata arrives and drops custom1, so the
+				// label is owed again then (reconciled by Torrents).
+				c.remember(e.hash, label)
 			}
 		}
 	}

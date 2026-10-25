@@ -54,7 +54,7 @@ func InfoHash(torrent []byte) (string, error) {
 		}
 		i += n
 		if string(key) == "info" {
-			sum := sha1.Sum(torrent[start:i])
+			sum := sha1.Sum(torrent[start:i]) // NOSONAR: the BitTorrent v1 info hash is SHA-1 by protocol; it identifies the torrent, it protects nothing
 			return strings.ToUpper(hex.EncodeToString(sum[:])), nil
 		}
 	}
