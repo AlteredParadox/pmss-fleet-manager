@@ -1065,7 +1065,7 @@ func (p *poller) rtAddTorrents(ctx context.Context, req qbt.AddRequest) (rtorren
 	// instead, until the records can be written again (fred on PR 123).
 	p.settleRtTombs(actx, true)
 	if open := p.m.rtTombList(p.box.ID, p.generation()); len(open) > 0 {
-		return rtorrent.AddResult{}, fmt.Errorf("%w: a previous removal on this box is not yet settled in the dashboard's records (its database could not be written); nothing was added, try again shortly", ErrNotReady)
+		return rtorrent.AddResult{}, fmt.Errorf("%w: a previous removal on this box is not yet settled in the dashboard's records, because the dashboard's database could not be written; nothing was added. This is a dashboard-side problem, not rTorrent's: check the dashboard's disk and database, then try again", ErrNotReady)
 	}
 	r := rtorrent.AddRequest{URLs: req.URLs, Label: req.Category, Stopped: req.Stopped}
 	for _, f := range req.Files {
