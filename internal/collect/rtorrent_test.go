@@ -682,6 +682,18 @@ func TestRtPendingLabelsSurviveTransportAndRestart(t *testing.T) {
 	if c2 == c1 || len(c2.Pending()) != 1 {
 		t.Fatal("rebuilt client must inherit the owed labels")
 	}
+	// A reconnect (closeConns, conn()'s teardown, the probe-failure path)
+	// drops the client but not what it owes: the next client has it (Codex
+	// on PR 123).
+	p.closeConns()
+	if p.rt != nil || len(p.rtLabels) != 1 {
+		t.Fatalf("teardown must keep the owed labels: %+v", p.rtLabels)
+	}
+	c3, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	if len(c3.Pending()) != 1 || p.rtLabels != nil {
+		t.Fatal("client after a reconnect must inherit the owed labels")
+	}
+	c2 = c3
 	// record persists them for this generation; a restarted manager finds
 	// them for the same record and not for a moved one. (box_cache rows
 	// belong to a stored box, so the record is created first.)

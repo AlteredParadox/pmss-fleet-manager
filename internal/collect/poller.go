@@ -346,7 +346,7 @@ func (p *poller) closeConns() {
 		p.dk.Close()
 		p.dk = nil
 	}
-	p.rt, p.rtSSH = nil, nil
+	p.dropRtLocked()
 	if p.ssh != nil {
 		p.ssh.Close()
 		p.ssh = nil
@@ -425,7 +425,7 @@ func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
 			p.dk.Close()
 			p.dk = nil
 		}
-		p.rt, p.rtSSH = nil, nil // its dialer held the closed transport (Codex on PR 123)
+		p.dropRtLocked() // its dialer held the closed transport (Codex on PR 123)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -562,7 +562,7 @@ func (p *poller) poll(ctx context.Context) {
 			p.ssh.Close()
 			p.ssh = nil
 		}
-		p.rt, p.rtSSH = nil, nil
+		p.dropRtLocked()
 		p.mu.Unlock()
 		p.inventoryFailed(inventory)
 		p.fail(ctx, &st, fmt.Errorf("probe: %w %s", explainSessionError(err), strings.TrimSpace(string(stderr))), start)

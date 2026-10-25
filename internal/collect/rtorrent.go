@@ -118,6 +118,20 @@ func (p *poller) rtClient(cli *sshx.Client, ep string) (*rtorrent.Client, error)
 	return p.rt, nil
 }
 
+// dropRtLocked forgets the rTorrent client (its dialer is bound to a
+// transport being closed) but keeps the labels it still owes, so the next
+// client inherits them; p.mu must be held. Without this a reconnect would
+// lose the only in-memory copy and the next poll would persist an empty
+// list over the cached one (Codex on PR 123).
+func (p *poller) dropRtLocked() {
+	if p.rt != nil {
+		if owed := p.rt.Pending(); len(owed) > 0 {
+			p.rtLabels = owed
+		}
+	}
+	p.rt, p.rtSSH = nil, nil
+}
+
 // rtLabelsCacheKind is the box_cache kind holding the labels owed to
 // magnets (rtLabelsCache) across restarts.
 const rtLabelsCacheKind = "rt_labels"
