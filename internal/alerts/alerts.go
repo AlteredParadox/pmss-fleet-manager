@@ -167,6 +167,7 @@ func wantProbeRules(s *collect.BoxState, set store.Settings) []want {
 	active = append(active, wantDisk(s, set)...)
 	active = append(active, wantTraffic(s, set)...)
 	active = append(active, wantQbt(s)...)
+	active = append(active, wantRt(s)...)
 	active = append(active, wantDocker(s)...)
 	active = append(active, wantApps(s)...)
 	active = append(active, wantRAM(s)...)
@@ -238,6 +239,25 @@ func wantQbt(s *collect.BoxState) []want {
 	}
 	active = append(active, wantQbtConnection(s, time.Now())...)
 	return active
+}
+
+// wantRt raises the alert for a monitored rTorrent that does not answer on
+// its SCGI endpoint. A client the tenant stopped on purpose
+// (~/.rtorrentDisable) is not an alert: PMSS's watchdog honours the marker
+// and so does this rule.
+func wantRt(s *collect.BoxState) []want {
+	if !s.Rt.Enabled || s.Rt.Reachable || s.Rt.Disabled {
+		return nil
+	}
+	what := "rTorrent SCGI endpoint not responding"
+	if s.Rt.ProcessKnown && !s.Rt.ProcessUp {
+		what = "rtorrent is not running"
+	}
+	msg := fmt.Sprintf("%s — %s", s.Name, what)
+	if s.Rt.Error != "" {
+		msg += " (" + s.Rt.Error + ")"
+	}
+	return []want{{"rtorrent", "warn", msg}}
 }
 
 // firewalledGrace is how long a client may report no incoming connectivity

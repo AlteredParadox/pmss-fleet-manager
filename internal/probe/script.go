@@ -130,6 +130,8 @@ fi
 if [ -f "/sys/fs/cgroup/pids/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/cgroup/pids/$S/pids.current)"
 elif [ -f "/sys/fs/cgroup/$S/pids.current" ]; then echo "pids=$(cat /sys/fs/cgroup/$S/pids.current)"; fi
 sec qbt_conf; ` + qbtConfShell + `sec qbt_pid; pgrep -u "$uid" -x qbittorrent-nox 2>/dev/null
+sec home; printf '%s\n' "$home"
+sec rt_conf; ` + rtConfShell + `sec rt_disable; [ -e "$home/.rtorrentDisable" ] && echo 1 || echo 0
 sec listen
 ` + listenShell + `sec docker_sock; [ -S "/run/user/$uid/docker.sock" ] && echo 1 || echo 0
 # Every poll, not inventory: the panel can switch its own qBittorrent on
@@ -339,6 +341,14 @@ const (
 const qbtConfShell = `awk '/^\[/{s=$0; sub(/[ \r]+$/,"",s); next}
 s=="[Preferences]" && /^WebUI\\(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=/{print; next}
 s=="[WebUI]" && /^(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=/{print "WebUI\\" $0}' "$home/.config/qBittorrent/qBittorrent.conf" 2>/dev/null
+`
+
+// rtConfShell prints the SCGI endpoint lines from the tenant's rTorrent
+// configuration: PMSS renders ~/.rtorrent.rc (root-owned, world-readable)
+// with `network.scgi.open_local = ~/.rtorrent.socket`, and the tenant's own
+// ~/.rtorrent.rc.custom may override it (later lines win, as in rTorrent).
+// Only the four endpoint directives are printed, old and new spelling.
+const rtConfShell = `grep -hE '^[[:space:]]*(network\.scgi\.open_local|network\.scgi\.open_port|scgi_local|scgi_port)[[:space:]]*=' "$home/.rtorrent.rc" "$home/.rtorrent.rc.custom" 2>/dev/null | cut -c1-300 | head -n 20
 `
 
 // logsListShell lists log files in the places the PMSS stack and the usual

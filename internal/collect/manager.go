@@ -31,6 +31,7 @@ import (
 	"pmss-fleet-manager/internal/pmapi"
 	"pmss-fleet-manager/internal/pmdb"
 	"pmss-fleet-manager/internal/qbt"
+	"pmss-fleet-manager/internal/rtorrent"
 	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 )
@@ -753,6 +754,38 @@ func (m *Manager) TorrentAction(ctx context.Context, id int64, hash, action stri
 	err := p.torrentAction(ctx, hash, action)
 	p.wake()
 	return err
+}
+
+// RtTorrentAction performs one RtTorrentActions entry on a torrent in the
+// box's rTorrent and wakes the poller so the list reflects it promptly.
+func (m *Manager) RtTorrentAction(ctx context.Context, id int64, hash, action string) error {
+	p := m.poller(id)
+	if p == nil {
+		return store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return ErrDisabled
+	}
+	if !RtTorrentActions[action] {
+		return fmt.Errorf("unknown rTorrent action %q", action)
+	}
+	err := p.rtTorrentAction(ctx, hash, action)
+	p.wake()
+	return err
+}
+
+// RtAddTorrents adds links and/or .torrent files to the box's rTorrent.
+func (m *Manager) RtAddTorrents(ctx context.Context, id int64, req qbt.AddRequest) (rtorrent.AddResult, error) {
+	p := m.poller(id)
+	if p == nil {
+		return rtorrent.AddResult{}, store.ErrNotFound
+	}
+	if !p.box.Enabled {
+		return rtorrent.AddResult{}, ErrDisabled
+	}
+	res, err := p.rtAddTorrents(ctx, req)
+	p.wake()
+	return res, err
 }
 
 // DiscoveryKeys are the preferences SetDiscovery may change.

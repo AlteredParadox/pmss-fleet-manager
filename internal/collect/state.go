@@ -85,6 +85,7 @@ type BoxState struct {
 	HostSys HostState    `json:"host_sys"`
 	Account AccountState `json:"account"`
 	Qbt     QbtState     `json:"qbt"`
+	Rt      RtState      `json:"rtorrent"`
 	Docker  DockerState  `json:"docker"`
 	Dirs    DirsState    `json:"dirs"`
 	Apps    AppsState    `json:"apps"`
@@ -158,7 +159,7 @@ type TrafficState struct {
 type RateState struct {
 	UpBps   float64 `json:"up_bps"`
 	DownBps float64 `json:"down_bps"`
-	Source  string  `json:"source,omitempty"` // qbt | pmss-15min | ""
+	Source  string  `json:"source,omitempty"` // qbt | rtorrent | clients (both) | pmss-15min | ""
 }
 
 // CPUState is the slice's CPU accounting.
@@ -228,7 +229,8 @@ type AccountState struct {
 
 // TorrentView is one torrent for the UI.
 type TorrentView struct {
-	Hash     string  `json:"hash"` // addresses the torrent in per-torrent actions
+	Hash     string  `json:"hash"`   // addresses the torrent in per-torrent actions
+	Client   string  `json:"client"` // qbt | rtorrent: which client on the box holds it
 	Name     string  `json:"name"`
 	Size     int64   `json:"size"`
 	Progress float64 `json:"progress"`
@@ -291,6 +293,38 @@ type QbtState struct {
 	FirewalledSince string        `json:"firewalled_since,omitempty"`
 	Discovery       Discovery     `json:"discovery"`
 	Torrents        []TorrentView `json:"torrents,omitempty"`
+}
+
+// RtState is the rTorrent view. rTorrent on a PMSS box is the panel's own
+// client: PMSS's watchdog starts it and the tenant stops it with the
+// ~/.rtorrentDisable marker, so there is no install, start or stop here,
+// only monitoring and torrent actions over its SCGI socket.
+type RtState struct {
+	Enabled   bool `json:"enabled"`
+	ProcessUp bool `json:"process_up"`
+	// ProcessKnown is false when the process list could not be read; the
+	// socket then decides whether the client is up.
+	ProcessKnown bool   `json:"process_known"`
+	Reachable    bool   `json:"reachable"`
+	Version      string `json:"version,omitempty"` // system.client_version
+	Library      string `json:"library,omitempty"` // system.library_version
+	// Endpoint is the SCGI endpoint in use ("unix:/home/u/.rtorrent.socket"
+	// or "tcp:127.0.0.1:5000"); ConfFound whether the config named one.
+	Endpoint  string `json:"endpoint,omitempty"`
+	ConfFound bool   `json:"conf_found"`
+	Disabled  bool   `json:"disabled"` // ~/.rtorrentDisable: stopped on purpose
+	Error     string `json:"error,omitempty"`
+	// PortOK is set when the endpoint is a loopback port verified as this
+	// account's (a unix socket inside the home needs no such check).
+	PortOK     bool          `json:"port_ok"`
+	ListenPort int           `json:"listen_port,omitempty"`
+	DHT        bool          `json:"dht"`
+	Total      int           `json:"total"`
+	Seeding    int           `json:"seeding"`
+	Leeching   int           `json:"leeching"`
+	Paused     int           `json:"paused"`
+	Errored    int           `json:"errored"`
+	Torrents   []TorrentView `json:"torrents,omitempty"`
 }
 
 // Discovery is the client's peer-discovery configuration. Known is false
@@ -362,7 +396,7 @@ func (s BoxState) EffectiveRenewal() string {
 func (s *BoxState) adoptIdentity(from BoxState) {
 	s.Name, s.Host, s.Port, s.User, s.Type = from.Name, from.Host, from.Port, from.User, from.Type
 	s.Plan, s.Datacenter, s.Renewal, s.Enabled, s.HostKeyFP = from.Plan, from.Datacenter, from.Renewal, from.Enabled, from.HostKeyFP
-	s.Qbt.Enabled, s.Docker.Enabled, s.Dirs.Enabled = from.Qbt.Enabled, from.Docker.Enabled, from.Dirs.Enabled
+	s.Qbt.Enabled, s.Rt.Enabled, s.Docker.Enabled, s.Dirs.Enabled = from.Qbt.Enabled, from.Rt.Enabled, from.Docker.Enabled, from.Dirs.Enabled
 	s.Apps.Watched = from.Apps.Watched
 	s.Apps.markWatched()
 }
@@ -374,6 +408,7 @@ func (s *BoxState) adoptIdentity(from BoxState) {
 // an edit.
 func (s *BoxState) resetVolatile() {
 	s.Qbt.PortOK, s.Qbt.Reachable, s.Qbt.AuthHold = false, false, false
+	s.Rt.PortOK, s.Rt.Reachable = false, false
 	s.Docker.Reachable = false
 	s.Dirs.Running = false
 	s.Unpolled = true
@@ -472,6 +507,7 @@ func (s *BoxState) Sanitize() { sanitizeFloats(reflect.ValueOf(s).Elem()) }
 func (s BoxState) Summary() BoxState {
 	c := s
 	c.Qbt.Torrents = nil
+	c.Rt.Torrents = nil
 	c.Docker.Containers = nil
 	c.Dirs.Entries = nil
 	c.Traffic.Daily = nil
@@ -486,6 +522,7 @@ func fromBox(b *store.Box) BoxState {
 		Plan: b.Plan, Datacenter: b.Datacenter, Renewal: b.Renewal, Enabled: b.Enabled,
 		Status:    "pending",
 		Qbt:       QbtState{Enabled: b.QbtEnabled, Port: b.QbtPort},
+		Rt:        RtState{Enabled: b.RtEnabled, Endpoint: b.RtSCGI},
 		Docker:    DockerState{Enabled: b.DockerEnabled},
 		Dirs:      DirsState{Enabled: b.DuEnabled},
 		Apps:      AppsState{Watched: append([]string{}, b.AppsWatch...)},

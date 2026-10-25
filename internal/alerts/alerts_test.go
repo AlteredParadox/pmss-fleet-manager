@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,5 +232,30 @@ func TestUnwatchResolvesWhileOffline(t *testing.T) {
 	slices.Sort(keys)
 	if want := []string{"app:radarr", "disk", "unreachable"}; !slices.Equal(keys, want) {
 		t.Fatalf("active after unwatch while offline: %v, want %v", keys, want)
+	}
+}
+
+func TestWantRt(t *testing.T) {
+	s := &collect.BoxState{Name: "b"}
+	if wantRt(s) != nil {
+		t.Fatal("disabled: nothing")
+	}
+	s.Rt.Enabled = true
+	got := wantRt(s)
+	if len(got) != 1 || got[0].key != "rtorrent" || !strings.Contains(got[0].title, "SCGI endpoint not responding") {
+		t.Fatalf("%+v", got)
+	}
+	s.Rt.ProcessKnown, s.Rt.ProcessUp, s.Rt.Error = true, false, "rtorrent is not running"
+	got = wantRt(s)
+	if len(got) != 1 || !strings.Contains(got[0].title, "rtorrent is not running (rtorrent is not running)") {
+		t.Fatalf("%+v", got)
+	}
+	s.Rt.Disabled = true
+	if wantRt(s) != nil {
+		t.Fatal("stopped on purpose is not an alert")
+	}
+	s.Rt.Disabled, s.Rt.Reachable = false, true
+	if wantRt(s) != nil {
+		t.Fatal("reachable: nothing")
 	}
 }

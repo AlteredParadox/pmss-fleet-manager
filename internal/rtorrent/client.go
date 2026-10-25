@@ -706,15 +706,20 @@ func nonNeg(n int64) int64 {
 }
 
 // Kind classifies a torrent the way the dashboard's qBittorrent rows are:
-// seeding, leeching, paused, checking, error.
+// seeding, leeching, paused, checking, error. A stopped torrent is paused
+// whatever d.message says: rTorrent keeps the last tracker message (the
+// "stopped" announce of a stop often leaves one), as seen on a live box. A
+// message on a running torrent counts as an error only while nothing is
+// moving; a torrent transferring at full speed with a stale tracker note
+// is not broken.
 func (t Torrent) Kind() string {
 	switch {
 	case t.Hashing != 0:
 		return "checking"
-	case t.Message != "" && !strings.Contains(t.Message, "Tried all trackers"):
-		return "error"
 	case !t.Started || !t.Active:
 		return "paused"
+	case t.Message != "" && !strings.Contains(t.Message, "Tried all trackers") && t.UpRate == 0 && t.DownRate == 0:
+		return "error"
 	case t.Complete:
 		return "seeding"
 	default:

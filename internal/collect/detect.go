@@ -59,6 +59,8 @@ type Facts struct {
 	CPUQuota      float64 `json:"cpu_quota_cpus"`
 	QbtVersion    string  `json:"qbt_version"`
 	QbtPort       int     `json:"qbt_port"`
+	RtVersion     string  `json:"rt_version,omitempty"`
+	RtEndpoint    string  `json:"rt_endpoint,omitempty"`
 	DockerVersion string  `json:"docker_version"`
 	Containers    int     `json:"containers"`
 	HostKeyFP     string  `json:"host_key_fp"`
@@ -169,6 +171,7 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 	detectHostFacts(snap, res, add)
 	detectLimitFacts(snap, res, add)
 	detectQbt(ctx, cli, snap, &b, res, add)
+	detectRt(ctx, cli, snap, &b, res, add)
 	detectDocker(ctx, cli, snap, &b, res, add)
 
 	if b.Name == "" {
@@ -285,6 +288,60 @@ func detectQbt(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *s
 		b.QbtEnabled = true
 		b.QbtPort = port
 	}
+}
+
+// detectRt reports the rTorrent state and sets the box's RtEnabled from
+// what it finds: a config naming an SCGI endpoint or a running process
+// means PMSS's client is in use. No credentials are involved, so the
+// socket is simply asked for its version.
+func detectRt(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *store.Box, res *DetectResult, add addStep) {
+	running, known := snap.RtProcess()
+	ep := rtEndpoint(rtBox{b.RtSCGI}, snap)
+	if !snap.Rt.ConfFound && !running && b.RtSCGI == "" {
+		if snap.Rt.Disabled {
+			add("info", "rTorrent is switched off on this box (~/.rtorrentDisable)")
+		} else {
+			add("info", "no rTorrent configuration found (~/.rtorrent.rc)")
+		}
+		b.RtEnabled = false
+		return
+	}
+	res.Facts.RtEndpoint = clip(ep, 600)
+	if known && !running {
+		what := "not running"
+		if snap.Rt.Disabled {
+			what = "stopped on purpose (~/.rtorrentDisable)"
+		}
+		add("warn", "rTorrent is configured (%s) but %s", ep, what)
+		b.RtEnabled = !snap.Rt.Disabled
+		return
+	}
+	if strings.HasPrefix(ep, "tcp:") {
+		_, portStr, _ := strings.Cut(ep[len("tcp:"):], ":")
+		port, _ := strconv.Atoi(portStr)
+		if ok, reason := snap.PortOwner(port); !ok {
+			add("warn", "not connecting to rTorrent's SCGI port: %s", reason)
+			b.RtEnabled = true
+			return
+		}
+	}
+	p := &poller{box: b}
+	rc, err := p.rtClient(cli, ep)
+	if err != nil {
+		add("warn", "rTorrent: %v", err)
+		b.RtEnabled = true
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	v, err := rc.Version(rctx)
+	if err != nil {
+		add("warn", "rTorrent configured (%s) but its SCGI endpoint did not answer: %v", ep, err)
+	} else {
+		res.Facts.RtVersion = clip(v, 32)
+		add("ok", "rTorrent %s responding on %s", v, ep)
+	}
+	b.RtEnabled = true
 }
 
 // detectDocker reports the rootless docker state and sets the box's

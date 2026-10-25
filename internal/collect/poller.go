@@ -34,6 +34,7 @@ import (
 	"pmss-fleet-manager/internal/dockerx"
 	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/qbt"
+	"pmss-fleet-manager/internal/rtorrent"
 	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 )
@@ -84,6 +85,11 @@ type poller struct {
 	// tunnel (sshDialTCP). Tests point it at a fake WebUI so the real
 	// pollQbt orchestration runs without a box.
 	dialTCP func(addr string) qbt.Dialer
+	// rt is the rTorrent client for rtEP (see rtClient); dialRt is the test
+	// hook that replaces the SSH channel to the SCGI endpoint.
+	rt     *rtorrent.Client
+	rtEP   string
+	dialRt func(ep string) rtorrent.Dialer
 
 	duMu      sync.Mutex
 	duRunning bool
@@ -585,6 +591,13 @@ func (p *poller) poll(ctx context.Context) {
 		qs.UpdateAvail = qs.BinaryVersion != "" && qs.LatestVersion != "" && versionLess(qs.BinaryVersion, qs.LatestVersion)
 		st.Qbt = qs
 	}
+	if p.box.RtEnabled {
+		p.pollRt(ctx, &st, snap)
+	} else {
+		running, known := snap.RtProcess()
+		st.Rt = RtState{Enabled: false, ProcessUp: running, ProcessKnown: known, ConfFound: snap.Rt.ConfFound, Disabled: snap.Rt.Disabled,
+			Endpoint: clip(rtEndpoint(rtBox{p.box.RtSCGI}, snap), 600)}
+	}
 	if p.box.DockerEnabled {
 		p.pollDocker(ctx, &st, snap)
 	} else {
@@ -668,6 +681,7 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 	st.Rates = RateState{}
 	st.Qbt.Reachable = false
 	st.Qbt.PortOK = false // must be re-verified by the next successful probe
+	st.Rt.Reachable, st.Rt.PortOK = false, false
 	st.Docker.Reachable = false
 	p.m.log.Warn("poll failed", "box", p.box.Name, "failures", st.Failures, "err", describeErr(err))
 	// st is the snapshot from the poll's start: a discovery toggle that
@@ -716,6 +730,9 @@ func classify(st *BoxState) (string, string) {
 	}
 	if st.Qbt.Enabled && !st.Qbt.Reachable {
 		reasons = append(reasons, "qBittorrent not responding")
+	}
+	if st.Rt.Enabled && !st.Rt.Reachable {
+		reasons = append(reasons, "rTorrent not responding")
 	}
 	if st.Docker.Enabled && !st.Docker.Reachable {
 		reasons = append(reasons, "docker not responding")
@@ -1091,7 +1108,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 			qs.Errored++
 		}
 		qs.Torrents = append(qs.Torrents, TorrentView{
-			Hash: torrentHash(t.Hash), Name: clip(t.Name, 400), Size: nonNeg64(t.Size), Progress: unit(t.Progress), UpBps: t.UPSpeed, DownBps: t.DLSpeed,
+			Hash: torrentHash(t.Hash), Client: "qbt", Name: clip(t.Name, 400), Size: nonNeg64(t.Size), Progress: unit(t.Progress), UpBps: t.UPSpeed, DownBps: t.DLSpeed,
 			Ratio: t.Ratio, State: clip(t.State, 32), Kind: kind, AddedOn: t.AddedOn, Category: clip(t.Category, 100),
 			Uploaded: nonNeg64(t.Uploaded), Downloaded: nonNeg64(t.Downloaded),
 			Seeds: nonNeg(t.Seeds), SeedsSwarm: nonNeg(t.SeedsSwarm), Peers: nonNeg(t.Peers), PeersSwarm: nonNeg(t.PeersSwarm),

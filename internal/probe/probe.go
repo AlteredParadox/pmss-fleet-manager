@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -48,7 +49,12 @@ type Snapshot struct {
 	Cgroup  CgroupInfo
 	Account AccountInfo
 	Qbt     QbtInfo
+	Rt      RtInfo
 	Docker  DockerInfo
+
+	// Home is the account's home directory as the probe's shell saw it
+	// ($HOME); paths in the client configs are relative to it.
+	Home string
 
 	// Procs are the account's own processes, the probe's own shell and its
 	// children left out. ProcsKnown is false when ps printed nothing (a
@@ -832,6 +838,8 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap.Cgroup = parseCgroup(s["cgroup"])
 	snap.Account = parseAccount(s["pmss_user"])
 	snap.Qbt = parseQbt(s)
+	snap.Home = homePath(strings.TrimSpace(s["home"]))
+	snap.Rt = parseRt(s, snap.Home)
 	snap.Listeners, snap.ListenersKnown = parseListeners(s["listen"])
 	snap.Docker = DockerInfo{
 		SocketPresent: strings.TrimSpace(s["docker_sock"]) == "1",
@@ -1287,6 +1295,119 @@ func parseQbt(s map[string]string) QbtInfo {
 		}
 	}
 	return q
+}
+
+// RtInfo is what the probe saw of the tenant's rTorrent.
+type RtInfo struct {
+	// ConfFound is true when an SCGI directive was read from ~/.rtorrent.rc
+	// or ~/.rtorrent.rc.custom. SCGI is the endpoint it names, normalised
+	// to "unix:/abs/path" or "tcp:host:port" (the last directive wins, as
+	// in rTorrent); empty when none was found or the path was not usable.
+	ConfFound bool
+	SCGI      string
+	// Disabled is the ~/.rtorrentDisable marker: the tenant told PMSS's
+	// watchdog to stop rTorrent and leave it stopped.
+	Disabled bool
+}
+
+// DefaultSCGI is where PMSS puts the SCGI socket when the config says
+// nothing readable.
+func DefaultSCGI(home string) string {
+	if home == "" {
+		return ""
+	}
+	return "unix:" + home + "/.rtorrent.socket"
+}
+
+// homePath accepts an absolute, clean home directory and nothing else: it
+// is spliced into socket paths the dashboard will dial as this account.
+func homePath(h string) string {
+	if h == "" || !strings.HasPrefix(h, "/") || len(h) > 256 || strings.ContainsAny(h, "\x00\n\r") || path.Clean(h) != h {
+		return ""
+	}
+	return h
+}
+
+func parseRt(s map[string]string, home string) RtInfo {
+	r := RtInfo{Disabled: strings.TrimSpace(s["rt_disable"]) == "1"}
+	for _, line := range strings.Split(s["rt_conf"], "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if strings.HasPrefix(v, `"`) { // a quoted value ends at its closing quote
+			v = strings.TrimPrefix(v, `"`)
+			if i := strings.IndexByte(v, '"'); i >= 0 {
+				v = v[:i]
+			}
+		} else if i := strings.IndexAny(v, " \t#;"); i >= 0 { // a trailing comment or a second command
+			v = v[:i]
+		}
+		if v == "" {
+			continue
+		}
+		r.ConfFound = true
+		switch k {
+		case "network.scgi.open_local", "scgi_local":
+			r.SCGI = scgiUnix(v, home)
+		case "network.scgi.open_port", "scgi_port":
+			r.SCGI = scgiTCP(v)
+		}
+	}
+	return r
+}
+
+// scgiUnix normalises a socket path from the config: "~/x" is the home,
+// the result must be absolute and clean (it is dialed as this account, so
+// a relative or dot-dot path is refused rather than guessed).
+func scgiUnix(v, home string) string {
+	if strings.HasPrefix(v, "~/") {
+		if home == "" {
+			return ""
+		}
+		v = home + v[1:]
+	}
+	if !strings.HasPrefix(v, "/") || len(v) > 512 || path.Clean(v) != v {
+		return ""
+	}
+	return "unix:" + v
+}
+
+// scgiTCP normalises "host:port" or ":port" (rTorrent binds localhost for
+// a bare port) to "tcp:host:port"; only loopback hosts are accepted since
+// the dashboard reaches the box over its own SSH tunnel.
+func scgiTCP(v string) string {
+	host, port, ok := strings.Cut(v, ":")
+	if !ok {
+		port, host = v, ""
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return ""
+	}
+	switch host {
+	case "", "localhost", "127.0.0.1", "::1", "[::1]":
+		return "tcp:127.0.0.1:" + strconv.Itoa(n)
+	}
+	return ""
+}
+
+// RtProcess reports whether one of the account's processes is rTorrent:
+// the system 0.9.8 build names its main thread "rtorrent main", the 0.16
+// store build "rtorrent-main", a plain build "rtorrent". Known is false
+// when the process list could not be read (then the socket decides).
+func (s *Snapshot) RtProcess() (running, known bool) {
+	if !s.ProcsKnown {
+		return false, false
+	}
+	for _, p := range s.Procs {
+		switch p.Comm {
+		case "rtorrent", "rtorrent main", "rtorrent-main":
+			return true, true
+		}
+	}
+	return false, !s.ProcsTruncated
 }
 
 // binaryStatShape is what `stat -c '%s %Y %Z %i'` prints.

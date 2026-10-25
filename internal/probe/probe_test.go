@@ -1332,3 +1332,104 @@ func TestQbtConfShell(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRt(t *testing.T) {
+	home := "/home/u"
+	cases := []struct {
+		conf string
+		want string
+	}{
+		{"network.scgi.open_local = ~/.rtorrent.socket\n", "unix:/home/u/.rtorrent.socket"},
+		{"scgi_local = /tmp/rpc.sock\n", "unix:/tmp/rpc.sock"},
+		{"network.scgi.open_port = 127.0.0.1:5000\n", "tcp:127.0.0.1:5000"},
+		{"scgi_port = localhost:5001\n", "tcp:127.0.0.1:5001"},
+		{"scgi_port = 5002\n", "tcp:127.0.0.1:5002"},
+		{"network.scgi.open_local = ~/.rtorrent.socket\nnetwork.scgi.open_port = 0.0.0.0:5000\n", ""}, // last wins; a public bind is refused
+		{"network.scgi.open_local = ~/a\nnetwork.scgi.open_local = \"~/b\" # comment\n", "unix:/home/u/b"},
+		{"network.scgi.open_local = ../x\n", ""},
+		{"network.scgi.open_local = /home/u/../../etc/x\n", ""},
+		{"scgi_port = 70000\n", ""},
+		{"scgi_port = 10.0.0.1:5000\n", ""},
+		{"# network.scgi.open_local = ~/x\n", ""},
+	}
+	for _, tc := range cases {
+		r := parseRt(map[string]string{"rt_conf": tc.conf, "rt_disable": "0"}, home)
+		if r.SCGI != tc.want {
+			t.Errorf("%q: got %q want %q", tc.conf, r.SCGI, tc.want)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(tc.conf), "#") && !r.ConfFound {
+			t.Errorf("%q: ConfFound", tc.conf)
+		}
+	}
+	r := parseRt(map[string]string{"rt_conf": "", "rt_disable": "1"}, home)
+	if r.ConfFound || r.SCGI != "" || !r.Disabled {
+		t.Fatalf("%+v", r)
+	}
+	// Without a home, a ~ path cannot be resolved and the default is unknown.
+	if parseRt(map[string]string{"rt_conf": "network.scgi.open_local = ~/s\n"}, "").SCGI != "" || DefaultSCGI("") != "" {
+		t.Fatal("tilde without home")
+	}
+	if DefaultSCGI("/home/u") != "unix:/home/u/.rtorrent.socket" {
+		t.Fatal(DefaultSCGI("/home/u"))
+	}
+	for h, ok := range map[string]bool{"/home/u": true, "/home/u/": false, "home/u": false, "/home/../etc": false, "": false, "/h\nome": false} {
+		if (homePath(h) != "") != ok {
+			t.Errorf("homePath(%q) = %q", h, homePath(h))
+		}
+	}
+}
+
+func TestRtProcess(t *testing.T) {
+	s := &Snapshot{}
+	if r, k := s.RtProcess(); r || k {
+		t.Fatal("unknown procs must be unknown")
+	}
+	s.ProcsKnown = true
+	s.Procs = []ProcInfo{{Comm: "sshd"}, {Comm: "rtorrent main"}}
+	if r, k := s.RtProcess(); !r || !k {
+		t.Fatal("0.9.8 thread name")
+	}
+	s.Procs = []ProcInfo{{Comm: "rtorrent-main"}}
+	if r, _ := s.RtProcess(); !r {
+		t.Fatal("0.16 thread name")
+	}
+	s.Procs = []ProcInfo{{Comm: "php"}}
+	if r, k := s.RtProcess(); r || !k {
+		t.Fatal("absent")
+	}
+	s.ProcsTruncated = true
+	if r, k := s.RtProcess(); r || k {
+		t.Fatal("a truncated list cannot prove absence")
+	}
+}
+
+// TestRtConfShell runs the real conf reader against both files, the custom
+// one overriding, with a comment line and a long line that is cut.
+func TestRtConfShell(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	os.WriteFile(home+"/.rtorrent.rc", []byte("# comment\nnetwork.scgi.open_local = ~/.rtorrent.socket\nsession.path.set = ~/session\n  scgi_port = 5000\n"), 0o644)
+	os.WriteFile(home+"/.rtorrent.rc.custom", []byte("network.scgi.open_local = ~/other.sock"+strings.Repeat(" ", 400)+"\n"), 0o600)
+	out, stderr, _ := runSh(t, "home="+home+"\n"+rtConfShell)
+	if stderr != "" {
+		t.Fatal(stderr)
+	}
+	r := parseRt(map[string]string{"rt_conf": out}, home)
+	if r.SCGI != "unix:"+home+"/other.sock" || !r.ConfFound {
+		t.Fatalf("%+v from %q", r, out)
+	}
+	if strings.Contains(out, "session.path") {
+		t.Fatal("only endpoint lines are printed")
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if len(line) > 300 {
+			t.Fatal("lines are cut at 300")
+		}
+	}
+	out, _, _ = runSh(t, "home="+t.TempDir()+"\n"+rtConfShell)
+	if out != "" {
+		t.Fatalf("no files: %q", out)
+	}
+}

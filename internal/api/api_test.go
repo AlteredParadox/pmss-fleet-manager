@@ -875,3 +875,61 @@ func TestSettingsPMDB(t *testing.T) {
 		t.Fatalf("sync while off: %d", code)
 	}
 }
+
+func TestRtRoutesAndSettings(t *testing.T) {
+	s, st := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080"}
+	// rt_scgi is validated like the other endpoint fields.
+	code, body := do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","rt_enabled":true,"rt_scgi":"tcp:0.0.0.0:5000"}`, hdr)
+	if code != 400 || !strings.Contains(body, "rt_scgi") {
+		t.Fatalf("bad rt_scgi: %d %s", code, body)
+	}
+	code, body = do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","rt_enabled":true,"rt_scgi":" unix:/home/u/.rtorrent.socket "}`, hdr)
+	if code != 201 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	var created struct {
+		ID int64 `json:"id"`
+	}
+	json.Unmarshal([]byte(body), &created)
+	b, err := st.GetBox(context.Background(), created.ID)
+	if err != nil || !b.RtEnabled || b.RtSCGI != "unix:/home/u/.rtorrent.socket" {
+		t.Fatalf("stored %+v %v", b, err)
+	}
+	// The combined list carries the rtorrent block for a box with only rTorrent on.
+	code, body = do(t, s, "GET", "/api/torrents", "", nil)
+	var out struct {
+		Boxes []struct {
+			ID int64 `json:"id"`
+			Rt struct {
+				Enabled  bool   `json:"enabled"`
+				Endpoint string `json:"endpoint"`
+			} `json:"rtorrent"`
+		} `json:"boxes"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil || code != 200 || len(out.Boxes) != 1 || !out.Boxes[0].Rt.Enabled || out.Boxes[0].Rt.Endpoint != "unix:/home/u/.rtorrent.socket" {
+		t.Fatalf("list: %d %s", code, body)
+	}
+	// Actions: the action and hash are checked before anything reaches the box.
+	id := created.ID
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/pause", id, strings.Repeat("a", 40)), 400},
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/stop", id, strings.Repeat("a", 64)), 400}, // v2 hashes are qBittorrent's
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/..%%2F/stop", id), 400},
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/remove-data", id, strings.Repeat("A", 40)), 409}, // valid, but the box was never probed: not ready
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/stop", 999, strings.Repeat("a", 40)), 404},
+	} {
+		code, body := do(t, s, "POST", tc.path, "", hdr)
+		if code != tc.want {
+			t.Errorf("%s: %d %s", tc.path, code, body)
+		}
+	}
+	// Add: the shared form validation applies; a never-probed box is 409.
+	code, body = do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/torrents", id), "", hdr)
+	if code != 400 {
+		t.Fatalf("add without form: %d %s", code, body)
+	}
+}
