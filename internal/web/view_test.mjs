@@ -69,3 +69,42 @@ test('fleet torrent totals count every monitored client, from a snapshot or an S
   assert.deepEqual(V.clientTotals({ qbt: { enabled: true, total: 'x' } }), { torrents: 0, seeding: 0, clients: 1 });
   assert.deepEqual(V.clientTotals(undefined), { torrents: 0, seeding: 0, clients: 0 });
 });
+
+test('the row action is client-aware: rTorrent error rows are running and get stop (daybreak blue review of #124)', () => {
+  assert.equal(V.torrentAction('qbt', 'paused'), 'start');
+  assert.equal(V.torrentAction('qbt', 'error'), 'start', 'qBittorrent error/missingFiles are stopped torrents');
+  assert.equal(V.torrentAction('qbt', 'seeding'), 'stop');
+  assert.equal(V.torrentAction('qbt', 'checking'), 'stop');
+  assert.equal(V.torrentAction('rtorrent', 'paused'), 'start');
+  assert.equal(V.torrentAction('rtorrent', 'error'), 'stop', 'an rTorrent error row is active with a tracker message');
+  assert.equal(V.torrentAction('rtorrent', 'leeching'), 'stop');
+  assert.equal(V.torrentAction(undefined, 'error'), 'start', 'rows without a client are qBittorrent\'s');
+});
+
+test('every documented rate source has a label', () => {
+  assert.equal(V.rateSourceLabel('qbt'), 'live from qBittorrent');
+  assert.equal(V.rateSourceLabel('rtorrent'), 'live from rTorrent');
+  assert.equal(V.rateSourceLabel('clients'), 'live from qBittorrent + rTorrent');
+  assert.match(V.rateSourceLabel('pmss-15min'), /15-min/);
+  assert.equal(V.rateSourceLabel(''), 'no rate source');
+  assert.equal(V.rateSourceLabel(undefined), 'no rate source');
+});
+
+test('a client stopped on purpose is neither down nor a place to add torrents', () => {
+  assert.deepEqual(V.clientAvailability({ enabled: true, reachable: false, disabled: true }), { down: false, stopped: true });
+  assert.deepEqual(V.clientAvailability({ enabled: true, reachable: false, disabled: false }), { down: true, stopped: false });
+  assert.deepEqual(V.clientAvailability({ enabled: true, reachable: true, disabled: true }), { down: false, stopped: false }, 'answering wins over a stale marker');
+  assert.deepEqual(V.clientAvailability({ enabled: false, reachable: false, disabled: true }), { down: false, stopped: false }, 'not monitored: nothing to say');
+  assert.deepEqual(V.clientAvailability(undefined), { down: false, stopped: false });
+});
+
+test('the confirmation and action markup of a row carry the client (snapshot of the pure parts)', () => {
+  // The row renderer lives in app.js with the DOM; its client-specific
+  // decisions are the helpers above, pinned here, plus the data-client
+  // attribute the action handler routes on, checked in the source itself.
+  const app = readFileSync(new URL('./static/app.js', import.meta.url), 'utf8');
+  assert.match(app, /data-client="\$\{esc\(client\)\}"/, 'row buttons carry data-client');
+  assert.match(app, /pfmView\.torrentAction\(client, t\.kind\)/, 'the start/stop choice goes through the helper');
+  assert.match(app, /refuses otherwise, leaving the torrent in place/, 'the rTorrent remove-with-data confirmation states the real ordering');
+  assert.match(app, /\/\$\{seg\}\/torrents\//, 'actions are routed per client');
+});

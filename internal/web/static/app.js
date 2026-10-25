@@ -666,7 +666,7 @@ function ovUploadPanel(b, tt) {
 }
 function ovBandwidthPanel(b) {
   const tr = b.traffic;
-  const rateNote = b.rates.source === 'qbt' ? 'live from qBittorrent' : b.rates.source === 'pmss-15min' ? 'PMSS 15-min average (refreshed twice an hour)' : 'no rate source';
+  const rateNote = pfmView.rateSourceLabel(b.rates.source);
   // PMSS's cap_mbit is the upload rate the account is held to while it is
   // over its traffic limit, not a standing cap: only meter against it then.
   const cap = tr.throttled && tr.cap_mbit ? tr.cap_mbit : 0;
@@ -852,11 +852,14 @@ function boxClients(b) {
 }
 function tabTorrents(b) {
   const clients = boxClients(b);
-  if (clients.length === 0) return `<div class="empty">no torrent client is monitored on this box — enable qBittorrent or rTorrent under <a href="#/edit/${b.id}">edit</a>.</div>`;
+  // rTorrent stopped on purpose (~/.rtorrentDisable) with monitoring off:
+  // say so rather than hiding the client, since that is the useful fact.
+  const rtOffNote = !b.rtorrent?.enabled && b.rtorrent?.disabled ? `<div class="empty" style="margin-bottom:12px">rTorrent is stopped on purpose on this box (<code>~/.rtorrentDisable</code>); monitoring is off.</div>` : '';
+  if (clients.length === 0) return `${rtOffNote}<div class="empty">no torrent client is monitored on this box — enable qBittorrent or rTorrent under <a href="#/edit/${b.id}">edit</a>.</div>`;
   const f = S.filter.trim().toLowerCase();
   // With several clients the torrents are grouped by client, each group
   // with its own header, counts and add button; the filter spans all.
-  return `<div class="table tor-table" style="overflow:hidden">
+  return `${rtOffNote}<div class="table tor-table" style="overflow:hidden">
     ${clients.map((c, i) => clientSection(b, c, f, clients.length > 1, i === 0)).join('')}
   </div>`;
 }
@@ -868,13 +871,14 @@ function clientSection(b, c, f, grouped, first) {
   const shown = list.slice(0, 300);
   const addOpen = S.torAdd && (S.torAdd.client || 'qbt') === c.key;
   const notes = c.key === 'qbt' ? `${discoveryNote(q, b)}${connectionNote(q)}` : rtNote(q);
+  const avail = pfmView.clientAvailability(q); // stopped on purpose is expected: no warning, nothing to add to
   return `<div class="thead-tools"${grouped && !first ? ' style="border-top:1px solid var(--line)"' : ''}>
-      <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
+      <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span></div>
       <div class="actions">
         ${first ? `<input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">` : ''}
         ${c.key === 'qbt' ? `<button class="small" data-act="qbt:pause" data-confirm="Pause all torrents in qBittorrent on ${esc(b.name)}?">pause all</button>
         <button class="small" data-act="qbt:resume">resume all</button>` : ''}
-        <button class="small" data-act="tor-add:toggle" data-client="${c.key}">${addOpen ? 'close' : 'add'}</button>
+        ${avail.stopped ? '' : `<button class="small" data-act="tor-add:toggle" data-client="${c.key}">${addOpen ? 'close' : 'add'}</button>`}
       </div>
     </div>
     ${addOpen ? torAddForm(b, q.torrents || [], c) : ''}
@@ -939,7 +943,7 @@ function viewTorrents() {
     for (const c of boxClients(b)) {
       const q = c.st;
       for (const k of Object.keys(sum)) sum[k] += q[k] || 0;
-      if (!q.reachable) notes.push(`<span class="warn">${esc(b.name)} (${c.label}): ${unreachableNote(b, c)}</span>`);
+      if (pfmView.clientAvailability(q).down) notes.push(`<span class="warn">${esc(b.name)} (${c.label}): ${unreachableNote(b, c)}</span>`);
       for (const t of q.torrents || []) if (!f || torrentMatches(t, f) || b.name.toLowerCase().includes(f) || c.label.toLowerCase().includes(f)) rows.push([b, t]);
     }
   }
@@ -1073,9 +1077,9 @@ function torrentButtons(b, t) {
   const h = `data-hash="${esc(t.hash)}" data-box="${b.id}" data-client="${esc(client)}"${off}`;
   const name = esc(t.name);
   const files = client === 'rtorrent'
-    ? `Remove ${name} from rTorrent AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? The path is checked on the box to lie inside rTorrent's download directory before anything is deleted. This cannot be undone.`
+    ? `Remove ${name} from rTorrent AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? The box first checks that the path lies inside rTorrent's download directory and refuses otherwise, leaving the torrent in place. If it passes, the torrent is removed and then its files are deleted; should the deletion fail at that point, the torrent is already gone and files may remain. This cannot be undone.`
     : `Remove ${name} AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? This cannot be undone.`;
-  return `${t.kind === 'paused' || t.kind === 'error' // error/missingFiles are stopped torrents: start is what recovers them
+  return `${pfmView.torrentAction(client, t.kind) === 'start'
     ? `<button class="small" data-act="tor:start" ${h}>start</button>`
     : `<button class="small" data-act="tor:stop" ${h} data-confirm="Stop ${name} on ${esc(b.name)}?">stop</button>`}
     <button class="small ghost" data-act="tor:remove" ${h} data-confirm="Remove ${name} from ${label} on ${esc(b.name)}? The downloaded files stay on disk.">remove</button>
@@ -1445,7 +1449,7 @@ function addStep1(A, f, E, edit, back) {
         <label class="f">renewal date<input data-f="renewal" type="date" value="${esc(f.renewal)}"></label>
       </div>
       ${addServiceHint(A.service)}
-      <details class="adv" ${edit ? 'open' : ''}><summary>qBittorrent, docker and measurement options</summary><div>
+      <details class="adv" ${edit ? 'open' : ''}><summary>torrent clients, Docker and measurement options</summary><div>
         ${addQbtFields(f, edit)}
         ${addRtFields(f)}
         ${addDockerDuFields(f)}

@@ -76,5 +76,38 @@ function clientTotals(b) {
   return t;
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals };
+// torrentAction is the one control a torrent row offers besides remove:
+// 'start' for a torrent that is not running, 'stop' otherwise. qBittorrent
+// reports stopped torrents with problems as kind "error" (error,
+// missingFiles), so start is what recovers them; rTorrent's "error" is a
+// running torrent with a tracker message, which only stop can manage
+// (daybreak blue review of #124).
+function torrentAction(client, kind) {
+  if (kind === 'paused') return 'start';
+  if (kind === 'error' && client !== 'rtorrent') return 'start';
+  return 'stop';
+}
+
+// rateSourceLabel names where the live bandwidth figure comes from.
+function rateSourceLabel(source) {
+  switch (source) {
+    case 'qbt': return 'live from qBittorrent';
+    case 'rtorrent': return 'live from rTorrent';
+    case 'clients': return 'live from qBittorrent + rTorrent';
+    case 'pmss-15min': return 'PMSS 15-min average (refreshed twice an hour)';
+    default: return 'no rate source';
+  }
+}
+
+// clientAvailability says how a monitored client's state should read:
+// `down` when it does not answer and that is unexpected, `stopped` when
+// the tenant stopped it on purpose (rTorrent's ~/.rtorrentDisable), which
+// is neither a warning nor a place to add torrents.
+function clientAvailability(st) {
+  if (!st || !st.enabled) return { down: false, stopped: false };
+  if (st.reachable) return { down: false, stopped: false };
+  return { down: !st.disabled, stopped: !!st.disabled };
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability };
 })();
