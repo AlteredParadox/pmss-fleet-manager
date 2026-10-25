@@ -313,7 +313,17 @@ func (c *Client) Action(ctx context.Context, action, hash string) error {
 
 // AddRequest is a batch of torrents to load: URLs (magnet or http(s), which
 // rTorrent fetches itself) and .torrent file contents. Label sets
-// d.custom1 on each; Stopped loads without starting.
+// d.custom1 (ruTorrent's label) on each; Stopped loads without starting.
+//
+// The label is never passed along the load command: those trailing
+// arguments go through rTorrent's command parser, which evaluates a leading
+// "(" as a function and a leading "$" as a command even inside quotes
+// (confirmed live on 0.9.8: the label "$system.client_version=" came back
+// as "0.9.8"). Instead the torrent is loaded first and d.custom1.set is
+// called by hash as its own XML-RPC method, whose parameters are literal
+// values. That needs the hash up front, so a label is applied to .torrent
+// files (hash computed here) and magnet links (hash in the link); an http(s)
+// link with a label is refused with ErrLabelNeedsHash before anything loads.
 type AddRequest struct {
 	URLs    []string
 	Files   [][]byte
@@ -323,41 +333,64 @@ type AddRequest struct {
 
 // AddResult counts what was accepted. rTorrent answers a load command
 // before it knows whether the torrent is valid, so Added is what it took,
-// not what it will keep.
+// not what it will keep. Unlabelled counts loaded torrents whose label
+// could not then be set (rTorrent refused the d.custom1.set).
 type AddResult struct {
-	Added  int
-	Failed int
+	Added      int
+	Failed     int
+	Unlabelled int
 }
 
-// Add loads every entry; one refused entry does not stop the rest.
+// ErrLabelNeedsHash is a label on an http(s) link: the hash is not known
+// until rTorrent fetched the file, and a label is only ever set by hash.
+var ErrLabelNeedsHash = errors.New("rtorrent: a label can be applied to .torrent files and magnet links only; add the http(s) link without a label, or label it in ruTorrent")
+
+// Add loads every entry; one refused entry does not stop the rest. With a
+// label, every entry's hash is checked first so nothing is loaded that the
+// label could not then be set on.
 func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 	var res AddResult
-	var cmds []any
-	if req.Label != "" {
-		cmds = append(cmds, "d.custom1.set="+quoteArg(clip(req.Label, maxLabel)))
+	label := clip(req.Label, maxLabel)
+	type entry struct {
+		method string
+		arg    any    // the URL or the file bytes
+		hash   string // for the label; "" when none is wanted
 	}
 	urlMethod, rawMethod := "load.start", "load.raw_start"
 	if req.Stopped {
 		urlMethod, rawMethod = "load.normal", "load.raw"
 	}
-	var lastErr error
+	var entries []entry
 	for _, u := range req.URLs {
 		if !validURL(u) {
 			res.Failed++
 			continue
 		}
-		if _, err := c.call(ctx, 0, urlMethod, append([]any{"", u}, cmds...)...); err != nil {
-			if isFault(err) {
-				res.Failed++
-				lastErr = err
-				continue
+		e := entry{method: urlMethod, arg: u}
+		if label != "" {
+			h, err := MagnetHash(u)
+			if err != nil {
+				return AddResult{}, ErrLabelNeedsHash
 			}
-			return res, err
+			e.hash = h
 		}
-		res.Added++
+		entries = append(entries, e)
 	}
 	for _, f := range req.Files {
-		if _, err := c.call(ctx, 0, rawMethod, append([]any{"", f}, cmds...)...); err != nil {
+		e := entry{method: rawMethod, arg: f}
+		if label != "" {
+			h, err := InfoHash(f)
+			if err != nil {
+				res.Failed++ // not a torrent: rTorrent would refuse it too
+				continue
+			}
+			e.hash = h
+		}
+		entries = append(entries, e)
+	}
+	var lastErr error
+	for _, e := range entries {
+		if _, err := c.call(ctx, 0, e.method, "", e.arg); err != nil {
 			if isFault(err) {
 				res.Failed++
 				lastErr = err
@@ -366,6 +399,19 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 			return res, err
 		}
 		res.Added++
+		if e.hash != "" {
+			// A literal XML-RPC string: rTorrent's command parser never sees
+			// it. A fault here (the hash not present yet, which rTorrent
+			// does not do for a synchronous load) leaves the torrent loaded
+			// without its label and is reported.
+			if _, err := c.call(ctx, 0, "d.custom1.set", e.hash, label); err != nil {
+				if isFault(err) {
+					res.Unlabelled++
+					continue
+				}
+				return res, err
+			}
+		}
 	}
 	if res.Added == 0 && lastErr != nil {
 		return res, lastErr
@@ -379,33 +425,6 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 func validURL(u string) bool {
 	l := strings.ToLower(u)
 	return strings.HasPrefix(l, "magnet:?") || strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
-}
-
-// quoteArg renders s as one literal string argument in rTorrent's command
-// syntax: the commands that ride along a load ("d.custom1.set=...") are
-// parsed by rTorrent's own parser, which splits unquoted arguments on
-// commas, treats a leading "(" as a function call to evaluate (so a label
-// "(d.stop)" would stop the torrent, Codex on PR 122) and reads a quoted
-// string as text with backslash escapes. Quoting is therefore the literal
-// encoding; a blacklist of punctuation is not. Backslashes and quotes are
-// escaped, control characters dropped (the parser has no escape for them
-// and a newline ends a command).
-func quoteArg(s string) string {
-	var b strings.Builder
-	b.WriteByte('"')
-	for _, r := range s {
-		switch {
-		case r == '\\' || r == '"':
-			b.WriteByte('\\')
-			b.WriteRune(r)
-		case r < 0x20 || r == 0x7f:
-			// dropped
-		default:
-			b.WriteRune(r)
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
 }
 
 func isFault(err error) bool {

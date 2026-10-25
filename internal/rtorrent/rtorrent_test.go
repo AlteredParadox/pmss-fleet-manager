@@ -20,6 +20,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/base32"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -510,9 +514,20 @@ func TestActions(t *testing.T) {
 
 func TestAdd(t *testing.T) {
 	f := newFake(t)
+	torrent := "d8:announce9:http://x/4:infod4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee"
+	want, err := InfoHash([]byte(torrent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sets []call
 	f.on(func(m string, p []string) string {
-		if m == "load.raw_start" && p[1] != "ZDg6YW5ub3VuY2Vl" { // base64("d8:announcee")
-			t.Errorf("raw params %q", p)
+		switch m {
+		case "load.raw_start":
+			if p[1] != base64.StdEncoding.EncodeToString([]byte(torrent)) {
+				t.Errorf("raw params %q", p)
+			}
+		case "d.custom1.set":
+			sets = append(sets, call{m, p})
 		}
 		if strings.Contains(p[1], "bad.example") {
 			return fault(-501, "Could not create download")
@@ -520,39 +535,105 @@ func TestAdd(t *testing.T) {
 		return resp(i8(0))
 	})
 	c := New(f.dial)
+	// Without a label: http(s) links are fine, paths and file: URLs never
+	// reach the box, a refused link counts as failed.
 	res, err := c.Add(context.Background(), AddRequest{
-		URLs:  []string{"magnet:?xt=urn:btih:" + hashA, "https://bad.example/x.torrent", "/etc/passwd", "file:///x"},
-		Files: [][]byte{[]byte("d8:announcee")},
-		Label: `(d.stop) tv,"d.directory.set=/tmp" back\slash` + "\n\x01",
+		URLs:  []string{"magnet:?xt=urn:btih:" + hashA, "https://bad.example/x.torrent", "https://ok.example/y.torrent", "/etc/passwd", "file:///x"},
+		Files: [][]byte{[]byte(torrent)},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || res.Added != 3 || res.Failed != 3 {
+		t.Fatalf("%+v %v", res, err)
 	}
-	if res.Added != 2 || res.Failed != 3 {
-		t.Fatalf("%+v", res)
+	if got := strings.Join(f.methods(), ","); got != "load.start,load.start,load.start,load.raw_start" {
+		t.Fatalf("methods %v", got)
 	}
-	methods := f.methods()
-	if strings.Join(methods, ",") != "load.start,load.start,load.raw_start" {
-		t.Fatalf("methods %v (paths and file: URLs never reach the box)", methods)
+	if len(sets) != 0 {
+		t.Fatal("no label, no d.custom1.set")
 	}
-	// The label is one quoted literal: no second command, no function call
-	// from a leading "(", control characters gone.
-	if got := f.last().params[2]; got != `d.custom1.set="(d.stop) tv,\"d.directory.set=/tmp\" back\\slash"` {
-		t.Fatalf("label arg %q", got)
+	// With a label: loaded first, then d.custom1.set by hash as a literal
+	// XML-RPC parameter; the label text is never part of a command string,
+	// so "(d.stop)" and "$system.shutdown.normal=" are just text (fred on
+	// PR 122, confirmed live).
+	label := `$system.shutdown.normal= (d.stop) "x",y\z`
+	sets = nil
+	res, err = c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + strings.ToLower(hashB)}, Files: [][]byte{[]byte(torrent), []byte("not a torrent")}, Label: label, Stopped: true})
+	if err != nil || res.Added != 2 || res.Failed != 1 {
+		t.Fatalf("%+v %v", res, err)
 	}
-	// Stopped uses the non-starting loaders.
-	f.on(func(m string, p []string) string { return resp(i8(0)) })
-	if _, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?x"}, Files: [][]byte{{1}}, Stopped: true}); err != nil {
-		t.Fatal(err)
+	if len(sets) != 2 || sets[0].params[0] != strings.ToUpper(hashB) || sets[0].params[1] != label || sets[1].params[0] != want || sets[1].params[1] != label {
+		t.Fatalf("sets %+v", sets)
 	}
 	m := f.methods()
-	if strings.Join(m[len(m)-2:], ",") != "load.normal,load.raw" {
+	if strings.Join(m[len(m)-4:], ",") != "load.normal,d.custom1.set,load.raw,d.custom1.set" {
 		t.Fatalf("%v", m)
+	}
+	for _, c := range f.calls {
+		for _, p := range c.params {
+			if c.method != "d.custom1.set" && strings.Contains(p, "custom1") {
+				t.Fatalf("label leaked into a command string: %q", p)
+			}
+		}
+	}
+	// A label on an http(s) link cannot be set by hash: refused before any load.
+	n := len(f.methods())
+	if _, err := c.Add(context.Background(), AddRequest{URLs: []string{"https://ok.example/y.torrent"}, Label: "tv"}); !errors.Is(err, ErrLabelNeedsHash) || len(f.methods()) != n {
+		t.Fatalf("%v", err)
 	}
 	// Every URL refused by rTorrent: the fault surfaces.
 	f.on(func(m string, p []string) string { return fault(-501, "no") })
 	if _, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?x"}}); !isFault(err) {
 		t.Fatal(err)
+	}
+	// A fault on the label set is counted, the torrent stays loaded.
+	f.on(func(m string, p []string) string {
+		if m == "d.custom1.set" {
+			return fault(-501, "Could not find info-hash.")
+		}
+		return resp(i8(0))
+	})
+	res, err = c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
+	if err != nil || res.Added != 1 || res.Unlabelled != 1 {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+func TestInfoHashAndMagnet(t *testing.T) {
+	// Built the way a client would: the hash is the SHA-1 of the raw info value.
+	info := "d4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaae"
+	sum := sha1.Sum([]byte(info))
+	want := strings.ToUpper(hex.EncodeToString(sum[:]))
+	for _, tor := range []string{
+		"d8:announce9:http://x/4:info" + info + "e",
+		"d4:info" + info + "8:announce9:http://x/e", // key order does not matter to the scan
+		"d7:comment3:abc13:announce-listll9:http://x/ee4:info" + info + "7:privatei1ee",
+	} {
+		h, err := InfoHash([]byte(tor))
+		if err != nil || h != want {
+			t.Errorf("%q: %s %v", tor[:20], h, err)
+		}
+	}
+	for _, bad := range []string{"", "l4:infoe", "d4:info", "d4:infoi1", "d8:announce9:http://x/e", "d4:info" + info[:len(info)-1], "d3:keye", "d4:infod1:ke" + "e", "not bencode", "d99999:xe"} {
+		if _, err := InfoHash([]byte(bad)); !errors.Is(err, ErrNoInfoHash) {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	// Deep nesting is bounded.
+	deep := "d4:info" + strings.Repeat("l", 100) + strings.Repeat("e", 100) + "e"
+	if _, err := InfoHash([]byte(deep)); !errors.Is(err, ErrNoInfoHash) {
+		t.Fatal("depth")
+	}
+	if h, err := MagnetHash("magnet:?xt=urn:btih:" + strings.ToLower(hashA) + "&dn=x"); err != nil || h != hashA {
+		t.Fatal(h, err)
+	}
+	raw, _ := hex.DecodeString(hashA)
+	b32 := base32.StdEncoding.EncodeToString(raw)
+	if h, err := MagnetHash("magnet:?dn=x&xt=urn:btih:" + strings.ToLower(b32)); err != nil || h != hashA {
+		t.Fatal(h, err)
+	}
+	for _, bad := range []string{"https://x/y.torrent", "magnet:?dn=x", "magnet:?xt=urn:btmh:1220" + hashA + hashA[:24], "magnet:?xt=urn:btih:zz", "magnet:?xt=urn:btih:" + hashA[:39], "magnet:?%zz"} {
+		if _, err := MagnetHash(bad); !errors.Is(err, ErrNoInfoHash) {
+			t.Errorf("%q: %v", bad, err)
+		}
 	}
 }
 
@@ -793,20 +874,5 @@ func TestDialErrorIsReported(t *testing.T) {
 	c := New(func(ctx context.Context) (net.Conn, error) { return nil, sentinel })
 	if _, err := c.Version(context.Background()); !errors.Is(err, sentinel) {
 		t.Fatalf("%v", err)
-	}
-}
-
-func TestQuoteArg(t *testing.T) {
-	for in, want := range map[string]string{
-		"tv":             `"tv"`,
-		"(d.stop)":       `"(d.stop)"`,
-		`a"b\c`:          `"a\"b\\c"`,
-		"x,y;z={w}":      `"x,y;z={w}"`,
-		"nl\nx\x00\x7fy": `"nlxy"`,
-		"ünï":            `"ünï"`,
-	} {
-		if got := quoteArg(in); got != want {
-			t.Errorf("quoteArg(%q) = %s want %s", in, got, want)
-		}
 	}
 }
