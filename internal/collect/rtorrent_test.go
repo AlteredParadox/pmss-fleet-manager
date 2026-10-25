@@ -31,6 +31,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/qbt"
@@ -662,5 +663,49 @@ func TestRtRemoveDataDeletionOutlivesRPCDeadline(t *testing.T) {
 	// the caller's context (Codex on PR 123).
 	if rtRemoveTimeout <= apiTimeout {
 		t.Fatalf("rtRemoveTimeout %v must exceed apiTimeout %v", rtRemoveTimeout, apiTimeout)
+	}
+}
+
+func TestRtPendingLabelsSurviveTransportAndRestart(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	// Labels restored from the cache reach the first client; a client
+	// rebuilt for a new transport inherits what is still owed.
+	owed := []rtorrent.PendingLabel{{Hash: rtHashA, Label: "tv", Until: time.Now().Add(time.Hour)}}
+	p.rtLabels = owed
+	c1, err := p.rtClient(&sshx.Client{}, "unix:/x")
+	if err != nil || len(c1.Pending()) != 1 || p.rtLabels != nil {
+		t.Fatalf("%v %d", err, len(c1.Pending()))
+	}
+	c2, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	if c2 == c1 || len(c2.Pending()) != 1 {
+		t.Fatal("rebuilt client must inherit the owed labels")
+	}
+	// record persists them for this generation; a restarted manager finds
+	// them for the same record and not for a moved one. (box_cache rows
+	// belong to a stored box, so the record is created first.)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
+	p.recordRtLabels(context.Background())
+	got := p.m.restoredRtLabels(p.box)
+	if len(got) != 1 || got[0].Hash != rtHashA || got[0].Label != "tv" {
+		t.Fatalf("%+v", got)
+	}
+	moved := *p.box
+	moved.Host = "elsewhere.example"
+	if p.m.restoredRtLabels(&moved) != nil {
+		t.Fatal("another generation must not get the labels")
+	}
+	// Once settled, the cache holds an empty list, not the old entry.
+	c2.Restore(nil)
+	p.mu.Lock()
+	p.rt = rtorrent.New(f.dialer(""))
+	p.mu.Unlock()
+	p.recordRtLabels(context.Background())
+	if got := p.m.restoredRtLabels(p.box); len(got) != 0 {
+		t.Fatalf("settled labels came back: %+v", got)
 	}
 }

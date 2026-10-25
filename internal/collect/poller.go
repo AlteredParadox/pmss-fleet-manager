@@ -87,10 +87,11 @@ type poller struct {
 	dialTCP func(addr string) qbt.Dialer
 	// rt is the rTorrent client for rtEP (see rtClient); dialRt is the test
 	// hook that replaces the SSH channel to the SCGI endpoint.
-	rt     *rtorrent.Client
-	rtEP   string
-	rtSSH  *sshx.Client // the transport rt's dialer is bound to; a new one means a new client
-	dialRt func(ep string) rtorrent.Dialer
+	rt       *rtorrent.Client
+	rtEP     string
+	rtSSH    *sshx.Client            // the transport rt's dialer is bound to; a new one means a new client
+	rtLabels []rtorrent.PendingLabel // owed magnet labels restored from the cache, handed to the first client
+	dialRt   func(ep string) rtorrent.Dialer
 
 	duMu      sync.Mutex
 	duRunning bool
@@ -1550,6 +1551,9 @@ func (p *poller) record(ctx context.Context, st *BoxState) {
 	if err := p.m.st.SetCache(sctx, p.box.ID, authCacheKind, auth); err != nil {
 		p.m.log.Warn("cache auth hold", "box", p.box.Name, "err", err)
 	}
+	// Labels owed to magnets whose metadata has not arrived yet must
+	// survive a restart too, or a deploy in that window drops them.
+	p.recordRtLabels(sctx)
 }
 
 // authCacheKind is the box_cache kind holding the persisted qbt.AuthState.

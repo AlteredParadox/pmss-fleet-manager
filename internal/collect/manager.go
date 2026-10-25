@@ -305,10 +305,12 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	// decision, and a box down for hours must not dip to "degraded".
 	st.NextPoll, st.Backoff = time.Time{}, false
 	auth, authKnown := m.restoredAuth(b)
+	rtLabels := m.restoredRtLabels(b)
 	if !b.Enabled {
 		st.Status, st.StatusReason, st.Failures = "disabled", "", 0 // nothing to retry; the reason belonged to the last poll
 	}
 	p := newPoller(m, b)
+	p.rtLabels = rtLabels
 	p.ctx, p.cancel = context.WithCancel(m.ctx)
 	if authKnown {
 		p.guard.Restore(auth)
@@ -526,7 +528,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 		// The old machine's alerts resolve, except the renewal alert, which
 		// is the record's and would otherwise come back unacknowledged.
 		prev = nil
-		if err := m.st.DeleteCache(sctx, b.ID, "state", "du"); err != nil {
+		if err := m.st.DeleteCache(sctx, b.ID, "state", "du", rtLabelsCacheKind); err != nil {
 			m.log.Warn("drop cache of moved box", "box", fresh.Name, "err", err)
 		}
 		if n, err := m.st.ResolveBoxAlerts(sctx, b.ID, "renewal"); err != nil {

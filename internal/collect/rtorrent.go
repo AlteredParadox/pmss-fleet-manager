@@ -29,6 +29,7 @@ import (
 	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/rtorrent"
 	"pmss-fleet-manager/internal/sshx"
+	"pmss-fleet-manager/internal/store"
 )
 
 // rTorrent on a PMSS box is the panel's own client: root's watchdog starts
@@ -103,8 +104,62 @@ func (p *poller) rtClient(cli *sshx.Client, ep string) (*rtorrent.Client, error)
 	default:
 		return nil, errors.New("rtorrent: no SCGI endpoint known (set one under edit, or check ~/.rtorrent.rc)")
 	}
-	p.rt, p.rtEP, p.rtSSH = rtorrent.New(dial), ep, cli
+	nc := rtorrent.New(dial)
+	// Labels still owed to magnets (see rtorrent.Client.Pending) belong to
+	// the box, not to one client object: carry them over from the client
+	// being replaced, or from the cache on the first client after a start.
+	if p.rt != nil {
+		nc.Restore(p.rt.Pending())
+	} else {
+		nc.Restore(p.rtLabels)
+		p.rtLabels = nil
+	}
+	p.rt, p.rtEP, p.rtSSH = nc, ep, cli
 	return p.rt, nil
+}
+
+// rtLabelsCacheKind is the box_cache kind holding the labels owed to
+// magnets (rtLabelsCache) across restarts.
+const rtLabelsCacheKind = "rt_labels"
+
+// rtLabelsCache is the persisted form: the owed labels and the generation
+// of the box they were recorded for, so a record moved to another machine
+// does not label a stranger's torrents.
+type rtLabelsCache struct {
+	Generation string                  `json:"generation"`
+	Labels     []rtorrent.PendingLabel `json:"labels"`
+}
+
+// recordRtLabels writes the client's owed labels to the cache (an empty
+// list when there is none, so a settled label does not come back).
+func (p *poller) recordRtLabels(ctx context.Context) {
+	p.mu.Lock()
+	cli := p.rt
+	p.mu.Unlock()
+	if cli == nil {
+		return
+	}
+	c := rtLabelsCache{Generation: boxGeneration(p.box), Labels: cli.Pending()}
+	if err := p.m.st.SetCache(ctx, p.box.ID, rtLabelsCacheKind, c); err != nil {
+		p.m.log.Warn("cache rtorrent labels", "box", p.box.Name, "err", err)
+	}
+}
+
+// restoredRtLabels loads the owed labels recorded for this box's current
+// generation; anything else is ignored.
+func (m *Manager) restoredRtLabels(b *store.Box) []rtorrent.PendingLabel {
+	ctx := m.ctx
+	if ctx == nil { // before Start (tests); a nil context must never reach the driver
+		ctx = context.Background()
+	}
+	var c rtLabelsCache
+	if _, err := m.st.GetCache(ctx, b.ID, rtLabelsCacheKind, &c); err != nil || c.Generation != boxGeneration(b) {
+		return nil
+	}
+	if len(c.Labels) > 1000 {
+		c.Labels = c.Labels[:1000]
+	}
+	return c.Labels
 }
 
 // detectRtDial is the test hook for detectRt's socket dial.
