@@ -1844,6 +1844,9 @@ func TestRtRetireTimeoutAdoptsLate(t *testing.T) {
 	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
 		t.Fatal(err)
 	}
+	p.m.mu.Lock()
+	p.m.pollers[p.box.ID] = p // the late set goes to the box's current poller
+	p.m.mu.Unlock()
 	c1, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	c1.Restore([]rtorrent.PendingLabel{{Hash: rtHashB, Label: "gone", Until: time.Now().Add(time.Hour)}})
 	addDone := make(chan error, 1)
@@ -1866,26 +1869,156 @@ func TestRtRetireTimeoutAdoptsLate(t *testing.T) {
 	if _, err := p.m.st.GetCache(context.Background(), p.box.ID, rtLabelsCacheKind, &rtLabelsCache{}); err == nil {
 		t.Fatal("an unknown owed set must not be written")
 	}
-	// The successor comes up; hashB is erased meanwhile (tombstoned).
-	c2, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
-	p.m.rtTombstone(p.box.ID, p.generation(), rtHashB)
+	// The successor comes up (over the hook's nil transport, as rtReady
+	// resolves it) and removes hashB through the poller: forgotten,
+	// tombstoned, and then fully settled, before the predecessor's
+	// operation ends (fred on PR 123: the barrier must outlive the
+	// settlement).
+	readyRt(t, p, "unix:/x")
+	c2, _ := p.rtClient(context.Background(), nil, "unix:/x")
+	if err := p.rtTorrentAction(context.Background(), rtHashB, rtorrent.ActionRemove); err != nil {
+		t.Fatal(err)
+	}
+	p.settleRtTombs(context.Background(), false)
+	if n := len(p.m.rtTombList(p.box.ID, p.generation())); n != 0 {
+		t.Fatalf("fixture: the tombstone should be settled, %d open", n)
+	}
 	close(gate)
 	if err := <-addDone; err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	// The late set arrives: hashA adopted and persisted, hashB refused.
+	waitFor(t, 3*time.Second, func() bool {
 		got := c2.Pending()
-		if len(got) == 1 && got[0].Hash == rtHashA && got[0].Label == "tv" {
-			break
-		}
+		saved := p.m.restoredRtLabels(p.box)
+		return len(got) == 1 && got[0].Hash == rtHashA && got[0].Label == "tv" && len(saved) == 1 && saved[0].Hash == rtHashA
+	}, func() string { return fmt.Sprintf("pending %+v cache %+v", c2.Pending(), p.m.restoredRtLabels(p.box)) })
+	// Re-adding hashB unlabelled stays unlabelled.
+	before := countCalls(f, "d.custom1.set")
+	if _, err := c2.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashB}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Torrents(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if countCalls(f, "d.custom1.set") != before {
+		t.Fatal("the erased torrent's label was applied to its unlabelled re-add")
+	}
+}
+
+// waitFor polls cond until it holds or the wait runs out.
+func waitFor(t *testing.T, d time.Duration, cond func() bool, why func() string) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatalf("late adoption did not arrive: %+v", got)
+			t.Fatalf("not reached in %v: %s", d, why())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if saved := p.m.restoredRtLabels(p.box); len(saved) != 1 || saved[0].Hash != rtHashA {
-		t.Fatalf("the adopted set must be persisted: %+v", saved)
+}
+
+// TestRtLateAdoptionGoesToCurrentPoller (Codex on PR 123): a late
+// retirement snapshot is handed to the box's current poller of the same
+// generation, not to the retired one that spawned the wait, and is never
+// written over a replacement's own labels; a replacement of another
+// generation gets nothing.
+func TestRtLateAdoptionGoesToCurrentPoller(t *testing.T) {
+	f := newFakeSCGI(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f.reply = func(m, b string) string {
+		if m == "d.custom1.set" {
+			entered <- struct{}{}
+			<-gate
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
+	p.m.mu.Lock()
+	p.m.pollers[p.box.ID] = p
+	p.m.mu.Unlock()
+	c1, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
+	addDone := make(chan error, 1)
+	go func() {
+		_, err := c1.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Label: "tv"})
+		addDone <- err
+	}()
+	<-entered
+	// An edit: the probe is cancelled, the teardown cannot wait, and a
+	// replacement poller with a label of its own is published.
+	sctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	p.mu.Lock()
+	p.dropRtLocked(sctx)
+	p.mu.Unlock()
+	cancel()
+	box := *p.box
+	p2 := newPoller(p.m, &box)
+	p2.dialRt = f.dialer
+	p2.rtLabels = []rtorrent.PendingLabel{{Hash: rtHashB, Label: "mine", Until: time.Now().Add(time.Hour)}}
+	p.m.mu.Lock()
+	p.m.pollers[box.ID] = p2
+	p.m.mu.Unlock()
+	close(gate)
+	if err := <-addDone; err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		p2.mu.Lock()
+		defer p2.mu.Unlock()
+		return len(p2.rtLabels) == 2
+	}, func() string {
+		p2.mu.Lock()
+		defer p2.mu.Unlock()
+		return fmt.Sprintf("replacement owes %+v", p2.rtLabels)
+	})
+	p.mu.Lock()
+	stale := len(p.rtLabels)
+	p.mu.Unlock()
+	if stale != 0 {
+		t.Fatalf("the retired poller must not take the labels: %d", stale)
+	}
+	saved := p.m.restoredRtLabels(&box)
+	got := map[string]string{}
+	for _, l := range saved {
+		got[l.Hash] = l.Label
+	}
+	if len(saved) != 2 || got[rtHashA] != "tv" || got[rtHashB] != "mine" {
+		t.Fatalf("cache %+v", saved)
+	}
+	// Another generation: the late set is dropped, not written.
+	gate = make(chan struct{})
+	c3, _ := p2.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
+	go func() {
+		_, err := c3.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:43519D14444904F6015E1A0D92018068FB0A49FB"}, Label: "x"})
+		addDone <- err
+	}()
+	<-entered
+	sctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+	p2.mu.Lock()
+	p2.dropRtLocked(sctx)
+	p2.mu.Unlock()
+	cancel()
+	moved := box
+	moved.Host = "elsewhere.example"
+	p3 := newPoller(p.m, &moved)
+	p.m.mu.Lock()
+	p.m.pollers[moved.ID] = p3
+	p.m.mu.Unlock()
+	close(gate)
+	if err := <-addDone; err != nil {
+		t.Fatal(err)
+	}
+	p.m.lateWG.Wait()
+	p3.mu.Lock()
+	n := len(p3.rtLabels)
+	p3.mu.Unlock()
+	if n != 0 || p.m.restoredRtLabels(&moved) != nil {
+		t.Fatalf("another generation took the labels: %d, cache %+v", n, p.m.restoredRtLabels(&moved))
 	}
 }
 

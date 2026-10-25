@@ -92,6 +92,9 @@ type Manager struct {
 	// removed and whose owed label may still be held somewhere (a
 	// removal's bookkeeping skipped or interrupted). See rtTombstone.
 	rtTombs map[int64]map[string]rtTomb
+	// lateWG counts late handoff adoptions (poller.adoptLate) so Stop can
+	// wait for them before its final label flush.
+	lateWG sync.WaitGroup
 	// watchMu serialises SetAppWatch's read-modify-write of a box's watch
 	// list: two toggles at once would otherwise each save a list missing
 	// the other's change.
@@ -285,6 +288,9 @@ func (m *Manager) Stop() {
 	// shutdown, only by a hard kill of the process (documented).
 	m.jobWG.Wait()
 	m.jobCancel()
+	// A handoff whose predecessor's operation outlived the wait delivers
+	// its labels late: wait for those too (bounded by their own contexts).
+	m.lateWG.Wait()
 	// A job that ended after the flush above may have left an erase
 	// tombstone (its bookkeeping skipped): settle it into the saved copy
 	// and write that, so the restart does not restore the dead label.
@@ -304,9 +310,16 @@ func (m *Manager) Stop() {
 // the edit lock is not free in time, or cut by a failure, and the owed
 // label would otherwise survive up to its 24-hour expiry and be applied to
 // a re-added torrent). Scoped to the box's generation, like the labels.
+// Once the forget is complete on the current owner the tombstone is
+// settled, not dropped: it stays, as the record of when the hash was
+// erased, until it expires, so a predecessor client's snapshot taken
+// before that erase and delivered after it (adoptLate) is still refused
+// (fred on PR 123: an erase barrier until older handoffs can no longer
+// arrive).
 type rtTomb struct {
-	gen string
-	at  time.Time
+	gen     string
+	at      time.Time
+	settled bool
 }
 
 // rtTombTTL bounds a tombstone's life: an owed label expires in 24 hours
@@ -317,9 +330,10 @@ const rtTombTTL = 24 * time.Hour
 const rtTombMax = 1000
 
 // rtTombstone records that hash was erased on the box of generation gen.
-// Every path that forgets a label records it first, and removes it only
+// Every path that forgets a label records it first, and settles it only
 // once the forget is known complete on the box's current owner; a poll
-// settles whatever is left (settleRtTombs).
+// settles whatever is left (settleRtTombs). Recording again (the hash was
+// re-added and erased once more) reopens it with the new time.
 func (m *Manager) rtTombstone(id int64, gen, hash string) {
 	hash = strings.ToUpper(hash)
 	m.leaseMu.Lock()
@@ -341,21 +355,21 @@ func (m *Manager) rtTombstone(id int64, gen, hash string) {
 	tombs[hash] = rtTomb{gen: gen, at: time.Now()}
 }
 
-// rtUntomb drops the tombstone for hash: its label is known gone.
-func (m *Manager) rtUntomb(id int64, hash string) {
+// rtSettleTomb marks the tombstone for hash settled: its label is known
+// gone from the current owner. The erase stays on record (rtErasedSince).
+func (m *Manager) rtSettleTomb(id int64, hash string) {
 	m.leaseMu.Lock()
 	defer m.leaseMu.Unlock()
-	if tombs := m.rtTombs[id]; tombs != nil {
-		delete(tombs, strings.ToUpper(hash))
-		if len(tombs) == 0 {
-			delete(m.rtTombs, id)
-		}
+	hash = strings.ToUpper(hash)
+	if t, ok := m.rtTombs[id][hash]; ok {
+		t.settled = true
+		m.rtTombs[id][hash] = t
 	}
 }
 
-// rtTombList returns the live tombstones of the box for generation gen,
-// dropping expired ones and those of another generation (a moved record)
-// on the way.
+// rtTombList returns the unsettled tombstones of the box for generation
+// gen, dropping expired ones and those of another generation (a moved
+// record) on the way.
 func (m *Manager) rtTombList(id int64, gen string) []string {
 	m.leaseMu.Lock()
 	defer m.leaseMu.Unlock()
@@ -370,7 +384,9 @@ func (m *Manager) rtTombList(id int64, gen string) []string {
 			delete(tombs, h)
 			continue
 		}
-		out = append(out, h)
+		if !t.settled {
+			out = append(out, h)
+		}
 	}
 	if len(tombs) == 0 {
 		delete(m.rtTombs, id)
@@ -379,12 +395,22 @@ func (m *Manager) rtTombList(id int64, gen string) []string {
 	return out
 }
 
-// rtTombed reports whether hash carries a live tombstone for gen.
+// rtTombed reports whether hash carries a live, unsettled tombstone for gen.
 func (m *Manager) rtTombed(id int64, gen, hash string) bool {
 	m.leaseMu.Lock()
 	defer m.leaseMu.Unlock()
 	t, ok := m.rtTombs[id][strings.ToUpper(hash)]
-	return ok && t.gen == gen && time.Since(t.at) <= rtTombTTL
+	return ok && !t.settled && t.gen == gen && time.Since(t.at) <= rtTombTTL
+}
+
+// rtErasedSince reports whether hash was erased on the box of generation
+// gen at or after since, settled or not: the barrier a late snapshot taken
+// at since must not cross.
+func (m *Manager) rtErasedSince(id int64, gen, hash string, since time.Time) bool {
+	m.leaseMu.Lock()
+	defer m.leaseMu.Unlock()
+	t, ok := m.rtTombs[id][strings.ToUpper(hash)]
+	return ok && t.gen == gen && !t.at.Before(since) && time.Since(t.at) <= rtTombTTL
 }
 
 // ErrShuttingDown refuses a destructive job once Stop began.
