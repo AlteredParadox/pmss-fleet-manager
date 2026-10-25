@@ -1436,7 +1436,7 @@ function addQbtFields(f, edit) {
 function addRtFields(f) {
   const det = S.add.detect?.facts?.rt_endpoint;
   return `<label class="check"><input type="checkbox" data-f="rt_enabled" ${f.rt_enabled ? 'checked' : ''}> monitor rTorrent via its SCGI socket (over SSH; the Pulsed Media client, started by the panel)</label>
-        <label class="f">SCGI endpoint <span class="hint">(blank = from ~/.rtorrent.rc${det ? `; detected ${esc(det)}` : ''}; unix:/path or tcp:127.0.0.1:port)</span><input data-f="rt_scgi" value="${esc(f.rt_scgi || '')}" placeholder="unix:/home/${esc(f.user || 'user')}/.rtorrent.socket" spellcheck="false"></label>`;
+        <label class="f">SCGI endpoint <span class="hint">(blank = from ~/.rtorrent.rc${det ? `; detected ${esc(det)}` : ''}; unix:/path recommended. tcp:127.0.0.1:port is unauthenticated: on a shared host every tenant can reach it)</span><input data-f="rt_scgi" value="${esc(f.rt_scgi || '')}" placeholder="unix:/home/${esc(f.user || 'user')}/.rtorrent.socket" spellcheck="false"></label>`;
 }
 function addDockerDuFields(f) {
   return `<label class="check"><input type="checkbox" data-f="docker_enabled" ${f.docker_enabled ? 'checked' : ''}> monitor rootless docker containers</label>

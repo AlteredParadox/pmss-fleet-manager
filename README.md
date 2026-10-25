@@ -338,10 +338,16 @@ confirm.
 A box can run rTorrent beside or instead of qBittorrent; both are monitored
 when enabled under edit. The dashboard talks to rTorrent over its SCGI
 unix socket (`~/.rtorrent.socket`, read from `~/.rtorrent.rc` and
-`~/.rtorrent.rc.custom`, or set per box as `unix:/path` or
-`tcp:127.0.0.1:port`), through the SSH connection as the tenant, so no
-password is involved: the socket's permissions decide who may connect. The
-client is PMSS's own, started by the panel's watchdog, so there is no
+`~/.rtorrent.rc.custom`, or set per box as `unix:/path`), through the SSH
+connection as the tenant, so no password is involved: the socket's
+permissions decide who may connect. A loopback TCP endpoint
+(`tcp:127.0.0.1:port`) is accepted too, but SCGI has no authentication of
+its own and on a shared host every tenant can reach the same loopback port:
+anyone on the box could then drive your rTorrent. The dashboard checks that
+the port is owned by your account before it connects, which keeps it from
+talking to an impostor, but it cannot keep others from talking to your
+rTorrent. Keep the unix socket unless the host isolates loopback between
+tenants. The client is PMSS's own, started by the panel's watchdog, so there is no
 install, start or stop for it here; the tenant's `~/.rtorrentDisable`
 marker is shown and silences the alert. On a box running both clients the
 torrents tab groups the torrents by client, each group with its own counts
