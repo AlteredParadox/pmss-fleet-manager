@@ -99,8 +99,12 @@ func ValidRtEndpoint(ep string) bool {
 // wherever the transport is closed). A unix socket is dialed as-is: the
 // kernel enforces who may connect inside the home. A loopback port goes
 // through verifiedDial like the WebUI, since on a shared host a co-tenant
-// can bind a free port.
-func (p *poller) rtClient(cli *sshx.Client, ep string) (*rtorrent.Client, error) {
+// can bind a free port. A client being replaced is retired first, the same
+// way a teardown retires it (dropRtLocked): the labels it owes move to the
+// successor only once its operation in flight is complete, and a caller
+// still holding it gets rtorrent.ErrRetired rather than a client the box
+// no longer listens to (daybreak blue re-review of PR 123).
+func (p *poller) rtClient(ctx context.Context, cli *sshx.Client, ep string) (*rtorrent.Client, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.rt != nil && p.rtEP == ep && p.rtSSH == cli {
@@ -110,18 +114,34 @@ func (p *poller) rtClient(cli *sshx.Client, ep string) (*rtorrent.Client, error)
 	if err != nil {
 		return nil, err
 	}
+	if p.rt != nil {
+		p.dropRtLocked(ctx)
+	}
 	nc := rtorrent.New(dial)
 	// Labels still owed to magnets (see rtorrent.Client.Pending) belong to
-	// the box, not to one client object: carry them over from the client
-	// being replaced, or from the cache on the first client after a start.
-	if p.rt != nil {
-		nc.Restore(p.rt.Pending())
-	} else {
-		nc.Restore(p.rtLabels)
-		p.rtLabels = nil
-	}
+	// the box, not to one client object: the successor takes the saved
+	// copy, from the retired client or from the cache on the first client
+	// after a start, and is the authority from here (the copy is cleared).
+	nc.Restore(p.rtLabels)
+	p.rtLabels = nil
 	p.rt, p.rtEP, p.rtSSH = nc, ep, cli
 	return p.rt, nil
+}
+
+// onRetired runs fn against cli and, when that found the client retired by
+// a handoff since the caller resolved it, once more against the box's
+// current client (daybreak blue re-review of PR 123: a holder of an old
+// pointer must resolve the current client, not fail or act on the old).
+func (p *poller) onRetired(ctx context.Context, cli *rtorrent.Client, fn func(*rtorrent.Client) error) error {
+	err := fn(cli)
+	if !errors.Is(err, rtorrent.ErrRetired) {
+		return err
+	}
+	cur, _, _, rerr := p.rtReady(ctx)
+	if rerr != nil {
+		return rerr
+	}
+	return fn(cur)
 }
 
 // rtDialer builds the SCGI dialer for ep over the transport cli (or the
@@ -190,24 +210,75 @@ func (p *poller) dropRtLocked(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	p.rtEpoch++
 	rctx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 	owed, err := cli.Retire(rctx)
 	if err != nil {
-		owed = cli.Pending() // the operation did not finish in time: what is there now
+		// The operation in flight outlived the wait. The client is retired
+		// all the same (nothing new starts on it), so its owed set is final
+		// once that operation ends: it is collected then and adopted by
+		// whoever owns the box's labels by that time. Nothing is read from
+		// the client meanwhile: a snapshot now could miss a label the
+		// operation is about to remember, or keep one it is about to forget.
+		go p.adoptLate(cli)
+		return
 	}
-	if len(owed) > 0 {
-		p.rtLabels = append(p.rtLabels[:0:0], owed...)
+	// A new, non-nil slice even when nothing is owed: an empty snapshot is
+	// a fact to persist (the labels settled), not an absence of knowledge.
+	p.rtLabels = append([]rtorrent.PendingLabel{}, owed...)
+}
+
+// adoptLate finishes the retirement of cli after dropRtLocked could not
+// wait for it, and hands what it still owed to the box's current client, or
+// to the saved copy when there is none; hashes erased meanwhile (tombstoned)
+// are not revived, and a label set since is never overwritten (Adopt).
+func (p *poller) adoptLate(cli *rtorrent.Client) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*apiTimeout)
+	defer cancel()
+	owed, err := cli.Retire(ctx)
+	if err != nil {
+		p.m.log.Warn("rtorrent handoff: the retired client's operation did not end; its owed labels are lost", "box", p.box.Name, "err", err)
+		return
 	}
-	p.rtEpoch++
+	gen := p.generation()
+	kept := make([]rtorrent.PendingLabel, 0, len(owed))
+	for _, l := range owed {
+		if !p.m.rtTombed(p.box.ID, gen, l.Hash) {
+			kept = append(kept, l)
+		}
+	}
+	p.mu.Lock()
+	switch {
+	case p.rt != nil:
+		p.rt.Adopt(kept)
+	default:
+		have := map[string]bool{}
+		for _, l := range p.rtLabels {
+			have[strings.ToUpper(l.Hash)] = true
+		}
+		merged := append([]rtorrent.PendingLabel{}, p.rtLabels...)
+		for _, l := range kept {
+			if !have[strings.ToUpper(l.Hash)] {
+				merged = append(merged, l)
+			}
+		}
+		p.rtLabels = merged
+	}
+	p.mu.Unlock()
+	p.recordRtLabels(ctx)
 }
 
 // forgetRtLabel drops any label owed to hash from this poller's client and
 // its saved copy, and persists the owed set when asked (only the box's
 // current poller writes the cache, so a retired one cannot overwrite
-// additions made since).
-func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
+// additions made since). It records an erase tombstone for the hash first
+// and reports whether the forget is known complete here; the caller lifts
+// the tombstone when it is complete on the box's current owner, else a
+// poll settles it (settleRtTombs).
+func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) (settled bool) {
 	hash = strings.ToUpper(hash)
+	p.m.rtTombstone(p.box.ID, p.generation(), hash)
 	// The saved copy and the client are two homes for the same label, and a
 	// reconnect (dropRtLocked) moves it from the client to the copy at any
 	// moment, including while Forget below waits for the client's operation
@@ -231,10 +302,14 @@ func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
 		cli, epoch := p.rt, p.rtEpoch
 		p.mu.Unlock()
 		if cli == nil {
+			settled = true // the saved copy was the only home
 			break
 		}
 		// Outside p.mu: Forget waits for the client's operation token.
 		if err := cli.Forget(ctx, hash); err != nil {
+			if errors.Is(err, rtorrent.ErrRetired) && ctx.Err() == nil {
+				continue // a handoff retired it under us: the successor is current now
+			}
 			p.m.log.Warn("forget rtorrent label", "box", p.box.Name, "err", err)
 			break
 		}
@@ -243,6 +318,7 @@ func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
 		p.mu.Unlock()
 		if stable || ctx.Err() != nil {
 			if stable {
+				settled = true
 				// One last strip: a handoff cannot have happened, but the
 				// copy is cheap to clear again.
 				p.mu.Lock()
@@ -263,6 +339,38 @@ func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
 	if persist {
 		p.recordRtLabels(ctx)
 	}
+	return settled
+}
+
+// settleRtTombs forgets the labels still owed to tombstoned hashes (a
+// removal whose bookkeeping was skipped or cut) and lifts the tombstones
+// it settled, then persists. Serialised with adds and removals through the
+// box's mutation lease: a caller that holds it says so, a poll takes it
+// for a moment and leaves the work to the next poll if a mutation holds it
+// (the one that left the tombstone, perhaps). A poll's settle is also
+// serialised with edits (stopAndWait waits for it), so a label it drops
+// cannot be restored by an edit's replacement poller.
+func (p *poller) settleRtTombs(ctx context.Context, leased bool) {
+	gen := p.generation()
+	if len(p.m.rtTombList(p.box.ID, gen)) == 0 {
+		return
+	}
+	if !leased {
+		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		release, err := p.m.rtLease(p.box.ID).Acquire(lctx)
+		cancel()
+		if err != nil {
+			return
+		}
+		defer release()
+	}
+	// Re-read under the lease: an add may have settled and lifted some.
+	for _, h := range p.m.rtTombList(p.box.ID, gen) {
+		if p.forgetRtLabel(ctx, h, false) {
+			p.m.rtUntomb(p.box.ID, h)
+		}
+	}
+	p.recordRtLabels(ctx)
 }
 
 // rtLabelsCacheKind is the box_cache kind holding the labels owed to
@@ -306,11 +414,20 @@ func (p *poller) recordRtLabels(ctx context.Context) {
 	case cli != nil:
 		labels = cli.Pending()
 	case saved != nil:
-		labels = saved
+		labels = saved // an empty saved copy is known-empty and is written as such
 	default:
 		return
 	}
-	c := rtLabelsCache{Generation: p.generation(), Labels: labels}
+	// Never persist a label whose torrent was erased: a tombstone outlives
+	// a skipped cleanup, the written copy must not.
+	gen := p.generation()
+	kept := make([]rtorrent.PendingLabel, 0, len(labels))
+	for _, l := range labels {
+		if !p.m.rtTombed(p.box.ID, gen, l.Hash) {
+			kept = append(kept, l)
+		}
+	}
+	c := rtLabelsCache{Generation: gen, Labels: kept}
 	if err := p.m.st.SetCache(ctx, p.box.ID, rtLabelsCacheKind, c); err != nil {
 		p.m.log.Warn("cache rtorrent labels", "box", p.box.Name, "err", err)
 	}
@@ -375,25 +492,32 @@ func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot)
 			return
 		}
 	}
-	cli, err := p.rtClient(sshc, rs.Endpoint)
+	cli, err := p.rtClient(ctx, sshc, rs.Endpoint)
 	if err != nil {
 		rs.Error = describeErr(err)
 		return
 	}
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
-	stats, err := cli.Stats(actx)
+	// Labels left owed by a removal whose bookkeeping was skipped go before
+	// the listing applies any label.
+	p.settleRtTombs(actx, false)
+	var stats *rtorrent.Stats
+	var list []rtorrent.Torrent
+	err = p.onRetiredPoll(actx, &cli, sshc, rs.Endpoint, func(c *rtorrent.Client) error {
+		var err error
+		if stats, err = c.Stats(actx); err != nil {
+			return err
+		}
+		list, err = c.Torrents(actx)
+		return err
+	})
 	if err != nil {
 		rs.Error = describeErr(err)
 		return
 	}
 	rs.Version, rs.Library = clip(stats.Version, 32), clip(stats.Library, 32)
 	rs.ListenPort, rs.DHT = stats.ListenPort, stats.DHT
-	list, err := cli.Torrents(actx)
-	if err != nil {
-		rs.Error = describeErr(err)
-		return
-	}
 	rs.Reachable = true
 	// A socket that answers is a running client, whatever ps said.
 	rs.ProcessUp = true
@@ -450,11 +574,15 @@ func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot)
 
 // rtRemoveTimeout bounds the rm of a torrent's data on the box, as a fresh
 // deadline started after the erase and its bookkeeping: a large tree on a
-// slow disk takes a while. rtRemoveJobTimeout bounds the whole detached
-// job (connection, erase, bookkeeping, then the rm with its own budget).
+// slow disk takes a while. rtRemoveSetupTimeout bounds what comes before
+// it in the detached job: the connection, the erase and the label
+// bookkeeping (including the wait for the edit lock). The two run one
+// after the other, so a remove-with-data can take up to their sum, about
+// 225 seconds, before the dashboard gives up on it; the request that
+// started it is answered as soon as its own deadline passes.
 const (
-	rtRemoveTimeout    = 75 * time.Second
-	rtRemoveJobTimeout = 150 * time.Second
+	rtRemoveTimeout      = 75 * time.Second
+	rtRemoveSetupTimeout = 150 * time.Second
 )
 
 // RtActionRemoveData is the one torrent action rTorrent has no command
@@ -501,11 +629,26 @@ func (p *poller) rtReady(ctx context.Context) (*rtorrent.Client, *sshx.Client, B
 			}
 		}
 	}
-	cli, err := p.rtClient(sshc, st.Rt.Endpoint)
+	cli, err := p.rtClient(ctx, sshc, st.Rt.Endpoint)
 	if err != nil {
 		return nil, nil, st, err
 	}
 	return cli, sshc, st, nil
+}
+
+// onRetiredPoll is onRetired for the poll, which resolves clients through
+// rtClient rather than the Ready gate (the state is being built).
+func (p *poller) onRetiredPoll(ctx context.Context, cli **rtorrent.Client, sshc *sshx.Client, ep string, fn func(*rtorrent.Client) error) error {
+	err := fn(*cli)
+	if !errors.Is(err, rtorrent.ErrRetired) {
+		return err
+	}
+	cur, rerr := p.rtClient(ctx, sshc, ep)
+	if rerr != nil {
+		return rerr
+	}
+	*cli = cur
+	return fn(cur)
 }
 
 // sshRunner adapts a possibly nil SSH client to scriptRunner (a nil
@@ -538,7 +681,18 @@ func (p *poller) rtTorrentAction(ctx context.Context, hash, action string) error
 		return p.rtRemoveData(ctx, cli, sshRunner(sshc), st.Rt.Endpoint, st.Rt.DataDir, hash, release)
 	}
 	defer release()
-	return cli.Action(actx, action, hash)
+	if err := p.onRetired(actx, cli, func(c *rtorrent.Client) error { return c.Action(actx, action, hash) }); err != nil {
+		return err
+	}
+	if action == rtorrent.ActionRemove {
+		// A removed torrent is owed nothing: forget the label now and
+		// persist, so a stop or edit before the next poll does not carry
+		// it into a restart (daybreak blue re-review of PR 123); the
+		// tombstone is lifted by the next poll, which runs before an edit
+		// can restore anything.
+		p.forgetRtLabel(actx, hash, true)
+	}
+	return nil
 }
 
 // scriptRunner runs a shell script on the box: sshx.Client, or a fake in
@@ -581,8 +735,8 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 	}
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
-	base, err := cli.BasePath(actx, hash)
-	if err != nil {
+	var base string
+	if err := p.onRetired(actx, cli, func(c *rtorrent.Client) (err error) { base, err = c.BasePath(actx, hash); return err }); err != nil {
 		return err
 	}
 	if base == "" {
@@ -610,7 +764,7 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 	// ends, so no other rTorrent mutation on this box runs meanwhile. The
 	// job's deadline bounds the connection, the erase and the bookkeeping;
 	// the rm then gets its own, from the job context itself.
-	res, admitted := p.m.detached(p.rmJobTimeout(), func(dctx context.Context) (err error) {
+	res, admitted := p.m.detached(p.rmSetupTimeout(), func(dctx context.Context) (err error) {
 		defer release()
 		drun, ddial, dclose, err := p.detachedTransport(dctx, ep)
 		if err != nil {
@@ -632,19 +786,33 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		// poller of the same generation (compared through each poller's
 		// synchronised view: conn pins the host key under its lock); fred
 		// and the daybreak blue re-reviews on PR 123. The lock is waited
-		// for under the job's deadline: an edit holding it past that means
-		// the bookkeeping is skipped (the next poll settles the label) and
-		// the rm still runs.
+		// for under the job's deadline. The erase tombstone comes first,
+		// before the lease can be released: should the lock not be free in
+		// time (the forget then runs here only, unverified against the
+		// current owner) or the forget be cut, the tombstone outlives this
+		// job and the next poll settles it before any label is applied or
+		// persisted, so the dead label cannot reach a re-added torrent
+		// (fred on PR 123). It is lifted only when the cleanup is known
+		// complete on the current owner.
+		gen := p.generation()
+		p.m.rtTombstone(p.box.ID, gen, hash)
 		if unlock, ok := lockWithin(dctx, &p.m.boxMu); ok {
-			p.forgetRtLabel(dctx, hash, false)
+			settled := p.forgetRtLabel(dctx, hash, false)
 			if cur := p.m.poller(p.box.ID); cur == p {
+				if settled {
+					p.m.rtUntomb(p.box.ID, hash)
+				}
 				p.recordRtLabels(dctx)
-			} else if cur != nil && cur.generation() == p.generation() {
-				cur.forgetRtLabel(dctx, hash, true)
+			} else if cur != nil && cur.generation() == gen {
+				if cur.forgetRtLabel(dctx, hash, false) && settled {
+					p.m.rtUntomb(p.box.ID, hash)
+				}
+				cur.recordRtLabels(dctx)
 			}
 			unlock()
 		} else {
-			p.m.log.Warn("rtorrent remove-with-data: the edit lock was not free in time; label bookkeeping left to the next poll", "box", p.box.Name)
+			p.forgetRtLabel(dctx, hash, false)
+			p.m.log.Warn("rtorrent remove-with-data: the edit lock was not free in time; the label is tombstoned and settled by the next poll", "box", p.box.Name)
 		}
 		// The rm gets its own, full budget from here, from the job context
 		// itself rather than this job's deadline, which the connection, the
@@ -706,13 +874,13 @@ func lockWithin(ctx context.Context, mu *sync.Mutex) (unlock func(), ok bool) {
 	}
 }
 
-// rmJobTimeout is the detached job's deadline for connection, erase and
-// bookkeeping (rtRemoveJobTimeout outside tests).
-func (p *poller) rmJobTimeout() time.Duration {
+// rmSetupTimeout is the detached job's deadline for connection, erase and
+// bookkeeping (rtRemoveSetupTimeout outside tests).
+func (p *poller) rmSetupTimeout() time.Duration {
 	if p.jobTimeout > 0 {
 		return p.jobTimeout
 	}
-	return rtRemoveJobTimeout
+	return rtRemoveSetupTimeout
 }
 
 // rtRemoveDataVars renders the script's inputs as shell-quoted assignments
@@ -762,11 +930,15 @@ func (p *poller) rtAddTorrents(ctx context.Context, req qbt.AddRequest) (rtorren
 		return rtorrent.AddResult{}, err
 	}
 	defer release()
+	// Tombstoned hashes are settled first, under the lease: a re-add of an
+	// erased hash gets the label it asks for now, not the one it had.
+	p.settleRtTombs(actx, true)
 	r := rtorrent.AddRequest{URLs: req.URLs, Label: req.Category, Stopped: req.Stopped}
 	for _, f := range req.Files {
 		r.Files = append(r.Files, f.Data)
 	}
-	res, err := cli.Add(actx, r)
+	var res rtorrent.AddResult
+	err = p.onRetired(actx, cli, func(c *rtorrent.Client) (err error) { res, err = c.Add(actx, r); return err })
 	// The labels now owed to magnets are persisted at once, whatever the
 	// outcome: a shutdown before the next poll must not lose them
 	// (daybreak blue review of PR 123).

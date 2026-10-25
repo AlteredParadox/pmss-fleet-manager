@@ -92,7 +92,7 @@ type poller struct {
 	rtSSH    *sshx.Client            // the transport rt's dialer is bound to; a new one means a new client
 	rtLabels []rtorrent.PendingLabel // owed magnet labels restored from the cache, handed to the first client
 	rtEpoch  uint64                  // bumped on every client handoff (see forgetRtLabel)
-	// jobTimeout overrides rtRemoveJobTimeout in tests.
+	// jobTimeout overrides rtRemoveSetupTimeout in tests.
 	jobTimeout time.Duration
 	dialRt     func(ep string) rtorrent.Dialer
 	// dialDetached is the test hook for the destructive phase's own

@@ -102,6 +102,15 @@ func (f *fakeSCGI) serve(c net.Conn) {
 	reply := f.reply
 	f.mu.Unlock()
 	resp := reply(method, s)
+	if method == "d.custom1.set" && resp == xmlResp(i8(0)) {
+		// Real rTorrent answers a string variable's setter with the string it
+		// assigned (fred on PR 122): a reply that did not care gets that.
+		if i := strings.LastIndex(s, "<string>"); i >= 0 {
+			if j := strings.Index(s[i:], "</string>"); j > 0 {
+				resp = xmlResp(s[i : i+j+len("</string>")])
+			}
+		}
+	}
 	fmt.Fprintf(c, "Status: 200 OK\r\nContent-Type: text/xml\r\nContent-Length: %d\r\n\r\n%s", len(resp), resp)
 }
 
@@ -380,24 +389,24 @@ func TestRtClientFollowsTransport(t *testing.T) {
 	p, _ := rtFixture(t, f)
 	p.dialRt = nil
 	// Without a transport and without the hook there is nothing to dial.
-	if _, err := p.rtClient(nil, "unix:/x"); err == nil {
+	if _, err := p.rtClient(context.Background(), nil, "unix:/x"); err == nil {
 		t.Fatal("nil transport")
 	}
 	p.dialRt = f.dialer
 	a := &sshx.Client{}
-	c1, err := p.rtClient(a, "unix:/x")
+	c1, err := p.rtClient(context.Background(), a, "unix:/x")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c2, _ := p.rtClient(a, "unix:/x"); c2 != c1 {
+	if c2, _ := p.rtClient(context.Background(), a, "unix:/x"); c2 != c1 {
 		t.Fatal("same transport and endpoint: same client")
 	}
 	// A reconnected transport must not reuse a client whose dialer holds the
 	// closed one (Codex P1 on PR 123); so must a changed endpoint.
-	if c3, _ := p.rtClient(&sshx.Client{}, "unix:/x"); c3 == c1 {
+	if c3, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x"); c3 == c1 {
 		t.Fatal("new transport must rebuild the client")
 	}
-	if c4, _ := p.rtClient(a, "unix:/y"); c4 == c1 {
+	if c4, _ := p.rtClient(context.Background(), a, "unix:/y"); c4 == c1 {
 		t.Fatal("new endpoint must rebuild the client")
 	}
 	// The teardown paths drop the cache.
@@ -410,16 +419,16 @@ func TestRtClientFollowsTransport(t *testing.T) {
 	// transport; a malformed or foreign endpoint is refused.
 	p.dialRt = nil
 	tr := &sshx.Client{}
-	if _, err := p.rtClient(tr, "unix:/home/u/.rtorrent.socket"); err != nil {
+	if _, err := p.rtClient(context.Background(), tr, "unix:/home/u/.rtorrent.socket"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.rtClient(tr, "tcp:127.0.0.1:5000"); err != nil {
+	if _, err := p.rtClient(context.Background(), tr, "tcp:127.0.0.1:5000"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.rtClient(tr, "tcp:127.0.0.1:x"); err == nil {
+	if _, err := p.rtClient(context.Background(), tr, "tcp:127.0.0.1:x"); err == nil {
 		t.Fatal("bad port")
 	}
-	if _, err := p.rtClient(tr, "http://x"); err == nil {
+	if _, err := p.rtClient(context.Background(), tr, "http://x"); err == nil {
 		t.Fatal("unknown scheme")
 	}
 }
@@ -631,11 +640,11 @@ func TestRtPendingLabelsSurviveTransportAndRestart(t *testing.T) {
 	// rebuilt for a new transport inherits what is still owed.
 	owed := []rtorrent.PendingLabel{{Hash: rtHashA, Label: "tv", Until: time.Now().Add(time.Hour)}}
 	p.rtLabels = owed
-	c1, err := p.rtClient(&sshx.Client{}, "unix:/x")
+	c1, err := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	if err != nil || len(c1.Pending()) != 1 || p.rtLabels != nil {
 		t.Fatalf("%v %d", err, len(c1.Pending()))
 	}
-	c2, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	c2, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	if c2 == c1 || len(c2.Pending()) != 1 {
 		t.Fatal("rebuilt client must inherit the owed labels")
 	}
@@ -646,7 +655,7 @@ func TestRtPendingLabelsSurviveTransportAndRestart(t *testing.T) {
 	if p.rt != nil || len(p.rtLabels) != 1 {
 		t.Fatalf("teardown must keep the owed labels: %+v", p.rtLabels)
 	}
-	c3, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	c3, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	if len(c3.Pending()) != 1 || p.rtLabels != nil {
 		t.Fatal("client after a reconnect must inherit the owed labels")
 	}
@@ -676,7 +685,7 @@ func TestRtPendingLabelsSurviveTransportAndRestart(t *testing.T) {
 	if got := p.m.restoredRtLabels(p.box); len(got) != 1 {
 		t.Fatalf("saved labels not persisted while the client is down: %+v", got)
 	}
-	c2, _ = p.rtClient(&sshx.Client{}, "unix:/x") // takes them back
+	c2, _ = p.rtClient(context.Background(), &sshx.Client{}, "unix:/x") // takes them back
 	// Once settled, the cache holds an empty list, not the old entry.
 	c2.Restore(nil)
 	p.mu.Lock()
@@ -722,7 +731,7 @@ func TestRtLabelsHandedOverOnEdit(t *testing.T) {
 	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
 		t.Fatal(err)
 	}
-	c, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	c, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	c.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "tv", Until: time.Now().Add(time.Hour)}})
 	// What UpdateBox does after stopAndWait: the client is torn down and the
 	// owed labels recorded for the unchanged record.
@@ -960,7 +969,7 @@ func TestRtRemoveDataOwnTransport(t *testing.T) {
 		return rtReplies(m, b)
 	}
 	p, _ := rtFixture(t, f)
-	pollerCli, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	pollerCli, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	pollerCli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "tv", Until: time.Now().Add(time.Hour)}})
 	check := &localRunner{home: home} // the poller's transport: used for the check only
 	detached := &localRunner{home: home, gate: make(chan struct{}), block: true}
@@ -989,7 +998,9 @@ func TestRtRemoveDataOwnTransport(t *testing.T) {
 	if len(pollerCli.Pending()) != 0 {
 		t.Fatal("the poller's client must forget the removed torrent's label")
 	}
-	// A transport that cannot be opened changes nothing.
+	// A transport that cannot be opened changes nothing. (closeConns retired
+	// the poller's client: the current one is resolved again.)
+	pollerCli, _ = p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
 		return nil, nil, nil, errors.New("ssh: dial failed")
 	}
@@ -1055,7 +1066,7 @@ func TestRtRemoveDataForgetsLabelOnCurrentOwner(t *testing.T) {
 	p.m.mu.Lock()
 	p.m.pollers[p.box.ID] = p
 	p.m.mu.Unlock()
-	cli, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	cli, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
 	run := &localRunner{home: home}
 	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
@@ -1089,7 +1100,7 @@ func TestRtRemoveDataForgetsLabelOnCurrentOwner(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("replacement still owes %d", n)
 	}
-	c2, _ := p2.rtClient(&sshx.Client{}, "unix:/x")
+	c2, _ := p2.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	if len(c2.Pending()) != 0 || len(p.m.restoredRtLabels(&box)) != 0 {
 		t.Fatalf("client %d cache %d", len(c2.Pending()), len(p.m.restoredRtLabels(&box)))
 	}
@@ -1142,7 +1153,7 @@ func TestRtRemoveDataCleanupSerialisedWithEdit(t *testing.T) {
 	m.mu.Lock()
 	m.pollers[p.box.ID] = p
 	m.mu.Unlock()
-	cli, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	cli, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
 	run := &localRunner{home: home}
 	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
@@ -1200,6 +1211,7 @@ func TestRtRemoveDataCleanupSerialisedWithEdit(t *testing.T) {
 		}
 		return rtReplies(m, b)
 	}
+	cli, _ = p.rtClient(context.Background(), &sshx.Client{}, "unix:/x") // the old one was retired by closeConns
 	if err := p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1370,7 +1382,7 @@ func TestRtLeaseSerialisesMutations(t *testing.T) {
 	// Give the poller's client a transport-free path for the check: the
 	// sshc is nil under the dial hook, so hand the check runner in by
 	// running rtRemoveData directly with the lease taken as the action does.
-	cli, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	cli, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	release, err := p.m.rtLease(p.box.ID).Acquire(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1461,7 +1473,7 @@ func TestForgetRtLabelSurvivesReconnect(t *testing.T) {
 	f := newFakeSCGI(t)
 	f.reply = rtReplies
 	p, _ := rtFixture(t, f)
-	c1, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	c1, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	c1.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
 	// Keep c1 busy with a real operation (a listing held inside the fake):
 	// the forget on it has to wait.
@@ -1488,7 +1500,7 @@ func TestForgetRtLabelSurvivesReconnect(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	close(gate)
 	<-closed
-	c2, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	c2, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -1518,7 +1530,7 @@ func TestHandoffWaitsForInFlightAdd(t *testing.T) {
 		return rtReplies(m, b)
 	}
 	p, _ := rtFixture(t, f)
-	c1, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	c1, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	addDone := make(chan error, 1)
 	go func() {
 		_, err := c1.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Label: "tv"})
@@ -1545,7 +1557,7 @@ func TestHandoffWaitsForInFlightAdd(t *testing.T) {
 	}
 	// Mirror: a remove paused after its erase; the handoff must not keep it.
 	gate = make(chan struct{})
-	c2, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	c2, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	if len(c2.Pending()) != 1 {
 		t.Fatal("fixture: the new client should hold the label")
 	}
@@ -1587,9 +1599,17 @@ func TestPostEraseLockIsBounded(t *testing.T) {
 		}
 		return rtReplies(m, b)
 	}
-	p, _ := rtFixture(t, f)
+	p, snap := rtFixture(t, f)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
+	p.m.mu.Lock()
+	p.m.pollers[p.box.ID] = p
+	p.m.mu.Unlock()
 	p.jobTimeout = 500 * time.Millisecond // the whole setup-and-bookkeeping budget
-	cli := rtorrent.New(f.dialer(""))
+	cli, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
+	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
 	var rmDeadline time.Duration
 	run := &deadlineRunner{inner: &localRunner{home: home}, onDelete: func(ctx context.Context) {
 		if dl, ok := ctx.Deadline(); ok {
@@ -1599,14 +1619,56 @@ func TestPostEraseLockIsBounded(t *testing.T) {
 	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
 		return run, f.dialer(ep), func() {}, nil
 	}
-	// An edit holds the lock for longer than the job's deadline.
+	// An edit holds the lock for longer than the job's deadline; inside it,
+	// the poller is torn down and recorded and a replacement built with the
+	// restored label (fred on PR 123: the skipped cleanup must still not
+	// let that label reach a re-added torrent).
 	p.m.boxMu.Lock()
+	p.closeConns()
+	p.recordRtLabels(context.Background())
+	box := *p.box
+	p2 := newPoller(p.m, &box)
+	p2.dialRt = f.dialer
+	p2.rtLabels = p.m.restoredRtLabels(&box)
+	if len(p2.rtLabels) != 1 {
+		t.Fatalf("fixture: the replacement should restore the label: %+v", p2.rtLabels)
+	}
+	cli, _ = p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
 	start := time.Now()
 	err := p.rtRemoveData(context.Background(), cli, run.inner, "unix:/x", data, rtHashA, nil)
 	took := time.Since(start)
-	p.m.boxMu.Unlock()
 	if err != nil {
 		t.Fatalf("the deletion must still run: %v", err)
+	}
+	// The edit publishes the replacement and ends.
+	p.m.mu.Lock()
+	p.m.pollers[box.ID] = p2
+	p.m.mu.Unlock()
+	p.m.boxMu.Unlock()
+	if !p.m.rtTombed(box.ID, p2.generation(), rtHashA) {
+		t.Fatal("the skipped cleanup must leave an erase tombstone")
+	}
+	// The replacement's first poll settles it before applying any label:
+	// nothing owed, nothing persisted, tombstone lifted.
+	var st BoxState
+	p2.pollRt(context.Background(), &st, snap)
+	if st.Rt.Error != "" {
+		t.Fatal(st.Rt.Error)
+	}
+	c2, _ := p2.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
+	if len(c2.Pending()) != 0 || len(p.m.restoredRtLabels(&box)) != 0 || len(p.m.rtTombList(box.ID, p2.generation())) != 0 {
+		t.Fatalf("pending %d cache %d tombs %d", len(c2.Pending()), len(p.m.restoredRtLabels(&box)), len(p.m.rtTombList(box.ID, p2.generation())))
+	}
+	// Re-adding the hash unlabelled stays unlabelled.
+	before := countCalls(f, "d.custom1.set")
+	if _, err := c2.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Torrents(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if countCalls(f, "d.custom1.set") != before {
+		t.Fatal("the re-added torrent inherited the erased torrent's label")
 	}
 	if took > 3*time.Second {
 		t.Fatalf("the job waited on the lock for %v", took)
@@ -1690,5 +1752,243 @@ func TestLockWithinNeverLeaks(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("iteration %d: the mutex leaked", i)
 		}
+	}
+}
+
+func countCalls(f *fakeSCGI, method string) int {
+	n := 0
+	for _, m := range f.called() {
+		if m == method {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRtClientReplacementRetiresOld (daybreak blue re-review 4 of PR 123,
+// finding 1): replacing the client, for a new endpoint or transport, is the
+// same terminal handoff as a teardown. The replacement waits for the old
+// client's operation in flight, takes what it owes, and the old pointer is
+// dead: an operation on it fails with ErrRetired, and a caller going
+// through the poller resolves the current client and succeeds.
+func TestRtClientReplacementRetiresOld(t *testing.T) {
+	f := newFakeSCGI(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f.reply = func(m, b string) string {
+		if m == "d.custom1.set" {
+			entered <- struct{}{}
+			<-gate
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	a := &sshx.Client{}
+	c1, _ := p.rtClient(context.Background(), a, "unix:/x")
+	addDone := make(chan error, 1)
+	go func() {
+		_, err := c1.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Label: "tv"})
+		addDone <- err
+	}()
+	<-entered
+	// An endpoint change while the Add is in flight: the replacement waits.
+	replaced := make(chan *rtorrent.Client, 1)
+	go func() { c, _ := p.rtClient(context.Background(), a, "unix:/y"); replaced <- c }()
+	select {
+	case <-replaced:
+		t.Fatal("the replacement did not wait for the operation in flight")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(gate)
+	if err := <-addDone; err != nil {
+		t.Fatal(err)
+	}
+	c2 := <-replaced
+	if c2 == c1 || !c1.Retired() || len(c2.Pending()) != 1 || c2.Pending()[0].Label != "tv" {
+		t.Fatalf("retired %v pending %+v", c1.Retired(), c2.Pending())
+	}
+	if err := c1.Action(context.Background(), rtorrent.ActionStop, rtHashA); !errors.Is(err, rtorrent.ErrRetired) {
+		t.Fatalf("old pointer: %v", err)
+	}
+	// A caller holding the old pointer goes through the poller: the current
+	// client answers.
+	readyRt(t, p, "unix:/y")
+	if err := p.onRetired(context.Background(), c1, func(c *rtorrent.Client) error { return c.Action(context.Background(), rtorrent.ActionStop, rtHashA) }); err != nil {
+		t.Fatalf("retry on the current client: %v", err)
+	}
+	// A transport change retires the same way.
+	c3, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/y")
+	if c3 == c2 || !c2.Retired() || len(c3.Pending()) != 1 {
+		t.Fatal("transport change must retire and hand over")
+	}
+}
+
+// TestRtRetireTimeoutAdoptsLate (daybreak blue re-review 4 of PR 123,
+// finding 1): when the teardown cannot wait for the old client's operation,
+// nothing is read from it (a snapshot then could be wrong either way); the
+// client is retired, its final owed set is collected once the operation
+// ends and adopted by the current client, minus hashes erased meanwhile.
+func TestRtRetireTimeoutAdoptsLate(t *testing.T) {
+	f := newFakeSCGI(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f.reply = func(m, b string) string {
+		if m == "d.custom1.set" {
+			entered <- struct{}{}
+			<-gate
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
+	c1, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
+	c1.Restore([]rtorrent.PendingLabel{{Hash: rtHashB, Label: "gone", Until: time.Now().Add(time.Hour)}})
+	addDone := make(chan error, 1)
+	go func() {
+		_, err := c1.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Label: "tv"})
+		addDone <- err
+	}()
+	<-entered
+	sctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	p.mu.Lock()
+	p.dropRtLocked(sctx)
+	unknown := p.rtLabels == nil
+	p.mu.Unlock()
+	cancel()
+	if !unknown || !c1.Retired() {
+		t.Fatalf("a timed-out handoff must read nothing from the client (saved %+v) and retire it (%v)", p.rtLabels, c1.Retired())
+	}
+	// Nothing is persisted from an unknown set either.
+	p.recordRtLabels(context.Background())
+	if _, err := p.m.st.GetCache(context.Background(), p.box.ID, rtLabelsCacheKind, &rtLabelsCache{}); err == nil {
+		t.Fatal("an unknown owed set must not be written")
+	}
+	// The successor comes up; hashB is erased meanwhile (tombstoned).
+	c2, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
+	p.m.rtTombstone(p.box.ID, p.generation(), rtHashB)
+	close(gate)
+	if err := <-addDone; err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		got := c2.Pending()
+		if len(got) == 1 && got[0].Hash == rtHashA && got[0].Label == "tv" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("late adoption did not arrive: %+v", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if saved := p.m.restoredRtLabels(p.box); len(saved) != 1 || saved[0].Hash != rtHashA {
+		t.Fatalf("the adopted set must be persisted: %+v", saved)
+	}
+}
+
+// TestRtEmptySnapshotIsAuthoritative (daybreak blue re-review 4 of PR 123,
+// finding 2): a retired client that owes nothing yields a known-empty set,
+// and that is what gets persisted, not the stale cached entry.
+func TestRtEmptySnapshotIsAuthoritative(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/x")
+	c.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "tv", Until: time.Now().Add(time.Hour)}})
+	p.recordRtLabels(context.Background())
+	if len(p.m.restoredRtLabels(p.box)) != 1 {
+		t.Fatal("fixture")
+	}
+	if err := c.Forget(context.Background(), rtHashA); err != nil {
+		t.Fatal(err)
+	}
+	p.closeConns() // retires: an empty, known snapshot
+	p.mu.Lock()
+	saved := p.rtLabels
+	p.mu.Unlock()
+	if saved == nil || len(saved) != 0 {
+		t.Fatalf("known-empty must be kept as a non-nil empty slice: %#v", saved)
+	}
+	p.recordRtLabels(context.Background())
+	var cached rtLabelsCache
+	if _, err := p.m.st.GetCache(context.Background(), p.box.ID, rtLabelsCacheKind, &cached); err != nil || len(cached.Labels) != 0 {
+		t.Fatalf("the empty set must be written: %v %+v", err, cached)
+	}
+	if len(p.m.restoredRtLabels(p.box)) != 0 {
+		t.Fatal("a restart must not restore the settled label")
+	}
+}
+
+// TestRtPlainRemovePersistsAtOnce (daybreak blue re-review 4 of PR 123,
+// finding 2): a labelled add is persisted, a plain remove through the
+// poller forgets and persists at once (no poll in between), and a restart
+// restores nothing; the tombstone it leaves is lifted by the next poll.
+func TestRtPlainRemovePersistsAtOnce(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, snap := rtFixture(t, f)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
+	readyRt(t, p, "unix:/x")
+	if _, err := p.rtAddTorrents(context.Background(), qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Category: "tv"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.m.restoredRtLabels(p.box); len(got) != 1 {
+		t.Fatalf("the add must persist its owed label: %+v", got)
+	}
+	if err := p.rtTorrentAction(context.Background(), rtHashA, rtorrent.ActionRemove); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.m.restoredRtLabels(p.box); len(got) != 0 {
+		t.Fatalf("the remove must persist at once: %+v", got)
+	}
+	// Like a restart: a new poller for the same record restores nothing.
+	p2 := newPoller(p.m, p.box)
+	p2.rtLabels = p.m.restoredRtLabels(p.box)
+	if len(p2.rtLabels) != 0 {
+		t.Fatalf("restored %+v", p2.rtLabels)
+	}
+	// The remove leaves a tombstone until a poll confirms the forget.
+	if !p.m.rtTombed(p.box.ID, p.generation(), rtHashA) {
+		t.Fatal("a remove must leave an erase tombstone")
+	}
+	var st BoxState
+	p.pollRt(context.Background(), &st, snap)
+	if st.Rt.Error != "" || len(p.m.rtTombList(p.box.ID, p.generation())) != 0 {
+		t.Fatalf("the poll must settle the tombstone: %q %v", st.Rt.Error, p.m.rtTombList(p.box.ID, p.generation()))
+	}
+	// A tombstone without a client (the box offline, or Stop's final pass)
+	// settles into the saved copy and the cache.
+	p.closeConns()
+	p.mu.Lock()
+	p.rtLabels = []rtorrent.PendingLabel{{Hash: rtHashB, Label: "x", Until: time.Now().Add(time.Hour)}}
+	p.mu.Unlock()
+	p.m.rtTombstone(p.box.ID, p.generation(), rtHashB)
+	p.settleRtTombs(context.Background(), true)
+	p.mu.Lock()
+	n := len(p.rtLabels)
+	p.mu.Unlock()
+	if n != 0 || len(p.m.restoredRtLabels(p.box)) != 0 || p.m.rtTombed(p.box.ID, p.generation(), rtHashB) {
+		t.Fatalf("saved %d cache %d tombed %v", n, len(p.m.restoredRtLabels(p.box)), p.m.rtTombed(p.box.ID, p.generation(), rtHashB))
+	}
+	// Tombstones are bounded: the cap evicts the oldest, another
+	// generation's and expired ones are purged on listing.
+	for i := 0; i < rtTombMax+5; i++ {
+		p.m.rtTombstone(p.box.ID, "g", fmt.Sprintf("%040X", i))
+	}
+	if n := len(p.m.rtTombList(p.box.ID, "g")); n != rtTombMax {
+		t.Fatalf("cap: %d", n)
+	}
+	if n := len(p.m.rtTombList(p.box.ID, "other")); n != 0 || len(p.m.rtTombList(p.box.ID, "g")) != 0 {
+		t.Fatal("another generation's listing purges the rest")
 	}
 }

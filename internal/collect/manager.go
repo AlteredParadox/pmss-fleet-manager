@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,6 +88,10 @@ type Manager struct {
 	leaseMu     sync.Mutex
 	rtLeases    map[int64]chan struct{}
 	labelGuards map[int64]*sync.Mutex
+	// rtTombs are erase tombstones per box: hashes whose torrent was
+	// removed and whose owed label may still be held somewhere (a
+	// removal's bookkeeping skipped or interrupted). See rtTombstone.
+	rtTombs map[int64]map[string]rtTomb
 	// watchMu serialises SetAppWatch's read-modify-write of a box's watch
 	// list: two toggles at once would otherwise each save a list missing
 	// the other's change.
@@ -141,7 +146,8 @@ func New(st *store.Store, log *slog.Logger) *Manager {
 		pmdb:        &pmdb.Client{URL: os.Getenv("PMSS_PMDB_URL")},
 		pmdbWakeCh:  make(chan struct{}, 1),
 		rtLeases:    map[int64]chan struct{}{},
-		labelGuards: map[int64]*sync.Mutex{}}
+		labelGuards: map[int64]*sync.Mutex{},
+		rtTombs:     map[int64]map[string]rtTomb{}}
 	m.jobCtx, m.jobCancel = context.WithCancel(context.Background())
 	def := store.DefaultSettings()
 	m.settings.Store(&def)
@@ -279,6 +285,106 @@ func (m *Manager) Stop() {
 	// shutdown, only by a hard kill of the process (documented).
 	m.jobWG.Wait()
 	m.jobCancel()
+	// A job that ended after the flush above may have left an erase
+	// tombstone (its bookkeeping skipped): settle it into the saved copy
+	// and write that, so the restart does not restore the dead label.
+	for _, p := range ps {
+		if len(m.rtTombList(p.box.ID, p.generation())) == 0 {
+			continue
+		}
+		fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		p.settleRtTombs(fctx, true) // nothing else runs for the box now
+		fcancel()
+	}
+}
+
+// rtTomb is an erase tombstone: a torrent removed from rTorrent while a
+// label may still be owed to its hash somewhere (fred and the daybreak
+// blue re-review of PR 123: a removal's label cleanup can be skipped when
+// the edit lock is not free in time, or cut by a failure, and the owed
+// label would otherwise survive up to its 24-hour expiry and be applied to
+// a re-added torrent). Scoped to the box's generation, like the labels.
+type rtTomb struct {
+	gen string
+	at  time.Time
+}
+
+// rtTombTTL bounds a tombstone's life: an owed label expires in 24 hours
+// (rtorrent.PendingLabel), so a tombstone older than that guards nothing.
+const rtTombTTL = 24 * time.Hour
+
+// rtTombMax caps the tombstones kept per box; beyond it the oldest goes.
+const rtTombMax = 1000
+
+// rtTombstone records that hash was erased on the box of generation gen.
+// Every path that forgets a label records it first, and removes it only
+// once the forget is known complete on the box's current owner; a poll
+// settles whatever is left (settleRtTombs).
+func (m *Manager) rtTombstone(id int64, gen, hash string) {
+	hash = strings.ToUpper(hash)
+	m.leaseMu.Lock()
+	defer m.leaseMu.Unlock()
+	tombs := m.rtTombs[id]
+	if tombs == nil {
+		tombs = map[string]rtTomb{}
+		m.rtTombs[id] = tombs
+	}
+	if _, ok := tombs[hash]; !ok && len(tombs) >= rtTombMax {
+		var oldest string
+		for h, t := range tombs {
+			if oldest == "" || t.at.Before(tombs[oldest].at) {
+				oldest = h
+			}
+		}
+		delete(tombs, oldest)
+	}
+	tombs[hash] = rtTomb{gen: gen, at: time.Now()}
+}
+
+// rtUntomb drops the tombstone for hash: its label is known gone.
+func (m *Manager) rtUntomb(id int64, hash string) {
+	m.leaseMu.Lock()
+	defer m.leaseMu.Unlock()
+	if tombs := m.rtTombs[id]; tombs != nil {
+		delete(tombs, strings.ToUpper(hash))
+		if len(tombs) == 0 {
+			delete(m.rtTombs, id)
+		}
+	}
+}
+
+// rtTombList returns the live tombstones of the box for generation gen,
+// dropping expired ones and those of another generation (a moved record)
+// on the way.
+func (m *Manager) rtTombList(id int64, gen string) []string {
+	m.leaseMu.Lock()
+	defer m.leaseMu.Unlock()
+	tombs := m.rtTombs[id]
+	if len(tombs) == 0 {
+		return nil
+	}
+	now := time.Now()
+	var out []string
+	for h, t := range tombs {
+		if t.gen != gen || now.Sub(t.at) > rtTombTTL {
+			delete(tombs, h)
+			continue
+		}
+		out = append(out, h)
+	}
+	if len(tombs) == 0 {
+		delete(m.rtTombs, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// rtTombed reports whether hash carries a live tombstone for gen.
+func (m *Manager) rtTombed(id int64, gen, hash string) bool {
+	m.leaseMu.Lock()
+	defer m.leaseMu.Unlock()
+	t, ok := m.rtTombs[id][strings.ToUpper(hash)]
+	return ok && t.gen == gen && time.Since(t.at) <= rtTombTTL
 }
 
 // ErrShuttingDown refuses a destructive job once Stop began.
