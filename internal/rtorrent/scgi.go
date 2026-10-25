@@ -42,6 +42,10 @@ const callTimeout = 20 * time.Second
 // ErrSCGI is a response that is not an SCGI/CGI answer at all.
 var ErrSCGI = errors.New("rtorrent: not an SCGI response")
 
+// maxHeaderLine bounds one response header line; rTorrent's are tens of
+// bytes.
+const maxHeaderLine = 8192
+
 // scgiRequest frames body as one SCGI request: a netstring of NUL-separated
 // headers (CONTENT_LENGTH first, as the protocol requires) then the body.
 func scgiRequest(body []byte) []byte {
@@ -90,7 +94,12 @@ func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
 	}
-	br := bufio.NewReaderSize(io.LimitReader(conn, maxBytes+1), 64<<10)
+	// The buffer is exactly one header line: ReadSlice refuses a longer
+	// line with ErrBufferFull the moment it is full, so a peer sending a
+	// header without a newline is cut at maxHeaderLine, not read toward the
+	// response cap (daybreak blue re-review of PR 122). Body bytes already
+	// buffered after the blank line stay in the reader for the decoder.
+	br := bufio.NewReaderSize(io.LimitReader(conn, maxBytes+1), maxHeaderLine+1)
 	if err := skipHeaders(br); err != nil {
 		err = deadlineErr(ctx, err)
 		done()
@@ -104,17 +113,14 @@ func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes
 // not start with a header line is refused rather than guessed at.
 func skipHeaders(br *bufio.Reader) error {
 	for n := 0; n < 32; n++ {
-		line, err := br.ReadString('\n')
+		raw, err := br.ReadSlice('\n')
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return ErrSCGI // closed without a header block
+			if errors.Is(err, bufio.ErrBufferFull) || errors.Is(err, io.EOF) {
+				return ErrSCGI // a line past maxHeaderLine, or closed without a header block
 			}
 			return err // the read itself failed (deadline, reset)
 		}
-		if len(line) > 8192 {
-			return ErrSCGI
-		}
-		line = strings.TrimRight(line, "\r\n")
+		line := strings.TrimRight(string(raw), "\r\n")
 		if line == "" {
 			if n == 0 {
 				return ErrSCGI

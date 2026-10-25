@@ -236,14 +236,16 @@ func (c *Client) call(ctx context.Context, maxRows, budget int, method string, p
 	return v, nil
 }
 
-// command runs a method whose answer is rTorrent's integer status (0 for a
-// command that ran); anything else is not rTorrent's answer.
+// command runs a method whose answer is rTorrent's integer status, 0 for a
+// command that ran: anything else, another integer included, is not
+// rTorrent's answer to a command and must not read as success (daybreak
+// blue re-review of PR 122).
 func (c *Client) command(ctx context.Context, method string, params ...any) error {
 	v, err := c.call(ctx, scalarRows, scalarValues, method, params...)
 	if err != nil {
 		return err
 	}
-	if v.Kind != KindInt {
+	if v.Kind != KindInt || v.Int != 0 {
 		return ErrUnexpected
 	}
 	return nil
@@ -534,6 +536,22 @@ type PendingLabel struct {
 	Until time.Time `json:"until"`
 }
 
+// Retire ends the client's use: it waits for the operation in flight, if
+// any, to complete its remote and local steps, then returns the labels
+// still owed so the caller can hand them to the next client. Without the
+// wait, a reconnect could snapshot between an Add's remote label setter and
+// its remember (losing the obligation) or between a remove's erase and its
+// forget (keeping a dead one): daybreak blue re-review of PR 123. The
+// client stays usable afterwards; its owner simply stops using it.
+func (c *Client) Retire(ctx context.Context) ([]PendingLabel, error) {
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return c.Pending(), nil
+}
+
 // Pending returns the labels still owed, for the caller to persist.
 func (c *Client) Pending() []PendingLabel {
 	c.pendMu.Lock()
@@ -632,13 +650,6 @@ func (c *Client) Forget(ctx context.Context, hash string) error {
 	defer release()
 	c.forgetLocked(hash)
 	return nil
-}
-
-// Hold takes the operation token until the returned function is called:
-// for tests of callers that must wait on a busy client. Not for production
-// use.
-func (c *Client) Hold(ctx context.Context) (func(), error) {
-	return c.acquire(ctx)
 }
 
 // forgetLocked is Forget for a caller that already holds the operation.

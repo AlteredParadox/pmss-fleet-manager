@@ -1607,3 +1607,106 @@ func TestPendingCapacityUpdates(t *testing.T) {
 		t.Fatalf("new entry eviction: %d, third %q", len(seen), seen[hashes[2]])
 	}
 }
+
+// Daybreak blue re-review of PR 122, finding 1: a header line without a
+// newline is refused at maxHeaderLine, promptly, with the connection still
+// open, instead of being read toward the response cap.
+func TestHeaderLineBounded(t *testing.T) {
+	f := newFake(t)
+	f.onRaw(func(conn net.Conn) {
+		io.WriteString(conn, "Status: 200 OK\r\nX-Pad: "+strings.Repeat("y", maxHeaderLine+100)) // no newline, no close
+		time.Sleep(3 * time.Second)
+	})
+	start := time.Now()
+	_, err := New(f.dial).Version(context.Background())
+	if !errors.Is(err, ErrSCGI) || time.Since(start) > time.Second {
+		t.Fatalf("%v after %v", err, time.Since(start))
+	}
+	// A line of exactly the limit passes; body bytes after the blank line
+	// reach the decoder intact (the buffer is sized to one header line).
+	f.onRaw(func(conn net.Conn) {
+		io.WriteString(conn, "Status: 200 OK\r\nX-Pad: "+strings.Repeat("y", maxHeaderLine-len("X-Pad: ")-1)+"\r\n\r\n"+resp(str("ok")))
+	})
+	if v, err := New(f.dial).Version(context.Background()); err != nil || v != "ok" {
+		t.Fatalf("%q %v", v, err)
+	}
+}
+
+// Finding 2: a command's status must be 0.
+func TestCommandStatusMustBeZero(t *testing.T) {
+	f := newFake(t)
+	f.on(func(m string, p []string) string { return resp(i8(1)) })
+	c := New(f.dial)
+	if err := c.Action(context.Background(), ActionStop, hashA); !errors.Is(err, ErrUnexpected) {
+		t.Fatalf("action: %v", err)
+	}
+	if got := f.methods(); len(got) != 1 {
+		t.Fatalf("the second command must not run after a bad status: %v", got)
+	}
+	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
+	if !errors.Is(err, ErrUnexpected) || res.Added != 0 {
+		t.Fatalf("add: %+v %v", res, err)
+	}
+}
+
+// Retire waits for the operation in flight: an Add paused after its label
+// setter has its label in the retired snapshot; a remove paused after its
+// erase has it gone.
+func TestRetireWaitsForOperation(t *testing.T) {
+	f := newFake(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f.on(func(m string, p []string) string {
+		if m == "d.custom1.set" || m == "d.erase" {
+			entered <- struct{}{}
+			<-gate
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	ctx := context.Background()
+	addDone := make(chan error, 1)
+	go func() {
+		_, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
+		addDone <- err
+	}()
+	<-entered
+	retired := make(chan []PendingLabel, 1)
+	go func() { l, _ := c.Retire(ctx); retired <- l }()
+	select {
+	case <-retired:
+		t.Fatal("Retire snapshotted during the Add")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(gate)
+	if err := <-addDone; err != nil {
+		t.Fatal(err)
+	}
+	if l := <-retired; len(l) != 1 || l[0].Label != "tv" {
+		t.Fatalf("retired snapshot %+v", l)
+	}
+	// The mirror: a remove paused in d.erase; the snapshot after it has
+	// nothing for the hash.
+	gate = make(chan struct{})
+	rmDone := make(chan error, 1)
+	go func() { rmDone <- c.Action(ctx, ActionRemove, hashA) }()
+	<-entered
+	go func() { l, _ := c.Retire(ctx); retired <- l }()
+	close(gate)
+	if err := <-rmDone; err != nil {
+		t.Fatal(err)
+	}
+	if l := <-retired; len(l) != 0 {
+		t.Fatalf("a removed torrent must not be in the retired snapshot: %+v", l)
+	}
+	// Retire honours its context while an operation holds the token.
+	gate = make(chan struct{})
+	go func() { c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}, Label: "x"}) }()
+	<-entered
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+	if _, err := c.Retire(cctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	close(gate)
+}
