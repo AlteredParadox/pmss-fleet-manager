@@ -255,6 +255,12 @@ func (c *Client) call(ctx context.Context, maxRows, budget int, method string, p
 	if err != nil {
 		return Value{}, err
 	}
+	// The cap is exact: a document that decoded but ran past maxBytes
+	// (trailing bytes read up to the sentinel) is refused too (daybreak blue
+	// re-review 5 of PR 122).
+	if r.over() {
+		return Value{}, ErrTooLarge
+	}
 	return v, nil
 }
 
@@ -582,7 +588,9 @@ type PendingLabel struct {
 // between a remove's erase and its forget (keeping a dead one); without the
 // terminal mark, a caller still holding the client could change state
 // after the snapshot (daybreak blue re-reviews of PR 122/123). Every later
-// operation, Restore included, fails with ErrRetired. Retire itself is
+// error-returning operation fails with ErrRetired, and Restore and Adopt
+// take nothing (they return no error; the caller resolves the current
+// client). Retire itself is
 // idempotent and returns the snapshot again.
 func (c *Client) Retire(ctx context.Context) ([]PendingLabel, error) {
 	// Retired first, then the wait: should the wait give up, the client is
@@ -776,8 +784,6 @@ func (c *Client) Forget(ctx context.Context, hash string) error {
 	c.eraseLocked(hash)
 	return nil
 }
-
-// forgetLocked is Forget for a caller that already holds the operation.
 
 // AddRequest is a batch of torrents to load: URLs (magnet or http(s), which
 // rTorrent fetches itself) and .torrent file contents. Label sets

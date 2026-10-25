@@ -1952,3 +1952,33 @@ func TestAdoptRespectsErase(t *testing.T) {
 		t.Fatalf("erased set %d, oldest kept %v", n, first)
 	}
 }
+
+// Daybreak blue re-review 5 of PR 122: the response cap is exact. A valid
+// document padded to exactly the cap passes; one byte more, even trailing
+// whitespace after a valid document, is refused.
+func TestResponseCapIsExact(t *testing.T) {
+	f := newFake(t)
+	doc := resp(str("0.9.8"))
+	hdr := "Status: 200 OK\r\nContent-Type: text/xml\r\n\r\n"
+	pad := func(total int) string {
+		body := doc + strings.Repeat(" ", total-len(hdr)-len(doc))
+		return hdr + body
+	}
+	cap_ := int64(len(hdr) + len(doc) + 64)
+	var payload string
+	f.onRaw(func(conn net.Conn) { io.WriteString(conn, payload) })
+	c := New(f.dial)
+	c.maxBytes = cap_
+	payload = pad(int(cap_))
+	if v, err := c.Version(context.Background()); err != nil || v != "0.9.8" {
+		t.Fatalf("exactly the cap: %v %q", err, v)
+	}
+	payload = pad(int(cap_) + 1)
+	if _, err := c.Version(context.Background()); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("one byte over the cap: %v", err)
+	}
+	payload = pad(int(cap_) + 500)
+	if _, err := c.Version(context.Background()); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("whitespace well past the cap: %v", err)
+	}
+}

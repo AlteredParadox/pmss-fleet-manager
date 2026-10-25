@@ -67,7 +67,7 @@ func scgiRequest(body []byte) []byte {
 // a decode error can be attributed to that deadline. The connection is
 // closed when the context ends or when the caller calls the returned
 // closer.
-func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes int64, body []byte) (io.Reader, context.Context, func(), error) {
+func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes int64, body []byte) (*responseBody, context.Context, func(), error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	conn, err := dial(ctx)
 	if err != nil {
@@ -99,14 +99,39 @@ func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes
 	// header without a newline is cut at maxHeaderLine, not read toward the
 	// response cap (daybreak blue re-review of PR 122). Body bytes already
 	// buffered after the blank line stay in the reader for the decoder.
-	br := bufio.NewReaderSize(io.LimitReader(conn, maxBytes+1), maxHeaderLine+1)
+	cr := &countingReader{r: io.LimitReader(conn, maxBytes+1)}
+	br := bufio.NewReaderSize(cr, maxHeaderLine+1)
 	if err := skipHeaders(br); err != nil {
 		err = deadlineErr(ctx, err)
 		done()
 		return nil, nil, nil, err
 	}
-	return br, ctx, done, nil
+	return &responseBody{Reader: br, cr: cr, max: maxBytes}, ctx, done, nil
 }
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// responseBody is the response reader with its byte count, so the caller
+// can tell a response that stayed within the cap from one that reached the
+// sentinel byte past it, even when the decoder was content.
+type responseBody struct {
+	*bufio.Reader
+	cr  *countingReader
+	max int64
+}
+
+// over reports whether more than the cap was read (headers included).
+func (b *responseBody) over() bool { return b.cr.n > b.max }
 
 // skipHeaders consumes the CGI-style header block ("Status: 200 OK",
 // "Content-Type: text/xml", ...) up to the blank line. A response that does
