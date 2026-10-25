@@ -251,15 +251,17 @@ func (c *Client) call(ctx context.Context, maxRows, budget int, method string, p
 	// caller's, is what cuts a stalled body, and the cut then decodes as
 	// malformed. Checked before done() cancels that context.
 	err = deadlineErr(rctx, err)
+	over := r.over()
 	done()
+	// The cap is exact: a document that decoded, as a value or as a fault,
+	// but ran past maxBytes (trailing bytes read up to the sentinel) is
+	// refused, so an oversized fault cannot steer a caller (daybreak blue
+	// re-review 5 of PR 122, fred). A deadline keeps its own attribution.
+	if over && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		return Value{}, ErrTooLarge
+	}
 	if err != nil {
 		return Value{}, err
-	}
-	// The cap is exact: a document that decoded but ran past maxBytes
-	// (trailing bytes read up to the sentinel) is refused too (daybreak blue
-	// re-review 5 of PR 122).
-	if r.over() {
-		return Value{}, ErrTooLarge
 	}
 	return v, nil
 }

@@ -1981,4 +1981,23 @@ func TestResponseCapIsExact(t *testing.T) {
 	if _, err := c.Version(context.Background()); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("whitespace well past the cap: %v", err)
 	}
+	// A fault is held to the same cap (fred on PR 122): at the cap it is the
+	// fault, one byte over it is ErrTooLarge, and an oversized unknown-method
+	// fault naming d.is_meta must not switch the listing's fallback on.
+	fault := `<?xml version="1.0" encoding="UTF-8"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>-506</i4></value></member><member><name>faultString</name><value><string>Method 'd.is_meta' not defined</string></value></member></struct></value></fault></methodResponse>`
+	padF := func(total int) string { return hdr + fault + strings.Repeat(" ", total-len(hdr)-len(fault)) }
+	capF := int64(len(hdr) + len(fault) + 64)
+	c.maxBytes = capF
+	payload = padF(int(capF))
+	var fe *Fault
+	if _, err := c.Version(context.Background()); !errors.As(err, &fe) || fe.Code != -506 {
+		t.Fatalf("fault at the cap: %v", err)
+	}
+	payload = padF(int(capF) + 1)
+	if _, err := c.Version(context.Background()); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("fault one byte over the cap: %v", err)
+	}
+	if _, err := c.Torrents(context.Background()); !errors.Is(err, ErrTooLarge) || c.noMeta.Load() {
+		t.Fatalf("an oversized d.is_meta fault must not flip the fallback: %v noMeta=%v", err, c.noMeta.Load())
+	}
 }
