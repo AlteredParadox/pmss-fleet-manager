@@ -370,7 +370,12 @@ the wrong instant cannot hand the removed torrent's pending label to a later
 unlabelled add of the same hash; the record is kept for a day. If a removal
 is refused with "could not record the removal before sending it", the
 dashboard could not write that record: check the dashboard's disk and
-database, not the box. Two limits remain.
+database, not the box. The same applies to an add refused with "a previous
+removal on this box is not yet settled in the dashboard's records": a
+removal's follow-up write failed (a full disk, a locked database), the
+record is still open, and adds on that box wait until it can be written,
+which the next poll retries. Both are dashboard-side conditions; rTorrent
+itself is fine. Two limits remain.
 A hard kill of the dashboard process after the removal and before the
 deletion has completed leaves the torrent gone and all or part of its files
 behind; those files are visible on the box and can be cleaned up by hand.
