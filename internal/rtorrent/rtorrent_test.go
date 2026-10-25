@@ -784,3 +784,13 @@ func TestRowValuesClamped(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDialErrorIsReported(t *testing.T) {
+	// A missing socket or a refused SSH channel is the dialer's error, not
+	// a cancellation (Codex on PR 122).
+	sentinel := errors.New("dial unix /home/u/.rtorrent.socket: no such file or directory")
+	c := New(func(ctx context.Context) (net.Conn, error) { return nil, sentinel })
+	if _, err := c.Version(context.Background()); !errors.Is(err, sentinel) {
+		t.Fatalf("%v", err)
+	}
+}

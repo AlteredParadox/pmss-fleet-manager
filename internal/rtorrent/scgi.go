@@ -67,8 +67,9 @@ func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	conn, err := dial(ctx)
 	if err != nil {
+		err = deadlineErr(ctx, err) // before cancel(), or every dial failure would read as Canceled
 		cancel()
-		return nil, nil, nil, deadlineErr(ctx, err)
+		return nil, nil, nil, err
 	}
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
