@@ -150,6 +150,9 @@ type rtLabelsCache struct {
 // a box that stays offline across a dashboard restart does not lose them
 // (Codex on PR 123). With neither, the cache is left as it is.
 func (p *poller) recordRtLabels(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	p.mu.Lock()
 	cli, saved := p.rt, p.rtLabels
 	p.mu.Unlock()

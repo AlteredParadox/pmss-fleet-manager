@@ -482,6 +482,12 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 	m.mu.Unlock()
 	if p != nil {
 		p.stopAndWait()
+		// Labels the retiring poller still owes to magnets live only in its
+		// memory (a poll cancelled by the stop did not record them): write
+		// them for the record as it was, so the replacement poller finds
+		// them in the cache (startPoller) unless the box moved, in which
+		// case they go with the other caches below (Codex on PR 123).
+		p.recordRtLabels(m.ctx)
 	}
 	// Snapshot the state only now: a poll that was finishing while we
 	// waited has written its result, and that is what the UI should keep.

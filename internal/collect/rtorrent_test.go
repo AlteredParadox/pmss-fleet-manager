@@ -730,3 +730,49 @@ func TestRtPendingLabelsSurviveTransportAndRestart(t *testing.T) {
 		t.Fatalf("settled labels came back: %+v", got)
 	}
 }
+
+func TestRtEndpointNotCarriedAcrossEdit(t *testing.T) {
+	// A probed state carries its resolved endpoint; after an edit the
+	// record's override (or nothing) is what actions may use until the next
+	// poll resolves it again (Codex on PR 123).
+	st := BoxState{Ready: true, Rt: RtState{Enabled: true, Endpoint: "unix:/home/u/.rtorrent.socket", Reachable: true}}
+	st.adoptIdentity(fromBox(&store.Box{RtEnabled: true, RtSCGI: "tcp:127.0.0.1:5000"}))
+	if st.Rt.Endpoint != "tcp:127.0.0.1:5000" {
+		t.Fatal(st.Rt.Endpoint)
+	}
+	st.adoptIdentity(fromBox(&store.Box{RtEnabled: true}))
+	if st.Rt.Endpoint != "" {
+		t.Fatalf("removed override must not leave the old endpoint: %q", st.Rt.Endpoint)
+	}
+	// With no endpoint the action gate refuses rather than guessing.
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	readyRt(t, p, "")
+	if err := p.rtTorrentAction(context.Background(), rtHashA, "stop"); err == nil || !strings.Contains(err.Error(), "no SCGI endpoint") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestRtLabelsHandedOverOnEdit(t *testing.T) {
+	// A labelled magnet added just before an edit: the retiring poller's
+	// owed label is written to the cache by UpdateBox so the replacement
+	// poller restores it (Codex on PR 123).
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	c.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "tv", Until: time.Now().Add(time.Hour)}})
+	// What UpdateBox does after stopAndWait: the client is torn down and the
+	// owed labels recorded for the unchanged record.
+	p.closeConns()
+	p.recordRtLabels(nil)
+	got := p.m.restoredRtLabels(p.box)
+	if len(got) != 1 || got[0].Label != "tv" {
+		t.Fatalf("%+v", got)
+	}
+}
