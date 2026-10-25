@@ -634,6 +634,13 @@ func (c *Client) Forget(ctx context.Context, hash string) error {
 	return nil
 }
 
+// Hold takes the operation token until the returned function is called:
+// for tests of callers that must wait on a busy client. Not for production
+// use.
+func (c *Client) Hold(ctx context.Context) (func(), error) {
+	return c.acquire(ctx)
+}
+
 // forgetLocked is Forget for a caller that already holds the operation.
 func (c *Client) forgetLocked(hash string) {
 	c.pendMu.Lock()
