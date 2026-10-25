@@ -1664,3 +1664,31 @@ func TestRefusedJobReleasesLease(t *testing.T) {
 		t.Fatal("a refused job must change nothing")
 	}
 }
+
+// TestLockWithinNeverLeaks (Codex P1 on PR 123): under a storm of deadlines
+// racing the lock, every lockWithin either hands the mutex over (and the
+// caller unlocks) or leaves it free; the mutex is always lockable after.
+func TestLockWithinNeverLeaks(t *testing.T) {
+	var mu sync.Mutex
+	for i := 0; i < 2000; i++ {
+		// Hold the lock briefly on another goroutine so the helper and the
+		// deadline race for it.
+		mu.Lock()
+		rel := make(chan struct{})
+		go func() { <-rel; mu.Unlock() }()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(i%3)*time.Microsecond)
+		go func() { time.Sleep(time.Duration(i%5) * time.Microsecond); close(rel) }()
+		if unlock, ok := lockWithin(ctx, &mu); ok {
+			unlock()
+		}
+		cancel()
+		// Whatever happened, the mutex must be free (promptly).
+		done := make(chan struct{})
+		go func() { mu.Lock(); mu.Unlock(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: the mutex leaked", i)
+		}
+	}
+}

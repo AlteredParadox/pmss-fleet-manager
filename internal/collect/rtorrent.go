@@ -676,30 +676,33 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 }
 
 // lockWithin takes mu unless ctx ends first. A mutex cannot be waited on
-// with a context, so the lock is taken on a helper goroutine that hands it
-// over only if the caller is still waiting, and lets go at once otherwise.
+// with a context, so the lock is taken on a helper goroutine, and exactly
+// one of two outcomes is chosen with one compare-and-swap: the helper hands
+// the lock to the caller, or the caller gave up first and the helper lets
+// the lock go at once. Nothing can be left holding it (Codex on PR 123: a
+// check-then-send handoff could leak the mutex when the deadline fell
+// between the check and the send).
 func lockWithin(ctx context.Context, mu *sync.Mutex) (unlock func(), ok bool) {
+	const waiting, handed, gaveUp = 0, 1, 2
+	var state atomic.Int32
 	got := make(chan struct{}, 1)
-	var gaveUp atomic.Bool
 	go func() {
 		mu.Lock()
-		if gaveUp.Load() {
-			mu.Unlock() // the caller gave up before the lock came
+		if state.CompareAndSwap(waiting, handed) {
+			got <- struct{}{} // ownership passes to the caller (buffered: never blocks)
 			return
 		}
-		got <- struct{}{} // the caller takes ownership (buffered: never blocks)
+		mu.Unlock() // the caller gave up first
 	}()
 	select {
 	case <-got:
 		return mu.Unlock, true
 	case <-ctx.Done():
-		gaveUp.Store(true)
-		select {
-		case <-got: // the lock arrived at the same moment: it is ours after all
-			return mu.Unlock, true
-		default:
-			return nil, false
+		if state.CompareAndSwap(waiting, gaveUp) {
+			return nil, false // the helper will unlock when it gets the lock
 		}
+		<-got // the helper won the race: the lock is ours after all
+		return mu.Unlock, true
 	}
 }
 
