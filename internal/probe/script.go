@@ -348,7 +348,7 @@ s=="[WebUI]" && /^(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhite
 // with `network.scgi.open_local = ~/.rtorrent.socket`, and the tenant's own
 // ~/.rtorrent.rc.custom may override it (later lines win, as in rTorrent).
 // Only the four endpoint directives are printed, old and new spelling.
-const rtConfShell = `grep -hE '^[[:space:]]*(network\.scgi\.open_local|network\.scgi\.open_port|scgi_local|scgi_port)[[:space:]]*=' "$home/.rtorrent.rc" "$home/.rtorrent.rc.custom" 2>/dev/null | cut -c1-300 | head -n 20
+const rtConfShell = `grep -hE '^[[:space:]]*(network\.scgi\.open_local|network\.scgi\.open_port|scgi_local|scgi_port|directory\.default\.set|directory)[[:space:]]*=' "$home/.rtorrent.rc" "$home/.rtorrent.rc.custom" 2>/dev/null | cut -c1-300 | head -n 40
 `
 
 // logsListShell lists log files in the places the PMSS stack and the usual

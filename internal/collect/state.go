@@ -314,6 +314,9 @@ type RtState struct {
 	ConfFound bool   `json:"conf_found"`
 	Disabled  bool   `json:"disabled"` // ~/.rtorrentDisable: stopped on purpose
 	Error     string `json:"error,omitempty"`
+	// DataDir is the download root remove-with-data may delete under, read
+	// from the box's own rTorrent config over SSH (never from the client).
+	DataDir string `json:"data_dir,omitempty"`
 	// PortOK is set when the endpoint is a loopback port verified as this
 	// account's (a unix socket inside the home needs no such check).
 	PortOK     bool          `json:"port_ok"`

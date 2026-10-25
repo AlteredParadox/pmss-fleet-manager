@@ -18,6 +18,7 @@ package collect
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -242,6 +243,18 @@ func TestPollRtGates(t *testing.T) {
 	if st.Rt.Reachable || !strings.Contains(st.Rt.Error, "no SCGI endpoint") {
 		t.Fatalf("%+v", st.Rt)
 	}
+	// A refused directive is reported as such, with the way out.
+	snap.Home = "/home/u"
+	snap.Rt = probe.RtInfo{ConfFound: true, ConfError: "unusable SCGI socket in the rTorrent config: scgi_local = ../x"}
+	p.pollRt(context.Background(), &st, snap)
+	if st.Rt.Reachable || !strings.Contains(st.Rt.Error, "unusable SCGI socket") || !strings.Contains(st.Rt.Error, "under edit") || len(f.called()) != 0 && st.Rt.Endpoint != "" {
+		t.Fatalf("%+v", st.Rt)
+	}
+	snap.Rt = probe.RtInfo{ConfFound: true, SCGI: "unix:/home/u/.rtorrent.socket", DataDir: "/home/u/dl"}
+	p.pollRt(context.Background(), &st, snap)
+	if st.Rt.DataDir != "/home/u/dl" {
+		t.Fatalf("data dir %q", st.Rt.DataDir)
+	}
 	// A loopback port must be this account's.
 	snap.Rt.SCGI = "tcp:127.0.0.1:5000"
 	snap.ListenersKnown, snap.Listeners = true, map[int]int{5000: 1002}
@@ -270,6 +283,15 @@ func TestRtEndpointAndValidation(t *testing.T) {
 	snap.Rt.SCGI = "tcp:127.0.0.1:5000"
 	if rtEndpoint(rtBox{}, snap) != "tcp:127.0.0.1:5000" || rtEndpoint(rtBox{"unix:/x"}, snap) != "unix:/x" {
 		t.Fatal("precedence")
+	}
+	// A directive that was found but refused never falls back to the
+	// default socket; the box setting still overrides.
+	snap.Rt = probe.RtInfo{ConfFound: true, ConfError: "unusable SCGI socket in the rTorrent config: scgi_local = ../x"}
+	if rtEndpoint(rtBox{}, snap) != "" || rtEndpoint(rtBox{"unix:/srv/s"}, snap) != "unix:/srv/s" {
+		t.Fatal("refused directive must not select the default")
+	}
+	if rtDataDir(&probe.Snapshot{Home: "/home/u"}) != "/home/u/data" || rtDataDir(&probe.Snapshot{Home: "/home/u", Rt: probe.RtInfo{DataDir: "/home/u/dl"}}) != "/home/u/dl" || rtDataDir(&probe.Snapshot{}) != "" {
+		t.Fatal("data dir")
 	}
 	for ep, ok := range map[string]bool{
 		"": true, "unix:/home/u/.rtorrent.socket": true, "tcp:127.0.0.1:5000": true,
@@ -301,7 +323,7 @@ func TestRtRemoveDataScript(t *testing.T) {
 	run := func(root, target string) (int, string) {
 		cmd := exec.Command("sh")
 		cmd.Env = append(os.Environ(), "HOME="+home)
-		cmd.Stdin = strings.NewReader("root=" + shellQuote(root) + "\ntarget=" + shellQuote(target) + "\n" + rtRemoveDataScript)
+		cmd.Stdin = strings.NewReader(rtRemoveDataVars("delete", root, target) + rtRemoveDataScript)
 		out, err := cmd.CombinedOutput()
 		code := 0
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -344,30 +366,6 @@ func TestRtRemoveDataScript(t *testing.T) {
 	}
 	if code, out := run(data, "'; touch "+filepath.Join(home, "pwned2")+"; '"); code == 0 || exists(filepath.Join(home, "pwned2")) {
 		t.Fatalf("quote break-out: %d %q", code, out)
-	}
-}
-
-func TestRtRemoveDataFlow(t *testing.T) {
-	f := newFakeSCGI(t)
-	f.reply = rtReplies
-	ctx := context.Background()
-	cli := rtorrent.New(f.dialer(""))
-	// The SSH side cannot run here (no box): check the order up to it with
-	// a client whose base path is unusable, so nothing is erased.
-	f.reply = func(m, b string) string {
-		if m == "d.base_path" {
-			return xmlResp(xs("bad\npath"))
-		}
-		return rtReplies(m, b)
-	}
-	err := rtRemoveData(ctx, cli, nil, rtHashA)
-	if err == nil || !strings.Contains(err.Error(), "cannot be checked") {
-		t.Fatalf("%v", err)
-	}
-	for _, m := range f.called() {
-		if m == "d.erase" {
-			t.Fatal("erase must not run when the path is unusable")
-		}
 	}
 }
 
@@ -418,56 +416,6 @@ func TestRtClientFollowsTransport(t *testing.T) {
 	}
 	if _, err := p.rtClient(tr, "http://x"); err == nil {
 		t.Fatal("unknown scheme")
-	}
-}
-
-func TestRtRemoveDataSSHFailureIsReported(t *testing.T) {
-	// Paths fine, erase accepted, but the box cannot be reached for the rm:
-	// the torrent is gone from rTorrent and the caller is told the files
-	// were not deleted (a disconnected transport answers every Run with an
-	// error).
-	f := newFakeSCGI(t)
-	f.reply = rtReplies
-	cli := rtorrent.New(f.dialer(""))
-	err := rtRemoveData(context.Background(), cli, &sshx.Client{}, rtHashA)
-	if err == nil || !strings.Contains(err.Error(), "files were not deleted") {
-		t.Fatalf("%v", err)
-	}
-	erased := false
-	for _, m := range f.called() {
-		erased = erased || m == "d.erase"
-	}
-	if !erased {
-		t.Fatal("erase should have run before the rm attempt")
-	}
-	// A fault on the erase stops everything.
-	f.reply = func(m, b string) string {
-		if m == "d.erase" {
-			return `<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>-501</i4></value></member><member><name>faultString</name><value><string>Could not find info-hash.</string></value></member></struct></value></fault></methodResponse>`
-		}
-		return rtReplies(m, b)
-	}
-	var fe *rtorrent.Fault
-	if err := rtRemoveData(context.Background(), cli, &sshx.Client{}, rtHashA); !errors.As(err, &fe) {
-		t.Fatalf("%v", err)
-	}
-	// A fault on either path lookup stops everything before the erase.
-	for _, failing := range []string{"d.base_path", "directory.default"} {
-		f.reply = func(m, b string) string {
-			if m == failing {
-				return `<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>-506</i4></value></member><member><name>faultString</name><value><string>no</string></value></member></struct></value></fault></methodResponse>`
-			}
-			return rtReplies(m, b)
-		}
-		n := len(f.called())
-		if err := rtRemoveData(context.Background(), cli, &sshx.Client{}, rtHashA); !errors.As(err, &fe) {
-			t.Fatalf("%s: %v", failing, err)
-		}
-		for _, m := range f.called()[n:] {
-			if m == "d.erase" {
-				t.Fatalf("%s failed but erase ran", failing)
-			}
-		}
 	}
 }
 
@@ -533,8 +481,12 @@ func TestRtActionsThroughPoller(t *testing.T) {
 	if err := p.rtTorrentAction(ctx, rtHashA, "start"); err != nil {
 		t.Fatal(err)
 	}
-	// remove-data with an unusable path never erases.
-	readyRt(t, p, "unix:/home/u/.rtorrent.socket")
+	// remove-data with an unusable path never erases (the state carries a
+	// download root, the runner is the SSH client, nil under the hook).
+	st = BoxState{ID: p.box.ID, Ready: true, Rt: RtState{Enabled: true, Endpoint: "unix:/home/u/.rtorrent.socket", Reachable: true, DataDir: "/home/u/data"}}
+	p.m.mu.Lock()
+	p.m.states[p.box.ID] = &st
+	p.m.mu.Unlock()
 	f.reply = func(m, b string) string {
 		if m == "d.base_path" {
 			return xmlResp(xs("relative/path"))
@@ -543,7 +495,7 @@ func TestRtActionsThroughPoller(t *testing.T) {
 	}
 	before := len(f.called())
 	err = p.rtTorrentAction(ctx, rtHashA, RtActionRemoveData)
-	if err == nil || !strings.Contains(err.Error(), "cannot be checked") {
+	if err == nil || !strings.Contains(err.Error(), "no SSH connection") && !strings.Contains(err.Error(), "cannot be checked") {
 		t.Fatalf("%v", err)
 	}
 	for _, m := range f.called()[before:] {
@@ -774,5 +726,197 @@ func TestRtLabelsHandedOverOnEdit(t *testing.T) {
 	got := p.m.restoredRtLabels(p.box)
 	if len(got) != 1 || got[0].Label != "tv" {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestClassifyRtDisabledIsNotDegraded(t *testing.T) {
+	st := &BoxState{Rt: RtState{Enabled: true, Reachable: false}}
+	if s, r := classify(st); s != "degraded" || !strings.Contains(r, "rTorrent") {
+		t.Fatal(s, r)
+	}
+	st.Rt.Disabled = true
+	if s, _ := classify(st); s != "online" {
+		t.Fatal("stopped on purpose must not degrade the box")
+	}
+	if !ValidRtAction("stop") || !ValidRtAction("remove-data") || ValidRtAction("pause") {
+		t.Fatal("ValidRtAction")
+	}
+}
+
+// localRunner runs the deletion script with sh against a fake HOME, like
+// the box would, recording each run; gate, when set, holds a delete-mode
+// run until released.
+type localRunner struct {
+	home  string
+	mu    sync.Mutex
+	runs  []string
+	gate  chan struct{}
+	block bool
+}
+
+func (r *localRunner) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
+	script, _ := io.ReadAll(stdin)
+	mode := "check"
+	if strings.HasPrefix(string(script), "mode='delete'") {
+		mode = "delete"
+	}
+	r.mu.Lock()
+	r.runs = append(r.runs, mode)
+	block := r.block && mode == "delete"
+	r.mu.Unlock()
+	if block {
+		<-r.gate
+	}
+	c := exec.CommandContext(ctx, cmd)
+	c.Env = append(os.Environ(), "HOME="+r.home)
+	c.Stdin = bytes.NewReader(script)
+	var out, errb bytes.Buffer
+	c.Stdout, c.Stderr = &out, &errb
+	err := c.Run()
+	return out.Bytes(), errb.Bytes(), err
+}
+
+func (r *localRunner) modes() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.runs...)
+}
+
+// TestRtRemoveDataBoundary: the boundary is the config's download root,
+// never what the peer says; the box check runs before the erase and a
+// refusal changes nothing (daybreak blue review of PR 123).
+func TestRtRemoveDataBoundary(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	mk := func(rel string) string {
+		p := filepath.Join(home, rel)
+		os.MkdirAll(p, 0o755)
+		os.WriteFile(filepath.Join(p, "f"), []byte("x"), 0o600)
+		return p
+	}
+	data := mk("data")
+	keys := mk(".ssh")
+	exists := func(p string) bool { _, err := os.Stat(p); return err == nil }
+	f := newFakeSCGI(t)
+	var base string
+	f.reply = func(m, b string) string {
+		switch m {
+		case "d.base_path":
+			return xmlResp(xs(base))
+		case "directory.default":
+			return xmlResp(xs(keys)) // the peer's idea of its root is never asked for, and would be ignored
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	cli := rtorrent.New(f.dialer(""))
+	run := &localRunner{home: home}
+	ctx := context.Background()
+	erased := func() int {
+		n := 0
+		for _, m := range f.called() {
+			if m == "d.erase" {
+				n++
+			}
+		}
+		return n
+	}
+	// A hostile peer naming a path outside the download root: refused by
+	// the box before anything, torrent left in place.
+	base = filepath.Join(keys, "f")
+	err := p.rtRemoveData(ctx, cli, run, data, rtHashA)
+	if err == nil || !strings.Contains(err.Error(), "left in place") || !strings.Contains(err.Error(), "not inside the download root") || erased() != 0 || !exists(base) {
+		t.Fatalf("%v erased %d exists %v", err, erased(), exists(base))
+	}
+	if got := run.modes(); strings.Join(got, ",") != "check" {
+		t.Fatalf("runs %v", got)
+	}
+	// The root itself, a missing path and no root at all are refused too.
+	base = data
+	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err == nil || erased() != 0 {
+		t.Fatalf("root itself: %v", err)
+	}
+	base = filepath.Join(data, "gone")
+	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err == nil || erased() != 0 || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing: %v", err)
+	}
+	if err := p.rtRemoveData(ctx, cli, run, "", rtHashA); err == nil || erased() != 0 || !strings.Contains(err.Error(), "download directory is not known") {
+		t.Fatalf("no root: %v", err)
+	}
+	if err := p.rtRemoveData(ctx, cli, nil, data, rtHashA); err == nil || erased() != 0 {
+		t.Fatalf("no runner: %v", err)
+	}
+	// Inside the root: check, erase, delete, in that order; the tree is gone.
+	target := mk("data/Alpha")
+	base = target
+	run.runs = nil
+	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err != nil || erased() != 1 || exists(target) {
+		t.Fatalf("%v erased %d exists %v", err, erased(), exists(target))
+	}
+	if got := run.modes(); strings.Join(got, ",") != "check,delete" {
+		t.Fatalf("runs %v", got)
+	}
+	// A symlink inside the root pointing outside is refused by resolution.
+	link := filepath.Join(data, "link")
+	os.Symlink(keys, link)
+	base = link
+	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err == nil || erased() != 1 || !exists(filepath.Join(keys, "f")) {
+		t.Fatalf("symlink: %v", err)
+	}
+	// Metacharacters in a path stay a path.
+	odd := mk("data/it's $(touch " + filepath.Join(home, "pwned") + ") x")
+	base = odd
+	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err != nil || exists(odd) || exists(filepath.Join(home, "pwned")) {
+		t.Fatalf("metacharacters: %v", err)
+	}
+}
+
+// TestRtRemoveDataOutlivesRequest: once the box approved the path, the
+// erase and the deletion run under the manager's deadline; a request that
+// ends meanwhile is told so, and the deletion still completes before the
+// manager's Stop returns.
+func TestRtRemoveDataOutlivesRequest(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	target := filepath.Join(data, "Alpha")
+	os.MkdirAll(target, 0o755)
+	os.WriteFile(filepath.Join(target, "f"), []byte("x"), 0o600)
+	f := newFakeSCGI(t)
+	f.reply = func(m, b string) string {
+		if m == "d.base_path" {
+			return xmlResp(xs(target))
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	cli := rtorrent.New(f.dialer(""))
+	run := &localRunner{home: home, gate: make(chan struct{}), block: true}
+	rctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.rtRemoveData(rctx, cli, run, data, rtHashA) }()
+	// Wait for the delete run to be held, then end the request.
+	for i := 0; i < 200; i++ {
+		if m := run.modes(); len(m) == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	err := <-done
+	if err == nil || !strings.Contains(err.Error(), "continues on the box") {
+		t.Fatalf("%v", err)
+	}
+	if _, statErr := os.Stat(target); statErr != nil {
+		t.Fatal("deleted before the gate opened")
+	}
+	close(run.gate)
+	p.m.wg.Wait() // Stop waits the same way
+	if _, statErr := os.Stat(target); statErr == nil {
+		t.Fatal("the deletion must complete after the request ended")
 	}
 }

@@ -1340,11 +1340,15 @@ func TestParseRt(t *testing.T) {
 		want string
 	}{
 		{"network.scgi.open_local = ~/.rtorrent.socket\n", "unix:/home/u/.rtorrent.socket"},
-		{"scgi_local = /tmp/rpc.sock\n", "unix:/tmp/rpc.sock"},
+		{"scgi_local = /home/u/rpc/sock\n", "unix:/home/u/rpc/sock"},
+		{"scgi_local = /tmp/rpc.sock\n", ""}, // outside the home: anyone's socket on a shared host
 		{"network.scgi.open_port = 127.0.0.1:5000\n", "tcp:127.0.0.1:5000"},
 		{"scgi_port = localhost:5001\n", "tcp:127.0.0.1:5001"},
 		{"scgi_port = 5002\n", "tcp:127.0.0.1:5002"},
 		{"network.scgi.open_local = ~/.rtorrent.socket\nnetwork.scgi.open_port = 0.0.0.0:5000\n", ""}, // last wins; a public bind is refused
+		{"scgi_port = [::1]:5003\n", "tcp:127.0.0.1:5003"},
+		{"scgi_port = ::1:5004\n", ""},                                   // not a valid host:port
+		{"network.scgi.open_local = /home/other/.rtorrent.socket\n", ""}, // outside the home
 		{"network.scgi.open_local = ~/a\nnetwork.scgi.open_local = \"~/b\" # comment\n", "unix:/home/u/b"},
 		{"network.scgi.open_local = ../x\n", ""},
 		{"network.scgi.open_local = /home/u/../../etc/x\n", ""},
@@ -1364,6 +1368,26 @@ func TestParseRt(t *testing.T) {
 	r := parseRt(map[string]string{"rt_conf": "", "rt_disable": "1"}, home)
 	if r.ConfFound || r.SCGI != "" || !r.Disabled {
 		t.Fatalf("%+v", r)
+	}
+	// A directive that was found but refused is an error to report, never a
+	// silent fallback (daybreak blue review of PR 123); a later good
+	// directive clears it.
+	r = parseRt(map[string]string{"rt_conf": "network.scgi.open_local = ../x\n"}, home)
+	if !r.ConfFound || r.SCGI != "" || !strings.Contains(r.ConfError, "unusable SCGI socket") || !strings.Contains(r.ConfError, "../x") {
+		t.Fatalf("%+v", r)
+	}
+	r = parseRt(map[string]string{"rt_conf": "scgi_port = 10.0.0.1:5000\nnetwork.scgi.open_local = ~/s\n"}, home)
+	if r.ConfError != "" || r.SCGI != "unix:/home/u/s" {
+		t.Fatalf("%+v", r)
+	}
+	// The download root comes from the config, inside the home only.
+	for conf, want := range map[string]string{
+		"directory.default.set = ~/data\n": "/home/u/data", "directory = /home/u/dl/\n": "/home/u/dl",
+		"directory.default.set = /mnt/other\n": "", "directory.default.set = ~/\n": "", "directory.default.set = ~/../x\n": "",
+	} {
+		if got := parseRt(map[string]string{"rt_conf": conf}, home).DataDir; got != want {
+			t.Errorf("%q: %q", conf, got)
+		}
 	}
 	// Without a home, a ~ path cannot be resolved and the default is unknown.
 	if parseRt(map[string]string{"rt_conf": "network.scgi.open_local = ~/s\n"}, "").SCGI != "" || DefaultSCGI("") != "" {
@@ -1410,14 +1434,14 @@ func TestRtConfShell(t *testing.T) {
 		t.Skip("no sh")
 	}
 	home := t.TempDir()
-	os.WriteFile(home+"/.rtorrent.rc", []byte("# comment\nnetwork.scgi.open_local = ~/.rtorrent.socket\nsession.path.set = ~/session\n  scgi_port = 5000\n"), 0o644)
+	os.WriteFile(home+"/.rtorrent.rc", []byte("# comment\nnetwork.scgi.open_local = ~/.rtorrent.socket\nsession.path.set = ~/session\ndirectory.default.set = ~/data\n  scgi_port = 5000\n"), 0o644)
 	os.WriteFile(home+"/.rtorrent.rc.custom", []byte("network.scgi.open_local = ~/other.sock"+strings.Repeat(" ", 400)+"\n"), 0o600)
 	out, stderr, _ := runSh(t, "home="+home+"\n"+rtConfShell)
 	if stderr != "" {
 		t.Fatal(stderr)
 	}
 	r := parseRt(map[string]string{"rt_conf": out}, home)
-	if r.SCGI != "unix:"+home+"/other.sock" || !r.ConfFound {
+	if r.SCGI != "unix:"+home+"/other.sock" || !r.ConfFound || r.DataDir != home+"/data" {
 		t.Fatalf("%+v from %q", r, out)
 	}
 	if strings.Contains(out, "session.path") {

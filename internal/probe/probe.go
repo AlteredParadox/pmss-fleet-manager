@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"path"
 	"regexp"
 	"slices"
@@ -1301,10 +1302,19 @@ func parseQbt(s map[string]string) QbtInfo {
 type RtInfo struct {
 	// ConfFound is true when an SCGI directive was read from ~/.rtorrent.rc
 	// or ~/.rtorrent.rc.custom. SCGI is the endpoint it names, normalised
-	// to "unix:/abs/path" or "tcp:host:port" (the last directive wins, as
-	// in rTorrent); empty when none was found or the path was not usable.
+	// to "unix:/abs/path" or "tcp:127.0.0.1:port" (the last directive wins,
+	// as in rTorrent). ConfError says why a directive that was found is not
+	// usable (a relative socket path, a socket outside the home, a public
+	// bind): the caller must then not fall back to the default socket, which
+	// could be another daemon's.
 	ConfFound bool
 	SCGI      string
+	ConfError string
+	// DataDir is rTorrent's download root from directory.default.set (or the
+	// old "directory ="), tilde-expanded, kept only when strictly inside the
+	// home. Read from the box's own files over SSH, not from the SCGI peer,
+	// it is the boundary remove-with-data is allowed to delete under.
+	DataDir string
 	// Disabled is the ~/.rtorrentDisable marker: the tenant told PMSS's
 	// watchdog to stop rTorrent and leave it stopped.
 	Disabled bool
@@ -1347,47 +1357,89 @@ func parseRt(s map[string]string, home string) RtInfo {
 		if v == "" {
 			continue
 		}
-		r.ConfFound = true
 		switch k {
 		case "network.scgi.open_local", "scgi_local":
-			r.SCGI = scgiUnix(v, home)
+			r.ConfFound = true
+			r.SCGI, r.ConfError = scgiUnix(v, home), ""
+			if r.SCGI == "" {
+				r.ConfError = "unusable SCGI socket in the rTorrent config: " + k + " = " + clipRunes(v, 120) + " (must be an absolute path inside the home)"
+			}
 		case "network.scgi.open_port", "scgi_port":
-			r.SCGI = scgiTCP(v)
+			r.ConfFound = true
+			r.SCGI, r.ConfError = scgiTCP(v), ""
+			if r.SCGI == "" {
+				r.ConfError = "unusable SCGI port in the rTorrent config: " + k + " = " + clipRunes(v, 120) + " (must be a loopback host:port)"
+			}
+		case "directory.default.set", "directory":
+			r.DataDir = homeDir(v, home)
 		}
 	}
 	return r
 }
 
-// scgiUnix normalises a socket path from the config: "~/x" is the home,
-// the result must be absolute and clean (it is dialed as this account, so
-// a relative or dot-dot path is refused rather than guessed).
-func scgiUnix(v, home string) string {
+// clipRunes keeps at most n runes of s.
+func clipRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+// homeDir normalises a directory from the config ("~/x" is the home) and
+// keeps it only when absolute, clean and strictly inside the home: the
+// download root is what remove-with-data may delete under, so nothing
+// outside the tenant's home can be named here.
+func homeDir(v, home string) string {
+	if home == "" {
+		return ""
+	}
 	if strings.HasPrefix(v, "~/") {
-		if home == "" {
-			return ""
-		}
 		v = home + v[1:]
 	}
-	if !strings.HasPrefix(v, "/") || len(v) > 512 || path.Clean(v) != v {
+	v = strings.TrimSuffix(v, "/")
+	if !strings.HasPrefix(v, home+"/") || len(v) > 512 || path.Clean(v) != v {
+		return ""
+	}
+	return v
+}
+
+// scgiUnix normalises a socket path from the config: "~/x" is the home,
+// the result must be absolute, clean and inside the home. A socket
+// elsewhere could be anyone's on a shared host, and the dashboard would
+// take whatever answers on it for the tenant's rTorrent (the box setting
+// is the explicit way to point at one).
+func scgiUnix(v, home string) string {
+	if home == "" {
+		return ""
+	}
+	if strings.HasPrefix(v, "~/") {
+		v = home + v[1:]
+	}
+	if !strings.HasPrefix(v, home+"/") || len(v) > 512 || path.Clean(v) != v {
 		return ""
 	}
 	return "unix:" + v
 }
 
-// scgiTCP normalises "host:port" or ":port" (rTorrent binds localhost for
-// a bare port) to "tcp:host:port"; only loopback hosts are accepted since
-// the dashboard reaches the box over its own SSH tunnel.
+// scgiTCP normalises "host:port", "[::1]:port" or a bare port (rTorrent
+// binds localhost for one) to "tcp:127.0.0.1:port"; only loopback hosts
+// are accepted since the dashboard reaches the box over its own SSH tunnel.
 func scgiTCP(v string) string {
-	host, port, ok := strings.Cut(v, ":")
-	if !ok {
-		port, host = v, ""
+	host, port := "", v
+	if strings.Contains(v, ":") {
+		h, p, err := net.SplitHostPort(v)
+		if err != nil {
+			return ""
+		}
+		host, port = h, p
 	}
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
 		return ""
 	}
 	switch host {
-	case "", "localhost", "127.0.0.1", "::1", "[::1]":
+	case "", "localhost", "127.0.0.1", "::1":
 		return "tcp:127.0.0.1:" + strconv.Itoa(n)
 	}
 	return ""

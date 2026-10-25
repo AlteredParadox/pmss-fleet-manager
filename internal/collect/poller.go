@@ -742,8 +742,8 @@ func classify(st *BoxState) (string, string) {
 	if st.Qbt.Enabled && !st.Qbt.Reachable {
 		reasons = append(reasons, "qBittorrent not responding")
 	}
-	if st.Rt.Enabled && !st.Rt.Reachable {
-		reasons = append(reasons, "rTorrent not responding")
+	if st.Rt.Enabled && !st.Rt.Reachable && !st.Rt.Disabled {
+		reasons = append(reasons, "rTorrent not responding") // stopped on purpose is not degraded
 	}
 	if st.Docker.Enabled && !st.Docker.Reachable {
 		reasons = append(reasons, "docker not responding")

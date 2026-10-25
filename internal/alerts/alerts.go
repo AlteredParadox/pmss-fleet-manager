@@ -254,8 +254,8 @@ func wantRt(s *collect.BoxState) []want {
 		what = "rtorrent is not running"
 	}
 	msg := fmt.Sprintf("%s — %s", s.Name, what)
-	if s.Rt.Error != "" {
-		msg += " (" + s.Rt.Error + ")"
+	if s.Rt.Error != "" && s.Rt.Error != what && !strings.HasPrefix(s.Rt.Error, what) {
+		msg += " (" + s.Rt.Error + ")" // only when it adds to the headline
 	}
 	return []want{{"rtorrent", "warn", msg}}
 }

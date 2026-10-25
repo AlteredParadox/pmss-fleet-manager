@@ -1171,7 +1171,7 @@ func (s *Server) handleRtTorrentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash, action := strings.ToLower(r.PathValue("hash")), r.PathValue("action")
-	if !collect.RtTorrentActions[action] {
+	if !collect.ValidRtAction(action) {
 		writeErr(w, 400, fmt.Errorf("unknown action %q", action))
 		return
 	}

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,7 +42,10 @@ import (
 // starts or stops the daemon.
 
 // rtEndpoint is the SCGI endpoint to use: the box setting, else what the
-// config named, else PMSS's default socket under the home.
+// config named, else PMSS's default socket under the home. A config that
+// names an endpoint the probe refused yields nothing: the default socket
+// could be another daemon's, and the misconfiguration is to be reported,
+// not papered over (daybreak blue review of PR 123).
 func rtEndpoint(b rtBox, snap *probe.Snapshot) string {
 	if b.RtSCGI != "" {
 		return b.RtSCGI
@@ -49,7 +53,23 @@ func rtEndpoint(b rtBox, snap *probe.Snapshot) string {
 	if snap.Rt.SCGI != "" {
 		return snap.Rt.SCGI
 	}
+	if snap.Rt.ConfFound {
+		return ""
+	}
 	return probe.DefaultSCGI(snap.Home)
+}
+
+// rtDataDir is the download root remove-with-data may delete under: the
+// config's directory.default (read over SSH from the box's own files), else
+// PMSS's ~/data. Never anything the SCGI peer said.
+func rtDataDir(snap *probe.Snapshot) string {
+	if snap.Rt.DataDir != "" {
+		return snap.Rt.DataDir
+	}
+	if snap.Home == "" {
+		return ""
+	}
+	return snap.Home + "/data"
 }
 
 // rtBox is what rtEndpoint needs from the box record.
@@ -205,8 +225,12 @@ func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot)
 		}
 		return
 	}
+	rs.DataDir = clip(rtDataDir(snap), 600)
 	if rs.Endpoint == "" {
 		rs.Error = "no SCGI endpoint: the probe could not read the home path or ~/.rtorrent.rc"
+		if snap.Rt.ConfError != "" {
+			rs.Error = clip(snap.Rt.ConfError, 300) + "; set the endpoint under edit to override"
+		}
 		return
 	}
 	if strings.HasPrefix(rs.Endpoint, "tcp:") {
@@ -307,130 +331,177 @@ const rtRemoveTimeout = 75 * time.Second
 // for: remove the torrent, then delete its data. See rtRemoveData.
 const RtActionRemoveData = "remove-data"
 
-// RtTorrentActions is the set the API accepts for rTorrent.
-var RtTorrentActions = map[string]bool{rtorrent.ActionStop: true, rtorrent.ActionStart: true, rtorrent.ActionRemove: true, RtActionRemoveData: true}
+// ValidRtAction reports whether a is an action the API accepts for
+// rTorrent: the client's own plus remove-data. A closed switch, so nothing
+// can add a key that validates but runs no case.
+func ValidRtAction(a string) bool {
+	return rtorrent.ValidAction(a) || a == RtActionRemoveData
+}
 
 // rtReady returns the client after the checks that precede any rTorrent
 // action: monitoring on, the box probed by this poller, the SSH connection
 // up and, for a loopback endpoint, the port verified as this account's
 // right now.
-func (p *poller) rtReady(ctx context.Context) (*rtorrent.Client, *sshx.Client, error) {
+func (p *poller) rtReady(ctx context.Context) (*rtorrent.Client, *sshx.Client, BoxState, error) {
 	if !p.box.RtEnabled {
-		return nil, nil, errors.New("rTorrent is not enabled for this box")
+		return nil, nil, BoxState{}, errors.New("rTorrent is not enabled for this box")
 	}
 	st, err := p.readyState()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, st, err
 	}
 	if st.Rt.Endpoint == "" {
-		return nil, nil, errors.New("no SCGI endpoint known for rTorrent yet")
+		return nil, nil, st, errors.New("no SCGI endpoint known for rTorrent yet")
 	}
 	var sshc *sshx.Client
 	if p.dialRt == nil {
 		if sshc, err = p.conn(ctx); err != nil {
-			return nil, nil, err
+			return nil, nil, st, err
 		}
 	}
 	if strings.HasPrefix(st.Rt.Endpoint, "tcp:") {
 		if !st.Rt.PortOK {
-			return nil, nil, errors.New("the SCGI port has not been verified as owned by this account yet")
+			return nil, nil, st, errors.New("the SCGI port has not been verified as owned by this account yet")
 		}
 		_, portStr, _ := strings.Cut(st.Rt.Endpoint[len("tcp:"):], ":")
 		port, _ := strconv.Atoi(portStr)
 		if sshc != nil { // nil only under the test hook, which has no box to ask
 			if err := verifyPortNow(ctx, sshc, port); err != nil {
-				return nil, nil, err
+				return nil, nil, st, err
 			}
 		}
 	}
 	cli, err := p.rtClient(sshc, st.Rt.Endpoint)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, st, err
 	}
-	return cli, sshc, nil
+	return cli, sshc, st, nil
+}
+
+// sshRunner adapts a possibly nil SSH client to scriptRunner (a nil
+// interface, not an interface holding a nil pointer).
+func sshRunner(c *sshx.Client) scriptRunner {
+	if c == nil {
+		return nil
+	}
+	return c
 }
 
 // rtTorrentAction runs one RtTorrentActions entry on hash.
 func (p *poller) rtTorrentAction(ctx context.Context, hash, action string) error {
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
-	cli, sshc, err := p.rtReady(actx)
+	cli, sshc, st, err := p.rtReady(actx)
 	if err != nil {
 		return err
 	}
 	if action == RtActionRemoveData {
-		// The caller's context: the rm inside gets its own, longer deadline
-		// than the RPC phase (a cut rm leaves a half-deleted tree behind an
-		// already erased torrent).
-		return rtRemoveData(ctx, cli, sshc, hash)
+		// The caller's context: the deletion inside runs under the
+		// manager's own deadline, not the request's.
+		return p.rtRemoveData(ctx, cli, sshRunner(sshc), st.Rt.DataDir, hash)
 	}
 	return cli.Action(actx, action, hash)
 }
 
+// scriptRunner runs a shell script on the box: sshx.Client, or a fake in
+// tests.
+type scriptRunner interface {
+	Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error)
+}
+
 // rtRemoveData is "remove torrent and data" for a client that has no such
-// command (ruTorrent does the deletion itself in PHP). The dashboard asks
-// rTorrent for the torrent's base path and its download root, erases the
-// torrent, then runs rm on the box with BOTH paths checked there, after
-// symlink resolution: the root must be strictly inside the home and the
-// path strictly inside the root. A torrent client is not trusted with a
-// path; the box's own view of the filesystem is what decides.
+// command (ruTorrent does the deletion itself in PHP).
 //
-// ctx is the caller's: the RPC calls run under apiTimeout within it, the
-// rm under rtRemoveTimeout (Codex on PR 123: a deletion capped by the RPC
-// deadline could be cut mid-way).
-func rtRemoveData(ctx context.Context, cli *rtorrent.Client, sshc *sshx.Client, hash string) error {
+// The boundary is root, the download directory read from the box's own
+// rTorrent config over SSH (RtState.DataDir; ~/data on PMSS), never a
+// path the SCGI peer named: the peer only says what to delete, the box
+// decides whether that lies inside the boundary (daybreak blue review of
+// PR 123). The box check runs first, with nothing changed on refusal; only
+// then is the torrent erased and the tree deleted, both under a deadline
+// owned by the manager rather than the HTTP request, so a browser that
+// goes away or a slow disk cannot cut the deletion between the two steps.
+// The caller gets the outcome when it is known, or, if its own context
+// ends first, word that the deletion continues.
+func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scriptRunner, root, hash string) error {
+	if run == nil {
+		return errors.New("no SSH connection to the box")
+	}
+	if root == "" {
+		return errors.New("the download directory is not known yet (no directory.default in the rTorrent config and no home path); not deleting anything")
+	}
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 	base, err := cli.BasePath(actx, hash)
 	if err != nil {
 		return err
 	}
-	root, err := cli.DefaultDirectory(actx)
-	if err != nil {
-		return err
-	}
-	// Refused here, before the erase, so a torrent whose path cannot even
-	// be handed to the box is not removed either: absolute, bounded, no
-	// line breaks (the box's own check is the authority on what is inside).
+	// Absolute, bounded, no line breaks: anything else cannot even be handed
+	// to the box (whose own check is the authority on what is inside).
 	for _, s := range []string{base, root} {
 		if !strings.HasPrefix(s, "/") || len(s) > 4096 || strings.ContainsAny(s, "\x00\n\r") {
 			return errors.New("rTorrent reported a path that cannot be checked; not deleting anything")
 		}
 	}
-	if sshc == nil {
-		return errors.New("no SSH connection to the box")
-	}
-	if err := cli.Action(actx, rtorrent.ActionRemove, hash); err != nil {
-		return err
-	}
-	rctx, rcancel := context.WithTimeout(ctx, rtRemoveTimeout)
-	defer rcancel()
-	// The paths ride as quoted assignments ahead of the script (the shell
-	// may buffer stdin past the script, so they cannot follow it as data).
-	out, stderr, err := sshc.Run(rctx, "sh", strings.NewReader("root="+shellQuote(root)+"\ntarget="+shellQuote(base)+"\n"+rtRemoveDataScript))
+	// 1. The box resolves both paths and checks containment; nothing has
+	// changed if it refuses.
+	cctx, ccancel := context.WithTimeout(ctx, 20*time.Second)
+	out, stderr, err := run.Run(cctx, "sh", strings.NewReader(rtRemoveDataVars("check", root, base)+rtRemoveDataScript))
+	ccancel()
 	if err != nil {
-		msg := strings.TrimSpace(string(out) + " " + string(stderr))
-		return fmt.Errorf("the torrent was removed from rTorrent but its files were not deleted: %s", clip(msg, 300))
+		return fmt.Errorf("refusing to delete, the torrent was left in place: %s", clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300))
 	}
-	return nil
+	// 2. Erase, then delete, detached from the request.
+	res := p.m.detached(rtRemoveTimeout, func(dctx context.Context) error {
+		ectx, ecancel := context.WithTimeout(dctx, apiTimeout)
+		defer ecancel()
+		if err := cli.Action(ectx, rtorrent.ActionRemove, hash); err != nil {
+			return err // nothing deleted
+		}
+		out, stderr, err := run.Run(dctx, "sh", strings.NewReader(rtRemoveDataVars("delete", root, base)+rtRemoveDataScript))
+		if err != nil {
+			return fmt.Errorf("the torrent was removed from rTorrent but its files were not deleted: %s", clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300))
+		}
+		return nil
+	})
+	select {
+	case err := <-res:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("the request ended before the deletion finished; it continues on the box and the next poll shows the result: %w", ctx.Err())
+	}
 }
 
-// rtRemoveDataScript takes the download root and the target path in $root
-// and $target (shell-quoted assignments prepended by the caller), resolves
-// both through symlinks and deletes the target only when root ⊂ $HOME and
-// target ⊂ root, strictly. Any other case prints why and exits non-zero
-// without touching the filesystem. Only rm -rf's own exit status is
-// non-zero after a deletion began.
+// rtRemoveDataVars renders the script's inputs as shell-quoted assignments
+// ahead of it (the shell may buffer stdin past the script, so they cannot
+// follow it as data).
+func rtRemoveDataVars(mode, root, target string) string {
+	return "mode=" + shellQuote(mode) + "\nroot=" + shellQuote(root) + "\ntarget=" + shellQuote(target) + "\n"
+}
+
+// rtRemoveDataScript takes $mode (check | delete), $root and $target.
+// Both paths are resolved through symlinks on the box; the root must lie
+// strictly inside the home and the target strictly inside the root, or the
+// script prints why and exits non-zero having changed nothing. In delete
+// mode it then enters the target's resolved parent directory, verifies it
+// is there, and removes the target by its base name relative to that
+// directory: a directory held open as the working directory cannot be
+// swapped for a symlink under the removal the way a pathname can, which
+// narrows the check-then-remove window to the final component (the
+// tenant's own concurrent renames; rm itself does not follow symlinks).
 const rtRemoveDataScript = `LC_ALL=C; export LC_ALL
 [ -n "$root" ] || { echo "no root"; exit 3; }
 [ -n "$target" ] || { echo "no target"; exit 3; }
 home=$(realpath -- "$HOME" 2>/dev/null) || { echo "cannot resolve HOME"; exit 4; }
-r=$(realpath -e -- "$root" 2>/dev/null) || { echo "download root does not exist"; exit 4; }
+r=$(realpath -e -- "$root" 2>/dev/null) || { echo "download root $root does not exist"; exit 4; }
 t=$(realpath -e -- "$target" 2>/dev/null) || { echo "path does not exist (already deleted?)"; exit 5; }
 case "$home" in /) echo "HOME is /"; exit 4;; esac
 case "$r" in "$home"/?*) ;; *) echo "refusing: download root $r is not inside the home"; exit 6;; esac
 case "$t" in "$r"/?*) ;; *) echo "refusing: $t is not inside the download root $r"; exit 6;; esac
-rm -rf -- "$t"
+[ "$mode" = delete ] || { echo "ok: $t"; exit 0; }
+parent=$(dirname -- "$t"); name=$(basename -- "$t")
+cd -- "$parent" || { echo "cannot enter $parent"; exit 7; }
+[ "$(pwd -P)" = "$parent" ] || { echo "refusing: $parent moved"; exit 7; }
+rm -rf -- "./$name"
 `
 
 // rtAddTorrents loads the request into rTorrent; the API shares its
@@ -438,7 +509,7 @@ rm -rf -- "$t"
 func (p *poller) rtAddTorrents(ctx context.Context, req qbt.AddRequest) (rtorrent.AddResult, error) {
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
-	cli, _, err := p.rtReady(actx)
+	cli, _, _, err := p.rtReady(actx)
 	if err != nil {
 		return rtorrent.AddResult{}, err
 	}
@@ -446,5 +517,12 @@ func (p *poller) rtAddTorrents(ctx context.Context, req qbt.AddRequest) (rtorren
 	for _, f := range req.Files {
 		r.Files = append(r.Files, f.Data)
 	}
-	return cli.Add(actx, r)
+	res, err := cli.Add(actx, r)
+	// The labels now owed to magnets are persisted at once, whatever the
+	// outcome: a shutdown before the next poll must not lose them
+	// (daybreak blue review of PR 123).
+	rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	p.recordRtLabels(rctx)
+	rcancel()
+	return res, err
 }

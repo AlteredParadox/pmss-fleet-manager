@@ -240,8 +240,34 @@ func (m *Manager) Stop() {
 	m.mu.Unlock()
 	for _, p := range ps {
 		p.stopAndWait()
+		// The labels owed to magnets live in the poller's memory until a
+		// poll records them; a poll cancelled by this stop did not. Write
+		// them now, under a fresh bounded context (the manager's is gone).
+		fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		p.recordRtLabels(fctx)
+		fcancel()
 	}
 	m.wg.Wait()
+}
+
+// detached runs fn under a context the manager owns (bounded by timeout and
+// by the manager's lifetime, never by an HTTP request) and returns the
+// channel its result arrives on. Stop waits for it. For work that must not
+// be cut because the caller went away, such as a deletion after an erase.
+func (m *Manager) detached(timeout time.Duration, fn func(ctx context.Context) error) <-chan error {
+	base := m.ctx
+	if base == nil {
+		base = context.Background() // before Start (tests)
+	}
+	ctx, cancel := context.WithTimeout(base, timeout)
+	res := make(chan error, 1)
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		defer cancel()
+		res <- fn(ctx)
+	}()
+	return res
 }
 
 func (m *Manager) housekeeping() {
@@ -767,7 +793,7 @@ func (m *Manager) TorrentAction(ctx context.Context, id int64, hash, action stri
 // RtTorrentAction performs one RtTorrentActions entry on a torrent in the
 // box's rTorrent and wakes the poller so the list reflects it promptly.
 func (m *Manager) RtTorrentAction(ctx context.Context, id int64, hash, action string) error {
-	if !RtTorrentActions[action] {
+	if !ValidRtAction(action) {
 		return fmt.Errorf("unknown rTorrent action %q", action)
 	}
 	p := m.poller(id)

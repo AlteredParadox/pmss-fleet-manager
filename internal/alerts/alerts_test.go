@@ -247,8 +247,16 @@ func TestWantRt(t *testing.T) {
 	}
 	s.Rt.ProcessKnown, s.Rt.ProcessUp, s.Rt.Error = true, false, "rtorrent is not running"
 	got = wantRt(s)
-	if len(got) != 1 || !strings.Contains(got[0].title, "rtorrent is not running (rtorrent is not running)") {
-		t.Fatalf("%+v", got)
+	if len(got) != 1 || !strings.HasSuffix(got[0].title, "rtorrent is not running") {
+		t.Fatalf("detail must not repeat the headline: %+v", got)
+	}
+	s.Rt.Error = "rtorrent is not running (~/.rtorrentDisable is set)"
+	if got = wantRt(s); !strings.HasSuffix(got[0].title, "rtorrent is not running") {
+		t.Fatalf("a detail that only extends the headline is dropped too: %+v", got)
+	}
+	s.Rt.Error = "dial unix: no such file"
+	if got = wantRt(s); !strings.Contains(got[0].title, "(dial unix: no such file)") {
+		t.Fatalf("a different detail is kept: %+v", got)
 	}
 	s.Rt.Disabled = true
 	if wantRt(s) != nil {
