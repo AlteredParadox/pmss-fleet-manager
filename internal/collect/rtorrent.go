@@ -435,6 +435,11 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 	if err != nil {
 		return err
 	}
+	if base == "" {
+		// A torrent that never started has no path yet (seen live on pm1
+		// with a freshly added, stopped torrent): nothing to delete.
+		return errors.New("rTorrent reports no download path for this torrent (never started?); nothing to delete, the torrent was left in place. Use remove instead")
+	}
 	// Absolute, bounded, no line breaks: anything else cannot even be handed
 	// to the box (whose own check is the authority on what is inside).
 	for _, s := range []string{base, root} {

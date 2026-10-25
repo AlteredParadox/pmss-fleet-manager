@@ -848,6 +848,11 @@ func TestRtRemoveDataBoundary(t *testing.T) {
 	if err := p.rtRemoveData(ctx, cli, nil, data, rtHashA); err == nil || erased() != 0 {
 		t.Fatalf("no runner: %v", err)
 	}
+	// A torrent that never started has no path: said so, nothing erased.
+	base = ""
+	if err := p.rtRemoveData(ctx, cli, run, data, rtHashA); err == nil || !strings.Contains(err.Error(), "no download path") || erased() != 0 {
+		t.Fatalf("empty path: %v", err)
+	}
 	// Inside the root: check, erase, delete, in that order; the tree is gone.
 	target := mk("data/Alpha")
 	base = target
