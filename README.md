@@ -343,8 +343,11 @@ unix socket (`~/.rtorrent.socket`, read from `~/.rtorrent.rc` and
 password is involved: the socket's permissions decide who may connect. The
 client is PMSS's own, started by the panel's watchdog, so there is no
 install, start or stop for it here; the tenant's `~/.rtorrentDisable`
-marker is shown and silences the alert. Torrent actions: stop, start,
-remove, remove with data, add. Remove with data asks rTorrent for the
+marker is shown and silences the alert. On a box running both clients the
+torrents tab groups the torrents by client, each group with its own counts
+and add button; the fleet-wide torrents view names the client in
+parentheses after each torrent. Torrent actions: stop, start, remove,
+remove with data, add. Remove with data asks rTorrent for the
 torrent's path, erases the torrent, then deletes on the box only after the
 box itself resolved the path through symlinks and found it strictly inside
 rTorrent's download root, which must itself be strictly inside the home.
