@@ -1967,28 +1967,30 @@ func TestRtLateAdoptionGoesToCurrentPoller(t *testing.T) {
 	if err := <-addDone; err != nil {
 		t.Fatal(err)
 	}
+	// Both the replacement's copy and the cache: the write follows the
+	// publication, so the wait covers both (fred on PR 123).
+	same := func(ls []rtorrent.PendingLabel) bool {
+		got := map[string]string{}
+		for _, l := range ls {
+			got[l.Hash] = l.Label
+		}
+		return len(got) == 2 && got[rtHashA] == "tv" && got[rtHashB] == "mine"
+	}
 	waitFor(t, 3*time.Second, func() bool {
 		p2.mu.Lock()
-		defer p2.mu.Unlock()
-		return len(p2.rtLabels) == 2
+		mem := same(p2.rtLabels)
+		p2.mu.Unlock()
+		return mem && same(p.m.restoredRtLabels(&box))
 	}, func() string {
 		p2.mu.Lock()
 		defer p2.mu.Unlock()
-		return fmt.Sprintf("replacement owes %+v", p2.rtLabels)
+		return fmt.Sprintf("replacement owes %+v, cache %+v", p2.rtLabels, p.m.restoredRtLabels(&box))
 	})
 	p.mu.Lock()
 	stale := len(p.rtLabels)
 	p.mu.Unlock()
 	if stale != 0 {
 		t.Fatalf("the retired poller must not take the labels: %d", stale)
-	}
-	saved := p.m.restoredRtLabels(&box)
-	got := map[string]string{}
-	for _, l := range saved {
-		got[l.Hash] = l.Label
-	}
-	if len(saved) != 2 || got[rtHashA] != "tv" || got[rtHashB] != "mine" {
-		t.Fatalf("cache %+v", saved)
 	}
 	// Another generation: the late set is dropped, not written.
 	gate = make(chan struct{})
