@@ -393,7 +393,8 @@ function recomputeTotals() {
     t.disk_used += b.disk.used_bytes; t.disk_quota += b.disk.quota_bytes;
     t.traffic_out += b.traffic.out_month_bytes; t.traffic_in += b.traffic.in_month_bytes;
     t.up_bps += b.rates.up_bps; t.down_bps += b.rates.down_bps;
-    t.torrents += b.qbt.total; t.seeding += b.qbt.seeding; t.containers += b.docker.running;
+    const ct = pfmView.clientTotals(b); // both clients, like the server's totals (fred review on #124)
+    t.torrents += ct.torrents; t.seeding += ct.seeding; t.containers += b.docker.running;
     const r = renewalOf(b);
     if (r && (!t.next_renewal || r < t.next_renewal)) t.next_renewal = r;
     if (serviceActive(b.service) && !seenSvc.has(b.service.id)) { seenSvc.add(b.service.id); t.monthly_cost += b.service.monthly || 0; t.currency = b.service.currency; }
@@ -515,11 +516,10 @@ function trafficPct(b) {
 // Torrent count across the monitored clients; the ratio is qBittorrent's
 // (rTorrent reports none fleet-wide). Empty when no client is monitored.
 function torrentsCell(b) {
-  const cs = boxClients(b);
-  if (!cs.length) return '';
-  const total = cs.reduce((n, c) => n + (c.st.total || 0), 0);
+  const ct = pfmView.clientTotals(b);
+  if (!ct.clients) return '';
   const ratio = b.qbt.enabled ? ` <span class="muted">r${b.qbt.global_ratio ? b.qbt.global_ratio.toFixed(2) : '—'}</span>` : '';
-  return `${total}${ratio}`;
+  return `${ct.torrents}${ratio}`;
 }
 function fleetCards() {
   const dt = S.settings.disk_threshold_pct || 90, tt = S.settings.traffic_threshold_pct || 90;
@@ -1008,6 +1008,7 @@ function addToast(r, stopped, client) {
   if (client === 'rtorrent') {
     const parts = [`${r?.added || 0} sent to rTorrent${tail}`];
     if (r?.failed) parts.push(`${r.failed} refused (not a magnet/http(s) link or not a torrent)`);
+    if (r?.unlabelled) parts.push(`${r.unlabelled} loaded without the label`);
     return parts.join(', ');
   }
   if (!r?.counted) {
@@ -1803,7 +1804,7 @@ async function torAddAction(a, act) {
   try {
     const seg = d.client === 'rtorrent' ? 'rtorrent' : 'qbt';
     const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${seg}/torrents`, fd);
-    toast(addToast(r, d.stopped, d.client), r?.failed ? 'warn' : 'ok');
+    toast(addToast(r, d.stopped, d.client), r?.failed || r?.unlabelled ? 'warn' : 'ok');
     if (S.torAdd === d) S.torAdd = null; // not a draft the user opened meanwhile
   } finally {
     if (S.torAdd) S.torAdd.busy = false;

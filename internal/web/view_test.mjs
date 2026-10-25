@@ -55,3 +55,17 @@ test('pctFine keeps a decimal under ten percent', () => {
   assert.equal(V.pctFine(12.4), '12%');
   assert.equal(V.pctFine(undefined), '0.0%');
 });
+
+test('fleet torrent totals count every monitored client, from a snapshot or an SSE state (fred review on #124)', () => {
+  const both = { qbt: { enabled: true, total: 55, seeding: 50 }, rtorrent: { enabled: true, total: 2, seeding: 1 } };
+  assert.deepEqual(V.clientTotals(both), { torrents: 57, seeding: 51, clients: 2 });
+  // rTorrent only: not zero.
+  assert.deepEqual(V.clientTotals({ qbt: { enabled: false, total: 0 }, rtorrent: { enabled: true, total: 2, seeding: 2 } }), { torrents: 2, seeding: 2, clients: 1 });
+  // An older event without the rtorrent block, or without qbt, still counts what it has.
+  assert.deepEqual(V.clientTotals({ qbt: { enabled: true, total: 3, seeding: 3 } }), { torrents: 3, seeding: 3, clients: 1 });
+  assert.deepEqual(V.clientTotals({ rtorrent: { enabled: true, total: 4, seeding: 0 } }), { torrents: 4, seeding: 0, clients: 1 });
+  // A monitored client that is down keeps its carried counts; a client switched off contributes nothing; junk is 0.
+  assert.deepEqual(V.clientTotals({ qbt: { enabled: true, reachable: false, total: 7, seeding: 1 }, rtorrent: { enabled: false, total: 9 } }), { torrents: 7, seeding: 1, clients: 1 });
+  assert.deepEqual(V.clientTotals({ qbt: { enabled: true, total: 'x' } }), { torrents: 0, seeding: 0, clients: 1 });
+  assert.deepEqual(V.clientTotals(undefined), { torrents: 0, seeding: 0, clients: 0 });
+});

@@ -59,5 +59,22 @@ function ramLimitMeter(ram, cls = '') {
   return `<div class="meter" title="${esc(title)}"><i class="${esc(cls)}" style="width:${r.ok ? Math.min(100, Math.max(0, Number(r.pct) || 0)) : 0}%"></i></div>`;
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine };
+// clientTotals sums a box's torrent counts over its monitored clients
+// (qBittorrent and rTorrent). A client that is off, or whose block is
+// missing from an older snapshot or event, contributes nothing; a client
+// that is on but unreachable still contributes its carried counts, as the
+// server's totals do. Used by the fleet totals recomputed from SSE events
+// and by the per-box cards, so the two never disagree (fred review on #124).
+function clientTotals(b) {
+  const t = { torrents: 0, seeding: 0, clients: 0 };
+  for (const c of [b?.qbt, b?.rtorrent]) {
+    if (!c || !c.enabled) continue;
+    t.clients++;
+    t.torrents += Number(c.total) || 0;
+    t.seeding += Number(c.seeding) || 0;
+  }
+  return t;
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals };
 })();
