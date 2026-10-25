@@ -1011,3 +1011,98 @@ func TestRtRemoveDataOwnTransport(t *testing.T) {
 		t.Fatalf("%v erases %d → %d", err, n, m)
 	}
 }
+
+// TestRtRemoveDataForgetsLabelOnCurrentOwner: the erase is paused, the
+// poller is torn down and replaced (its owed labels copied, persisted and
+// restored into the replacement), the erase completes; re-adding the hash
+// unlabelled on the replacement must not inherit the old label (fred on
+// PR 123).
+func TestRtRemoveDataForgetsLabelOnCurrentOwner(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	target := filepath.Join(data, "Alpha")
+	os.MkdirAll(target, 0o755)
+	os.WriteFile(filepath.Join(target, "f"), []byte("x"), 0o600)
+	f := newFakeSCGI(t)
+	eraseGate := make(chan struct{})
+	eraseEntered := make(chan struct{}, 1)
+	var mu sync.Mutex
+	sets := 0
+	f.reply = func(m, b string) string {
+		switch m {
+		case "d.base_path":
+			return xmlResp(xs(target))
+		case "d.erase":
+			eraseEntered <- struct{}{}
+			<-eraseGate
+		case "d.custom1.set":
+			mu.Lock()
+			sets++
+			mu.Unlock()
+		case "d.multicall2":
+			return xmlResp(`<array><data>` + xmlRow(xs(rtHashA), xs("Alpha"), i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), xs(""), xs(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
+	p.m.mu.Lock()
+	p.m.pollers[p.box.ID] = p
+	p.m.mu.Unlock()
+	cli, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
+	run := &localRunner{home: home}
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		return run, f.dialer(ep), func() {}, nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA) }()
+	<-eraseEntered // the detached erase is in flight
+	// An edit: the poller is torn down (its owed labels saved), recorded,
+	// and replaced by a poller that restores them from the cache.
+	p.closeConns()
+	p.recordRtLabels(context.Background())
+	box := *p.box
+	p2 := newPoller(p.m, &box)
+	p2.dialRt = f.dialer
+	p2.rtLabels = p.m.restoredRtLabels(&box)
+	if len(p2.rtLabels) != 1 {
+		t.Fatalf("replacement should start with the owed label: %+v", p2.rtLabels)
+	}
+	p.m.mu.Lock()
+	p.m.pollers[box.ID] = p2
+	p.m.mu.Unlock()
+	close(eraseGate)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// Nothing owed anywhere: the replacement's copy, its client, the cache.
+	p2.mu.Lock()
+	n := len(p2.rtLabels)
+	p2.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("replacement still owes %d", n)
+	}
+	c2, _ := p2.rtClient(&sshx.Client{}, "unix:/x")
+	if len(c2.Pending()) != 0 || len(p.m.restoredRtLabels(&box)) != 0 {
+		t.Fatalf("client %d cache %d", len(c2.Pending()), len(p.m.restoredRtLabels(&box)))
+	}
+	// Re-adding the hash unlabelled through the replacement stays unlabelled.
+	if _, err := c2.Add(context.Background(), rtorrent.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Torrents(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if sets != 0 {
+		t.Fatalf("the re-added torrent inherited a label: %d setter calls", sets)
+	}
+}

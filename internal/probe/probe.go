@@ -1368,7 +1368,7 @@ func parseRt(s map[string]string, home string) RtInfo {
 			r.ConfFound = true
 			r.SCGI, r.ConfError = scgiTCP(v), ""
 			if r.SCGI == "" {
-				r.ConfError = "unusable SCGI port in the rTorrent config: " + k + " = " + clipRunes(v, 120) + " (must be a loopback host:port)"
+				r.ConfError = "unusable SCGI port in the rTorrent config: " + k + " = " + clipRunes(v, 120) + " (must be 127.0.0.1:port or a bare port; IPv6 is not supported)"
 			}
 		case "directory.default.set", "directory":
 			r.DataDir = homeDir(v, home)
@@ -1422,9 +1422,12 @@ func scgiUnix(v, home string) string {
 	return "unix:" + v
 }
 
-// scgiTCP normalises "host:port", "[::1]:port" or a bare port (rTorrent
-// binds localhost for one) to "tcp:127.0.0.1:port"; only loopback hosts
-// are accepted since the dashboard reaches the box over its own SSH tunnel.
+// scgiTCP normalises "host:port" or a bare port (rTorrent binds localhost
+// for one) to "tcp:127.0.0.1:port". Only the IPv4 loopback is accepted: the
+// dashboard reaches the box over its own SSH tunnel, and its listener
+// ownership checks read the IPv4 socket table, so an IPv6 loopback
+// endpoint ([::1]:port) is refused rather than rewritten to a different
+// listener (Codex on PR 123).
 func scgiTCP(v string) string {
 	host, port := "", v
 	if strings.Contains(v, ":") {
@@ -1439,7 +1442,7 @@ func scgiTCP(v string) string {
 		return ""
 	}
 	switch host {
-	case "", "localhost", "127.0.0.1", "::1":
+	case "", "localhost", "127.0.0.1":
 		return "tcp:127.0.0.1:" + strconv.Itoa(n)
 	}
 	return ""

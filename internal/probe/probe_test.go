@@ -1346,9 +1346,9 @@ func TestParseRt(t *testing.T) {
 		{"scgi_port = localhost:5001\n", "tcp:127.0.0.1:5001"},
 		{"scgi_port = 5002\n", "tcp:127.0.0.1:5002"},
 		{"network.scgi.open_local = ~/.rtorrent.socket\nnetwork.scgi.open_port = 0.0.0.0:5000\n", ""}, // last wins; a public bind is refused
-		{"scgi_port = [::1]:5003\n", "tcp:127.0.0.1:5003"},
-		{"scgi_port = ::1:5004\n", ""},                                   // not a valid host:port
-		{"network.scgi.open_local = /home/other/.rtorrent.socket\n", ""}, // outside the home
+		{"scgi_port = [::1]:5003\n", ""},                                                              // a different listener: refused, not rewritten to IPv4 (Codex on PR 123)
+		{"scgi_port = ::1:5004\n", ""},                                                                // not a valid host:port
+		{"network.scgi.open_local = /home/other/.rtorrent.socket\n", ""},                              // outside the home
 		{"network.scgi.open_local = ~/a\nnetwork.scgi.open_local = \"~/b\" # comment\n", "unix:/home/u/b"},
 		{"network.scgi.open_local = ../x\n", ""},
 		{"network.scgi.open_local = /home/u/../../etc/x\n", ""},

@@ -183,6 +183,31 @@ func (p *poller) dropRtLocked() {
 	p.rt, p.rtSSH = nil, nil
 }
 
+// forgetRtLabel drops any label owed to hash from this poller's client and
+// its saved copy, and persists the owed set when asked (only the box's
+// current poller writes the cache, so a retired one cannot overwrite
+// additions made since).
+func (p *poller) forgetRtLabel(ctx context.Context, hash string, persist bool) {
+	hash = strings.ToUpper(hash)
+	p.mu.Lock()
+	if p.rt != nil {
+		p.rt.Forget(hash)
+	}
+	if len(p.rtLabels) > 0 {
+		kept := p.rtLabels[:0]
+		for _, l := range p.rtLabels {
+			if strings.ToUpper(l.Hash) != hash {
+				kept = append(kept, l)
+			}
+		}
+		p.rtLabels = kept
+	}
+	p.mu.Unlock()
+	if persist {
+		p.recordRtLabels(ctx)
+	}
+}
+
 // rtLabelsCacheKind is the box_cache kind holding the labels owed to
 // magnets (rtLabelsCache) across restarts.
 const rtLabelsCacheKind = "rt_labels"
@@ -503,7 +528,16 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		if err := dcli.Action(ectx, rtorrent.ActionRemove, hash); err != nil {
 			return err // nothing deleted
 		}
-		cli.Forget(hash) // the poller's client owes this torrent nothing any more
+		// The removed torrent is owed nothing any more, wherever the box's
+		// pending labels live by now: this poller's client or its saved
+		// copy, and, if an edit replaced this poller meanwhile, the current
+		// poller's (which also persists the result); fred on PR 123.
+		p.forgetRtLabel(dctx, hash, false)
+		if cur := p.m.poller(p.box.ID); cur != nil && cur != p {
+			cur.forgetRtLabel(dctx, hash, true)
+		} else if cur == p {
+			p.recordRtLabels(dctx)
+		}
 		out, stderr, err := drun.Run(dctx, "sh", strings.NewReader(rtRemoveDataVars("delete", root, base)+rtRemoveDataScript))
 		if err != nil {
 			return fmt.Errorf("the torrent was removed from rTorrent but its files were not deleted: %s", clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300))
