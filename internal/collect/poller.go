@@ -687,6 +687,12 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 	st.Qbt.Reachable = false
 	st.Qbt.PortOK = false // must be re-verified by the next successful probe
 	st.Rt.Reachable, st.Rt.PortOK = false, false
+	// Labels owed to magnets must reach the cache from a failed poll too:
+	// the client was just dropped with the transport, and the box may stay
+	// down across a restart (Codex on PR 123).
+	rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	p.recordRtLabels(rctx)
+	rcancel()
 	st.Docker.Reachable = false
 	p.m.log.Warn("poll failed", "box", p.box.Name, "failures", st.Failures, "err", describeErr(err))
 	// st is the snapshot from the poll's start: a discovery toggle that

@@ -711,6 +711,15 @@ func TestRtPendingLabelsSurviveTransportAndRestart(t *testing.T) {
 	if p.m.restoredRtLabels(&moved) != nil {
 		t.Fatal("another generation must not get the labels")
 	}
+	// While the client is down (reconnect pending), the labels saved by the
+	// teardown are what gets persisted, not nothing (Codex on PR 123).
+	p.closeConns()
+	p.m.st.DeleteCache(context.Background(), p.box.ID, rtLabelsCacheKind)
+	p.recordRtLabels(context.Background())
+	if got := p.m.restoredRtLabels(p.box); len(got) != 1 {
+		t.Fatalf("saved labels not persisted while the client is down: %+v", got)
+	}
+	c2, _ = p.rtClient(&sshx.Client{}, "unix:/x") // takes them back
 	// Once settled, the cache holds an empty list, not the old entry.
 	c2.Restore(nil)
 	p.mu.Lock()

@@ -144,16 +144,25 @@ type rtLabelsCache struct {
 	Labels     []rtorrent.PendingLabel `json:"labels"`
 }
 
-// recordRtLabels writes the client's owed labels to the cache (an empty
-// list when there is none, so a settled label does not come back).
+// recordRtLabels writes the owed labels to the cache: the client's while
+// one is up (an empty list when there is none, so a settled label does not
+// come back), else the ones saved from the last client by dropRtLocked, so
+// a box that stays offline across a dashboard restart does not lose them
+// (Codex on PR 123). With neither, the cache is left as it is.
 func (p *poller) recordRtLabels(ctx context.Context) {
 	p.mu.Lock()
-	cli := p.rt
+	cli, saved := p.rt, p.rtLabels
 	p.mu.Unlock()
-	if cli == nil {
+	var labels []rtorrent.PendingLabel
+	switch {
+	case cli != nil:
+		labels = cli.Pending()
+	case saved != nil:
+		labels = saved
+	default:
 		return
 	}
-	c := rtLabelsCache{Generation: boxGeneration(p.box), Labels: cli.Pending()}
+	c := rtLabelsCache{Generation: boxGeneration(p.box), Labels: labels}
 	if err := p.m.st.SetCache(ctx, p.box.ID, rtLabelsCacheKind, c); err != nil {
 		p.m.log.Warn("cache rtorrent labels", "box", p.box.Name, "err", err)
 	}
