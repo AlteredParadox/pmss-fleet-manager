@@ -2698,6 +2698,69 @@ func TestUnsentEraseWithdrawsTombstone(t *testing.T) {
 	if _, had := m.rtTombSnapshot(p.box.ID, rtHashA); had {
 		t.Fatal("a record that could not be written must not exist in memory")
 	}
+	// A withdrawal whose durable write fails leaves memory and disk agreeing
+	// on the open record (daybreak blue re-review 7 of PR 123): the
+	// conservative outcome, settled by the next poll, never a restart
+	// finding an intent memory had forgotten.
+	m.cacheFault = nil
+	if err := m.rtTombstone(p.box.ID, p.generation(), rtHashA); err != nil {
+		t.Fatal(err)
+	}
+	m.cacheFault = func(kind string) error {
+		if kind == rtTombsCacheKind {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	m.rtRestoreTomb(p.box.ID, rtHashA, rtTomb{}, false)
+	m.cacheFault = nil
+	if rec, had := m.rtTombSnapshot(p.box.ID, rtHashA); !had || rec.settled {
+		t.Fatalf("a withdrawal that could not be written must keep the open record in memory: %+v %v", rec, had)
+	}
+	var disk rtTombsCache
+	if _, err := m.st.GetCache(context.Background(), p.box.ID, rtTombsCacheKind, &disk); err != nil || len(disk.Tombs) != 2 {
+		t.Fatalf("disk must still hold the open record: %v %+v", err, disk)
+	}
+	m.rtRestoreTomb(p.box.ID, rtHashA, rtTomb{}, false) // writes work again
+	if _, had := m.rtTombSnapshot(p.box.ID, rtHashA); had {
+		t.Fatal("withdrawn once the write succeeds")
+	}
+}
+
+// TestRemoveBoxWaitsForMutationLease (daybreak blue re-review 7 of PR 123):
+// a box removal takes the box's rTorrent mutation lease first, so it cannot
+// overtake an admitted add or removal whose bookkeeping would then find no
+// owner; a lease held past the request's deadline fails the request and
+// leaves the box; once free, the removal proceeds.
+func TestRemoveBoxWaitsForMutationLease(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	defer m.cancel()
+	m.mu.Lock()
+	m.states[p.box.ID] = &BoxState{ID: p.box.ID}
+	m.mu.Unlock()
+	release, err := m.rtLease(p.box.ID).Acquire(context.Background()) // an add in flight
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := m.RemoveBox(ctx, p.box.ID); err == nil || !strings.Contains(err.Error(), "cannot be removed right now") {
+		t.Fatalf("removal over a held lease: %v", err)
+	}
+	if m.poller(p.box.ID) == nil {
+		t.Fatal("the box must stay while the lease is held")
+	}
+	release()
+	if err := m.RemoveBox(context.Background(), p.box.ID); err != nil {
+		t.Fatal(err)
+	}
+	if m.poller(p.box.ID) != nil {
+		t.Fatal("removed")
+	}
 }
 
 // TestStaleDismissWithDirtyNoticeRow (daybreak blue re-review 6 of PR 123,

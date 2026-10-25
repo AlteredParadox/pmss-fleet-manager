@@ -658,9 +658,22 @@ func (b *boundedConn) Close() error {
 	}
 }
 
+// CloseWrite half-closes the stream (an SSH channel supports it) for a
+// peer that waits for EOF before answering.
+func (b *boundedConn) CloseWrite() error {
+	if cw, ok := b.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 // SetDeadline and friends are refused by the channel; they are no-ops
 // here so a caller that sets one as a courtesy gets Close's guarantee
-// instead of an error it would have to special-case.
+// instead of an error it would have to special-case. That is sound only
+// because every caller in this repository also closes the stream when its
+// context ends (the SCGI round trip's AfterFunc, the HTTP transports'
+// context plumbing); a caller relying on the deadline alone would not be
+// bounded.
 func (b *boundedConn) SetDeadline(time.Time) error      { return nil }
 func (b *boundedConn) SetReadDeadline(time.Time) error  { return nil }
 func (b *boundedConn) SetWriteDeadline(time.Time) error { return nil }

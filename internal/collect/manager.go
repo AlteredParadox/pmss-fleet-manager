@@ -367,6 +367,11 @@ func (m *Manager) rtTombstone(id int64, gen, hash string) error {
 				victim = h
 			}
 		}
+		if rank(tombs[victim]) == 2 {
+			// Every record is an open barrier: none may go for a new one.
+			m.leaseMu.Unlock()
+			return fmt.Errorf("%d removals on this box are still waiting to be settled; wait for a poll", rtTombMax)
+		}
 		delete(tombs, victim)
 	}
 	// An open tombstone keeps its original time (a settlement retried by a
@@ -411,6 +416,19 @@ func (m *Manager) rtTombSnapshot(id int64, hash string) (rtTomb, bool) {
 // conservative outcome.
 func (m *Manager) rtRestoreTomb(id int64, hash string, prev rtTomb, had bool) {
 	hash = strings.ToUpper(hash)
+	// Durable first, memory after: should the write fail, memory keeps the
+	// open record that disk still holds, so the two never disagree and a
+	// restart cannot find an intent memory had already forgotten (daybreak
+	// blue re-review 7 of PR 123). The cost of that failure is the
+	// conservative one: the next poll settles the live torrent's label.
+	var adding *rtTombRec
+	if had {
+		adding = &rtTombRec{Hash: hash, Generation: prev.gen, At: prev.at, Settled: prev.settled}
+	}
+	if err := m.saveRtTombs(id, "", adding, &rtTombRec{Hash: hash}); err != nil {
+		m.log.Warn("cache rtorrent tombstones; the unsent erase's record stays until the next poll settles it", "box", id, "err", err)
+		return
+	}
 	m.leaseMu.Lock()
 	if tombs := m.rtTombs[id]; tombs != nil {
 		if had {
@@ -423,9 +441,6 @@ func (m *Manager) rtRestoreTomb(id int64, hash string, prev rtTomb, had bool) {
 		}
 	}
 	m.leaseMu.Unlock()
-	if err := m.saveRtTombs(id, ""); err != nil {
-		m.log.Warn("cache rtorrent tombstones", "box", id, "err", err)
-	}
 }
 
 // rtSettleTomb marks the tombstone for hash settled: its label is known
@@ -496,7 +511,7 @@ func (m *Manager) saveRtTombs(id int64, settling string, adding ...*rtTombRec) e
 		c.Tombs = append(c.Tombs, rtTombRec{Hash: h, Generation: t.gen, At: t.at, Settled: t.settled || h == settling})
 	}
 	for _, a := range adding {
-		if a != nil {
+		if a != nil && a.Generation != "" { // a record without a generation only removes the hash
 			c.Tombs = append(c.Tombs, *a)
 		}
 	}
@@ -1004,6 +1019,17 @@ func authEndpointChanged(p *poller, fresh *store.Box) bool {
 
 // RemoveBox stops polling and deletes the box, its alerts and its cache.
 func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
+	// The box's rTorrent mutation lease first (the order late adoption
+	// uses: lease, then the edit lock): a removal cannot overtake an add or
+	// a remove-with-data admitted on the box, whose label bookkeeping would
+	// otherwise find no owner (daybreak blue re-review 7 of PR 123). A
+	// deletion in progress holds it for its whole life; the request then
+	// fails with its message and can be repeated.
+	release, err := m.rtLease(id).Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("the box cannot be removed right now: %w", err)
+	}
+	defer release()
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
 	// The removal is a commit like any other: the box leaves memory under
@@ -1312,8 +1338,8 @@ func (m *Manager) restoredRtRemove(b *store.Box) (msg string, at time.Time, ok b
 		ctx = context.Background()
 	}
 	var c rtRemoveCache
-	if _, err := m.st.GetCache(ctx, b.ID, rtRemoveCacheKind, &c); err != nil || c.Generation != boxGeneration(b) || c.Message == "" {
-		return "", time.Time{}, false
+	if _, err := m.st.GetCache(ctx, b.ID, rtRemoveCacheKind, &c); err != nil || c.Generation != boxGeneration(b) || c.Message == "" || c.At.IsZero() {
+		return "", time.Time{}, false // a row without a time could never be dismissed: not shown
 	}
 	return clip(c.Message, 400), c.At, true
 }

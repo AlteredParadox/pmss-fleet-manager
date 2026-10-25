@@ -333,4 +333,23 @@ func TestRtRemoveNoticeAlertIgnoresProbe(t *testing.T) {
 	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); !slices.Equal(keys, []string{"unreachable"}) {
 		t.Fatalf("dismiss while unpolled: %v", keys)
 	}
+	// Disabled: the probe alerts resolve, the notice alert stays or is
+	// raised, and a dismiss while disabled resolves it (daybreak blue
+	// re-review 7 of PR 123).
+	s = &collect.BoxState{ID: b.ID, Name: "x", Status: "disabled"}
+	s.Rt.RemoveFailed = "Alpha (43519d14…): disk says no"
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); !slices.Equal(keys, []string{"rtorrent-remove"}) {
+		t.Fatalf("disabled with a notice: %v", keys)
+	}
+	st.RaiseAlert(ctx, b.ID, "disk", "warn", "x")
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); !slices.Equal(keys, []string{"rtorrent-remove"}) {
+		t.Fatalf("disabled: probe alerts resolve, the notice stays: %v", keys)
+	}
+	s.Rt.RemoveFailed = ""
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); len(keys) != 0 {
+		t.Fatalf("dismiss while disabled: %v", keys)
+	}
 }

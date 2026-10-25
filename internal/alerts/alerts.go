@@ -173,13 +173,19 @@ func (e *Evaluator) resolveUnwatched(ctx context.Context, s *collect.BoxState) {
 // resolveDisabled handles a disabled box.
 func (e *Evaluator) resolveDisabled(ctx context.Context, s *collect.BoxState) {
 	// Nothing is being checked any more: resolve whatever was open so
-	// a disabled box does not keep an "unreachable" alert forever.
+	// a disabled box does not keep an "unreachable" alert forever. The
+	// recorded outcome of a remove-with-data is the dashboard's own, not a
+	// check: its alert stays (or is raised) while the notice is undismissed
+	// (daybreak blue re-review 7 of PR 123).
+	wanted, changed := e.raise(ctx, s, wantRtRemove(s))
 	keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
 	if err != nil {
 		return
 	}
-	changed := false
 	for _, k := range keys {
+		if wanted[k] {
+			continue
+		}
 		if err := e.st.ResolveAlert(ctx, s.ID, k); err == nil {
 			changed = true
 		}

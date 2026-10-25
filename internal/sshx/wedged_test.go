@@ -408,6 +408,9 @@ func TestForwardedStreamCloseIsBounded(t *testing.T) {
 	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatalf("a deadline is accepted as a no-op: %v", err)
 	}
+	if cw, ok := conn.(interface{ CloseWrite() error }); !ok || cw.CloseWrite() != nil {
+		t.Fatal("a forwarded stream half-closes like the channel it wraps")
+	}
 	conn.Close()
 	if c.transport() == nil {
 		t.Fatal("a healthy stream's Close must not wedge the transport")

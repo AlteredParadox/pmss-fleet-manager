@@ -901,8 +901,8 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		// persisted, so the dead label cannot reach a re-added torrent
 		// (fred on PR 123). It is settled only when the cleanup is known
 		// complete on the current owner, and stays on record as the erase
-		// time for late handoffs (adoptLate).
-		p.m.rtTombstone(p.box.ID, gen, hash)
+		// time for late handoffs (adoptLate). The record itself was
+		// written before the erase went out (above): nothing to add here.
 		if unlock, ok := lockWithin(dctx, &p.m.boxMu); ok {
 			// The cleaned label row is persisted by the current owner before
 			// the tombstone is settled durably (fred on PR 123).
