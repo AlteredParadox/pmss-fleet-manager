@@ -91,6 +91,9 @@ type Torrent struct {
 	UpTotal   int64
 	DownTotal int64
 	Private   bool
+	// Meta is a magnet's metadata placeholder (d.is_meta): rTorrent replaces
+	// it with the real torrent once the metadata arrives.
+	Meta bool
 }
 
 // Clips for retained strings: a hostile client cannot grow the state.
@@ -107,7 +110,7 @@ var torrentFields = []any{
 	"d.hash=", "d.name=", "d.size_bytes=", "d.completed_bytes=", "d.down.rate=", "d.up.rate=",
 	"d.ratio=", "d.state=", "d.complete=", "d.is_active=", "d.hashing=", "d.is_open=",
 	"d.message=", "d.custom1=", "d.timestamp.finished=", "d.peers_connected=", "d.peers_complete=",
-	"d.up.total=", "d.down.total=", "d.is_private=",
+	"d.up.total=", "d.down.total=", "d.is_private=", "d.is_meta=",
 }
 
 // Stats is the client-wide picture.
@@ -316,7 +319,7 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 			Hashing: nonNeg(r[10].Int), Open: r[11].Int == 1,
 			Message: clip(r[12].Str, maxMessage), Label: clip(r[13].Str, maxLabel),
 			Finished: nonNeg(r[14].Int), Peers: nonNeg(r[15].Int), Seeds: nonNeg(r[16].Int),
-			UpTotal: nonNeg(r[17].Int), DownTotal: nonNeg(r[18].Int), Private: r[19].Int == 1,
+			UpTotal: nonNeg(r[17].Int), DownTotal: nonNeg(r[18].Int), Private: r[19].Int == 1, Meta: r[20].Int == 1,
 		})
 	}
 	return out, nil
@@ -325,8 +328,9 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 // reconcileLabels applies pending labels to the listed torrents that lost
 // theirs (rTorrent's process_meta_download builds a fresh download when a
 // magnet's metadata arrives and does not copy custom1: fred and Codex on
-// PR 122). An entry lives through the placeholder phase (no size). The
-// first time its torrent is listed with metadata: a torrent that already
+// PR 122). An entry lives through the placeholder phase (d.is_meta; the
+// placeholder's size is not a tell, libtorrent gives it a one-byte file).
+// The first time its torrent is listed with metadata: a torrent that already
 // carries a label (ours or one the user set) spends the entry untouched,
 // so a label changed or cleared in ruTorrent afterwards is left alone; a
 // torrent without one gets the label, and the entry is spent only once
@@ -355,7 +359,7 @@ func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
 		if !ok {
 			continue // not listed yet (or removed): keep until it expires
 		}
-		if rows[i].Size == 0 {
+		if rows[i].Meta {
 			continue // still the placeholder: the rebuild is yet to come
 		}
 		if rows[i].Label != "" {

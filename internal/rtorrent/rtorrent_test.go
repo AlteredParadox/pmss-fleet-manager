@@ -234,7 +234,7 @@ const hashB = "89abcdef0123456789abcdef0123456789abcdef"
 
 func torrentRow(hash, name string, extra ...string) string {
 	// d.hash, d.name, size, completed, down, up, ratio, state, complete, active, hashing, open, message, label, finished, peers, seeds, uptotal, downtotal, private
-	vals := []string{str(hash), str(name), i8(1000), i8(1000), i8(0), i8(2048), i8(1500), i8(1), i8(1), i8(1), i8(0), i8(1), str(""), str("tv"), i8(1700000000), i8(3), i8(2), i8(4000), i8(1000), i8(1)}
+	vals := []string{str(hash), str(name), i8(1000), i8(1000), i8(0), i8(2048), i8(1500), i8(1), i8(1), i8(1), i8(0), i8(1), str(""), str("tv"), i8(1700000000), i8(3), i8(2), i8(4000), i8(1000), i8(1), i8(0)}
 	copy(vals[2:], extra)
 	return row(vals...)
 }
@@ -312,9 +312,9 @@ func TestTorrentsDecodeAndMapping(t *testing.T) {
 		return resp(`<array><data>` +
 			torrentRow(hashA, "Alpha") +
 			// lower-case hash, mixed int element names, stopped, with a tracker message
-			torrentRow(hashB, "Beta", "<i4>2000</i4>", "<int>500</int>", i8(99), i8(0), i8(250), i8(0), i8(0), i8(0), i8(0), i8(0), str("Tracker: [Failure reason]"), str(""), i8(0), i8(0), i8(0), i8(0), i8(500), i8(0)) +
+			torrentRow(hashB, "Beta", "<i4>2000</i4>", "<int>500</int>", i8(99), i8(0), i8(250), i8(0), i8(0), i8(0), i8(0), i8(0), str("Tracker: [Failure reason]"), str(""), i8(0), i8(0), i8(0), i8(0), i8(500), i8(0), i8(0)) +
 			// not a torrent row: ignored, not fatal
-			row(str("garbage"), str("x"), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) +
+			row(str("garbage"), str("x"), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) +
 			`</data></array>`)
 	})
 	ts, err := New(f.dial).Torrents(context.Background())
@@ -376,7 +376,7 @@ func TestRetainedStringsClippedAndUTF8(t *testing.T) {
 	long := strings.Repeat("ü", 1000)
 	bad := "caf\xe9 \xff\xfe ok" // latin-1 bytes in a name
 	f.on(func(m string, p []string) string {
-		return resp(`<array><data>` + torrentRow(hashA, long) + torrentRow(hashB, bad, i8(1), i8(1), i8(1), i8(1), i8(1), i8(1), i8(1), i8(1), i8(0), i8(1), str(strings.Repeat("m", 500)), str(strings.Repeat("l", 500)), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
+		return resp(`<array><data>` + torrentRow(hashA, long) + torrentRow(hashB, bad, i8(1), i8(1), i8(1), i8(1), i8(1), i8(1), i8(1), i8(1), i8(0), i8(1), str(strings.Repeat("m", 500)), str(strings.Repeat("l", 500)), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
 	})
 	ts, err := New(f.dial).Torrents(context.Background())
 	if err != nil {
@@ -849,7 +849,7 @@ func TestRowValuesClamped(t *testing.T) {
 	f := newFake(t)
 	neg := "<i8>-5</i8>"
 	f.on(func(m string, p []string) string {
-		return resp(`<array><data>` + torrentRow(hashA, "n", neg, neg, neg, neg, neg, i8(0), i8(0), i8(0), neg, i8(0), str(""), str(""), neg, neg, neg, neg, neg, i8(0)) + `</data></array>`)
+		return resp(`<array><data>` + torrentRow(hashA, "n", neg, neg, neg, neg, neg, i8(0), i8(0), i8(0), neg, i8(0), str(""), str(""), neg, neg, neg, neg, neg, i8(0), i8(0)) + `</data></array>`)
 	})
 	ts, err := New(f.dial).Torrents(context.Background())
 	if err != nil || len(ts) != 1 {
@@ -908,15 +908,17 @@ func TestMagnetLabelSurvivesMetadata(t *testing.T) {
 			label = p[1]
 			return resp(i8(0))
 		case "d.multicall2":
-			lbl, size := label, int64(0) // the placeholder has no size
+			// libtorrent 0.13.8 gives the metadata placeholder a one-byte
+			// file, so size tells nothing; d.is_meta does (Codex on PR 122).
+			lbl, size, meta := label, int64(1), int64(1)
 			if phase == "rebuilt" {
 				lbl = "" // the fresh download does not carry custom1
 				phase = "rebuilt-listed"
 			}
 			if phase != "placeholder" {
-				size = 1000
+				size, meta = 1000, 0
 			}
-			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(size), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(lbl), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
+			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(size), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(lbl), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(meta)) + `</data></array>`)
 		}
 		return resp(i8(0))
 	})
@@ -927,10 +929,11 @@ func TestMagnetLabelSurvivesMetadata(t *testing.T) {
 	if err != nil || label != "tv" || sets != 1 || res.Deferred != 1 {
 		t.Fatalf("add: %v label %q sets %d %+v", err, label, sets, res)
 	}
-	// Still the placeholder (no size): the label shows, nothing to do, and
-	// the entry must survive, since the rebuild is still to come.
+	// Still the placeholder (is_meta, one-byte file): the label shows,
+	// nothing to do, and the entry must survive, since the rebuild is still
+	// to come.
 	rows, err := c.Torrents(context.Background())
-	if err != nil || rows[0].Label != "tv" || sets != 1 {
+	if err != nil || rows[0].Label != "tv" || !rows[0].Meta || rows[0].Size != 1 || sets != 1 {
 		t.Fatalf("placeholder listing: %v %+v sets %d", err, rows, sets)
 	}
 	c.pendMu.Lock()
@@ -977,7 +980,7 @@ func TestMagnetLabelSurvivesMetadata(t *testing.T) {
 			label = p[1]
 			return resp(i8(0))
 		case "d.multicall2":
-			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(label), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
+			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(label), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
 		}
 		return resp(i8(0))
 	})
