@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -552,8 +553,84 @@ func (c *Client) dial(ctx context.Context, network, addr string) (net.Conn, erro
 		}
 		return nil, err
 	}
-	return conn, dialErr
+	if dialErr != nil {
+		return nil, dialErr
+	}
+	return &boundedConn{Conn: conn, c: c, cli: cli, idle: make(chan struct{}, 1)}, nil
 }
+
+// boundedConn is a forwarded stream whose Close is guaranteed to end it.
+// An x/crypto/ssh channel supports no deadline (SetDeadline is refused),
+// and its Close is a write to the peer that may block, so a stream whose
+// peer stopped answering would hold a Read forever, and with it the poll,
+// the edit, the removal or the shutdown waiting on that poll (daybreak
+// blue re-review 6 of PR 123). Close therefore gives an in-flight Read or
+// Write, and the channel close itself, graceWait to finish on their own;
+// past that the owning transport is wedged (see wedged), which fails them.
+// The poller reconnects at its next use, as for any other wedged
+// operation.
+type boundedConn struct {
+	net.Conn
+	c        *Client
+	cli      *ssh.Client
+	inflight atomic.Int32
+	idle     chan struct{}
+	once     sync.Once
+}
+
+func (b *boundedConn) Read(p []byte) (int, error) {
+	b.inflight.Add(1)
+	defer b.done()
+	return b.Conn.Read(p)
+}
+
+func (b *boundedConn) Write(p []byte) (int, error) {
+	b.inflight.Add(1)
+	defer b.done()
+	return b.Conn.Write(p)
+}
+
+func (b *boundedConn) done() {
+	if b.inflight.Add(-1) == 0 {
+		select {
+		case b.idle <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// Close ends the stream: bounded by graceWait, after which the transport
+// is wedged. Idempotent; a second Close returns at once.
+func (b *boundedConn) Close() error {
+	b.once.Do(func() {
+		closed := make(chan struct{})
+		go func() { b.Conn.Close(); close(closed) }()
+		timer := time.NewTimer(graceWait)
+		defer timer.Stop()
+		isClosed := false
+		for {
+			if isClosed && b.inflight.Load() == 0 {
+				return // ended on its own: the transport is fine
+			}
+			select {
+			case <-closed:
+				isClosed = true
+			case <-b.idle:
+			case <-timer.C:
+				b.c.wedged(b.cli)
+				return
+			}
+		}
+	})
+	return nil
+}
+
+// SetDeadline and friends are refused by the channel; they are no-ops
+// here so a caller that sets one as a courtesy gets Close's guarantee
+// instead of an error it would have to special-case.
+func (b *boundedConn) SetDeadline(time.Time) error      { return nil }
+func (b *boundedConn) SetReadDeadline(time.Time) error  { return nil }
+func (b *boundedConn) SetWriteDeadline(time.Time) error { return nil }
 
 // Ping sends a keepalive request and reports whether the connection answered.
 func (c *Client) Ping(ctx context.Context) error {

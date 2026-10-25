@@ -112,7 +112,7 @@ func verifiedDial(cli tunnel, hp string, port int) qbt.Dialer {
 		out, _, err := cli.Run(vctx, "sh", strings.NewReader(probe.EstablishedScript(port)))
 		if err != nil && len(out) == 0 {
 			conn.Close()
-			return nil, fmt.Errorf("could not verify who accepted the WebUI connection: %w", err)
+			return nil, fmt.Errorf("could not verify who accepted the connection on port %d: %w", port, err)
 		}
 		ok, known, reason := probe.EstablishedOwner(out, port)
 		if !known {
@@ -120,7 +120,7 @@ func verifiedDial(cli tunnel, hp string, port int) qbt.Dialer {
 		}
 		if !ok {
 			conn.Close()
-			return nil, errors.New("refusing to use the WebUI connection: " + reason)
+			return nil, fmt.Errorf("refusing to use the connection on port %d: %s", port, reason)
 		}
 		return conn, nil
 	}

@@ -2485,18 +2485,26 @@ func TestSettleWaitsForDurableLabelRow(t *testing.T) {
 	if got := m.restoredRtLabels(p.box); len(got) != 0 {
 		t.Fatalf("label row not cleaned: %+v", got)
 	}
-	// A poller whose label row cannot be written (no box row: the store
-	// refuses the cache write) must not settle: the tombstone stays open.
-	orphan := newPoller(m, &store.Box{ID: 2, Name: "y", Host: "y.example", User: "u", RtEnabled: true})
-	orphan.dialRt = f.dialer
-	m.mu.Lock()
-	m.pollers[2] = orphan
-	m.mu.Unlock()
-	orphan.rtLabels = []rtorrent.PendingLabel{{Hash: rtHashB, Label: "x", Until: time.Now().Add(time.Hour)}}
-	m.rtTombstone(2, orphan.generation(), rtHashB) // the durable write fails too; the memory record stands
-	orphan.settleRtTombs(context.Background(), true)
-	if n := len(m.rtTombList(2, orphan.generation())); n != 1 {
+	// A settle whose label write fails must not settle: the tombstone
+	// stays open for the next poll.
+	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashB, Label: "x", Until: time.Now().Add(time.Hour)}})
+	if err := m.rtTombstone(p.box.ID, p.generation(), rtHashB); err != nil {
+		t.Fatal(err)
+	}
+	m.cacheFault = func(kind string) error {
+		if kind == rtLabelsCacheKind {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	p.settleRtTombs(context.Background(), true)
+	m.cacheFault = nil
+	if n := len(m.rtTombList(p.box.ID, p.generation())); n != 1 {
 		t.Fatalf("a settle whose label write failed must leave the tombstone open: %d open", n)
+	}
+	p.settleRtTombs(context.Background(), true) // writes work again: settled
+	if n := len(m.rtTombList(p.box.ID, p.generation())); n != 0 {
+		t.Fatalf("retried settle: %d open", n)
 	}
 	// Restart from the reachable between-writes state: the cleaned label
 	// row is durable, the tombstone is still open on disk.
@@ -2606,4 +2614,116 @@ func TestFailedSettlementIsRetried(t *testing.T) {
 		t.Fatal("a restart must restore the new label, not filter it as erased")
 	}
 	_ = snap
+}
+
+// TestUnsentEraseWithdrawsTombstone (daybreak blue re-review 6 of PR 123,
+// finding 2): an erase whose command provably never left (the dial failed)
+// withdraws the intent it recorded, so the next poll does not revoke a
+// live torrent's label; a settled record from an earlier erase of the same
+// hash is put back as it was; and an intent whose durable write failed is
+// no record at all, in memory or on disk.
+func TestUnsentEraseWithdrawsTombstone(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	// An earlier erase of hashB, settled: the late-handoff barrier to keep.
+	if err := m.rtTombstone(p.box.ID, p.generation(), rtHashB); err != nil {
+		t.Fatal(err)
+	}
+	m.rtSettleTomb(p.box.ID, rtHashB)
+	before, _ := m.rtTombSnapshot(p.box.ID, rtHashB)
+	// The transport dies: every dial fails before a byte is sent.
+	p.dialRt = func(string) rtorrent.Dialer {
+		return func(ctx context.Context) (net.Conn, error) { return nil, errors.New("ssh: not connected") }
+	}
+	readyRt(t, p, "unix:/x")
+	for _, h := range []string{rtHashA, rtHashB} {
+		if err := p.rtTorrentAction(context.Background(), h, rtorrent.ActionRemove); !rtorrent.NotSent(err) {
+			t.Fatalf("%s: %v", h, err)
+		}
+	}
+	if _, had := m.rtTombSnapshot(p.box.ID, rtHashA); had {
+		t.Fatal("an unsent erase must leave no record")
+	}
+	if after, had := m.rtTombSnapshot(p.box.ID, rtHashB); !had || !after.settled || !after.at.Equal(before.at) {
+		t.Fatalf("the earlier settled record must be restored as it was: %+v (had %v)", after, had)
+	}
+	var row rtTombsCache
+	if _, err := m.st.GetCache(context.Background(), p.box.ID, rtTombsCacheKind, &row); err != nil || len(row.Tombs) != 1 || row.Tombs[0].Hash != rtHashB || !row.Tombs[0].Settled {
+		t.Fatalf("durable: %v %+v", err, row)
+	}
+	// A live magnet owed a label keeps it through all this.
+	cli, _ := p.rtClient(context.Background(), nil, "unix:/x")
+	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "live", Until: time.Now().Add(time.Hour)}})
+	p.settleRtTombs(context.Background(), true)
+	if got := cli.Pending(); len(got) != 1 || got[0].Label != "live" {
+		t.Fatalf("a live torrent's label was revoked: %+v", got)
+	}
+	// An intent whose durable write fails is refused and leaves nothing in
+	// memory either.
+	m.cacheFault = func(kind string) error {
+		if kind == rtTombsCacheKind {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	if err := p.rtTorrentAction(context.Background(), rtHashA, rtorrent.ActionRemove); err == nil || !strings.Contains(err.Error(), "could not record the removal") {
+		t.Fatalf("%v", err)
+	}
+	if _, had := m.rtTombSnapshot(p.box.ID, rtHashA); had {
+		t.Fatal("a record that could not be written must not exist in memory")
+	}
+}
+
+// TestStaleDismissWithDirtyNoticeRow (daybreak blue re-review 6 of PR 123,
+// finding 4): notice B's row write fails, so the row still holds A while B
+// is live; a stale dismiss of A must not clear B, and a dismiss of B, the
+// notice the user sees, clears it although the row disagrees.
+func TestStaleDismissWithDirtyNoticeRow(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	readyRt(t, p, "unix:/x")
+	p.reportRtRemove(p.generation(), rtHashA, "/home/u/data/Alpha", errors.New("first"))
+	m.mu.RLock()
+	seenA := m.states[p.box.ID].Rt.RemoveFailedAt
+	m.mu.RUnlock()
+	m.cacheFault = func(kind string) error {
+		if kind == rtRemoveCacheKind {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	time.Sleep(2 * time.Millisecond)
+	p.reportRtRemove(p.generation(), rtHashB, "/home/u/data/Beta", errors.New("second"))
+	m.cacheFault = nil
+	m.mu.RLock()
+	seenB, msgB := m.states[p.box.ID].Rt.RemoveFailedAt, m.states[p.box.ID].Rt.RemoveFailed
+	m.mu.RUnlock()
+	if !strings.Contains(msgB, "Beta") || !seenB.After(seenA) {
+		t.Fatalf("fixture: %q", msgB)
+	}
+	if msgRow, _, ok := m.restoredRtRemove(p.box); !ok || !strings.Contains(msgRow, "Alpha") {
+		t.Fatalf("fixture: the row should still hold A: %q %v", msgRow, ok)
+	}
+	if err := m.DismissRtRemoveFailure(p.box.ID, seenA); !errors.Is(err, ErrStaleNotice) {
+		t.Fatalf("a stale dismiss over a dirty row: %v", err)
+	}
+	m.mu.RLock()
+	still := m.states[p.box.ID].Rt.RemoveFailed
+	m.mu.RUnlock()
+	if still != msgB {
+		t.Fatalf("B must survive: %q", still)
+	}
+	if err := m.DismissRtRemoveFailure(p.box.ID, seenB); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.RLock()
+	cleared := m.states[p.box.ID].Rt.RemoveFailed == ""
+	m.mu.RUnlock()
+	if _, _, ok := m.restoredRtRemove(p.box); !cleared || ok {
+		t.Fatal("dismissing the live notice clears it and the dirty row")
+	}
 }

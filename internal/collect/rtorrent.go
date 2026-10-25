@@ -483,6 +483,12 @@ func (p *poller) recordRtLabels(ctx context.Context) (written bool) {
 		}
 	}
 	c := rtLabelsCache{Generation: gen, Labels: kept}
+	if p.m.cacheFault != nil {
+		if err := p.m.cacheFault(rtLabelsCacheKind); err != nil {
+			p.m.log.Warn("cache rtorrent labels", "box", p.box.Name, "err", err)
+			return false
+		}
+	}
 	if err := p.m.st.SetCache(ctx, p.box.ID, rtLabelsCacheKind, c); err != nil {
 		p.m.log.Warn("cache rtorrent labels", "box", p.box.Name, "err", err)
 		return false
@@ -738,17 +744,26 @@ func (p *poller) rtTorrentAction(ctx context.Context, hash, action string) error
 		return p.rtRemoveData(ctx, cli, sshRunner(sshc), st.Rt.Endpoint, st.Rt.DataDir, hash, release)
 	}
 	defer release()
+	var prevTomb rtTomb
+	var hadTomb bool
 	if action == rtorrent.ActionRemove {
 		// The erase intent is on record, durably, before the irreversible
 		// command goes out: should the answer be lost or the process die
 		// after rTorrent acted, the restart still knows the hash was
 		// erased and settles its label before anything can apply it
 		// (daybreak blue re-review 5 of PR 123). Not recordable: not sent.
+		prevTomb, hadTomb = p.m.rtTombSnapshot(p.box.ID, hash)
 		if err := p.m.rtTombstone(p.box.ID, p.generation(), hash); err != nil {
 			return fmt.Errorf("could not record the removal before sending it; nothing was changed: %w", err)
 		}
 	}
 	if err := p.onRetired(actx, cli, func(c *rtorrent.Client) error { return c.Action(actx, action, hash) }); err != nil {
+		if action == rtorrent.ActionRemove && rtorrent.NotSent(err) {
+			// The command provably never left: the intent is withdrawn, or
+			// the next poll would revoke a live torrent's label (daybreak
+			// blue re-review 6 of PR 123). A failure after the write keeps it.
+			p.m.rtRestoreTomb(p.box.ID, hash, prevTomb, hadTomb)
+		}
 		return err
 	}
 	if action == rtorrent.ActionRemove {
@@ -849,12 +864,16 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		ectx, ecancel := context.WithTimeout(dctx, apiTimeout)
 		defer ecancel()
 		// The erase intent goes on record, durably, before the erase is
-		// sent (see rtTorrentAction); the tombstone work below then
-		// reopens it with the time of the erase itself.
+		// sent (see rtTorrentAction); withdrawn again if the command
+		// provably never left.
+		prevTomb, hadTomb := p.m.rtTombSnapshot(p.box.ID, hash)
 		if err := p.m.rtTombstone(p.box.ID, gen, hash); err != nil {
 			return fmt.Errorf("could not record the removal before sending it; nothing was changed: %w", err)
 		}
 		if err := dcli.Action(ectx, rtorrent.ActionRemove, hash); err != nil {
+			if rtorrent.NotSent(err) {
+				p.m.rtRestoreTomb(p.box.ID, hash, prevTomb, hadTomb)
+			}
 			return fmt.Errorf("rTorrent refused to remove the torrent; nothing was deleted: %w", err)
 		}
 		// The removed torrent is owed nothing any more, wherever the box's
@@ -957,8 +976,18 @@ func (p *poller) reportRtRemove(gen, hash, base string, err error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := p.m.st.SetCache(ctx, p.box.ID, rtRemoveCacheKind, rtRemoveCache{Generation: gen, Message: msg, At: now}); err != nil {
-		p.m.log.Warn("cache rtorrent removal outcome", "box", p.box.Name, "err", err)
+	var werr error
+	if p.m.cacheFault != nil {
+		werr = p.m.cacheFault(rtRemoveCacheKind)
+	}
+	if werr == nil {
+		werr = p.m.st.SetCache(ctx, p.box.ID, rtRemoveCacheKind, rtRemoveCache{Generation: gen, Message: msg, At: now})
+	}
+	if werr != nil {
+		// The live notice is still published (the user must see it); the
+		// dismiss compares against the live notice first, so the stale row
+		// cannot be used to clear it (daybreak blue re-review 6 of PR 123).
+		p.m.log.Warn("cache rtorrent removal outcome", "box", p.box.Name, "err", werr)
 	}
 	p.m.commit(p.box.ID, func(st *BoxState) *BoxState {
 		if st == nil || st.generation() != gen {

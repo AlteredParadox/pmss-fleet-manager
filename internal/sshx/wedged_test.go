@@ -69,6 +69,26 @@ func testServer(t *testing.T) net.Addr {
 				defer sc.Close()
 				go ssh.DiscardRequests(reqs)
 				for nc := range chans {
+					if nc.ChannelType() == "direct-tcpip" {
+						// A forwarded stream: echoes what it reads.
+						ch, creqs, err := nc.Accept()
+						if err != nil {
+							continue
+						}
+						go ssh.DiscardRequests(creqs)
+						go func() {
+							defer ch.Close()
+							buf := make([]byte, 256)
+							for {
+								n, err := ch.Read(buf)
+								if err != nil {
+									return
+								}
+								ch.Write(buf[:n])
+							}
+						}()
+						continue
+					}
 					if nc.ChannelType() != "session" {
 						nc.Reject(ssh.UnknownChannelType, "no")
 						continue
@@ -359,4 +379,67 @@ func TestSettleKeepsCancellation(t *testing.T) {
 	if err := c.settle(dctx, cli, done); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("settle with a deadline: %v", err)
 	}
+}
+
+// A forwarded stream (the rTorrent SCGI path) on a transport that stops
+// answering is ended by Close within the grace, by wedging the transport,
+// so a caller's context deadline is honoured although the channel supports
+// no deadline of its own (an application that merely answers slowly is
+// ended by the channel close alone, as before); a healthy stream's Close
+// keeps the transport (daybreak blue re-review 6 of PR 123).
+func TestForwardedStreamCloseIsBounded(t *testing.T) {
+	graceWait = 150 * time.Millisecond
+	t.Cleanup(func() { graceWait = 2 * time.Second })
+	srv := testServer(t)
+	px := newProxy(t, srv)
+	c := dialTest(t, px.addr)
+	// Healthy: a round trip, then Close, and the transport survives.
+	conn, err := c.DialTCP(context.Background(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte("ping\n")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	if n, err := conn.Read(buf); err != nil || string(buf[:n]) != "ping\n" {
+		t.Fatalf("echo: %q %v", buf[:n], err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("a deadline is accepted as a no-op: %v", err)
+	}
+	conn.Close()
+	if c.transport() == nil {
+		t.Fatal("a healthy stream's Close must not wedge the transport")
+	}
+	runEcho(t, c)
+	// Frozen transport: the read blocks; the caller's context ends and
+	// closes the stream, as the SCGI round trip does; the read returns
+	// within the grace and the transport is wedged, so the next use
+	// reconnects.
+	conn, err = c.DialTCP(context.Background(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := runtime.NumGoroutine()
+	px.frozen.Store(true)
+	go conn.Write([]byte("ping\n")) // may block on the frozen path: it is ended with the stream
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	start := time.Now()
+	_, err = conn.Read(buf)
+	took := time.Since(start)
+	if err == nil {
+		t.Fatal("the read must fail once the stream is closed")
+	}
+	if took > 200*time.Millisecond+graceWait+time.Second {
+		t.Fatalf("the read outlived the deadline and the grace: %v", took)
+	}
+	if c.transport() != nil {
+		t.Fatal("a stream that did not end within the grace must wedge the transport")
+	}
+	px.frozen.Store(false)
+	goroutinesSettle(t, base)
 }
