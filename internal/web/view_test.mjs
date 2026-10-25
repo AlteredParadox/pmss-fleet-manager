@@ -114,3 +114,10 @@ test('an intentionally stopped rTorrent stays visible with monitoring off (Codex
   assert.match(app, /b\.rtorrent\?\.disabled\) tabs\.push\(\['torrents'/, 'the torrents tab shows for the marker alone');
   assert.match(app, /stopped on purpose · monitoring off/, 'the overview names the marker when monitoring is off');
 });
+
+test('the rTorrent header names the folder "+ files" may delete under, and refusals reach the user as the server said them', () => {
+  const app = readFileSync(new URL('./static/app.js', import.meta.url), 'utf8');
+  assert.match(app, /files: \$\{esc\(r\.data_dir\)\}/, 'the fenced folder is shown in the rTorrent section header');
+  assert.match(app, /plain remove always works/, 'the note says what to do instead');
+  assert.match(app, /throw Object\.assign\(new Error\(\(data\?\.error/, 'an action error carries the server message, which the toast shows');
+});

@@ -896,7 +896,11 @@ function clientSection(b, c, f, grouped, first) {
 // on-purpose stop.
 function rtNote(r) {
   if (!r.reachable) return r.disabled ? ' · <span class="muted" title="~/.rtorrentDisable is set">stopped on purpose</span>' : '';
-  return `${r.listen_port ? ` · port ${r.listen_port}` : ''} · <span class="${r.dht ? 'warn' : 'muted'}" title="${r.dht ? 'DHT is on: private trackers usually forbid it' : 'DHT off'}">DHT ${r.dht ? 'on' : 'off'}</span>`;
+  // Where "+ files" may delete: rTorrent's download folder as read from the
+  // box's own config (never from the client). Said up front so a refusal
+  // for data kept elsewhere is no surprise.
+  const fence = r.data_dir ? ` · <span class="muted" title="Remove with files deletes only inside rTorrent's download folder (${esc(r.data_dir)}, from directory.default in ~/.rtorrent.rc on the box). Data kept anywhere else, or a torrent that never started, is refused and the torrent left in place; plain remove always works. To move the fence, set directory.default.set in ~/.rtorrent.rc.custom.">files: ${esc(r.data_dir)}</span>` : '';
+  return `${r.listen_port ? ` · port ${r.listen_port}` : ''} · <span class="${r.dht ? 'warn' : 'muted'}" title="${r.dht ? 'DHT is on: private trackers usually forbid it' : 'DHT off'}">DHT ${r.dht ? 'on' : 'off'}</span>${fence}`;
 }
 const KIND_COLOR = { seeding: 'var(--ok)', leeching: 'var(--accent)', paused: 'var(--dim)', checking: 'var(--warn)', error: 'var(--bad)', unknown: 'var(--dim)' };
 // Column headings shared by both torrent tables; lead is the optional first
