@@ -501,12 +501,16 @@ func TestRtActionsThroughPoller(t *testing.T) {
 	if got := strings.Join(f.called(), ","); got != "d.stop,d.close" {
 		t.Fatalf("methods %s", got)
 	}
-	res, err := p.rtAddTorrents(ctx, qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Files: []qbt.TorrentFile{{Name: "a", Data: []byte("d8:announcee")}}, Category: "(d.stop)", Stopped: true})
-	if err != nil || res.Added != 2 {
+	// With a label the hash must be known up front: the magnet carries it,
+	// the file's is computed; the label then goes by hash as a literal
+	// XML-RPC parameter, never inside a command string.
+	torrent := []byte("d8:announce9:http://x/4:infod4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee")
+	res, err := p.rtAddTorrents(ctx, qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashA}, Files: []qbt.TorrentFile{{Name: "a", Data: torrent}}, Category: "(d.stop)", Stopped: true})
+	if err != nil || res.Added != 2 || res.Unlabelled != 0 {
 		t.Fatalf("%+v %v", res, err)
 	}
 	m := f.called()
-	if strings.Join(m[len(m)-2:], ",") != "load.normal,load.raw" {
+	if strings.Join(m[len(m)-4:], ",") != "load.normal,d.custom1.set,load.raw,d.custom1.set" {
 		t.Fatalf("%v", m)
 	}
 	// No endpoint in the state: refused before any dial.

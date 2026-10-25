@@ -1209,11 +1209,13 @@ func (s *Server) handleRtAddTorrents(w http.ResponseWriter, r *http.Request) {
 		var f *rtorrent.Fault
 		if errors.As(err, &f) {
 			code = 422 // rTorrent refused the torrent
+		} else if errors.Is(err, rtorrent.ErrLabelNeedsHash) {
+			code = 400 // a label on an http(s) link: the request, not the box
 		}
 		writeErr(w, code, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "links": len(req.URLs), "files": len(req.Files), "added": res.Added, "failed": res.Failed})
+	writeJSON(w, 200, map[string]any{"ok": true, "links": len(req.URLs), "files": len(req.Files), "added": res.Added, "failed": res.Failed, "unlabelled": res.Unlabelled})
 }
 
 // handleReadLog takes {"path": "<relative path from the box's log list>"}
