@@ -252,8 +252,10 @@ func (p *poller) rtReady(ctx context.Context) (*rtorrent.Client, *sshx.Client, e
 		}
 		_, portStr, _ := strings.Cut(st.Rt.Endpoint[len("tcp:"):], ":")
 		port, _ := strconv.Atoi(portStr)
-		if err := verifyPortNow(ctx, sshc, port); err != nil {
-			return nil, nil, err
+		if sshc != nil { // nil only under the test hook, which has no box to ask
+			if err := verifyPortNow(ctx, sshc, port); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 	cli, err := p.rtClient(sshc, st.Rt.Endpoint)

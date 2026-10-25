@@ -402,6 +402,54 @@ func TestRtClientFollowsTransport(t *testing.T) {
 	if p.rt != nil || p.rtSSH != nil {
 		t.Fatal("closeConns must drop the rtorrent client")
 	}
+	// The real dialers are built for a unix path and a loopback port over a
+	// transport; a malformed or foreign endpoint is refused.
+	p.dialRt = nil
+	tr := &sshx.Client{}
+	if _, err := p.rtClient(tr, "unix:/home/u/.rtorrent.socket"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.rtClient(tr, "tcp:127.0.0.1:5000"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.rtClient(tr, "tcp:127.0.0.1:x"); err == nil {
+		t.Fatal("bad port")
+	}
+	if _, err := p.rtClient(tr, "http://x"); err == nil {
+		t.Fatal("unknown scheme")
+	}
+}
+
+func TestRtRemoveDataSSHFailureIsReported(t *testing.T) {
+	// Paths fine, erase accepted, but the box cannot be reached for the rm:
+	// the torrent is gone from rTorrent and the caller is told the files
+	// were not deleted (a disconnected transport answers every Run with an
+	// error).
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	cli := rtorrent.New(f.dialer(""))
+	err := rtRemoveData(context.Background(), cli, &sshx.Client{}, rtHashA)
+	if err == nil || !strings.Contains(err.Error(), "files were not deleted") {
+		t.Fatalf("%v", err)
+	}
+	erased := false
+	for _, m := range f.called() {
+		erased = erased || m == "d.erase"
+	}
+	if !erased {
+		t.Fatal("erase should have run before the rm attempt")
+	}
+	// A fault on the erase stops everything.
+	f.reply = func(m, b string) string {
+		if m == "d.erase" {
+			return `<?xml version="1.0"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>-501</i4></value></member><member><name>faultString</name><value><string>Could not find info-hash.</string></value></member></struct></value></fault></methodResponse>`
+		}
+		return rtReplies(m, b)
+	}
+	var fe *rtorrent.Fault
+	if err := rtRemoveData(context.Background(), cli, &sshx.Client{}, rtHashA); !errors.As(err, &fe) {
+		t.Fatalf("%v", err)
+	}
 }
 
 // readyRt seeds a Ready state with rTorrent's endpoint for p, as a poll
@@ -452,6 +500,15 @@ func TestRtActionsThroughPoller(t *testing.T) {
 	readyRt(t, p, "tcp:127.0.0.1:5000")
 	if err := p.rtTorrentAction(ctx, rtHashA, "stop"); err == nil || !strings.Contains(err.Error(), "not been verified") {
 		t.Fatalf("%v", err)
+	}
+	// With the verdict in, the action goes through (the live re-check needs
+	// a box and is skipped under the dial hook).
+	st := BoxState{ID: p.box.ID, Ready: true, Rt: RtState{Enabled: true, Endpoint: "tcp:127.0.0.1:5000", Reachable: true, PortOK: true}}
+	p.m.mu.Lock()
+	p.m.states[p.box.ID] = &st
+	p.m.mu.Unlock()
+	if err := p.rtTorrentAction(ctx, rtHashA, "start"); err != nil {
+		t.Fatal(err)
 	}
 	// remove-data with an unusable path never erases.
 	readyRt(t, p, "unix:/home/u/.rtorrent.socket")
@@ -504,6 +561,10 @@ func TestManagerRtGuards(t *testing.T) {
 	}
 	if got := strings.Join(f.called(), ","); got != "d.open,d.start" {
 		t.Fatal(got)
+	}
+	res, err := m.RtAddTorrents(ctx, 1, qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashB}})
+	if err != nil || res.Added != 1 {
+		t.Fatalf("%+v %v", res, err)
 	}
 }
 
