@@ -1029,19 +1029,15 @@ func TestPendingLabelsPersist(t *testing.T) {
 	if len(saved) != 1 || saved[0].Hash != hashA || saved[0].Label != "tv" || !saved[0].Until.After(now) {
 		t.Fatalf("%+v", saved)
 	}
-	// A new client (a restarted dashboard) takes them back; junk and expired
-	// entries are dropped, hashes normalised, labels clipped.
+	// A new client (a reconnect, a restarted dashboard) starts with none:
+	// pending labels live in one client's memory, by design.
 	d := New(c.dial)
-	d.now = c.now
-	d.Restore(append(saved, PendingLabel{Hash: "nope", Label: "x", Until: now.Add(time.Hour)},
-		PendingLabel{Hash: hashB, Label: "", Until: now.Add(time.Hour)},
-		PendingLabel{Hash: hashB, Label: "old", Until: now.Add(-time.Minute)},
-		PendingLabel{Hash: strings.ToLower(hashB), Label: strings.Repeat("l", 500), Until: now.Add(time.Hour)}))
-	got := d.Pending()
-	if len(got) != 2 {
-		t.Fatalf("%+v", got)
+	if len(d.Pending()) != 0 {
+		t.Fatal("a new client owes nothing")
 	}
-	for _, p := range got {
+	// Hashes are normalised and labels clipped on the way in.
+	c.remember(strings.ToLower(hashB), strings.Repeat("l", 500))
+	for _, p := range c.Pending() {
 		if p.Hash == strings.ToUpper(hashB) && len(p.Label) != maxLabel {
 			t.Fatalf("label not clipped: %d", len(p.Label))
 		}
@@ -1592,24 +1588,16 @@ func TestPendingCapacityUpdates(t *testing.T) {
 	if seen[hashes[0]] != "renamed" || seen[hashes[1]] == "" {
 		t.Fatal("update lost or evicted a neighbour")
 	}
-	// Restore of an existing hash at capacity updates it.
-	c.Restore([]PendingLabel{{Hash: hashes[2], Label: "restored", Until: now.Add(time.Hour)}})
-	seen = map[string]string{}
-	for _, p := range c.Pending() {
-		seen[p.Hash] = p.Label
-	}
-	if seen[hashes[2]] != "restored" || len(c.Pending()) != pendingMax {
-		t.Fatal("restore of an existing hash at capacity")
-	}
+
 	// A new hash at capacity evicts exactly one, the nearest expiry: the
-	// restored entry, whose deadline is an hour away (the others have a day).
+	// second entry (the first was refreshed by its update just now).
 	c.remember(fmt.Sprintf("%040X", 5000), "new")
 	seen = map[string]string{}
 	for _, p := range c.Pending() {
 		seen[p.Hash] = p.Label
 	}
-	if len(seen) != pendingMax || seen[hashes[2]] != "" || seen[hashes[0]] != "renamed" || seen[hashes[1]] != "l" || seen[fmt.Sprintf("%040X", 5000)] != "new" {
-		t.Fatalf("new entry eviction: %d, third %q", len(seen), seen[hashes[2]])
+	if len(seen) != pendingMax || seen[hashes[1]] != "" || seen[hashes[0]] != "renamed" || seen[hashes[2]] != "l" || seen[fmt.Sprintf("%040X", 5000)] != "new" {
+		t.Fatalf("new entry eviction: %d, second %q third %q", len(seen), seen[hashes[1]], seen[hashes[2]])
 	}
 }
 
@@ -1651,112 +1639,6 @@ func TestCommandStatusMustBeZero(t *testing.T) {
 	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
 	if !errors.Is(err, ErrUnexpected) || res.Added != 0 {
 		t.Fatalf("add: %+v %v", res, err)
-	}
-}
-
-// Retire waits for the operation in flight: an Add paused after its label
-// setter has its label in the retired snapshot; a remove paused after its
-// erase has it gone.
-func TestRetireWaitsForOperation(t *testing.T) {
-	f := newFake(t)
-	gate := make(chan struct{})
-	entered := make(chan struct{}, 1)
-	f.on(func(m string, p []string) string {
-		if m == "d.custom1.set" || m == "d.erase" {
-			entered <- struct{}{}
-			<-gate
-		}
-		return resp(i8(0))
-	})
-	c := New(f.dial)
-	ctx := context.Background()
-	addDone := make(chan error, 1)
-	go func() {
-		_, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
-		addDone <- err
-	}()
-	<-entered
-	retired := make(chan []PendingLabel, 1)
-	go func() { l, _ := c.Retire(ctx); retired <- l }()
-	select {
-	case <-retired:
-		t.Fatal("Retire snapshotted during the Add")
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(gate)
-	if err := <-addDone; err != nil {
-		t.Fatal(err)
-	}
-	if l := <-retired; len(l) != 1 || l[0].Label != "tv" {
-		t.Fatalf("retired snapshot %+v", l)
-	}
-	// The mirror, on the successor (the retired client takes no more
-	// operations): a remove paused in d.erase; the snapshot after it has
-	// nothing for the hash.
-	c2 := New(f.dial)
-	c2.Restore(<-func() chan []PendingLabel {
-		ch := make(chan []PendingLabel, 1)
-		l, _ := c.Retire(ctx)
-		ch <- l
-		return ch
-	}())
-	gate = make(chan struct{})
-	rmDone := make(chan error, 1)
-	go func() { rmDone <- c2.Action(ctx, ActionRemove, hashA) }()
-	<-entered
-	go func() { l, _ := c2.Retire(ctx); retired <- l }()
-	close(gate)
-	if err := <-rmDone; err != nil {
-		t.Fatal(err)
-	}
-	if l := <-retired; len(l) != 0 {
-		t.Fatalf("a removed torrent must not be in the retired snapshot: %+v", l)
-	}
-	// Retire honours its context while an operation holds the token, and
-	// the client is retired from the Retire on: the operation in flight
-	// completes, nothing new starts, and a later Retire collects the final
-	// snapshot (the handoff's late delivery).
-	c3 := New(f.dial)
-	gate = make(chan struct{})
-	addDone = make(chan error, 1)
-	go func() {
-		_, err := c3.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}, Label: "x"})
-		addDone <- err
-	}()
-	<-entered
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
-	defer cancel()
-	if _, err := c3.Retire(cctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal(err)
-	}
-	if !c3.Retired() {
-		t.Fatal("a timed-out Retire still retires the client")
-	}
-	if _, err := c3.Version(ctx); !errors.Is(err, ErrRetired) {
-		t.Fatalf("new operation after a timed-out Retire: %v", err)
-	}
-	close(gate)
-	if err := <-addDone; err != nil {
-		t.Fatalf("the operation in flight completes: %v", err)
-	}
-	if l, err := c3.Retire(ctx); err != nil || len(l) != 1 || !strings.EqualFold(l[0].Hash, hashB) {
-		t.Fatalf("late snapshot: %+v %v", l, err)
-	}
-	// Adopt adds what is missing on a live client, never overwrites, and
-	// does nothing on a retired one.
-	c4 := New(f.dial)
-	c4.remember(hashB, "mine")
-	c4.Adopt([]PendingLabel{{Hash: hashA, Label: "late", Until: time.Now().Add(time.Hour)}, {Hash: hashB, Label: "old", Until: time.Now().Add(time.Hour)}})
-	got := map[string]string{}
-	for _, l := range c4.Pending() {
-		got[l.Hash] = l.Label
-	}
-	if got[hashA] != "late" || got[strings.ToUpper(hashB)] != "mine" {
-		t.Fatalf("adopt: %v", got)
-	}
-	c3.Adopt([]PendingLabel{{Hash: hashA, Label: "late", Until: time.Now().Add(time.Hour)}})
-	if l, _ := c3.Retire(ctx); len(l) != 1 {
-		t.Fatalf("adopt on a retired client: %+v", l)
 	}
 }
 
@@ -1820,139 +1702,6 @@ func TestLabelSetterContract(t *testing.T) {
 	}
 }
 
-// Daybreak blue re-review of PR 122, finding 2: Retire is terminal. An
-// operation after it, queued or later, fails with ErrRetired; Restore adds
-// nothing; Retire again returns the same snapshot.
-func TestRetireIsTerminal(t *testing.T) {
-	f := newFake(t)
-	gate := make(chan struct{})
-	entered := make(chan struct{}, 1)
-	f.on(func(m string, p []string) string {
-		if m == "d.multicall2" {
-			entered <- struct{}{}
-			<-gate
-		}
-		return resp(i8(0))
-	})
-	c := New(f.dial)
-	ctx := context.Background()
-	c.remember(hashA, "tv")
-	// An operation in flight, a retire waiting on it, and another operation
-	// queued behind the retire.
-	go func() { c.Torrents(ctx) }()
-	<-entered
-	retired := make(chan []PendingLabel, 1)
-	go func() { l, _ := c.Retire(ctx); retired <- l }()
-	time.Sleep(30 * time.Millisecond)
-	queued := make(chan error, 1)
-	go func() { queued <- c.Action(ctx, ActionStop, hashA) }()
-	time.Sleep(30 * time.Millisecond)
-	close(gate)
-	if l := <-retired; len(l) != 1 {
-		t.Fatalf("snapshot %+v", l)
-	}
-	if err := <-queued; !errors.Is(err, ErrRetired) {
-		t.Fatalf("queued operation after retire: %v", err)
-	}
-	if !c.Retired() {
-		t.Fatal("Retired")
-	}
-	for _, err := range []error{
-		func() error { _, e := c.Version(ctx); return e }(),
-		func() error { _, e := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}}); return e }(),
-		c.Forget(ctx, hashA),
-		func() error { _, e := c.Torrents(ctx); return e }(),
-	} {
-		if !errors.Is(err, ErrRetired) {
-			t.Fatalf("%v", err)
-		}
-	}
-	c.Restore([]PendingLabel{{Hash: hashB, Label: "x", Until: time.Now().Add(time.Hour)}})
-	if l, err := c.Retire(ctx); err != nil || len(l) != 1 || l[0].Hash != hashA {
-		t.Fatalf("second retire: %+v %v (Restore after retire must add nothing)", l, err)
-	}
-}
-
-// Codex on PR 122: a predecessor's late snapshot must not revive a label
-// for a torrent this client erased since. Remove, re-add unlabelled, adopt
-// the old snapshot, list: no setter call; and the barrier is bounded.
-func TestAdoptRespectsErase(t *testing.T) {
-	f := newFake(t)
-	var mu sync.Mutex
-	sets := 0
-	f.on(func(m string, p []string) string {
-		switch m {
-		case "d.custom1.set":
-			mu.Lock()
-			sets++
-			mu.Unlock()
-			return resp(str(p[1]))
-		case "d.multicall2":
-			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
-		}
-		return resp(i8(0))
-	})
-	c := New(f.dial)
-	ctx := context.Background()
-	old := []PendingLabel{{Hash: hashA, Label: "old", Until: time.Now().Add(time.Hour)}}
-	if err := c.Action(ctx, ActionRemove, hashA); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}}); err != nil {
-		t.Fatal(err)
-	}
-	c.Adopt(old)
-	if len(c.Pending()) != 0 {
-		t.Fatalf("the erased hash came back: %+v", c.Pending())
-	}
-	if _, err := c.Torrents(ctx); err != nil {
-		t.Fatal(err)
-	}
-	mu.Lock()
-	n := sets
-	mu.Unlock()
-	if n != 0 {
-		t.Fatalf("the stale label was applied: %d setter calls", n)
-	}
-	// A removal through another path reaches this client as a Forget: the
-	// same barrier.
-	c.remember(hashB, "x")
-	if err := c.Forget(ctx, hashB); err != nil {
-		t.Fatal(err)
-	}
-	c.Adopt([]PendingLabel{{Hash: hashB, Label: "stale", Until: time.Now().Add(time.Hour)}})
-	if len(c.Pending()) != 0 {
-		t.Fatalf("a forgotten hash came back through Adopt: %+v", c.Pending())
-	}
-	// A hash never erased here is adopted; one erased, then owed again by
-	// a labelled re-add, keeps the new label.
-	d2 := New(f.dial)
-	c = d2
-	c.remember(hashA, "old")
-	c.Action(ctx, ActionRemove, hashA)
-	c.Adopt([]PendingLabel{{Hash: hashB, Label: "late", Until: time.Now().Add(time.Hour)}})
-	c.remember(hashA, "new")
-	c.Adopt(old)
-	got := map[string]string{}
-	for _, l := range c.Pending() {
-		got[l.Hash] = l.Label
-	}
-	if got[strings.ToUpper(hashB)] != "late" || got[hashA] != "new" {
-		t.Fatalf("%v", got)
-	}
-	// The barrier is bounded: pendingMax entries, oldest out.
-	d := New(f.dial)
-	for i := 0; i < pendingMax+3; i++ {
-		d.eraseLocked(fmt.Sprintf("%040X", i))
-	}
-	d.pendMu.Lock()
-	n, first := len(d.erased), d.erasedLocked(fmt.Sprintf("%040X", 0))
-	d.pendMu.Unlock()
-	if n != pendingMax || first {
-		t.Fatalf("erased set %d, oldest kept %v", n, first)
-	}
-}
-
 // Daybreak blue re-review 5 of PR 122: the response cap is exact. A valid
 // document padded to exactly the cap passes; one byte more, even trailing
 // whitespace after a valid document, is refused.
@@ -2002,46 +1751,84 @@ func TestResponseCapIsExact(t *testing.T) {
 	}
 }
 
-// Daybreak blue re-review 6 of PR 123: a failure before the request left the
-// process is NotSent (a dial failure, a retired client); a failure after
-// the write (the peer read the request and went away) is not.
-func TestNotSent(t *testing.T) {
-	bad := New(func(ctx context.Context) (net.Conn, error) { return nil, errors.New("ssh: not connected") })
-	if err := bad.Action(context.Background(), ActionRemove, hashA); !NotSent(err) || !errors.Is(err, ErrNotSent) {
-		t.Fatalf("dial failure: %v", err)
-	}
+// Retire waits for the operation in flight to complete its remote and local
+// steps, is terminal (a queued or later operation fails with ErrRetired),
+// honours its context, and still retires when it times out.
+func TestRetire(t *testing.T) {
 	f := newFake(t)
-	f.onRaw(func(conn net.Conn) { conn.Close() })
-	c := New(f.dial)
-	if err := c.Action(context.Background(), ActionRemove, hashA); err == nil || NotSent(err) {
-		t.Fatalf("a request the peer read and dropped may have run: %v", err)
-	}
-	// Waiting for the operation token when the context ends: nothing sent,
-	// and the context error is still recognisable (Codex on PR 123).
 	gate := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	f2 := newFake(t)
-	f2.on(func(m string, p []string) string {
-		if m == "d.multicall2" {
+	f.on(func(m string, p []string) string {
+		if m == "d.custom1.set" {
 			entered <- struct{}{}
 			<-gate
 		}
 		return resp(i8(0))
 	})
-	busy := New(f2.dial)
-	go func() { busy.Torrents(context.Background()) }()
+	c := New(f.dial)
+	ctx := context.Background()
+	addDone := make(chan error, 1)
+	go func() {
+		_, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
+		addDone <- err
+	}()
 	<-entered
-	cctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-	dials := 0
-	busy.dial = func(ctx context.Context) (net.Conn, error) { dials++; return f2.dial(ctx) }
-	err := busy.Action(cctx, ActionRemove, hashA)
-	close(gate)
-	if !NotSent(err) || !errors.Is(err, context.DeadlineExceeded) || dials != 0 {
-		t.Fatalf("cancelled while queued: %v (dials %d)", err, dials)
+	retired := make(chan error, 1)
+	go func() { retired <- c.Retire(ctx) }()
+	select {
+	case <-retired:
+		t.Fatal("Retire returned during the Add")
+	case <-time.After(100 * time.Millisecond):
 	}
-	c.Retire(context.Background())
-	if err := c.Action(context.Background(), ActionRemove, hashA); !NotSent(err) {
-		t.Fatalf("retired: %v", err)
+	queued := make(chan error, 1)
+	go func() { queued <- c.Action(ctx, ActionStop, hashA) }()
+	time.Sleep(30 * time.Millisecond)
+	close(gate)
+	if err := <-addDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-retired; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-queued; !errors.Is(err, ErrRetired) {
+		t.Fatalf("queued operation after retire: %v", err)
+	}
+	if !c.Retired() || len(c.Pending()) != 1 {
+		t.Fatalf("retired %v pending %d (the add's remember completed before the retire)", c.Retired(), len(c.Pending()))
+	}
+	for _, err := range []error{
+		func() error { _, e := c.Version(ctx); return e }(),
+		func() error { _, e := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}}); return e }(),
+		c.Forget(ctx, hashA),
+		func() error { _, e := c.Torrents(ctx); return e }(),
+		c.Retire(ctx),
+	} {
+		if err != nil && !errors.Is(err, ErrRetired) {
+			t.Fatalf("%v", err)
+		}
+	}
+	// A timed-out Retire still retires: the operation in flight completes,
+	// nothing new starts.
+	c2 := New(f.dial)
+	gate = make(chan struct{})
+	go func() {
+		_, err := c2.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}, Label: "x"})
+		addDone <- err
+	}()
+	<-entered
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+	if err := c2.Retire(cctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	if !c2.Retired() {
+		t.Fatal("a timed-out Retire still retires the client")
+	}
+	if _, err := c2.Version(ctx); !errors.Is(err, ErrRetired) {
+		t.Fatalf("new operation after a timed-out Retire: %v", err)
+	}
+	close(gate)
+	if err := <-addDone; err != nil {
+		t.Fatalf("the operation in flight completes: %v", err)
 	}
 }

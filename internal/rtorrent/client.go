@@ -19,7 +19,6 @@ package rtorrent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,7 +41,11 @@ type Client struct {
 
 	// pending are labels set on a magnet's metadata placeholder that must
 	// be set again on the torrent rTorrent builds once the metadata
-	// arrives (see Add); Torrents reconciles them. Guarded by pendMu.
+	// arrives (see Add); Torrents reconciles them. Guarded by pendMu. They
+	// live in this client's memory only: a replacement client (a reconnect)
+	// or a dashboard restart starts with none, by design, and the add's
+	// answer says so (Deferred). Labels are a convenience; what must
+	// survive anything is kept elsewhere.
 	pendMu  sync.Mutex
 	pending map[string]pendingLabel
 	now     func() time.Time
@@ -55,30 +58,11 @@ type Client struct {
 	// every operation fails with ErrRetired, so a caller still holding this
 	// client after a handoff cannot change state the successor never sees.
 	retired bool
-	// erased are the hashes this client removed (d.erase), with the time:
-	// a barrier against a predecessor's late snapshot (Adopt) reviving a
-	// label for a torrent erased since (Codex on PR 122). Bounded like
-	// pending: pendingTTL, pendingMax entries, oldest out.
-	erased map[string]time.Time
 }
 
 // ErrRetired is an operation on a client after Retire: the caller must
 // resolve the current client and decide whether to retry. Nothing was sent.
 var ErrRetired = errors.New("rtorrent: client retired; resolve the current client")
-
-// ErrNotSent wraps a failure before any byte of the request reached the
-// peer (the dial failed, the request could not be encoded, the context
-// ended while waiting for the operation token): the call provably did not
-// happen, so a caller that recorded an intent ahead of it may withdraw that
-// record. A failure after the write (a lost answer, a cut stream) is never
-// wrapped in it: the command may have run.
-var ErrNotSent = errors.New("rtorrent: request not sent")
-
-// NotSent reports whether err means the request never reached the peer:
-// a dial failure, or a retired client refusing the call.
-func NotSent(err error) bool {
-	return errors.Is(err, ErrNotSent) || errors.Is(err, ErrRetired)
-}
 
 // pendingLabel is a label owed to a hash until it is seen set or expires.
 type pendingLabel struct {
@@ -118,8 +102,7 @@ func (c *Client) acquire(ctx context.Context) (release func(), err error) {
 		}
 		return func() { c.ops <- struct{}{} }, nil
 	case <-ctx.Done():
-		// Still waiting for the token: nothing was sent (Codex on PR 123).
-		return nil, fmt.Errorf("%w: %w", ErrNotSent, ctx.Err())
+		return nil, ctx.Err()
 	}
 }
 
@@ -256,7 +239,7 @@ const (
 func (c *Client) call(ctx context.Context, maxRows, budget int, method string, params ...any) (Value, error) {
 	body, err := encodeCall(method, params...)
 	if err != nil {
-		return Value{}, fmt.Errorf("%w: %w", ErrNotSent, err)
+		return Value{}, err
 	}
 	r, rctx, done, err := roundTrip(ctx, c.dial, c.timeout, c.maxBytes, body)
 	if err != nil {
@@ -598,61 +581,23 @@ type PendingLabel struct {
 	Until time.Time `json:"until"`
 }
 
-// Retire ends the client: it marks the client retired, waits for the
-// operation in flight, if any, to complete its remote and local steps, and
-// returns the labels still owed so the caller can hand them to the next
-// client. Without the wait, a reconnect could snapshot between
-// an Add's remote label setter and its remember (losing the obligation) or
-// between a remove's erase and its forget (keeping a dead one); without the
-// terminal mark, a caller still holding the client could change state
-// after the snapshot (daybreak blue re-reviews of PR 122/123). Every later
-// error-returning operation fails with ErrRetired, and Restore and Adopt
-// take nothing (they return no error; the caller resolves the current
-// client). Retire itself is
-// idempotent and returns the snapshot again.
-func (c *Client) Retire(ctx context.Context) ([]PendingLabel, error) {
-	// Retired first, then the wait: should the wait give up, the client is
-	// still closed to new operations, the one in flight completes, and a
-	// later Retire collects the final snapshot.
+// Retire ends the client: it marks the client retired, then waits for the
+// operation in flight, if any, to complete its remote and local steps, so a
+// replacement never overlaps it on the box. Every later error-returning
+// operation fails with ErrRetired. The pending labels go with the client:
+// they are not handed to a successor (see Client). Idempotent; honours ctx
+// while an operation holds the token, and a timed-out Retire still retires.
+func (c *Client) Retire(ctx context.Context) error {
 	c.pendMu.Lock()
 	c.retired = true
 	c.pendMu.Unlock()
 	select {
 	case <-c.ops:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
-	defer func() { c.ops <- struct{}{} }()
-	return c.Pending(), nil
-}
-
-// Adopt adds owed labels arriving late from a retired predecessor (its
-// Retire outlived the handoff's wait): only hashes this client does not
-// owe yet, so a label set since is never overwritten, and none this client
-// erased since, so a snapshot older than the erase cannot revive the label
-// (Codex on PR 122); a retired client takes nothing. The caller is
-// expected to apply the same barrier across clients (an erase through a
-// predecessor of this one is not known here).
-func (c *Client) Adopt(labels []PendingLabel) {
-	now := c.now()
-	c.pendMu.Lock()
-	defer c.pendMu.Unlock()
-	if c.retired {
-		return
-	}
-	for _, l := range labels {
-		h := strings.ToUpper(l.Hash)
-		if !ValidHash(l.Hash) || l.Label == "" || !now.Before(l.Until) {
-			continue
-		}
-		if _, owed := c.pending[h]; owed {
-			continue
-		}
-		if c.erasedLocked(h) {
-			continue
-		}
-		c.setPendingLocked(h, pendingLabel{label: clip(l.Label, maxLabel), until: l.Until})
-	}
+	c.ops <- struct{}{}
+	return nil
 }
 
 // Retired reports whether Retire has run.
@@ -673,29 +618,11 @@ func (c *Client) Pending() []PendingLabel {
 	return out
 }
 
-// Restore adds persisted pending labels (expired ones and malformed hashes
-// are dropped; the cap applies to new entries, an existing hash is updated
-// regardless). A retired client takes nothing.
-func (c *Client) Restore(labels []PendingLabel) {
-	now := c.now()
-	c.pendMu.Lock()
-	defer c.pendMu.Unlock()
-	if c.retired {
-		return
-	}
-	for _, l := range labels {
-		if !ValidHash(l.Hash) || l.Label == "" || !now.Before(l.Until) {
-			continue
-		}
-		c.setPendingLocked(strings.ToUpper(l.Hash), pendingLabel{label: clip(l.Label, maxLabel), until: l.Until})
-	}
-}
-
 // remember records a label owed to hash (a magnet's).
 func (c *Client) remember(hash, label string) {
 	c.pendMu.Lock()
 	defer c.pendMu.Unlock()
-	c.setPendingLocked(strings.ToUpper(hash), pendingLabel{label: label, until: c.now().Add(pendingTTL)})
+	c.setPendingLocked(strings.ToUpper(hash), pendingLabel{label: clip(label, maxLabel), until: c.now().Add(pendingTTL)})
 }
 
 // setPendingLocked stores an entry; only a NEW hash at capacity evicts the
@@ -744,44 +671,17 @@ func (c *Client) Action(ctx context.Context, action, hash string) error {
 		}
 	}
 	if action == ActionRemove {
-		c.eraseLocked(hash) // a removed magnet owes nothing any more, now or from a late snapshot (Codex on PR 122)
+		c.forgetLocked(hash) // a removed magnet owes nothing any more (Codex on PR 122)
 	}
 	return nil
 }
 
-// eraseLocked forgets hash and records the erase as a barrier for Adopt.
-func (c *Client) eraseLocked(hash string) {
-	hash = strings.ToUpper(hash)
-	now := c.now()
+// forgetLocked drops any pending label for hash; the caller holds the
+// operation token.
+func (c *Client) forgetLocked(hash string) {
 	c.pendMu.Lock()
-	defer c.pendMu.Unlock()
-	delete(c.pending, hash)
-	if c.erased == nil {
-		c.erased = map[string]time.Time{}
-	}
-	if _, ok := c.erased[hash]; !ok && len(c.erased) >= pendingMax {
-		var oldest string
-		for h, t := range c.erased {
-			if now.Sub(t) > pendingTTL {
-				delete(c.erased, h)
-				continue
-			}
-			if oldest == "" || t.Before(c.erased[oldest]) {
-				oldest = h
-			}
-		}
-		if len(c.erased) >= pendingMax && oldest != "" {
-			delete(c.erased, oldest)
-		}
-	}
-	c.erased[hash] = now
-}
-
-// erasedLocked reports whether hash was erased through this client within
-// pendingTTL (the longest a late snapshot could still owe it a label).
-func (c *Client) erasedLocked(hash string) bool {
-	t, ok := c.erased[hash]
-	return ok && c.now().Sub(t) <= pendingTTL
+	delete(c.pending, strings.ToUpper(hash))
+	c.pendMu.Unlock()
 }
 
 // Forget drops any label still owed to hash: for a torrent removed through
@@ -796,10 +696,7 @@ func (c *Client) Forget(ctx context.Context, hash string) error {
 		return err
 	}
 	defer release()
-	// A Forget means the torrent was removed through another path (another
-	// client, a detached job): the same barrier applies, or a late
-	// predecessor snapshot could restore the label (Codex on PR 122).
-	c.eraseLocked(hash)
+	c.forgetLocked(hash)
 	return nil
 }
 
