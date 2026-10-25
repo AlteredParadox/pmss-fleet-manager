@@ -1106,3 +1106,107 @@ func TestRtRemoveDataForgetsLabelOnCurrentOwner(t *testing.T) {
 		t.Fatalf("the re-added torrent inherited a label: %d setter calls", sets)
 	}
 }
+
+// TestRtRemoveDataCleanupSerialisedWithEdit: the cleanup after the erase
+// waits for the edit lock, so it cannot land between an edit's restore of
+// the owed labels and its publish of the replacement poller; and it only
+// touches a replacement of the same generation (fred on PR 123).
+func TestRtRemoveDataCleanupSerialisedWithEdit(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	target := filepath.Join(data, "Alpha")
+	os.MkdirAll(target, 0o755)
+	os.WriteFile(filepath.Join(target, "f"), []byte("x"), 0o600)
+	f := newFakeSCGI(t)
+	eraseGate := make(chan struct{})
+	eraseEntered := make(chan struct{}, 1)
+	f.reply = func(m, b string) string {
+		switch m {
+		case "d.base_path":
+			return xmlResp(xs(target))
+		case "d.erase":
+			eraseEntered <- struct{}{}
+			<-eraseGate
+		}
+		return rtReplies(m, b)
+	}
+	p, _ := rtFixture(t, f)
+	p.box.Host = "box.example"
+	if err := p.m.st.CreateBox(context.Background(), p.box); err != nil {
+		t.Fatal(err)
+	}
+	m := p.m
+	m.mu.Lock()
+	m.pollers[p.box.ID] = p
+	m.mu.Unlock()
+	cli, _ := p.rtClient(&sshx.Client{}, "unix:/x")
+	cli.Restore([]rtorrent.PendingLabel{{Hash: rtHashA, Label: "old", Until: time.Now().Add(time.Hour)}})
+	run := &localRunner{home: home}
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		return run, f.dialer(ep), func() {}, nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA) }()
+	<-eraseEntered
+	// The edit transaction begins and holds the lock: the retiring poller
+	// is stopped and recorded, the replacement built with the restored
+	// labels, but not yet published.
+	m.boxMu.Lock()
+	p.closeConns()
+	p.recordRtLabels(context.Background())
+	box := *p.box
+	p2 := newPoller(m, &box)
+	p2.dialRt = f.dialer
+	p2.rtLabels = m.restoredRtLabels(&box)
+	// The erase completes now; the cleanup must wait for the lock.
+	close(eraseGate)
+	select {
+	case err := <-done:
+		t.Fatalf("cleanup ran during the edit transaction: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	// The edit publishes the replacement and releases the lock.
+	m.mu.Lock()
+	m.pollers[box.ID] = p2
+	m.mu.Unlock()
+	m.boxMu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	p2.mu.Lock()
+	n := len(p2.rtLabels)
+	p2.mu.Unlock()
+	if n != 0 || len(m.restoredRtLabels(&box)) != 0 {
+		t.Fatalf("replacement owes %d, cache %d", n, len(m.restoredRtLabels(&box)))
+	}
+
+	// A replacement of another generation (the record moved to another
+	// machine) owes the same hash a label of its own: left alone.
+	os.MkdirAll(target, 0o755)
+	moved := *p.box
+	moved.Host = "elsewhere.example"
+	p3 := newPoller(m, &moved)
+	p3.dialRt = f.dialer
+	p3.rtLabels = []rtorrent.PendingLabel{{Hash: rtHashA, Label: "theirs", Until: time.Now().Add(time.Hour)}}
+	m.mu.Lock()
+	m.pollers[moved.ID] = p3
+	m.mu.Unlock()
+	f.reply = func(m, b string) string {
+		if m == "d.base_path" {
+			return xmlResp(xs(target))
+		}
+		return rtReplies(m, b)
+	}
+	if err := p.rtRemoveData(context.Background(), cli, run, "unix:/x", data, rtHashA); err != nil {
+		t.Fatal(err)
+	}
+	p3.mu.Lock()
+	kept := len(p3.rtLabels)
+	p3.mu.Unlock()
+	if kept != 1 {
+		t.Fatal("another generation's owed label must not be cleared")
+	}
+}

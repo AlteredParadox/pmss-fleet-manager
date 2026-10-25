@@ -531,13 +531,19 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		// The removed torrent is owed nothing any more, wherever the box's
 		// pending labels live by now: this poller's client or its saved
 		// copy, and, if an edit replaced this poller meanwhile, the current
-		// poller's (which also persists the result); fred on PR 123.
+		// poller's (which also persists the result). Under the edit lock,
+		// so the cleanup cannot fall between an edit's restore of the owed
+		// labels and its publish of the replacement poller, and only for a
+		// poller of the same generation: a record moved to another machine
+		// may owe the same hash a label of its own (fred on PR 123).
+		p.m.boxMu.Lock()
 		p.forgetRtLabel(dctx, hash, false)
-		if cur := p.m.poller(p.box.ID); cur != nil && cur != p {
-			cur.forgetRtLabel(dctx, hash, true)
-		} else if cur == p {
+		if cur := p.m.poller(p.box.ID); cur == p {
 			p.recordRtLabels(dctx)
+		} else if cur != nil && boxGeneration(cur.box) == boxGeneration(p.box) {
+			cur.forgetRtLabel(dctx, hash, true)
 		}
+		p.m.boxMu.Unlock()
 		out, stderr, err := drun.Run(dctx, "sh", strings.NewReader(rtRemoveDataVars("delete", root, base)+rtRemoveDataScript))
 		if err != nil {
 			return fmt.Errorf("the torrent was removed from rTorrent but its files were not deleted: %s", clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300))
