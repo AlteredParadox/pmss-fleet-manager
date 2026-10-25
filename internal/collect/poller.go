@@ -87,19 +87,12 @@ type poller struct {
 	dialTCP func(addr string) qbt.Dialer
 	// rt is the rTorrent client for rtEP (see rtClient); dialRt is the test
 	// hook that replaces the SSH channel to the SCGI endpoint.
-	rt       *rtorrent.Client
-	rtEP     string
-	rtSSH    *sshx.Client            // the transport rt's dialer is bound to; a new one means a new client
-	rtLabels []rtorrent.PendingLabel // owed magnet labels restored from the cache, handed to the first client
-	rtEpoch  uint64                  // bumped on every client handoff (see forgetRtLabel)
+	rt    *rtorrent.Client
+	rtEP  string
+	rtSSH *sshx.Client // the transport rt's dialer is bound to; a new one means a new client
 	// jobTimeout overrides rtRemoveSetupTimeout in tests.
 	jobTimeout time.Duration
-	// beforeRecord, when set (tests), runs between an add's remote work and
-	// its persistence of the owed labels; readyHook, when set, runs first
-	// in rtReady and can fail it.
-	beforeRecord func()
-	readyHook    func() error
-	dialRt       func(ep string) rtorrent.Dialer
+	dialRt     func(ep string) rtorrent.Dialer
 	// dialDetached is the test hook for the destructive phase's own
 	// transport (see detachedTransport).
 	dialDetached func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error)
@@ -702,12 +695,6 @@ func (p *poller) fail(ctx context.Context, st *BoxState, err error, start time.T
 	st.Qbt.Reachable = false
 	st.Qbt.PortOK = false // must be re-verified by the next successful probe
 	st.Rt.Reachable, st.Rt.PortOK = false, false
-	// Labels owed to magnets must reach the cache from a failed poll too:
-	// the client was just dropped with the transport, and the box may stay
-	// down across a restart (Codex on PR 123).
-	rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
-	p.recordRtLabels(rctx)
-	rcancel()
 	st.Docker.Reachable = false
 	p.m.log.Warn("poll failed", "box", p.box.Name, "failures", st.Failures, "err", describeErr(err))
 	// st is the snapshot from the poll's start: a discovery toggle that
@@ -1572,9 +1559,6 @@ func (p *poller) record(ctx context.Context, st *BoxState) {
 	if err := p.m.st.SetCache(sctx, p.box.ID, authCacheKind, auth); err != nil {
 		p.m.log.Warn("cache auth hold", "box", p.box.Name, "err", err)
 	}
-	// Labels owed to magnets whose metadata has not arrived yet must
-	// survive a restart too, or a deploy in that window drops them.
-	p.recordRtLabels(sctx)
 }
 
 // authCacheKind is the box_cache kind holding the persisted qbt.AuthState.

@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"os"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -88,13 +87,6 @@ type Manager struct {
 	leaseMu     sync.Mutex
 	rtLeases    map[int64]chan struct{}
 	labelGuards map[int64]*sync.Mutex
-	// rtTombs are erase tombstones per box: hashes whose torrent was
-	// removed and whose owed label may still be held somewhere (a
-	// removal's bookkeeping skipped or interrupted). See rtTombstone.
-	rtTombs map[int64]map[string]rtTomb
-	// lateWG counts late handoff adoptions (poller.adoptLate) so Stop can
-	// wait for them before its final label flush.
-	lateWG sync.WaitGroup
 	// cacheFault, when set (tests), fails a cache write of the given kind.
 	cacheFault func(kind string) error
 	// watchMu serialises SetAppWatch's read-modify-write of a box's watch
@@ -151,8 +143,7 @@ func New(st *store.Store, log *slog.Logger) *Manager {
 		pmdb:        &pmdb.Client{URL: os.Getenv("PMSS_PMDB_URL")},
 		pmdbWakeCh:  make(chan struct{}, 1),
 		rtLeases:    map[int64]chan struct{}{},
-		labelGuards: map[int64]*sync.Mutex{},
-		rtTombs:     map[int64]map[string]rtTomb{}}
+		labelGuards: map[int64]*sync.Mutex{}}
 	m.jobCtx, m.jobCancel = context.WithCancel(context.Background())
 	def := store.DefaultSettings()
 	m.settings.Store(&def)
@@ -277,12 +268,6 @@ func (m *Manager) Stop() {
 	m.mu.Unlock()
 	for _, p := range ps {
 		p.stopAndWait()
-		// The labels owed to magnets live in the poller's memory until a
-		// poll records them; a poll cancelled by this stop did not. Write
-		// them now, under a fresh bounded context (the manager's is gone).
-		fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
-		p.recordRtLabels(fctx)
-		fcancel()
 	}
 	m.wg.Wait()
 	// Admitted destructive jobs complete under their own deadlines before
@@ -290,314 +275,7 @@ func (m *Manager) Stop() {
 	// shutdown, only by a hard kill of the process (documented).
 	m.jobWG.Wait()
 	m.jobCancel()
-	// A handoff whose predecessor's operation outlived the wait delivers
-	// its labels late: wait for those too (bounded by their own contexts).
-	m.lateWG.Wait()
-	// A job that ended after the flush above may have left an erase
-	// tombstone (its bookkeeping skipped): settle it into the saved copy
-	// and write that, so the restart does not restore the dead label.
-	for _, p := range ps {
-		if len(m.rtTombList(p.box.ID, p.generation())) == 0 {
-			continue
-		}
-		fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
-		p.settleRtTombs(fctx, true) // nothing else runs for the box now
-		fcancel()
-	}
-}
 
-// rtTomb is an erase tombstone: a torrent removed from rTorrent while a
-// label may still be owed to its hash somewhere (fred and the daybreak
-// blue re-review of PR 123: a removal's label cleanup can be skipped when
-// the edit lock is not free in time, or cut by a failure, and the owed
-// label would otherwise survive up to its 24-hour expiry and be applied to
-// a re-added torrent). Scoped to the box's generation, like the labels.
-// Once the forget is complete on the current owner the tombstone is
-// settled, not dropped: it stays, as the record of when the hash was
-// erased, until it expires, so a predecessor client's snapshot taken
-// before that erase and delivered after it (adoptLate) is still refused
-// (fred on PR 123: an erase barrier until older handoffs can no longer
-// arrive).
-type rtTomb struct {
-	gen     string
-	at      time.Time
-	settled bool
-}
-
-// rtTombTTL bounds a tombstone's life: an owed label expires in 24 hours
-// (rtorrent.PendingLabel), so a tombstone older than that guards nothing.
-const rtTombTTL = 24 * time.Hour
-
-// rtTombMax caps the tombstones kept per box; beyond it the oldest goes.
-const rtTombMax = 1000
-
-// rtTombstone records that hash was erased, or is about to be, on the box
-// of generation gen, in memory and durably (rtTombsCacheKind), and reports
-// whether the record is durable. Every erase records it before the command
-// goes out, every path that forgets a label records it first, and it is
-// settled only once the forget is known complete on the box's current
-// owner; a poll settles whatever is left (settleRtTombs). Recording again
-// (the hash was re-added and erased once more) reopens it with the new
-// time.
-func (m *Manager) rtTombstone(id int64, gen, hash string) error {
-	hash = strings.ToUpper(hash)
-	now := time.Now()
-	m.leaseMu.Lock()
-	tombs := m.rtTombs[id]
-	if tombs == nil {
-		tombs = map[string]rtTomb{}
-		m.rtTombs[id] = tombs
-	}
-	if _, ok := tombs[hash]; !ok && len(tombs) >= rtTombMax {
-		// Room for the new record: expired ones first, then settled ones
-		// oldest first, and only then an open barrier (daybreak blue
-		// re-review 6 of PR 123).
-		var victim string
-		rank := func(t rtTomb) int {
-			switch {
-			case now.Sub(t.at) > rtTombTTL:
-				return 0
-			case t.settled:
-				return 1
-			}
-			return 2
-		}
-		for h, t := range tombs {
-			if victim == "" || rank(t) < rank(tombs[victim]) || rank(t) == rank(tombs[victim]) && t.at.Before(tombs[victim].at) {
-				victim = h
-			}
-		}
-		if rank(tombs[victim]) == 2 {
-			// Every record is an open barrier: none may go for a new one.
-			m.leaseMu.Unlock()
-			return fmt.Errorf("%d removals on this box are still waiting to be settled; wait for a poll", rtTombMax)
-		}
-		delete(tombs, victim)
-	}
-	// An open tombstone keeps its original time (a settlement retried by a
-	// later poll is not a new erase); a settled one is reopened with the
-	// time of this erase.
-	rec := rtTomb{gen: gen, at: now}
-	if cur, ok := tombs[hash]; ok && !cur.settled && cur.gen == gen {
-		rec.at = cur.at
-	}
-	m.leaseMu.Unlock()
-	// Durable first, then in memory: a record that could not be written is
-	// no record (a poll must not settle a label on its account), and the
-	// caller, told so, sends nothing (daybreak blue re-review 6 of PR 123).
-	if err := m.saveRtTombs(id, "", &rtTombRec{Hash: hash, Generation: rec.gen, At: rec.at}); err != nil {
-		return err
-	}
-	m.leaseMu.Lock()
-	if tombs := m.rtTombs[id]; tombs != nil {
-		tombs[hash] = rec
-	} else {
-		m.rtTombs[id] = map[string]rtTomb{hash: rec}
-	}
-	m.leaseMu.Unlock()
-	return nil
-}
-
-// rtTombSnapshot returns the box's record for hash, if any, so a caller
-// can put it back (rtRestoreTomb) when the erase it recorded an intent for
-// provably never left the process.
-func (m *Manager) rtTombSnapshot(id int64, hash string) (rtTomb, bool) {
-	m.leaseMu.Lock()
-	defer m.leaseMu.Unlock()
-	t, ok := m.rtTombs[id][strings.ToUpper(hash)]
-	return t, ok
-}
-
-// rtRestoreTomb withdraws the intent recorded for an erase that was never
-// sent (rtorrent.NotSent): the record goes back to what it was before,
-// nothing when there was none, so the next poll does not revoke the label
-// of a torrent still live (daybreak blue re-review 6 of PR 123). Best
-// effort on the durable side: a failed write leaves the open record, the
-// conservative outcome.
-func (m *Manager) rtRestoreTomb(id int64, hash string, prev rtTomb, had bool) {
-	hash = strings.ToUpper(hash)
-	// Durable first, memory after: should the write fail, memory keeps the
-	// open record that disk still holds, so the two never disagree and a
-	// restart cannot find an intent memory had already forgotten (daybreak
-	// blue re-review 7 of PR 123). The cost of that failure is the
-	// conservative one: the next poll settles the live torrent's label.
-	var adding *rtTombRec
-	if had {
-		adding = &rtTombRec{Hash: hash, Generation: prev.gen, At: prev.at, Settled: prev.settled}
-	}
-	if err := m.saveRtTombs(id, "", adding, &rtTombRec{Hash: hash}); err != nil {
-		m.log.Warn("cache rtorrent tombstones; the unsent erase's record stays until the next poll settles it", "box", id, "err", err)
-		return
-	}
-	m.leaseMu.Lock()
-	if tombs := m.rtTombs[id]; tombs != nil {
-		if had {
-			tombs[hash] = prev
-		} else {
-			delete(tombs, hash)
-			if len(tombs) == 0 {
-				delete(m.rtTombs, id)
-			}
-		}
-	}
-	m.leaseMu.Unlock()
-}
-
-// rtSettleTomb marks the tombstone for hash settled: its label is known
-// gone from the current owner. The erase stays on record (rtErasedSince).
-// Durably first, then in memory: a settlement whose write failed stays open
-// in memory too, so the next poll retries it (fred on PR 123); only a
-// durable settlement can take the hash off the open list.
-func (m *Manager) rtSettleTomb(id int64, hash string) {
-	hash = strings.ToUpper(hash)
-	if err := m.saveRtTombs(id, hash); err != nil {
-		m.log.Warn("cache rtorrent tombstones; settlement retried by the next poll", "box", id, "err", err)
-		return
-	}
-	m.leaseMu.Lock()
-	if t, ok := m.rtTombs[id][hash]; ok {
-		t.settled = true
-		m.rtTombs[id][hash] = t
-	}
-	m.leaseMu.Unlock()
-}
-
-// rtTombsCacheKind is the box_cache kind holding a box's erase tombstones
-// (rtTombsCache) across restarts, so an erase whose answer was lost, or
-// that the process did not outlive, is still known on restart (daybreak
-// blue re-review 5 of PR 123).
-const rtTombsCacheKind = "rt_tombs"
-
-// rtTombsCache is the persisted form.
-type rtTombsCache struct {
-	Tombs []rtTombRec `json:"tombs"`
-}
-
-// rtTombRec is one persisted tombstone.
-type rtTombRec struct {
-	Hash       string    `json:"hash"`
-	Generation string    `json:"generation"`
-	At         time.Time `json:"at"`
-	Settled    bool      `json:"settled,omitempty"`
-}
-
-// saveRtTombs writes the box's tombstones, with the one named in settling
-// ("" for none) written as settled and any in adding written as given
-// (the memory copy follows once the write succeeded).
-// Under the box's label guard, so two writers' snapshots reach the store in
-// the order they were taken; the snapshot itself is taken under leaseMu and
-// the write under neither. Tests inject a write failure through cacheFault.
-func (m *Manager) saveRtTombs(id int64, settling string, adding ...*rtTombRec) error {
-	g := m.labelGuard(id)
-	g.Lock()
-	defer g.Unlock()
-	if m.cacheFault != nil {
-		if err := m.cacheFault(rtTombsCacheKind); err != nil {
-			return err
-		}
-	}
-	m.leaseMu.Lock()
-	c := rtTombsCache{Tombs: make([]rtTombRec, 0, len(m.rtTombs[id])+len(adding))}
-	for h, t := range m.rtTombs[id] {
-		skip := false
-		for _, a := range adding {
-			if a != nil && a.Hash == h {
-				skip = true // replaced by the record being added
-			}
-		}
-		if skip {
-			continue
-		}
-		c.Tombs = append(c.Tombs, rtTombRec{Hash: h, Generation: t.gen, At: t.at, Settled: t.settled || h == settling})
-	}
-	for _, a := range adding {
-		if a != nil && a.Generation != "" { // a record without a generation only removes the hash
-			c.Tombs = append(c.Tombs, *a)
-		}
-	}
-	m.leaseMu.Unlock()
-	sort.Slice(c.Tombs, func(i, j int) bool { return c.Tombs[i].Hash < c.Tombs[j].Hash })
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return m.st.SetCache(ctx, id, rtTombsCacheKind, c)
-}
-
-// restoreRtTombs loads the persisted tombstones of this box's current
-// generation into memory (an entry already in memory wins), dropping
-// expired ones and those of another generation.
-func (m *Manager) restoreRtTombs(b *store.Box) {
-	ctx := m.ctx
-	if ctx == nil { // before Start (tests)
-		ctx = context.Background()
-	}
-	var c rtTombsCache
-	if _, err := m.st.GetCache(ctx, b.ID, rtTombsCacheKind, &c); err != nil {
-		return
-	}
-	gen := boxGeneration(b)
-	now := time.Now()
-	m.leaseMu.Lock()
-	defer m.leaseMu.Unlock()
-	tombs := m.rtTombs[b.ID]
-	for _, r := range c.Tombs {
-		if r.Generation != gen || now.Sub(r.At) > rtTombTTL || !rtorrent.ValidHash(r.Hash) {
-			continue
-		}
-		if tombs == nil {
-			tombs = map[string]rtTomb{}
-			m.rtTombs[b.ID] = tombs
-		}
-		if _, ok := tombs[strings.ToUpper(r.Hash)]; ok || len(tombs) >= rtTombMax {
-			continue
-		}
-		tombs[strings.ToUpper(r.Hash)] = rtTomb{gen: r.Generation, at: r.At, settled: r.Settled}
-	}
-}
-
-// rtTombList returns the unsettled tombstones of the box for generation
-// gen, dropping expired ones and those of another generation (a moved
-// record) on the way.
-func (m *Manager) rtTombList(id int64, gen string) []string {
-	m.leaseMu.Lock()
-	defer m.leaseMu.Unlock()
-	tombs := m.rtTombs[id]
-	if len(tombs) == 0 {
-		return nil
-	}
-	now := time.Now()
-	var out []string
-	for h, t := range tombs {
-		if t.gen != gen || now.Sub(t.at) > rtTombTTL {
-			delete(tombs, h)
-			continue
-		}
-		if !t.settled {
-			out = append(out, h)
-		}
-	}
-	if len(tombs) == 0 {
-		delete(m.rtTombs, id)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// rtTombed reports whether hash carries a live, unsettled tombstone for gen.
-func (m *Manager) rtTombed(id int64, gen, hash string) bool {
-	m.leaseMu.Lock()
-	defer m.leaseMu.Unlock()
-	t, ok := m.rtTombs[id][strings.ToUpper(hash)]
-	return ok && !t.settled && t.gen == gen && time.Since(t.at) <= rtTombTTL
-}
-
-// rtErasedSince reports whether hash was erased on the box of generation
-// gen at or after since, settled or not: the barrier a late snapshot taken
-// at since must not cross.
-func (m *Manager) rtErasedSince(id int64, gen, hash string, since time.Time) bool {
-	m.leaseMu.Lock()
-	defer m.leaseMu.Unlock()
-	t, ok := m.rtTombs[id][strings.ToUpper(hash)]
-	return ok && t.gen == gen && !t.at.Before(since) && time.Since(t.at) <= rtTombTTL
 }
 
 // ErrShuttingDown refuses a destructive job once Stop began.
@@ -661,8 +339,9 @@ func (l *boxLease) Acquire(ctx context.Context) (release func(), err error) {
 	}
 }
 
-// labelGuard serialises the snapshot-and-write of a box's owed labels, so
-// an older snapshot can never be written after a newer one.
+// labelGuard serialises the writes of a box's rTorrent records (the
+// removal notice: its row and its publication), so an older state can
+// never be written after a newer one.
 func (m *Manager) labelGuard(id int64) *sync.Mutex {
 	m.leaseMu.Lock()
 	defer m.leaseMu.Unlock()
@@ -735,25 +414,10 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	// decision, and a box down for hours must not dip to "degraded".
 	st.NextPoll, st.Backoff = time.Time{}, false
 	auth, authKnown := m.restoredAuth(b)
-	// Erase tombstones first: an owed label whose torrent was erased (the
-	// erase's answer lost, or the process gone before the forget) must not
-	// come back with the restored labels; the first poll settles the rest.
-	m.restoreRtTombs(b)
-	rtLabels := m.restoredRtLabels(b)
-	if len(rtLabels) > 0 {
-		kept := rtLabels[:0:0]
-		for _, l := range rtLabels {
-			if !m.rtTombed(b.ID, boxGeneration(b), l.Hash) {
-				kept = append(kept, l)
-			}
-		}
-		rtLabels = kept
-	}
 	if !b.Enabled {
 		st.Status, st.StatusReason, st.Failures = "disabled", "", 0 // nothing to retry; the reason belonged to the last poll
 	}
 	p := newPoller(m, b)
-	p.rtLabels = rtLabels
 	p.ctx, p.cancel = context.WithCancel(m.ctx)
 	if authKnown {
 		p.guard.Restore(auth)
@@ -925,18 +589,6 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 
 // UpdateBox persists changes and restarts the poller with fresh connections.
 func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clears) error {
-	// The box's rTorrent mutation lease first, as RemoveBox and late
-	// adoption take it: an edit's label handoff then cannot fall between a
-	// removal's recorded intent and its outcome (fred on PR 123: an erase
-	// refused unsent would withdraw its intent, but the edit's flush had
-	// already filtered the live torrent's label out as erased). A removal
-	// in progress holds the lease for its life; the edit then fails with
-	// its message and can be repeated.
-	release, err := m.rtLease(b.ID).Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("the box cannot be edited right now: %w", err)
-	}
-	defer release()
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
 	if err := m.st.UpdateBox(ctx, b, clears); err != nil {
@@ -947,12 +599,6 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 	m.mu.Unlock()
 	if p != nil {
 		p.stopAndWait()
-		// Labels the retiring poller still owes to magnets live only in its
-		// memory (a poll cancelled by the stop did not record them): write
-		// them for the record as it was, so the replacement poller finds
-		// them in the cache (startPoller) unless the box moved, in which
-		// case they go with the other caches below (Codex on PR 123).
-		p.recordRtLabels(m.ctx)
 	}
 	// Snapshot the state only now: a poll that was finishing while we
 	// waited has written its result, and that is what the UI should keep.
@@ -999,7 +645,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 		// The old machine's alerts resolve, except the renewal alert, which
 		// is the record's and would otherwise come back unacknowledged.
 		prev = nil
-		if err := m.st.DeleteCache(sctx, b.ID, "state", "du", rtLabelsCacheKind, rtRemoveCacheKind, rtTombsCacheKind); err != nil {
+		if err := m.st.DeleteCache(sctx, b.ID, "state", "du", rtRemoveCacheKind); err != nil {
 			m.log.Warn("drop cache of moved box", "box", fresh.Name, "err", err)
 		}
 		if n, err := m.st.ResolveBoxAlerts(sctx, b.ID, "renewal"); err != nil {
@@ -1031,17 +677,6 @@ func authEndpointChanged(p *poller, fresh *store.Box) bool {
 
 // RemoveBox stops polling and deletes the box, its alerts and its cache.
 func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
-	// The box's rTorrent mutation lease first (the order late adoption
-	// uses: lease, then the edit lock): a removal cannot overtake an add or
-	// a remove-with-data admitted on the box, whose label bookkeeping would
-	// otherwise find no owner (daybreak blue re-review 7 of PR 123). A
-	// deletion in progress holds it for its whole life; the request then
-	// fails with its message and can be repeated.
-	release, err := m.rtLease(id).Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("the box cannot be removed right now: %w", err)
-	}
-	defer release()
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
 	// The removal is a commit like any other: the box leaves memory under
@@ -1051,16 +686,8 @@ func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 	// afterwards: the box is gone from the live view either way, and a
 	// failed delete is reported to the caller (and the row resurfaces at
 	// the next start).
-	// The poller is stopped and its owed labels flushed while it is still
-	// the box's current one (recordRtLabels writes only for the current
-	// poller), so an add that finished on it is on record should the delete
-	// below fail and the row resurface at the next start (daybreak blue
-	// re-review 6 of PR 123).
 	if p := m.poller(id); p != nil {
 		p.stopAndWait()
-		fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
-		p.recordRtLabels(fctx)
-		fcancel()
 	}
 	m.hooksMu.Lock()
 	m.mu.Lock()
