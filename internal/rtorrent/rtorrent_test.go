@@ -1047,42 +1047,71 @@ func TestPendingLabelsPersist(t *testing.T) {
 }
 
 // TestListWithoutIsMeta: a build that does not know d.is_meta refuses the
-// whole listing; the client asks again without it, remembers, and tells
-// the placeholder by its one-byte file instead.
+// whole listing with an unknown-method fault naming it; the client asks
+// again without the getter and remembers. The placeholder can then not be
+// told from the real torrent (it grows to the advertised metadata size
+// before it is replaced, fred on PR 122), so a pending label is kept until
+// the label is seen missing, which is the rebuild, and set then.
 func TestListWithoutIsMeta(t *testing.T) {
 	f := newFake(t)
-	var lists int
+	var lists, sets int
+	label := "tv"    // what the box holds for hashA's custom1
+	size := int64(1) // the placeholder's file: one byte, then the metadata size
 	f.on(func(m string, p []string) string {
-		if m != "d.multicall2" {
+		switch m {
+		case "d.custom1.set":
+			sets++
+			label = p[1]
 			return resp(i8(0))
-		}
-		lists++
-		for _, x := range p {
-			if x == "d.is_meta=" {
-				return fault(-506, "Method 'd.is_meta' not defined")
+		case "d.multicall2":
+			lists++
+			for _, x := range p {
+				if x == "d.is_meta=" {
+					return fault(-506, "Method 'd.is_meta' not defined")
+				}
 			}
+			return resp(`<array><data>` + row(str(hashA), str("Alpha"), i8(size), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(label), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
 		}
-		// 20 fields: a placeholder (one byte, incomplete) and a real torrent.
-		short := func(hash, name string, size, complete int64) string {
-			return row(str(hash), str(name), i8(size), i8(0), i8(0), i8(0), i8(0), i8(1), i8(complete), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0))
-		}
-		return resp(`<array><data>` + short(hashA, "placeholder", 1, 0) + short(hashB, "real", 1000, 0) + `</data></array>`)
+		return resp(i8(0))
 	})
 	c := New(f.dial)
+	c.remember(hashA, "tv")
 	rows, err := c.Torrents(context.Background())
-	if err != nil || len(rows) != 2 || lists != 2 {
-		t.Fatalf("%v rows %d lists %d", err, len(rows), lists)
+	if err != nil || len(rows) != 1 || lists != 2 || rows[0].MetaKnown {
+		t.Fatalf("%v rows %d lists %d %+v", err, len(rows), lists, rows)
 	}
-	if !rows[0].Meta || rows[1].Meta {
-		t.Fatalf("meta by size: %+v", rows)
+	// Remembered: the next listings go without the getter at once.
+	size = 16384 // the placeholder grew to the metadata size, still a placeholder
+	if _, err := c.Torrents(context.Background()); err != nil || lists != 3 || len(c.Pending()) != 1 {
+		t.Fatalf("%v lists %d pending %d: a labelled placeholder of any size must not spend the entry", err, lists, len(c.Pending()))
 	}
-	// Remembered: the next listing goes without the getter at once.
-	if _, err := c.Torrents(context.Background()); err != nil || lists != 3 {
-		t.Fatalf("%v lists %d", err, lists)
+	// The rebuild: the real torrent arrives without custom1 and gets it.
+	label = ""
+	rows, err = c.Torrents(context.Background())
+	if err != nil || sets != 1 || label != "tv" || rows[0].Label != "tv" || len(c.Pending()) != 0 {
+		t.Fatalf("rebuild: %v sets %d label %q pending %d", err, sets, label, len(c.Pending()))
 	}
-	// Any other fault still surfaces.
-	f.on(func(m string, p []string) string { return fault(-501, "no") })
-	if _, err := New(f.dial).Torrents(context.Background()); !isFault(err) {
-		t.Fatal(err)
+	// A fault that is not about an unknown d.is_meta surfaces unchanged and
+	// does not switch the getter off.
+	g := newFake(t)
+	g.on(func(m string, p []string) string { return fault(-501, "Could not find info-hash.") })
+	d := New(g.dial)
+	if _, err := d.Torrents(context.Background()); !isFault(err) || d.noMeta.Load() {
+		t.Fatalf("%v noMeta %v", err, d.noMeta.Load())
+	}
+	g.on(func(m string, p []string) string { return fault(-506, "Method 'd.hash' not defined") })
+	if _, err := d.Torrents(context.Background()); !isFault(err) || d.noMeta.Load() {
+		t.Fatal("another missing method is not d.is_meta's fault")
+	}
+	for msg, want := range map[string]bool{
+		"Method 'd.is_meta' not defined": true, `Command "d.is_meta" does not exist.`: true, "Unsupported command: d.is_meta": true,
+		"d.is_meta: unknown": true, "Could not find info-hash.": false, "Method 'd.hash' not defined": false,
+	} {
+		if got := unknownMethodFault(&Fault{Code: -501, String: msg}, "d.is_meta"); got != want {
+			t.Errorf("%q: %v", msg, got)
+		}
+	}
+	if !unknownMethodFault(&Fault{Code: -506, String: "d.is_meta"}, "d.is_meta") || unknownMethodFault(errors.New("x"), "d.is_meta") {
+		t.Fatal("code -506 with the name counts; a non-fault does not")
 	}
 }

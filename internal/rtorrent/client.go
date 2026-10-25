@@ -43,9 +43,9 @@ type Client struct {
 	pending map[string]pendingLabel
 	now     func() time.Time
 
-	// noMeta is set once a build refused the listing with d.is_meta in it
-	// (a d.multicall2 is all or nothing): later listings leave the getter
-	// out and the placeholder is told by its one-byte file instead.
+	// noMeta is set once a build answered the listing with d.is_meta in it
+	// with an unknown-method fault (a d.multicall2 is all or nothing): later
+	// listings leave the getter out and Torrent.MetaKnown is false.
 	noMeta atomic.Bool
 }
 
@@ -98,8 +98,13 @@ type Torrent struct {
 	DownTotal int64
 	Private   bool
 	// Meta is a magnet's metadata placeholder (d.is_meta): rTorrent replaces
-	// it with the real torrent once the metadata arrives.
-	Meta bool
+	// it with the real torrent once the metadata arrives. MetaKnown is false
+	// when the build did not answer d.is_meta (see list): the placeholder
+	// cannot then be told from the real torrent, by size or otherwise, since
+	// the placeholder grows to the advertised metadata size before it is
+	// replaced (fred on PR 122).
+	Meta      bool
+	MetaKnown bool
 }
 
 // Clips for retained strings: a hostile client cannot grow the state.
@@ -310,9 +315,10 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 		fields = torrentFields[:metaField]
 	}
 	v, err := c.call(ctx, c.maxRows, "d.multicall2", append([]any{"", "main"}, fields...)...)
-	if err != nil && isFault(err) && !c.noMeta.Load() {
-		// A build without d.is_meta refuses the whole listing: ask once
-		// more without it and remember. Any other fault stands.
+	if err != nil && !c.noMeta.Load() && unknownMethodFault(err, "d.is_meta") {
+		// A build without d.is_meta refuses the whole listing with an
+		// unknown-method fault naming it: ask once more without it and
+		// remember. Any other fault stands (fred on PR 122).
 		c.noMeta.Store(true)
 		fields = torrentFields[:metaField]
 		v, err = c.call(ctx, c.maxRows, "d.multicall2", append([]any{"", "main"}, fields...)...)
@@ -345,11 +351,7 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 		})
 		t := &out[len(out)-1]
 		if len(r) > metaField {
-			t.Meta = r[metaField].Int == 1
-		} else {
-			// Without d.is_meta the one-byte file libtorrent gives a metadata
-			// download is the tell; a real one-byte torrent is vanishingly rare.
-			t.Meta = t.Size <= 1 && !t.Complete
+			t.Meta, t.MetaKnown = r[metaField].Int == 1, true
 		}
 	}
 	return out, nil
@@ -393,7 +395,13 @@ func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
 			continue // still the placeholder: the rebuild is yet to come
 		}
 		if rows[i].Label != "" {
-			delete(c.pending, h) // the real torrent carries a label: nothing owed
+			if rows[i].MetaKnown {
+				delete(c.pending, h) // the real torrent carries a label: nothing owed
+			}
+			// Unknown whether this is still the placeholder (a build without
+			// d.is_meta): keep the entry until the label is seen missing,
+			// which is the rebuild, or it expires; a label the user clears
+			// in ruTorrent meanwhile is set once more on such a build.
 			continue
 		}
 		set = append(set, todo{h, p.label})
@@ -621,6 +629,24 @@ func validURL(u string) bool {
 func isFault(err error) bool {
 	var f *Fault
 	return errors.As(err, &f)
+}
+
+// unknownMethodFault reports whether err is rTorrent saying it does not know
+// method: xmlrpc-c's "Method 'x' not defined" (code -506) on 0.9.8, "Command
+// "x" does not exist" or "Unsupported" style texts on other builds. The
+// method name must appear, so a fault about anything else is not mistaken
+// for it.
+func unknownMethodFault(err error, method string) bool {
+	var f *Fault
+	if !errors.As(err, &f) {
+		return false
+	}
+	msg := strings.ToLower(f.String)
+	if !strings.Contains(msg, strings.ToLower(method)) {
+		return false
+	}
+	return f.Code == -506 || strings.Contains(msg, "not defined") || strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "unsupported") || strings.Contains(msg, "unknown") || strings.Contains(msg, "not found")
 }
 
 func nonNeg(n int64) int64 {
