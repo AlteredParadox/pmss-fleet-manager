@@ -263,20 +263,74 @@ func TestWantRt(t *testing.T) {
 		t.Fatal("stopped on purpose is not an alert")
 	}
 	// A detached remove-with-data that failed after its request ended is
-	// an alert of its own, whatever the connection state (Codex on PR 123).
+	// an alert of its own, decided by the dashboard's record rather than
+	// the probe: raised whatever the connection state, and resolvable
+	// without a probe (Codex on PR 123).
 	s.Rt.Disabled = false
 	s.Rt.RemoveFailed = "Alpha (43519d14…): disk says no"
-	got = wantRt(s)
-	if len(got) != 2 || got[0].key != "rtorrent-remove" || !strings.Contains(got[0].title, "remove with files failed: Alpha") || got[1].key != "rtorrent" {
+	if got = wantRtRemove(s); len(got) != 1 || got[0].key != "rtorrent-remove" || !strings.Contains(got[0].title, "remove with files failed: Alpha") {
 		t.Fatalf("%+v", got)
 	}
-	s.Rt.Reachable = true
-	if got = wantRt(s); len(got) != 1 || got[0].key != "rtorrent-remove" {
-		t.Fatalf("%+v", got)
+	if got = wantRt(s); len(got) != 1 || got[0].key != "rtorrent" {
+		t.Fatalf("the connection rule is unchanged: %+v", got)
+	}
+	if !localKey("rtorrent-remove") || !localKey("renewal") || localKey("rtorrent") {
+		t.Fatal("localKey")
 	}
 	s.Rt.RemoveFailed = ""
+	if wantRtRemove(s) != nil {
+		t.Fatal("no notice, no alert")
+	}
 	s.Rt.Disabled, s.Rt.Reachable = false, true
 	if wantRt(s) != nil {
 		t.Fatal("reachable: nothing")
+	}
+}
+
+// TestRtRemoveNoticeAlertIgnoresProbe (Codex on PR 123): the recorded
+// outcome of a detached remove-with-data is the dashboard's own record, so
+// its alert is raised while the box is offline or not yet polled, and a
+// dismiss resolves it in the same states; the connection rules are
+// untouched by it.
+func TestRtRemoveNoticeAlertIgnoresProbe(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	b := &store.Box{Name: "x", Host: "h", User: "u", Port: 22, Enabled: true}
+	if err := st.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	e := New(st, store.DefaultSettings, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	// Offline: the notice raises, the probe rules do not run.
+	s := &collect.BoxState{ID: b.ID, Name: "x", Status: "offline", LastError: "down", Failures: 3}
+	s.Rt.Enabled, s.Rt.RemoveFailed = true, "Alpha (43519d14…): disk says no"
+	e.Evaluate(ctx, s)
+	keys, _ := st.ActiveAlertKeys(ctx, b.ID)
+	slices.Sort(keys)
+	if want := []string{"rtorrent-remove", "unreachable"}; !slices.Equal(keys, want) {
+		t.Fatalf("offline: %v, want %v", keys, want)
+	}
+	// Dismissed while still offline: resolved without a probe.
+	s.Rt.RemoveFailed = ""
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); !slices.Equal(keys, []string{"unreachable"}) {
+		t.Fatalf("dismiss while offline: %v", keys)
+	}
+	// Unpolled (restored after a restart): raised at once, resolved at once.
+	s = &collect.BoxState{ID: b.ID, Name: "x", Status: "online", Unpolled: true}
+	s.Rt.Enabled, s.Rt.RemoveFailed = true, "Alpha (43519d14…): disk says no"
+	e.Evaluate(ctx, s)
+	keys, _ = st.ActiveAlertKeys(ctx, b.ID)
+	slices.Sort(keys)
+	if want := []string{"rtorrent-remove", "unreachable"}; !slices.Equal(keys, want) {
+		t.Fatalf("unpolled: %v, want %v (nothing else may be raised or resolved on an unpolled state)", keys, want)
+	}
+	s.Rt.RemoveFailed = ""
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); !slices.Equal(keys, []string{"unreachable"}) {
+		t.Fatalf("dismiss while unpolled: %v", keys)
 	}
 }
