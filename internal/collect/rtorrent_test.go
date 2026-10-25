@@ -2127,3 +2127,87 @@ func TestRtPlainRemovePersistsAtOnce(t *testing.T) {
 		t.Fatal("another generation's listing purges the rest")
 	}
 }
+
+// failingRunner runs the check like the box would and fails the delete.
+type failingRunner struct{ inner *localRunner }
+
+func (r *failingRunner) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
+	script, _ := io.ReadAll(stdin)
+	if strings.HasPrefix(string(script), "mode='delete'") {
+		r.inner.mu.Lock()
+		r.inner.runs = append(r.inner.runs, "delete")
+		r.inner.mu.Unlock()
+		if r.inner.gate != nil {
+			<-r.inner.gate
+		}
+		return nil, []byte("rm: disk says no"), errors.New("exit 1")
+	}
+	return r.inner.Run(ctx, cmd, bytes.NewReader(script))
+}
+
+// TestRtRemoveDataFailureReportedAfterRequest (Codex on PR 123): a deletion
+// that fails after the request ended is not lost: the job logs it, records
+// it on the box's rTorrent state (with the torrent's folder and hash) where
+// the alert rule and the UI read it, polls carry it, and a dismiss clears it.
+func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	target := filepath.Join(data, "Alpha")
+	os.MkdirAll(target, 0o755)
+	f := newFakeSCGI(t)
+	f.reply = func(m, b string) string {
+		if m == "d.base_path" {
+			return xmlResp(xs(target))
+		}
+		return rtReplies(m, b)
+	}
+	p, snap := rtFixture(t, f)
+	p.m.mu.Lock()
+	p.m.pollers[p.box.ID] = p
+	p.m.mu.Unlock()
+	readyRt(t, p, "unix:/x")
+	cli := rtorrent.New(f.dialer(""))
+	check := &localRunner{home: home}
+	run := &failingRunner{inner: &localRunner{home: home, gate: make(chan struct{}), block: true}}
+	p.dialDetached = func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error) {
+		return run, f.dialer(ep), func() {}, nil
+	}
+	rctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.rtRemoveData(rctx, cli, check, "unix:/x", data, rtHashA, nil) }()
+	// The delete is held; the request ends; then the delete fails.
+	waitFor(t, 3*time.Second, func() bool { return len(run.inner.modes()) == 1 }, func() string { return fmt.Sprint(run.inner.modes()) })
+	cancel()
+	err := <-done
+	if err == nil || !strings.Contains(err.Error(), "raises an alert") {
+		t.Fatalf("%v", err)
+	}
+	close(run.inner.gate)
+	p.m.jobWG.Wait()
+	p.m.mu.RLock()
+	st := *p.m.states[p.box.ID]
+	p.m.mu.RUnlock()
+	if !strings.Contains(st.Rt.RemoveFailed, "Alpha (43519d14…)") || !strings.Contains(st.Rt.RemoveFailed, "disk says no") || st.Rt.RemoveFailedAt.IsZero() {
+		t.Fatalf("failure not recorded: %q", st.Rt.RemoveFailed)
+	}
+	// A poll keeps it.
+	p.pollRt(context.Background(), &st, snap)
+	if st.Rt.RemoveFailed == "" || st.Rt.Error != "" {
+		t.Fatalf("poll dropped the record: %+v", st.Rt)
+	}
+	if err := p.m.DismissRtRemoveFailure(p.box.ID); err != nil {
+		t.Fatal(err)
+	}
+	p.m.mu.RLock()
+	cleared := p.m.states[p.box.ID].Rt.RemoveFailed == "" && p.m.states[p.box.ID].Rt.RemoveFailedAt.IsZero()
+	p.m.mu.RUnlock()
+	if !cleared {
+		t.Fatal("dismiss must clear the record")
+	}
+	if err := p.m.DismissRtRemoveFailure(999); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("%v", err)
+	}
+}

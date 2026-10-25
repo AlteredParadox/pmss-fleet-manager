@@ -1025,6 +1025,23 @@ func (m *Manager) RtTorrentAction(ctx context.Context, id int64, hash, action st
 	return err
 }
 
+// DismissRtRemoveFailure clears the recorded outcome of a failed detached
+// remove-with-data (RtState.RemoveFailed) once the user has seen it.
+func (m *Manager) DismissRtRemoveFailure(id int64) error {
+	if m.poller(id) == nil {
+		return store.ErrNotFound
+	}
+	m.commit(id, func(st *BoxState) *BoxState {
+		if st == nil {
+			return nil
+		}
+		next := *st
+		next.Rt.RemoveFailed, next.Rt.RemoveFailedAt = "", time.Time{}
+		return &next
+	}, commitOpts{hooks: true, publish: true})
+	return nil
+}
+
 // RtAddTorrents adds links and/or .torrent files to the box's rTorrent.
 func (m *Manager) RtAddTorrents(ctx context.Context, id int64, req qbt.AddRequest) (rtorrent.AddResult, error) {
 	p := m.poller(id)

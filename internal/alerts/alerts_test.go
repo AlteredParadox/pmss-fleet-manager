@@ -262,6 +262,19 @@ func TestWantRt(t *testing.T) {
 	if wantRt(s) != nil {
 		t.Fatal("stopped on purpose is not an alert")
 	}
+	// A detached remove-with-data that failed after its request ended is
+	// an alert of its own, whatever the connection state (Codex on PR 123).
+	s.Rt.Disabled = false
+	s.Rt.RemoveFailed = "Alpha (43519d14…): disk says no"
+	got = wantRt(s)
+	if len(got) != 2 || got[0].key != "rtorrent-remove" || !strings.Contains(got[0].title, "remove with files failed: Alpha") || got[1].key != "rtorrent" {
+		t.Fatalf("%+v", got)
+	}
+	s.Rt.Reachable = true
+	if got = wantRt(s); len(got) != 1 || got[0].key != "rtorrent-remove" {
+		t.Fatalf("%+v", got)
+	}
+	s.Rt.RemoveFailed = ""
 	s.Rt.Disabled, s.Rt.Reachable = false, true
 	if wantRt(s) != nil {
 		t.Fatal("reachable: nothing")

@@ -246,8 +246,15 @@ func wantQbt(s *collect.BoxState) []want {
 // (~/.rtorrentDisable) is not an alert: PMSS's watchdog honours the marker
 // and so does this rule.
 func wantRt(s *collect.BoxState) []want {
+	var out []want
+	// A remove-with-data that failed after its request had ended: the only
+	// place the outcome reaches the user besides the box's own section
+	// (Codex on PR 123). Open until dismissed there.
+	if s.Rt.RemoveFailed != "" {
+		out = append(out, want{"rtorrent-remove", "warn", fmt.Sprintf("%s — rTorrent remove with files failed: %s", s.Name, s.Rt.RemoveFailed)})
+	}
 	if !s.Rt.Enabled || s.Rt.Reachable || s.Rt.Disabled {
-		return nil
+		return out
 	}
 	what := "rTorrent SCGI endpoint not responding"
 	if s.Rt.ProcessKnown && !s.Rt.ProcessUp {
@@ -257,7 +264,7 @@ func wantRt(s *collect.BoxState) []want {
 	if s.Rt.Error != "" && s.Rt.Error != what && !strings.HasPrefix(s.Rt.Error, what) {
 		msg += " (" + s.Rt.Error + ")" // only when it adds to the headline
 	}
-	return []want{{"rtorrent", "warn", msg}}
+	return append(out, want{"rtorrent", "warn", msg})
 }
 
 // firewalledGrace is how long a client may report no incoming connectivity

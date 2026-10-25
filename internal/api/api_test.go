@@ -921,6 +921,8 @@ func TestRtRoutesAndSettings(t *testing.T) {
 		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/..%%2F/stop", id), 400},
 		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/remove-data", id, strings.Repeat("A", 40)), 409}, // valid, but the box was never probed: not ready
 		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/stop", 999, strings.Repeat("a", 40)), 404},
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", id), 200},
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", 999), 404},
 	} {
 		code, body := do(t, s, "POST", tc.path, "", hdr)
 		if code != tc.want {

@@ -317,6 +317,14 @@ type RtState struct {
 	// DataDir is the download root remove-with-data may delete under, read
 	// from the box's own rTorrent config over SSH (never from the client).
 	DataDir string `json:"data_dir,omitempty"`
+	// RemoveFailed is the outcome of the last remove-with-data that failed
+	// on the box after its request had ended (the browser gone, the request
+	// timed out): nobody was left to see the error, so the detached job
+	// records it here, logs it and raises an alert (Codex on PR 123). Kept
+	// until dismissed (DismissRtRemoveFailure): a later success for another
+	// torrent says nothing about these files.
+	RemoveFailed   string    `json:"remove_failed,omitempty"`
+	RemoveFailedAt time.Time `json:"remove_failed_at,omitempty"`
 	// PortOK is set when the endpoint is a loopback port verified as this
 	// account's (a unix socket inside the home needs no such check).
 	PortOK     bool          `json:"port_ok"`

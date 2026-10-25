@@ -256,6 +256,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/discovery", s.handleSetDiscovery)
 	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/torrents/{hash}/{action}", s.handleRtTorrentAction)
 	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/torrents", s.handleRtAddTorrents) // literal segment wins over {hash}
+	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/remove-failure/dismiss", s.handleRtDismissRemoveFailure)
 	mux.HandleFunc("POST "+bp+boxRoute+"/containers/{cid}/{action}", s.handleContainerAction)
 	mux.HandleFunc("POST "+bp+boxRoute+"/apps/watch", s.handleAppWatch)
 	mux.HandleFunc("POST "+bp+boxRoute+"/logs/read", s.handleReadLog)                   // runs tail over SSH: POST so the CSRF check applies
@@ -1182,6 +1183,21 @@ func (s *Server) handleRtTorrentAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second) // remove-data runs rm on the box
 	defer cancel()
 	if err := s.m.RtTorrentAction(ctx, id, hash, action); err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// handleRtDismissRemoveFailure clears the recorded failure of a detached
+// remove-with-data once the user has seen it.
+func (s *Server) handleRtDismissRemoveFailure(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.m.DismissRtRemoveFailure(id); err != nil {
 		writeErr(w, actionCode(err), err)
 		return
 	}

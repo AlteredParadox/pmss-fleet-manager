@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -489,7 +490,7 @@ var detectRtDial func(ep string) rtorrent.Dialer
 func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot) {
 	running, known := snap.RtProcess()
 	rs := RtState{Enabled: true, ProcessUp: running, ProcessKnown: known, ConfFound: snap.Rt.ConfFound, Disabled: snap.Rt.Disabled,
-		Version: st.Rt.Version, Library: st.Rt.Library}
+		Version: st.Rt.Version, Library: st.Rt.Library, RemoveFailed: st.Rt.RemoveFailed, RemoveFailedAt: st.Rt.RemoveFailedAt}
 	rs.Endpoint = clip(rtEndpoint(rtBox{p.box.RtSCGI}, snap), 600)
 	defer func() { st.Rt = rs }()
 	if known && !running {
@@ -798,6 +799,12 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 	// the rm then gets its own, from the job context itself.
 	res, admitted := p.m.detached(p.rmSetupTimeout(), func(dctx context.Context) (err error) {
 		defer release()
+		// The job answers for itself, whether or not the request is still
+		// there to hear it: the outcome is logged, and a failure is written
+		// to the box's state (shown under the client, raised as an alert)
+		// until dismissed (Codex on PR 123: a request that ended first left
+		// nobody to consume the result).
+		defer func() { p.reportRtRemove(hash, base, err) }()
 		drun, ddial, dclose, err := p.detachedTransport(dctx, ep)
 		if err != nil {
 			return fmt.Errorf("could not open a connection for the deletion; nothing was changed: %w", err)
@@ -872,8 +879,28 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 	case err := <-res:
 		return err
 	case <-ctx.Done():
-		return fmt.Errorf("the request ended before the deletion finished; it continues on the box and the next poll shows the result: %w", ctx.Err())
+		return fmt.Errorf("the request ended before the deletion finished; it continues on the box: a failure is shown under rTorrent on this box and raises an alert: %w", ctx.Err())
 	}
+}
+
+// reportRtRemove logs a detached remove-with-data's outcome and, on a
+// failure, records it on the box's state for the UI and the alert rule.
+func (p *poller) reportRtRemove(hash, base string, err error) {
+	if err == nil {
+		p.m.log.Info("rtorrent remove-with-data done", "box", p.box.Name, "hash", hash, "path", base)
+		return
+	}
+	p.m.log.Warn("rtorrent remove-with-data failed", "box", p.box.Name, "hash", hash, "path", base, "err", err)
+	msg := clip(fmt.Sprintf("%s (%s…): %v", filepath.Base(base), strings.ToLower(hash[:8]), err), 400)
+	now := time.Now()
+	p.m.commit(p.box.ID, func(st *BoxState) *BoxState {
+		if st == nil {
+			return nil
+		}
+		next := *st
+		next.Rt.RemoveFailed, next.Rt.RemoveFailedAt = msg, now
+		return &next
+	}, commitOpts{hooks: true, publish: true})
 }
 
 // lockWithin takes mu unless ctx ends first. A mutex cannot be waited on
