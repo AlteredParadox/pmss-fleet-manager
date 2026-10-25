@@ -574,10 +574,12 @@ func TestAdd(t *testing.T) {
 			}
 		}
 	}
-	// A label on an http(s) link cannot be set by hash: refused before any load.
-	n := len(f.methods())
-	if _, err := c.Add(context.Background(), AddRequest{URLs: []string{"https://ok.example/y.torrent"}, Label: "tv"}); !errors.Is(err, ErrLabelNeedsHash) || len(f.methods()) != n {
-		t.Fatalf("%v", err)
+	// A label on an http(s) link cannot be set by hash: the link loads
+	// without it and is counted, the magnet beside it gets the label.
+	sets = nil
+	res, err = c.Add(context.Background(), AddRequest{URLs: []string{"https://ok.example/y.torrent", "magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
+	if err != nil || res.Added != 2 || res.Unlabelled != 1 || len(sets) != 1 || sets[0].params[0] != hashA {
+		t.Fatalf("%+v %v %+v", res, err, sets)
 	}
 	// Every URL refused by rTorrent: the fault surfaces.
 	f.on(func(m string, p []string) string { return fault(-501, "no") })

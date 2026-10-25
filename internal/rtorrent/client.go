@@ -323,7 +323,8 @@ func (c *Client) Action(ctx context.Context, action, hash string) error {
 // called by hash as its own XML-RPC method, whose parameters are literal
 // values. That needs the hash up front, so a label is applied to .torrent
 // files (hash computed here) and magnet links (hash in the link); an http(s)
-// link with a label is refused with ErrLabelNeedsHash before anything loads.
+// link loads without the label (the hash is not known until rTorrent
+// fetched the file) and is counted in AddResult.Unlabelled.
 type AddRequest struct {
 	URLs    []string
 	Files   [][]byte
@@ -341,20 +342,15 @@ type AddResult struct {
 	Unlabelled int
 }
 
-// ErrLabelNeedsHash is a label on an http(s) link: the hash is not known
-// until rTorrent fetched the file, and a label is only ever set by hash.
-var ErrLabelNeedsHash = errors.New("rtorrent: a label can be applied to .torrent files and magnet links only; add the http(s) link without a label, or label it in ruTorrent")
-
-// Add loads every entry; one refused entry does not stop the rest. With a
-// label, every entry's hash is checked first so nothing is loaded that the
-// label could not then be set on.
+// Add loads every entry; one refused entry does not stop the rest.
 func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 	var res AddResult
 	label := clip(req.Label, maxLabel)
 	type entry struct {
-		method string
-		arg    any    // the URL or the file bytes
-		hash   string // for the label; "" when none is wanted
+		method     string
+		arg        any    // the URL or the file bytes
+		hash       string // for the label; "" when none is wanted or known
+		unlabelled bool   // a label was asked for but cannot be set by hash
 	}
 	urlMethod, rawMethod := "load.start", "load.raw_start"
 	if req.Stopped {
@@ -368,11 +364,11 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 		}
 		e := entry{method: urlMethod, arg: u}
 		if label != "" {
-			h, err := MagnetHash(u)
-			if err != nil {
-				return AddResult{}, ErrLabelNeedsHash
+			if h, err := MagnetHash(u); err == nil {
+				e.hash = h
+			} else {
+				e.unlabelled = true // an http(s) link: loaded, label left to ruTorrent
 			}
-			e.hash = h
 		}
 		entries = append(entries, e)
 	}
@@ -399,6 +395,9 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 			return res, err
 		}
 		res.Added++
+		if e.unlabelled {
+			res.Unlabelled++
+		}
 		if e.hash != "" {
 			// A literal XML-RPC string: rTorrent's command parser never sees
 			// it. A fault here (the hash not present yet, which rTorrent
