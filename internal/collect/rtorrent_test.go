@@ -2276,3 +2276,43 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// TestStartPollerPublishesNoticeUnderGuard (Codex on PR 123): a replacement
+// poller reads the durable removal notice and publishes its state under the
+// box's per-box guard, so a report or dismiss cannot land between the read
+// and the publish and be overwritten by the older value.
+func TestStartPollerPublishesNoticeUnderGuard(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	defer m.cancel()
+	box := *p.box
+	box.Host, box.Enabled = "box.example", false // disabled: no poll loop starts
+	if err := m.st.CreateBox(context.Background(), &box); err != nil {
+		t.Fatal(err)
+	}
+	g := m.labelGuard(box.ID)
+	g.Lock() // a report in progress
+	started := make(chan struct{})
+	go func() { m.startPoller(&box, nil); close(started) }()
+	select {
+	case <-started:
+		t.Fatal("startPoller published without the guard")
+	case <-time.After(150 * time.Millisecond):
+	}
+	// The report lands (row, then live state is absent yet) before the guard
+	// is given up: the publication must carry it.
+	if err := m.st.SetCache(context.Background(), box.ID, rtRemoveCacheKind, rtRemoveCache{Generation: boxGeneration(&box), Message: "Alpha: boom", At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	g.Unlock()
+	<-started
+	m.mu.RLock()
+	got := m.states[box.ID].Rt.RemoveFailed
+	m.mu.RUnlock()
+	if got != "Alpha: boom" {
+		t.Fatalf("published notice %q", got)
+	}
+}

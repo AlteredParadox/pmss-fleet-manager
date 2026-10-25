@@ -547,10 +547,6 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	// at once. The failure count stays: it feeds the offline/degraded
 	// decision, and a box down for hours must not dip to "degraded".
 	st.NextPoll, st.Backoff = time.Time{}, false
-	// The recorded outcome of a failed detached removal is kept in a cache
-	// row of its own, written and deleted as it happens; the state cache's
-	// copy may predate either, so the row decides (fred on PR 123).
-	m.applyRtRemove(b, &st)
 	auth, authKnown := m.restoredAuth(b)
 	rtLabels := m.restoredRtLabels(b)
 	if !b.Enabled {
@@ -567,12 +563,22 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	if ds, ok := detectGuardState(b); ok {
 		p.guard.Restore(ds)
 	}
+	// The recorded outcome of a failed detached removal is kept in a cache
+	// row of its own, written and deleted as it happens; the state cache's
+	// copy may predate either, so the row decides (fred on PR 123). Read
+	// and published under the same per-box guard the recording and the
+	// dismissal hold, so neither can land between the read and the publish
+	// and be overwritten by the older value (Codex on PR 123).
+	g := m.labelGuard(b.ID)
+	g.Lock()
+	m.applyRtRemove(b, &st)
 	// No poll will ever run the hooks of a disabled box: let the alert
 	// rules see the disabled status now so open alerts for it resolve.
 	m.commit(b.ID, func(*BoxState) *BoxState {
 		m.pollers[b.ID] = p // fn runs under m.mu: state and poller appear together
 		return &st
 	}, commitOpts{insert: true, hooks: !b.Enabled, publish: true})
+	g.Unlock()
 	if b.Enabled {
 		m.wg.Add(1)
 		go func() {
