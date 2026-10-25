@@ -242,6 +242,10 @@ func (p *poller) storeFix(start time.Time, keepDirs bool) func(s, stored *BoxSta
 		// Readiness is the generation's, not the poll's: a failed poll
 		// that started before the probe that set it must not unset it.
 		s.Ready = s.Ready || stored.Ready
+		// A detached removal's recorded failure is written and dismissed
+		// through commit, never by a poll: the stored value is the latest,
+		// whatever this poll's starting snapshot carried (Codex on PR 123).
+		s.Rt.RemoveFailed, s.Rt.RemoveFailedAt = stored.Rt.RemoveFailed, stored.Rt.RemoveFailedAt
 	}
 }
 

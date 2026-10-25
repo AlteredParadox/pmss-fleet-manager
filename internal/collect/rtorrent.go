@@ -797,6 +797,7 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 	// ends, so no other rTorrent mutation on this box runs meanwhile. The
 	// job's deadline bounds the connection, the erase and the bookkeeping;
 	// the rm then gets its own, from the job context itself.
+	gen := p.generation() // the machine this job acts on
 	res, admitted := p.m.detached(p.rmSetupTimeout(), func(dctx context.Context) (err error) {
 		defer release()
 		// The job answers for itself, whether or not the request is still
@@ -804,7 +805,7 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		// to the box's state (shown under the client, raised as an alert)
 		// until dismissed (Codex on PR 123: a request that ended first left
 		// nobody to consume the result).
-		defer func() { p.reportRtRemove(hash, base, err) }()
+		defer func() { p.reportRtRemove(gen, hash, base, err) }()
 		drun, ddial, dclose, err := p.detachedTransport(dctx, ep)
 		if err != nil {
 			return fmt.Errorf("could not open a connection for the deletion; nothing was changed: %w", err)
@@ -834,7 +835,6 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		// (fred on PR 123). It is settled only when the cleanup is known
 		// complete on the current owner, and stays on record as the erase
 		// time for late handoffs (adoptLate).
-		gen := p.generation()
 		p.m.rtTombstone(p.box.ID, gen, hash)
 		if unlock, ok := lockWithin(dctx, &p.m.boxMu); ok {
 			settled := p.forgetRtLabel(dctx, hash, false)
@@ -884,8 +884,13 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 }
 
 // reportRtRemove logs a detached remove-with-data's outcome and, on a
-// failure, records it on the box's state for the UI and the alert rule.
-func (p *poller) reportRtRemove(hash, base string, err error) {
+// failure, records it on the box's state for the UI and the alert rule,
+// provided the state still belongs to the machine the job acted on (gen):
+// an edit that moved the record to another host or account meanwhile
+// cleared that machine's state and alerts, and its cleanup error must not
+// reappear on the replacement (Codex on PR 123). The log line is kept
+// either way.
+func (p *poller) reportRtRemove(gen, hash, base string, err error) {
 	if err == nil {
 		p.m.log.Info("rtorrent remove-with-data done", "box", p.box.Name, "hash", hash, "path", base)
 		return
@@ -894,7 +899,7 @@ func (p *poller) reportRtRemove(hash, base string, err error) {
 	msg := clip(fmt.Sprintf("%s (%s…): %v", filepath.Base(base), strings.ToLower(hash[:8]), err), 400)
 	now := time.Now()
 	p.m.commit(p.box.ID, func(st *BoxState) *BoxState {
-		if st == nil {
+		if st == nil || st.generation() != gen {
 			return nil
 		}
 		next := *st

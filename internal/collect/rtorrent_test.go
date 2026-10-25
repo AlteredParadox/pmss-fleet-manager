@@ -437,7 +437,7 @@ func TestRtClientFollowsTransport(t *testing.T) {
 // would, so the action gates pass.
 func readyRt(t *testing.T, p *poller, ep string) {
 	t.Helper()
-	st := BoxState{ID: p.box.ID, Ready: true, Rt: RtState{Enabled: true, Endpoint: ep, Reachable: true}}
+	st := BoxState{ID: p.box.ID, Host: p.box.Host, Port: p.box.Port, User: p.box.User, Ready: true, Rt: RtState{Enabled: true, Endpoint: ep, Reachable: true}}
 	p.m.mu.Lock()
 	p.m.states[p.box.ID] = &st
 	p.m.mu.Unlock()
@@ -2197,6 +2197,29 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 	p.pollRt(context.Background(), &st, snap)
 	if st.Rt.RemoveFailed == "" || st.Rt.Error != "" {
 		t.Fatalf("poll dropped the record: %+v", st.Rt)
+	}
+	// A poll whose starting snapshot predates the record publishes with the
+	// stored (latest) value, and one that predates a dismiss does not
+	// resurrect it (Codex on PR 123).
+	stale := BoxState{ID: p.box.ID, Rt: RtState{Enabled: true}}
+	p.storeFix(time.Now(), false)(&stale, &st)
+	if stale.Rt.RemoveFailed != st.Rt.RemoveFailed || !stale.Rt.RemoveFailedAt.Equal(st.Rt.RemoveFailedAt) {
+		t.Fatalf("a poll in flight must carry the stored record: %q", stale.Rt.RemoveFailed)
+	}
+	dismissed := st
+	dismissed.Rt.RemoveFailed, dismissed.Rt.RemoveFailedAt = "", time.Time{}
+	p.storeFix(time.Now(), false)(&st, &dismissed)
+	if st.Rt.RemoveFailed != "" {
+		t.Fatal("a poll in flight must not resurrect a dismissed record")
+	}
+	// A failure reported for another generation (the record was moved to
+	// another machine while the job ran) is logged but not attached.
+	p.reportRtRemove("other-generation", rtHashA, target, errors.New("boom"))
+	p.m.mu.RLock()
+	gotMsg := p.m.states[p.box.ID].Rt.RemoveFailed
+	p.m.mu.RUnlock()
+	if strings.Contains(gotMsg, "boom") {
+		t.Fatal("another generation's failure must not be attached")
 	}
 	if err := p.m.DismissRtRemoveFailure(p.box.ID); err != nil {
 		t.Fatal(err)
