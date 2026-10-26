@@ -566,7 +566,7 @@ func (p *poller) reportRtRemove(gen, hash, base string, err error) {
 	}
 	p.m.log.Warn("rtorrent remove-with-data failed", "box", p.box.Name, "hash", hash, "path", base, "err", err)
 	msg := clip(fmt.Sprintf("%s (%s…): %v", filepath.Base(base), strings.ToLower(hash[:8]), err), 400)
-	now := time.Now()
+	now := time.Now().Round(0) // wall time only: the order must hold as stored (JSON drops the monotonic reading; fred on PR 123)
 	// Under the box's guard with the dismiss, and the durable row before the
 	// live state: a restart finds the row whatever the state cache's copy
 	// says (a poll writes that copy before it merges; fred on PR 123), and

@@ -1693,7 +1693,7 @@ func TestRemovalNoticeEdges(t *testing.T) {
 	// Strictly increasing times: a live notice dated in the future (a clock
 	// stepped back since) is still followed by a later one.
 	readyRt(t, p, "unix:/x")
-	future := time.Now().Add(time.Hour)
+	future := time.Now().Add(time.Hour).Round(0) // wall time only, as a stepped-back clock leaves it
 	m.mu.Lock()
 	m.states[p.box.ID].Rt.RemoveFailed, m.states[p.box.ID].Rt.RemoveFailedAt = "old", future
 	m.mu.Unlock()
