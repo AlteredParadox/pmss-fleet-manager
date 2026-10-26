@@ -742,7 +742,7 @@ function ovRtRows(r, both) {
   const state = r.reachable ? '' : r.disabled ? ' <span class="muted" title="~/.rtorrentDisable is set: the Pulsed Media watchdog leaves it stopped">(stopped on purpose)</span>' : ' <span class="warn">(not responding)</span>';
   return `<div><span>rTorrent</span><span>${esc(r.version || '')}${r.library ? ` <span class="muted">· libtorrent ${esc(r.library)}</span>` : ''}${state}${r.endpoint ? ` <span class="muted" title="SCGI endpoint">· ${esc(r.endpoint.replace(/^unix:/, ''))}</span>` : ''}</span></div>
       ${r.enabled && !r.reachable && r.error && !r.disabled ? `<div><span>rTorrent error</span><span class="warn" style="text-align:right">${esc(r.error)}</span></div>` : ''}
-      ${r.reachable && r.listen_port ? `<div><span>rTorrent port</span><span>${r.listen_port}${pfmView.rtDiscoveryOn(r).labels.length ? ` <span class="warn" title="${esc(pfmView.rtDiscoveryOn(r).title)}">· ${pfmView.rtDiscoveryOn(r).labels.join(' · ')} on</span>` : ' · DHT / PeX off'}</span></div>` : ''}
+      ${r.reachable && r.listen_port ? `<div><span>rTorrent port</span><span>${r.listen_port}${pfmView.rtDiscoveryOn(r).labels.length ? ` <span class="warn" title="${esc(pfmView.rtDiscoveryOn(r).title)}">· ${pfmView.rtDiscoveryOn(r).labels.join(' · ')} on</span>` : ' · <span title="DHT is not running; PeX is off as the default for new torrents (torrents already loaded keep their own setting)">DHT off · PeX default off</span>'}</span></div>` : ''}
       ${r.reachable ? `<div><span>torrents${both ? ' <span class="muted">(rTorrent)</span>' : ''}</span><span>${r.total} total · ${r.seeding} seeding · ${r.leeching} leeching</span></div>` : ''}`;
 }
 function ovDockerRow(b) {
