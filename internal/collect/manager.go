@@ -1007,6 +1007,9 @@ func (m *Manager) DismissRtRemoveFailure(id int64, at time.Time) error {
 	return nil
 }
 
+// rtStandInAt dates the stand-in notice for an unreadable record.
+var rtStandInAt = time.Unix(1, 0).UTC()
+
 // rtRemoveCacheKind is the box_cache kind holding the recorded outcome of
 // a failed detached remove-with-data (rtRemoveCache) across restarts.
 const rtRemoveCacheKind = "rt_remove"
@@ -1059,7 +1062,10 @@ func (m *Manager) applyRtRemove(b *store.Box, st *BoxState, live bool, liveMsg s
 		m.log.Warn("read rtorrent removal outcome; keeping what the state carried", "box", b.Name, "err", err)
 		if st.Rt.RemoveFailed == "" {
 			st.Rt.RemoveFailed = "the record of an earlier remove with files could not be read; check the dashboard's database, and the download folder on the box"
-			st.Rt.RemoveFailedAt = time.Now()
+			// Dated before any real outcome: a stand-in observed nothing, so
+			// a row that becomes readable later is always newer and is shown
+			// on dismiss rather than deleted unseen (fred on PR 123).
+			st.Rt.RemoveFailedAt = rtStandInAt
 		}
 		return
 	}

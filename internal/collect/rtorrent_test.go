@@ -1774,3 +1774,42 @@ func TestDismissKeepsNewerRow(t *testing.T) {
 		t.Fatal("dismissing the newer notice clears it")
 	}
 }
+
+// fred on PR 123: the stand-in for an unreadable record observed nothing;
+// a durable outcome older than the restart that showed the stand-in is
+// surfaced by its dismiss, never deleted unseen.
+func TestStandInNeverDeletesOlderRow(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	readyRt(t, p, "unix:/x")
+	older := time.Now().Add(-time.Minute).Round(0)
+	if err := m.st.SetCache(context.Background(), p.box.ID, rtRemoveCacheKind, "unreadable"); err != nil {
+		t.Fatal(err)
+	}
+	st := BoxState{}
+	m.applyRtRemove(p.box, &st, false, "", time.Time{})
+	if !st.Rt.RemoveFailedAt.Equal(rtStandInAt) {
+		t.Fatalf("stand-in date: %v", st.Rt.RemoveFailedAt)
+	}
+	m.mu.Lock()
+	m.states[p.box.ID].Rt.RemoveFailed, m.states[p.box.ID].Rt.RemoveFailedAt = st.Rt.RemoveFailed, st.Rt.RemoveFailedAt
+	m.mu.Unlock()
+	// The read recovers: the real row, older than the restart.
+	if err := m.st.SetCache(context.Background(), p.box.ID, rtRemoveCacheKind, rtRemoveCache{Generation: boxGeneration(p.box), Message: "Beta: real", At: older}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DismissRtRemoveFailure(p.box.ID, rtStandInAt); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.RLock()
+	live := m.states[p.box.ID].Rt
+	m.mu.RUnlock()
+	if live.RemoveFailed != "Beta: real" {
+		t.Fatalf("the recovered row must be shown, not deleted: %+v", live)
+	}
+	if _, _, ok := rowNotice(m, p.box); !ok {
+		t.Fatal("the row must survive the stand-in's dismiss")
+	}
+}
