@@ -412,13 +412,31 @@ func TestTorrentActionNeedsCurrentBoxRevision(t *testing.T) {
 	if before.BoxRev != b.Revision {
 		t.Fatalf("state box_rev %d, record %d", before.BoxRev, b.Revision)
 	}
-	mv := *b
+	// A cosmetic edit keeps the measured state and must still publish the
+	// record's new revision, or every later action would be refused (Codex
+	// on PR 130).
+	cos := *b
+	cos.Name = "renamed"
+	if err := m.UpdateBox(ctx, &cos, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	renamed, _ := m.State(b.ID)
+	if !renamed.Ready || renamed.BoxRev != cos.Revision || renamed.BoxRev == before.BoxRev {
+		t.Fatalf("cosmetic edit: ready=%v box_rev %d, record %d", renamed.Ready, renamed.BoxRev, cos.Revision)
+	}
+	if err := m.TorrentAction(ctx, b.ID, renamed.BoxRev, strings.Repeat("a", 40), "stop"); errors.Is(err, ErrStaleBox) || errors.Is(err, ErrNotReady) {
+		t.Fatalf("current revision after a rename: %v", err)
+	}
+	mv := cos
 	mv.Host = "127.0.0.2"
 	if err := m.UpdateBox(ctx, &mv, store.Clears{}); err != nil {
 		t.Fatal(err)
 	}
 	seedRemote(m, b.ID)
 	after, _ := m.State(b.ID)
+	if after.BoxRev != mv.Revision {
+		t.Fatalf("move: box_rev %d, record %d", after.BoxRev, mv.Revision)
+	}
 	if after.BoxRev == before.BoxRev {
 		t.Fatalf("an edit must change box_rev (%d)", after.BoxRev)
 	}

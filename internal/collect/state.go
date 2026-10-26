@@ -421,6 +421,7 @@ func (s BoxState) EffectiveRenewal() string {
 func (s *BoxState) adoptIdentity(from BoxState) {
 	s.Name, s.Host, s.Port, s.User, s.Type = from.Name, from.Host, from.Port, from.User, from.Type
 	s.Plan, s.Datacenter, s.Renewal, s.Enabled, s.HostKeyFP = from.Plan, from.Datacenter, from.Renewal, from.Enabled, from.HostKeyFP
+	s.BoxRev = from.BoxRev // torrent actions compare it with the poller's record (Codex on PR 130)
 	s.Qbt.Enabled, s.Rt.Enabled, s.Docker.Enabled, s.Dirs.Enabled = from.Qbt.Enabled, from.Rt.Enabled, from.Docker.Enabled, from.Dirs.Enabled
 	// The SCGI endpoint is the record's override, or nothing until the next
 	// poll resolves it from the box: a carried endpoint could be a setting
