@@ -641,7 +641,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.9.1 is the current release. The code was written against five real Pulsed
+1.10.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -652,6 +652,30 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.10.0**
+
+- rTorrent support. A box can run rTorrent beside or instead of
+  qBittorrent, monitored over its SCGI unix socket through the SSH
+  connection (endpoint read from `~/.rtorrent.rc`, or set per box under
+  edit; a loopback TCP endpoint is accepted with an ownership check and a
+  warning that it is unauthenticated on a shared host). The torrents tab
+  groups torrents by client, and the fleet view names the client after
+  each torrent. Actions: stop, start, remove, remove with files, and add.
+- Remove with files deletes only inside rTorrent's download folder as read
+  from the box's own config, checked on the box against the resolved path
+  before rTorrent is touched, and runs on its own SSH connection under the
+  dashboard's deadlines, so closing the browser, an edit or a stop does not
+  cut it. A deletion that fails after the request ended is kept as a notice
+  on the box with an alert until dismissed.
+- Labels are attempted once, right after a load, and only when the
+  torrent's hash is proven unique; a torrent whose label could not be
+  applied or confirmed still counts as added, and the dashboard log says
+  why. A magnet's label lands on its metadata placeholder, which rTorrent
+  drops when the metadata arrives: set it in ruTorrent then.
+- Forwarded SSH streams now end within a bounded grace on a transport that
+  stops answering, and a box removal keeps the box on screen if its
+  database row cannot be deleted.
 
 **1.9.1**
 
