@@ -152,8 +152,11 @@ type Stats struct {
 	PeXKnown bool // protocol.pex answered
 }
 
-// Actions on one torrent. Stop and Start mirror ruTorrent: stop then
-// close, open then start. Remove erases the torrent from the session and
+// Actions on one torrent. Stop mirrors ruTorrent: stop then close. Start
+// is open, start, then resume: d.start alone leaves a paused torrent
+// (started but inactive) paused, seen on pm1's 0.9.8, and d.resume on a
+// running one changes nothing. Pause keeps the torrent open and started
+// with its transfers halted (d.pause), as ruTorrent's pause. Remove erases the torrent from the session and
 // leaves its data alone: rTorrent has no delete-files command (ruTorrent
 // does that itself in PHP). The collector's remove-with-data uses the path
 // rTorrent reports only as a candidate, checked on the box against a
@@ -161,6 +164,7 @@ type Stats struct {
 const (
 	ActionStop   = "stop"
 	ActionStart  = "start"
+	ActionPause  = "pause"
 	ActionRemove = "remove"
 )
 
@@ -169,7 +173,7 @@ const (
 // but matches no case.
 func ValidAction(a string) bool {
 	switch a {
-	case ActionStop, ActionStart, ActionRemove:
+	case ActionStop, ActionStart, ActionPause, ActionRemove:
 		return true
 	}
 	return false
@@ -559,7 +563,9 @@ func (c *Client) Action(ctx context.Context, action, hash string) error {
 	case ActionStop:
 		seq = []string{"d.stop", "d.close"}
 	case ActionStart:
-		seq = []string{"d.open", "d.start"}
+		seq = []string{"d.open", "d.start", "d.resume"}
+	case ActionPause:
+		seq = []string{"d.pause"}
 	case ActionRemove:
 		seq = []string{"d.erase"}
 	}

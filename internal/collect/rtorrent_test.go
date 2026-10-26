@@ -552,7 +552,7 @@ func TestManagerRtGuards(t *testing.T) {
 	m.mu.Lock()
 	m.pollers[1] = p
 	m.mu.Unlock()
-	if err := m.RtTorrentAction(ctx, 1, rtHashA, "pause"); err == nil || !strings.Contains(err.Error(), "unknown rTorrent action") {
+	if err := m.RtTorrentAction(ctx, 1, rtHashA, "resume"); err == nil || !strings.Contains(err.Error(), "unknown rTorrent action") {
 		t.Fatal(err)
 	}
 	if err := m.RtTorrentAction(ctx, 1, rtHashA, "stop"); !errors.Is(err, ErrDisabled) {
@@ -566,7 +566,7 @@ func TestManagerRtGuards(t *testing.T) {
 	if err := m.RtTorrentAction(ctx, 1, rtHashA, "start"); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(f.called(), ","); got != "d.open,d.start" {
+	if got := strings.Join(f.called(), ","); got != "d.open,d.start,d.resume" {
 		t.Fatal(got)
 	}
 	res, err := m.RtAddTorrents(ctx, 1, qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + rtHashB}})
@@ -682,7 +682,7 @@ func TestClassifyRtDisabledIsNotDegraded(t *testing.T) {
 	if s, _ := classify(st); s != "online" {
 		t.Fatal("stopped on purpose must not degrade the box")
 	}
-	if !ValidRtAction("stop") || !ValidRtAction("remove-data") || ValidRtAction("pause") {
+	if !ValidRtAction("stop") || !ValidRtAction("pause") || !ValidRtAction("remove-data") || ValidRtAction("resume") {
 		t.Fatal("ValidRtAction")
 	}
 }

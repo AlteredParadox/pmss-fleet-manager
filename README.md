@@ -23,14 +23,14 @@ torrent count and share ratio, CPU/RAM of your systemd slice, host CPU model
 an update flag, and plan tags. Headline tiles for total storage, upload,
 aggregate bandwidth, torrents, containers, next renewal and monthly cost.
 
-**Torrents.** Every seedbox's torrents in one table, busiest first, with the
-box name (and whichever of DHT / PeX / LSD is enabled on it in parentheses)
-linking to that box's torrents tab; the same columns (size, progress, rates,
-lifetime uploaded / downloaded, ratio, connected seeds and peers with the
-swarm size), filter and per-torrent stop / start / remove controls as the
-per-box tab. Every column sorts on a click of its heading (again to reverse,
-a third time for the default order); the choice is remembered per table in
-the browser.
+**Torrents.** Every seedbox's torrents in one table, busiest first, with
+the same columns as the per-box tab (name, size, progress, rates, lifetime
+uploaded / downloaded, ratio, connected seeds and peers with the swarm
+size) followed by the client and the box name (with whichever of DHT / PeX /
+LSD is enabled on it in parentheses) linking to that box's torrents tab;
+filter and per-torrent stop / start / remove controls. Every column
+sorts on a click of its heading (again to reverse, a third time for the
+default order); the choice is remembered per table in the browser.
 
 **Per box.**
 
@@ -47,8 +47,8 @@ the browser.
   torrents may go; rTorrent has DHT and PeX only);
   the full list from each client with filter; add torrents by
   magnet, URL or `.torrent` file (optionally into a category, or stopped);
-  stop / start / remove (with or without the files) per torrent; pause all /
-  resume all; and start / stop / restart of the client.
+  stop / start / remove (with or without the files) per torrent; stop all /
+  start all; and start / stop / restart of the client.
 - Containers: rootless Docker containers with CPU and memory, start / stop /
   restart.
 - Services: every process the account runs on the shared host (PMSS hides
@@ -356,8 +356,8 @@ unless the host isolates loopback between tenants. The client is PMSS's own, sta
 install, start or stop for it here; the tenant's `~/.rtorrentDisable`
 marker is shown and silences the alert. On a box running both clients the
 torrents tab shows a table per client, each with its own counts, add button
-and column sort; the fleet-wide torrents view names the client in
-parentheses after each torrent. Torrent actions: stop, start, remove,
+and column sort; the fleet-wide torrents view has a client column (sortable
+like the others). Torrent actions: stop, start, remove,
 remove with data, add. Remove with data asks rTorrent for the
 torrent's path, erases the torrent, then deletes on the box only after the
 box itself resolved the path through symlinks and found it strictly inside
@@ -678,12 +678,21 @@ Newest first; each release's full notes are on the
 **Unreleased**
 
 - The torrents tab shows a separate table per client, and every torrent
-  table sorts by any column from its heading.
+  table sorts by any column from its heading. The fleet-wide list puts the
+  name first and ends with its own client column and the seedbox.
 - rTorrent DHT / PeX toggles, saved to `~/.rtorrent.rc.custom` and applied
   live where the client allows (PeX as the default for newly loaded
   torrents).
-- Torrent row actions are icons (start, stop, remove, remove with files,
-  each named on hover), and the rows are more compact.
+- Torrent row actions are icons (start, pause, stop, remove, remove with
+  files, each named on hover), and the rows are more compact. A button that
+  does not apply to the torrent's state is greyed out and says why. Pause is
+  rTorrent's and offered in its own table (the torrent stays open, start
+  resumes it); qBittorrent 5 has no pause of its own (its stop is the old
+  pause), and the fleet-wide list keeps start / stop for both.
+- qBittorrent's "pause all" / "resume all" are now named "stop all" /
+  "start all", as qBittorrent 5 names them (same actions as before).
+- rTorrent's start now also resumes a torrent paused in ruTorrent: d.start
+  alone left it paused.
 
 **1.10.0**
 

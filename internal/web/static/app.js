@@ -898,15 +898,15 @@ function clientSection(b, c, f, first) {
       <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span>${removeFailed}</div>
       <div class="actions">
         ${first ? `<input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">` : ''}
-        ${c.key === 'qbt' ? `<button class="small" data-act="qbt:pause" data-confirm="Pause all torrents in qBittorrent on ${esc(b.name)}?">pause all</button>
-        <button class="small" data-act="qbt:resume">resume all</button>` : ''}
+        ${c.key === 'qbt' ? `<button class="small" data-act="qbt:pause" title="stop every torrent in qBittorrent" data-confirm="Stop all torrents in qBittorrent on ${esc(b.name)}?">stop all</button>
+        <button class="small" data-act="qbt:resume" title="start every torrent, including any stopped on purpose">start all</button>` : ''}
         ${avail.stopped ? '' : `<button class="small" data-act="tor-add:toggle" data-client="${c.key}">${addOpen ? 'close' : 'add'}</button>`}
       </div>
     </div>
     ${addOpen ? torAddForm(b, q.torrents || [], c) : ''}
     <div style="overflow:auto">
       ${TOR_HEAD(c.key)}
-      ${shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(q.total, q.torrents, b.status)}</span></div>` : shown.map((t) => torrentRow(b, t, '')).join('')}
+      ${shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(q.total, q.torrents, b.status)}</span></div>` : shown.map((t) => torrentRow(b, t)).join('')}
       ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
     </div>`;
 }
@@ -935,14 +935,14 @@ function rtDiscoveryNote(r, b) {
 
 const KIND_COLOR = { seeding: 'var(--ok)', leeching: 'var(--accent)', paused: 'var(--dim)', checking: 'var(--warn)', error: 'var(--bad)', unknown: 'var(--dim)' };
 // Column headings shared by the torrent tables, each a sort button for its
-// table ('qbt', 'rtorrent' or 'all'); the fleet-wide list leads with the
-// seedbox.
+// table ('qbt', 'rtorrent' or 'all'); the fleet-wide list adds the client
+// and the seedbox after the peers.
 const TOR_COLS = [['name', 'name'], ['size', 'size'], ['progress', 'progress'], ['up', 'up'], ['down', 'down'], ['uploaded', 'uploaded', 'lifetime uploaded'], ['downloaded', 'downloaded', 'lifetime downloaded'], ['ratio', 'ratio'], ['seeds', 'seeds', 'connected seeds (swarm total)'], ['peers', 'peers', 'connected peers (swarm total)']];
 function sortHead(table, key, label, hint) {
   const s = S.torSort[table], on = s?.key === key;
   return `<button class="th-sort${on ? ' on' : ''}" data-act="sort:tor" data-table="${table}" data-key="${key}" title="${hint ? hint + ' — ' : ''}sort by ${label}${on ? ' (click again to reverse, a third time for the default order)' : ''}">${label}${on ? (s.dir === 'asc' ? ' ▲' : ' ▼') : ''}</button>`;
 }
-const TOR_HEAD = (table, box = false) => `<div class="trow head">${box ? sortHead(table, 'box', 'seedbox') : ''}${TOR_COLS.map(([k, l, h]) => sortHead(table, k, l, h)).join('')}<span></span></div>`;
+const TOR_HEAD = (table, fleet = false) => `<div class="trow head">${TOR_COLS.map(([k, l, h]) => sortHead(table, k, l, h) + (fleet && k === 'peers' ? sortHead(table, 'client', 'client') + sortHead(table, 'box', 'seedbox') : '')).join('')}<span></span></div>`;
 // Lifetime transfer summed over a list, for the table headers.
 function transferNote(list) {
   let up = 0, down = 0;
@@ -952,17 +952,16 @@ function transferNote(list) {
 // "3 <swarm>/120</swarm>": connected count, then the swarm size when known.
 const swarmCell = (n, swarm) => `<span class="num">${n}${swarm ? `<span class="muted swarm">/${swarm}</span>` : ''}</span>`;
 const torrentMatches = (t, f) => t.name.toLowerCase().includes(f) || (t.category || '').toLowerCase().includes(f) || t.kind.includes(f);
-// One torrent row, shared by the per-box tab and the fleet-wide list; lead
-// is an optional first cell (the box, in the fleet-wide list).
-function torrentRow(b, t, lead) {
+// One torrent row, shared by the per-box tab and the fleet-wide list; the
+// fleet list adds the client and the seedbox after the peers, so a box
+// running both clients reads unambiguously and both columns sort.
+function torrentRow(b, t, fleet = false) {
   const color = KIND_COLOR[t.kind] || 'var(--dim)';
-  // In the fleet-wide list every row names its client in parentheses, so
-  // a box running both reads unambiguously.
-  const client = lead ? ` <span class="muted">(${CLIENT_LABEL[t.client] || esc(t.client || 'qBittorrent')})</span>` : '';
   const hint = t.kind === 'error' && t.state && t.state !== t.kind ? ` — ${esc(t.state)}` : '';
+  const where = fleet ? `<span class="ellip muted">${CLIENT_LABEL[t.client] || esc(t.client || 'qBittorrent')}</span>${boxCell(b, t)}` : '';
   return `
-      <div class="trow">${lead}
-        <div style="min-width:0;display:flex;align-items:center;gap:8px" title="${esc(t.name)}${hint}"><span class="led" style="width:6px;height:6px;background:${color}"></span><span class="ellip">${esc(t.name)}${client}</span></div>
+      <div class="trow">
+        <div style="min-width:0;display:flex;align-items:center;gap:8px" title="${esc(t.name)}${hint}"><span class="led" style="width:6px;height:6px;background:${color}"></span><span class="ellip">${esc(t.name)}</span></div>
         <span class="muted num">${fmtBytes(t.size, 1)}</span>
         <div><div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted)"><span>${esc(t.kind === 'unknown' ? t.state : t.kind)}</span><span>${(t.progress * 100).toFixed(t.progress < 1 ? 1 : 0)}%</span></div><div class="meter" style="height:3px;margin-top:3px"><i style="width:${t.progress * 100}%;background:${color}"></i></div></div>
         <span class="num ${t.up_bps ? 'up' : 'dim'}">${fmtBps(t.up_bps)}</span>
@@ -972,7 +971,8 @@ function torrentRow(b, t, lead) {
         <span class="num">${t.ratio >= 0 ? t.ratio.toFixed(2) : '∞'}</span>
         ${swarmCell(t.seeds || 0, t.seeds_swarm)}
         ${swarmCell(t.peers || 0, t.peers_swarm)}
-        <div class="actions">${torrentButtons(b, t)}</div>
+        ${where}
+        <div class="actions">${torrentButtons(b, t, fleet)}</div>
       </div>`;
 }
 
@@ -1013,7 +1013,7 @@ function viewTorrents() {
       ${TOR_HEAD('all', true)}
       ${qbtBoxes === 0 ? `<div class="trow"><span class="muted">no box has a torrent client monitored</span></div>`
         : shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(sum.total, allTorrents(S.torrents), boxes.some((b) => b.status !== 'disabled' && boxClients(b).some((c) => c.st.total)) ? '' : 'disabled')}</span></div>`
-        : shown.map(([b, t]) => torrentRow(b, t, boxCell(b, t))).join('')}
+        : shown.map(([b, t]) => torrentRow(b, t, true)).join('')}
       ${rows.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${rows.length} — refine the filter</span></div>` : ''}
     </div>
   </div>`;
@@ -1100,7 +1100,7 @@ function torAddForm(b, list, c) {
 }
 // Per-torrent controls. Removal always confirms; removing the data as well
 // names the size so the two cannot be mistaken for each other.
-function torrentButtons(b, t) {
+function torrentButtons(b, t, fleet = false) {
   if (!t.hash) return '';
   const client = t.client || 'qbt', label = esc(CLIENT_LABEL[client] || client); // a closed set today; escaped so the attribute sink stays safe if another client is added
   const off = b.status === 'disabled' ? ' disabled title="polling is disabled for this box; enable it to run actions"'
@@ -1111,14 +1111,19 @@ function torrentButtons(b, t) {
     ? `Remove ${name} from rTorrent AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? The box first checks that the path lies inside rTorrent's download directory and refuses otherwise, leaving the torrent in place. If it passes, the torrent is removed and then its files are deleted; should the deletion fail at that point, the torrent is already gone and files may remain. This cannot be undone.`
     : `Remove ${name} AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? This cannot be undone.`;
   // Icons; the hover text names each. A disabled button's own title (in h)
-  // comes first and so is the one shown.
-  return `${pfmView.torrentAction(client, t.kind) === 'start'
-    ? `<button class="icon" data-act="tor:start" ${h} title="start" aria-label="start">${ICON.start}</button>`
-    : `<button class="icon" data-act="tor:stop" ${h} title="stop" aria-label="stop" data-confirm="Stop ${name} on ${esc(b.name)}?">${ICON.stop}</button>`}<button class="icon" data-act="tor:remove" ${h} title="remove (keeps the files)" aria-label="remove, keeping the files" data-confirm="Remove ${name} from ${label} on ${esc(b.name)}? The downloaded files stay on disk.">${ICON.remove}</button><button class="icon danger" data-act="tor:remove-data" ${h} title="remove and delete the files" aria-label="remove and delete the files" data-confirm="${files}">${ICON.trash}</button>`;
+  // comes first and so is the one shown; one that does not apply to the
+  // torrent's state is disabled and says why. Pause is rTorrent's alone
+  // (qBittorrent has none), so it is offered only in rTorrent's own table;
+  // the fleet list mixes both and keeps start / stop, where start also
+  // resumes a paused rTorrent torrent.
+  const can = pfmView.torrentControls(client, t.kind, t.state);
+  const btn = (act, ok, label, why, icon, extra = '') => `<button class="icon" data-act="tor:${act}" ${h}${ok ? '' : ' disabled'} title="${ok ? label : why}" aria-label="${label}"${extra}>${icon}</button>`;
+  return `${btn('start', can.start, client === 'rtorrent' && t.state === 'paused' ? 'resume' : 'start', 'already running', ICON.start)}${can.pause === null || fleet ? '' : btn('pause', can.pause, 'pause (stays open; start resumes it)', 'not running', ICON.pause)}${btn('stop', can.stop, 'stop', 'already stopped', ICON.stop, ` data-confirm="Stop ${name} on ${esc(b.name)}?"`)}<button class="icon" data-act="tor:remove" ${h} title="remove (keeps the files)" aria-label="remove, keeping the files" data-confirm="Remove ${name} from ${label} on ${esc(b.name)}? The downloaded files stay on disk.">${ICON.remove}</button><button class="icon danger" data-act="tor:remove-data" ${h} title="remove and delete the files" aria-label="remove and delete the files" data-confirm="${files}">${ICON.trash}</button>`;
 }
 // Torrent row icons (16-unit grid, drawn in the button's colour).
 const ICON = {
   start: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6L12.5 8z" fill="currentColor"/></svg>',
+  pause: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg>',
   stop: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 1.5h5l4 4v5l-4 4h-5l-4-4v-5z"/><path d="M5 8h6"/></svg>',
   remove: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
   trash: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M6.2 4.5V2.5h3.6v2M4 4.5l.8 9h6.4l.8-9M6.6 7v4.5M9.4 7v4.5"/></svg>',
@@ -1811,14 +1816,14 @@ async function qbtAction(a, act) {
   act.disabled = true;
   if (what === 'install') toast('downloading qbittorrent-nox on the box…');
   const r = await api('POST', `${BASE}/api/boxes/${S.selId}/qbt/${what}`);
-  toast(`qBittorrent ${what}: ok${r?.output ? ' — ' + r.output.split('\n').slice(0, 2).join(' · ') : ''}`, 'ok');
+  toast(`qBittorrent ${{ pause: 'stop all', resume: 'start all' }[what] || what}: ok${r?.output ? ' — ' + r.output.split('\n').slice(0, 2).join(' · ') : ''}`, 'ok');
 }
 async function torrentAction(a, act) {
   const what = a.slice(4);
   act.disabled = true;
   const seg = act.dataset.client === 'rtorrent' ? 'rtorrent' : 'qbt';
   await api('POST', `${BASE}/api/boxes/${act.dataset.box || S.selId}/${seg}/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
-  toast(`torrent ${{ stop: 'stopped', start: 'started', remove: 'removed', 'remove-data': 'removed with its files' }[what]}`, 'ok');
+  toast(`torrent ${{ stop: 'stopped', start: 'started', pause: 'paused', remove: 'removed', 'remove-data': 'removed with its files' }[what]}`, 'ok');
   if (S.view === 'torrents') void loadTorrents();
 }
 async function discoveryAction(a, act) {
