@@ -162,7 +162,7 @@ func rtReplies(method, body string) string {
 			`<value><array><data><value><struct><member><name>dht</name><value><string>auto</string></value></member><member><name>active</name><value><i8>1</i8></value></member></struct></value></data></array></value></data></array>`)
 	case "d.multicall2":
 		row := func(hash, name string, size, done, down, up, ratio, state, complete, active, msg, label string) string {
-			return xmlRow(xs(hash), xs(name), i8(mustInt(size)), i8(mustInt(done)), i8(mustInt(down)), i8(mustInt(up)), i8(mustInt(ratio)), i8(mustInt(state)), i8(mustInt(complete)), i8(mustInt(active)), i8(0), i8(mustInt(state)), xs(msg), xs(label), i8(0), i8(48), i8(40), i8(1000), i8(2000), i8(0), i8(0))
+			return xmlRow(xs(hash), xs(name), i8(mustInt(size)), i8(mustInt(done)), i8(mustInt(down)), i8(mustInt(up)), i8(mustInt(ratio)), i8(mustInt(state)), i8(mustInt(complete)), i8(mustInt(active)), i8(0), i8(mustInt(state)), xs(msg), xs(label), i8(0), i8(48), i8(40), i8(1000), i8(2000), i8(0))
 		}
 		return xmlResp(`<array><data>` +
 			row(rtHashA, "ubuntu-24.04.5.1-desktop-amd64.iso", "6250332160", "4868000000", "54197410", "0", "0", "1", "0", "1", "", "iso") +
@@ -1314,7 +1314,7 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 	p.m.mu.RLock()
 	gotMsg := p.m.states[p.box.ID].Rt.RemoveFailed
 	p.m.mu.RUnlock()
-	if msg, _, ok := p.m.restoredRtRemove(p.box); strings.Contains(gotMsg, "boom") || !ok || strings.Contains(msg, "boom") {
+	if msg, _, ok := rowNotice(p.m, p.box); strings.Contains(gotMsg, "boom") || !ok || strings.Contains(msg, "boom") {
 		t.Fatalf("another generation's failure must not be attached: %q / %q", gotMsg, msg)
 	}
 	// A restart: the state cache was written by the poll before the merge
@@ -1329,13 +1329,13 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 	if _, err := m2.st.GetCache(context.Background(), p.box.ID, "state", &cached); err != nil || cached.Rt.RemoveFailed != "" {
 		t.Fatalf("fixture: the state cache should carry no notice: %v %q", err, cached.Rt.RemoveFailed)
 	}
-	m2.applyRtRemove(p.box, &cached, "", time.Time{})
+	m2.applyRtRemove(p.box, &cached, false, "", time.Time{})
 	if !strings.Contains(cached.Rt.RemoveFailed, "disk says no") || cached.Rt.RemoveFailedAt.IsZero() {
 		t.Fatalf("the notice must survive a restart: %q", cached.Rt.RemoveFailed)
 	}
 	moved := *p.box
 	moved.Host = "elsewhere.example"
-	if _, _, ok := m2.restoredRtRemove(&moved); ok {
+	if _, _, ok := rowNotice(m2, &moved); ok {
 		t.Fatal("another generation must not restore the notice")
 	}
 	// Dismiss, then a restart without any poll in between: the stale state
@@ -1353,7 +1353,7 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 	if _, err := m2.st.GetCache(context.Background(), p.box.ID, "state", &cached); err != nil || cached.Rt.RemoveFailed == "" {
 		t.Fatalf("fixture: the state cache should still carry the notice: %v", err)
 	}
-	m2.applyRtRemove(p.box, &cached, "", time.Time{})
+	m2.applyRtRemove(p.box, &cached, false, "", time.Time{})
 	if cached.Rt.RemoveFailed != "" || !cached.Rt.RemoveFailedAt.IsZero() {
 		t.Fatalf("a dismissed notice came back after a restart: %q", cached.Rt.RemoveFailed)
 	}
@@ -1385,13 +1385,13 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 	p.m.mu.RLock()
 	still := p.m.states[p.box.ID].Rt.RemoveFailed
 	p.m.mu.RUnlock()
-	if msgR, _, ok := p.m.restoredRtRemove(p.box); still != msgB || !ok || !strings.Contains(msgR, "Beta") {
+	if msgR, _, ok := rowNotice(p.m, p.box); still != msgB || !ok || !strings.Contains(msgR, "Beta") {
 		t.Fatalf("the newer notice must survive a stale dismiss: %q / %q", still, msgR)
 	}
 	if err := p.m.DismissRtRemoveFailure(p.box.ID, seenB); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := p.m.restoredRtRemove(p.box); ok {
+	if _, _, ok := rowNotice(p.m, p.box); ok {
 		t.Fatal("dismissed")
 	}
 	if err := p.m.DismissRtRemoveFailure(999, seenB); !errors.Is(err, store.ErrNotFound) {
@@ -1468,7 +1468,7 @@ func TestStaleDismissWithDirtyNoticeRow(t *testing.T) {
 	if !strings.Contains(msgB, "Beta") || !seenB.After(seenA) {
 		t.Fatalf("fixture: %q", msgB)
 	}
-	if msgRow, _, ok := m.restoredRtRemove(p.box); !ok || !strings.Contains(msgRow, "Alpha") {
+	if msgRow, _, ok := rowNotice(m, p.box); !ok || !strings.Contains(msgRow, "Alpha") {
 		t.Fatalf("fixture: the row should still hold A: %q %v", msgRow, ok)
 	}
 	if err := m.DismissRtRemoveFailure(p.box.ID, seenA); !errors.Is(err, ErrStaleNotice) {
@@ -1486,7 +1486,7 @@ func TestStaleDismissWithDirtyNoticeRow(t *testing.T) {
 	m.mu.RLock()
 	cleared := m.states[p.box.ID].Rt.RemoveFailed == ""
 	m.mu.RUnlock()
-	if _, _, ok := m.restoredRtRemove(p.box); !cleared || ok {
+	if _, _, ok := rowNotice(m, p.box); !cleared || ok {
 		t.Fatal("dismissing the live notice clears it and the dirty row")
 	}
 }
@@ -1613,7 +1613,7 @@ func TestEditKeepsNewerLiveNotice(t *testing.T) {
 	// An edit: the carried snapshot and the current live notice agree on
 	// Beta; the row still says Alpha. Beta stays.
 	carried := live
-	m.applyRtRemove(p.box, &carried, live.Rt.RemoveFailed, live.Rt.RemoveFailedAt)
+	m.applyRtRemove(p.box, &carried, true, live.Rt.RemoveFailed, live.Rt.RemoveFailedAt)
 	if !strings.Contains(carried.Rt.RemoveFailed, "Beta") {
 		t.Fatalf("an edit must keep the newer live notice: %q", carried.Rt.RemoveFailed)
 	}
@@ -1622,7 +1622,7 @@ func TestEditKeepsNewerLiveNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 	carried = live
-	m.applyRtRemove(p.box, &carried, live.Rt.RemoveFailed, live.Rt.RemoveFailedAt)
+	m.applyRtRemove(p.box, &carried, true, live.Rt.RemoveFailed, live.Rt.RemoveFailedAt)
 	if !strings.Contains(carried.Rt.RemoveFailed, "Beta") {
 		t.Fatalf("an edit must keep a live notice that has no row: %q", carried.Rt.RemoveFailed)
 	}
@@ -1630,14 +1630,82 @@ func TestEditKeepsNewerLiveNotice(t *testing.T) {
 	// notice is empty and the row gone; the snapshot's Beta must not come
 	// back (Codex on PR 123).
 	carried = live
-	m.applyRtRemove(p.box, &carried, "", time.Time{})
+	m.applyRtRemove(p.box, &carried, true, "", time.Time{})
 	if carried.Rt.RemoveFailed != "" {
 		t.Fatalf("a dismiss between the snapshot and the publish must hold: %q", carried.Rt.RemoveFailed)
 	}
 	// A restart (no live state): the row decides, here nothing.
 	restored := live
-	m.applyRtRemove(p.box, &restored, "", time.Time{})
+	m.applyRtRemove(p.box, &restored, false, "", time.Time{})
 	if restored.Rt.RemoveFailed != "" {
 		t.Fatalf("a restart takes the row: %q", restored.Rt.RemoveFailed)
+	}
+}
+
+// rowNotice reads the durable removal notice: present only when readable
+// and set.
+func rowNotice(m *Manager, b *store.Box) (string, time.Time, bool) {
+	msg, at, err := m.restoredRtRemove(b)
+	return msg, at, err == nil && msg != ""
+}
+
+// Daybreak blue re-review of PR 123: a removal of an unknown box allocates
+// no lease and answers not found; an unreadable notice row on a start keeps
+// what the state carried or says the record is unreadable, never clears it;
+// a notice's time strictly increases per box even when the clock does not.
+func TestRemovalNoticeEdges(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	m.leaseMu.Lock()
+	before := len(m.rtLeases)
+	m.leaseMu.Unlock()
+	for i := int64(1000); i < 1100; i++ {
+		if err := m.RemoveBox(context.Background(), i); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("%d: %v", i, err)
+		}
+	}
+	m.leaseMu.Lock()
+	after := len(m.rtLeases)
+	m.leaseMu.Unlock()
+	if after != before {
+		t.Fatalf("unknown ids grew the lease registry: %d -> %d", before, after)
+	}
+	// An unreadable row (bad JSON) on a start: not "absent".
+	if err := m.st.SetCache(context.Background(), p.box.ID, rtRemoveCacheKind, "not an object"); err != nil {
+		t.Fatal(err)
+	}
+	carried := BoxState{}
+	carried.Rt.RemoveFailed, carried.Rt.RemoveFailedAt = "Alpha: earlier", time.Now()
+	m.applyRtRemove(p.box, &carried, false, "", time.Time{})
+	if carried.Rt.RemoveFailed != "Alpha: earlier" {
+		t.Fatalf("an unreadable row must keep what the state carried: %q", carried.Rt.RemoveFailed)
+	}
+	empty := BoxState{}
+	m.applyRtRemove(p.box, &empty, false, "", time.Time{})
+	if !strings.Contains(empty.Rt.RemoveFailed, "could not be read") || empty.Rt.RemoveFailedAt.IsZero() {
+		t.Fatalf("an unreadable row with nothing carried must say so: %q", empty.Rt.RemoveFailed)
+	}
+	if err := m.st.DeleteCache(context.Background(), p.box.ID, rtRemoveCacheKind); err != nil {
+		t.Fatal(err)
+	}
+	// Strictly increasing times: a live notice dated in the future (a clock
+	// stepped back since) is still followed by a later one.
+	readyRt(t, p, "unix:/x")
+	future := time.Now().Add(time.Hour)
+	m.mu.Lock()
+	m.states[p.box.ID].Rt.RemoveFailed, m.states[p.box.ID].Rt.RemoveFailedAt = "old", future
+	m.mu.Unlock()
+	p.reportRtRemove(p.generation(), rtHashA, "/home/u/data/Alpha", errors.New("x"))
+	m.mu.RLock()
+	got := m.states[p.box.ID].Rt.RemoveFailedAt
+	m.mu.RUnlock()
+	if !got.After(future) {
+		t.Fatalf("the new notice must sort after the live one: %v vs %v", got, future)
+	}
+	_, rowAt, ok := rowNotice(m, p.box)
+	if !ok || !rowAt.Equal(got) {
+		t.Fatalf("row and live share the new time: %v %v %v", ok, rowAt, got)
 	}
 }

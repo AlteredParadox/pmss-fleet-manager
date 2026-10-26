@@ -437,7 +437,7 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	g := m.labelGuard(b.ID)
 	g.Lock()
 	// The box's live notice as it is now, under the guard (an edit's
-	// snapshot may predate a dismiss or a newer report); none on a start.
+	// snapshot may predate a dismiss or a newer report); a start reads the row.
 	var liveMsg string
 	var liveAt time.Time
 	if prev != nil {
@@ -447,7 +447,7 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 		}
 		m.mu.RUnlock()
 	}
-	m.applyRtRemove(b, &st, liveMsg, liveAt)
+	m.applyRtRemove(b, &st, prev != nil, liveMsg, liveAt)
 	// No poll will ever run the hooks of a disabled box: let the alert
 	// rules see the disabled status now so open alerts for it resolve.
 	m.commit(b.ID, func(*BoxState) *BoxState {
@@ -689,6 +689,11 @@ func authEndpointChanged(p *poller, fresh *store.Box) bool {
 
 // RemoveBox stops polling and deletes the box, its alerts and its cache.
 func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
+	// An unknown box allocates nothing: the lease registry holds entries for
+	// boxes that exist (daybreak blue re-review of PR 123).
+	if m.poller(id) == nil {
+		return store.ErrNotFound
+	}
 	// The box's rTorrent mutation lease first (the order the detached job's
 	// own waits use: lease, then the edit lock): a remove-with-data holds
 	// it for its whole life, up to its report, so a removal cannot
@@ -994,34 +999,47 @@ type rtRemoveCache struct {
 }
 
 // restoredRtRemove loads the recorded failure for this box's current
-// generation, if any.
-func (m *Manager) restoredRtRemove(b *store.Box) (msg string, at time.Time, ok bool) {
+// generation: empty with a nil error when there is none, an error when the
+// row could not be read.
+func (m *Manager) restoredRtRemove(b *store.Box) (msg string, at time.Time, err error) {
 	ctx := m.ctx
 	if ctx == nil { // before Start (tests)
 		ctx = context.Background()
 	}
 	var c rtRemoveCache
-	if _, err := m.st.GetCache(ctx, b.ID, rtRemoveCacheKind, &c); err != nil || c.Generation != boxGeneration(b) || c.Message == "" || c.At.IsZero() {
-		return "", time.Time{}, false // a row without a time could never be dismissed: not shown
+	if _, err := m.st.GetCache(ctx, b.ID, rtRemoveCacheKind, &c); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", time.Time{}, nil
+		}
+		return "", time.Time{}, err
 	}
-	return clip(c.Message, 400), c.At, true
+	if c.Generation != boxGeneration(b) || c.Message == "" || c.At.IsZero() {
+		return "", time.Time{}, nil // another machine's, or a row that could never be dismissed
+	}
+	return clip(c.Message, 400), c.At, nil
 }
 
-// applyRtRemove sets or clears the state's recorded removal failure from
-// the durable row, whatever the state cache carried; except that the
-// box's current live notice, when it is newer than the row (its own row
-// write failed: reportRtRemove still publishes it, so the user sees it),
-// is kept across a same-generation edit, or the edit would silently
-// replace an undismissed failure with an older one or nothing (Codex on PR
-// 123). liveMsg and liveAt are the box's live notice read under the label
-// guard at the moment of the call, not the snapshot the edit took earlier:
-// a dismiss between the two clears both the row and the live notice, and
-// must not be undone by the snapshot (Codex on PR 123). A restart has no
-// live state, so there the row decides.
-func (m *Manager) applyRtRemove(b *store.Box, st *BoxState, liveMsg string, liveAt time.Time) {
-	msg, at, _ := m.restoredRtRemove(b)
-	if liveMsg != "" && liveAt.After(at) {
+// applyRtRemove decides the state's removal notice when a poller starts.
+// On an edit (live) the box's live notice, read under the label guard at
+// the moment of the call, is authoritative as it stands, set or cleared:
+// it is what the user sees and what a dismiss acted on, and a row that
+// differs is a write that failed since (daybreak blue re-review of PR
+// 123). On a start the durable row decides. Only a missing row means no
+// notice: a row that cannot be read keeps the notice the state cache
+// carried, or, if that has none, shows that the record is unreadable, so
+// an open alert is never resolved on an unknown (daybreak blue, fred).
+func (m *Manager) applyRtRemove(b *store.Box, st *BoxState, live bool, liveMsg string, liveAt time.Time) {
+	if live {
 		st.Rt.RemoveFailed, st.Rt.RemoveFailedAt = liveMsg, liveAt
+		return
+	}
+	msg, at, err := m.restoredRtRemove(b)
+	if err != nil {
+		m.log.Warn("read rtorrent removal outcome; keeping what the state carried", "box", b.Name, "err", err)
+		if st.Rt.RemoveFailed == "" {
+			st.Rt.RemoveFailed = "the record of an earlier remove with files could not be read; check the dashboard's database, and the download folder on the box"
+			st.Rt.RemoveFailedAt = time.Now()
+		}
 		return
 	}
 	st.Rt.RemoveFailed, st.Rt.RemoveFailedAt = msg, at

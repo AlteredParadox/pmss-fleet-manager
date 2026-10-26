@@ -862,7 +862,11 @@ func (s *Server) handleDeleteBox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.m.RemoveBox(r.Context(), id); err != nil {
-		writeErr(w, 500, err)
+		code := 500
+		if errors.Is(err, store.ErrNotFound) {
+			code = 404
+		}
+		writeErr(w, code, err)
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})

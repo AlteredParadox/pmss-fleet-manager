@@ -579,9 +579,23 @@ func (p *poller) reportRtRemove(gen, hash, base string, err error) {
 	p.m.mu.RLock()
 	stored := p.m.states[p.box.ID]
 	same := stored != nil && stored.generation() == gen
+	var liveAt time.Time
+	if same {
+		liveAt = stored.Rt.RemoveFailedAt
+	}
 	p.m.mu.RUnlock()
 	if !same {
 		return
+	}
+	// The notice's time is its identity for a dismiss and its order: kept
+	// strictly after the live notice's and the row's, so it increases per
+	// box across a failed row write, a restart and a clock stepped back
+	// (daybreak blue re-review of PR 123).
+	_, rowAt, _ := p.m.restoredRtRemove(p.box)
+	for _, t := range []time.Time{liveAt, rowAt} {
+		if !now.After(t) {
+			now = t.Add(time.Microsecond)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -594,8 +608,10 @@ func (p *poller) reportRtRemove(gen, hash, base string, err error) {
 	}
 	if werr != nil {
 		// The live notice is still published (the user must see it); the
-		// dismiss compares against the live notice first, so the stale row
-		// cannot be used to clear it (daybreak blue re-review 6 of PR 123).
+		// dismiss compares against the live notice first and an edit keeps
+		// the live notice, so the stale row cannot clear it. A restart before
+		// the row is written again shows the row's (older) notice, the
+		// documented limit of a failed write.
 		p.m.log.Warn("cache rtorrent removal outcome", "box", p.box.Name, "err", werr)
 	}
 	p.m.commit(p.box.ID, func(st *BoxState) *BoxState {
@@ -678,6 +694,9 @@ func (p *poller) rtAddTorrents(ctx context.Context, req qbt.AddRequest) (rtorren
 	err = p.onRetired(actx, cli, func(c *rtorrent.Client) (err error) { res, err = c.Add(actx, r); return err })
 	for _, e := range res.LabelErrors {
 		p.m.log.Warn("rtorrent add: label not applied or confirmed", "box", p.box.Name, "torrent", e)
+	}
+	if res.LabelErrorsOmitted > 0 {
+		p.m.log.Warn("rtorrent add: more labels not applied or confirmed", "box", p.box.Name, "count", res.LabelErrorsOmitted)
 	}
 	return res, err
 }
