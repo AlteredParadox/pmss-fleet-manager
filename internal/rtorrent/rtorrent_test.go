@@ -1586,3 +1586,13 @@ func TestFirstLoadLostReplyIsUncertain(t *testing.T) {
 		t.Fatalf("%+v %v", res, err)
 	}
 }
+
+// Daybreak blue re-review of PR 122: a load that never left (the dial
+// failed) is not uncertain; the add simply failed.
+func TestUnsentLoadIsNotUncertain(t *testing.T) {
+	c := New(func(ctx context.Context) (net.Conn, error) { return nil, errors.New("ssh: not connected") })
+	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}})
+	if err == nil || res.Added != 0 || res.Uncertain != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+}

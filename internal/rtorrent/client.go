@@ -52,6 +52,10 @@ type Client struct {
 // resolve the current client and decide whether to retry. Nothing was sent.
 var ErrRetired = errors.New("rtorrent: client retired; resolve the current client")
 
+// errNotSent marks a call that failed before any byte of the request was
+// written (the dial failed): the command did not reach rTorrent.
+var errNotSent = errors.New("rtorrent: request not sent")
+
 // maxLabelErrors bounds AddResult.LabelErrors; LabelErrorsOmitted counts
 // the rest.
 const maxLabelErrors = 8
@@ -538,9 +542,11 @@ type AddResult struct {
 	// never the label, a URL, torrent contents or the peer's own fault text.
 	LabelErrors        []string
 	LabelErrorsOmitted int
-	// Uncertain is 1 when the batch stopped on a load whose answer was not
-	// a refusal (a lost reply, a cut connection): that entry may or may not
-	// have been loaded. Set alongside the error Add returns.
+	// Uncertain is 1 when the batch stopped on a load that was sent but got
+	// no usable answer (a lost reply, a cut connection): that entry may or
+	// may not have been loaded. A load that never left (the dial failed) is
+	// not uncertain (daybreak blue re-review of PR 122). Set alongside the
+	// error Add returns.
 	Uncertain int
 }
 
@@ -602,7 +608,9 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 				lastErr = err
 				continue
 			}
-			res.Uncertain = 1
+			if !errors.Is(err, errNotSent) {
+				res.Uncertain = 1
+			}
 			return res, err
 		}
 		res.Added++

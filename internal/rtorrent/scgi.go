@@ -73,7 +73,8 @@ func roundTrip(ctx context.Context, dial Dialer, timeout time.Duration, maxBytes
 	if err != nil {
 		err = deadlineErr(ctx, err) // before cancel(), or every dial failure would read as Canceled
 		cancel()
-		return nil, nil, nil, err
+		// No byte left: an add that stops here did not load this entry.
+		return nil, nil, nil, fmt.Errorf("%w: %w", errNotSent, err)
 	}
 	// A plain socket honours the deadline; a stream forwarded over SSH
 	// supports none (x/crypto/ssh channels refuse SetDeadline), and then
