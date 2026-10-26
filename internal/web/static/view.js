@@ -149,8 +149,9 @@ function addSummary(r, stopped, client) {
   const tail = stopped ? ' (stopped)' : '';
   if (client === 'rtorrent') {
     const parts = [`${r?.added || 0} added to rTorrent${tail}`];
-    if (r?.failed) parts.push(`${r.failed} refused (not a magnet/http(s) link or not a torrent)`);
+    if (r?.failed) parts.push(`${r.failed} not added (refused by rTorrent or not a torrent)`);
     if (r?.unlabelled) parts.push(`${r.unlabelled} loaded, label not applied or confirmed`);
+    if (r?.stopped_early) parts.push(`then stopped, the rest were not sent: ${r.stopped_early}`);
     return parts.join('; ');
   }
   if (!r?.counted) {

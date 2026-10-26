@@ -154,8 +154,9 @@ test('a removal notice keeps the rTorrent section and the torrents tab reachable
 test('the add toast says what happened: added, refused, label unconfirmed; nothing is promised about labels (daybreak blue re-review of #124)', () => {
   assert.equal(V.addSummary({ added: 2, failed: 0, unlabelled: 0 }, false, 'rtorrent'), '2 added to rTorrent');
   assert.equal(V.addSummary({ added: 2, failed: 0, unlabelled: 1 }, false, 'rtorrent'), '2 added to rTorrent; 1 loaded, label not applied or confirmed');
-  assert.equal(V.addSummary({ added: 1, failed: 2, unlabelled: 1 }, true, 'rtorrent'), '1 added to rTorrent (stopped); 2 refused (not a magnet/http(s) link or not a torrent); 1 loaded, label not applied or confirmed');
-  assert.equal(V.addSummary({ added: 0, failed: 1 }, false, 'rtorrent'), '0 added to rTorrent; 1 refused (not a magnet/http(s) link or not a torrent)');
+  assert.equal(V.addSummary({ added: 1, failed: 2, unlabelled: 1 }, true, 'rtorrent'), '1 added to rTorrent (stopped); 2 not added (refused by rTorrent or not a torrent); 1 loaded, label not applied or confirmed');
+  assert.equal(V.addSummary({ added: 0, failed: 1 }, false, 'rtorrent'), '0 added to rTorrent; 1 not added (refused by rTorrent or not a torrent)');
+  assert.equal(V.addSummary({ added: 2, stopped_early: 'connection reset' }, false, 'rtorrent'), '2 added to rTorrent; then stopped, the rest were not sent: connection reset', 'a partial batch reports what landed');
   assert.doesNotMatch(V.addSummary({ added: 1, unlabelled: 1, deferred: 1 }, false, 'rtorrent'), /metadata|deferred|applied when/, 'no deferred promise survives the backend simplification');
   assert.equal(V.addSummary({ links: 2, files: 1 }, false, 'qbt'), '3 torrents sent to qBittorrent');
   assert.equal(V.addSummary({ counted: true, added: 1, pending: 1, failed: 1 }, true, 'qbt'), '1 added (stopped), 1 still being fetched, 1 not added (already present or not a torrent)');
