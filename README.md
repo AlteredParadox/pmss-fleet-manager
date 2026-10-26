@@ -388,8 +388,12 @@ applied to the running client, and what the client reports afterwards is
 shown. DHT off is written as `off`, not `disable`: both keep DHT from
 running, but a client started with `disable` never initialises DHT and so
 cannot turn it on until it is restarted; the toast says so, and the toggle
-carries ↻ until the running client matches the file. Peer exchange applies
-to torrents started after the change.
+carries ↻ until the running client matches the file. PeX is a default,
+not a switch on every torrent: rTorrent copies it into each torrent when the
+torrent is loaded, so torrents loaded after the change get it, while those
+already loaded keep their own setting, even when stopped and started again
+(remove and re-add one to change it). The toggle, toast and indicators say
+"default for new torrents" for that reason.
 
 **Labels.** A label (ruTorrent's `custom1`) is attempted once, right after
 the torrent is loaded, and never retried: the add's answer says how many
@@ -676,7 +680,8 @@ Newest first; each release's full notes are on the
 - The torrents tab shows a separate table per client, and every torrent
   table sorts by any column from its heading.
 - rTorrent DHT / PeX toggles, saved to `~/.rtorrent.rc.custom` and applied
-  live where the client allows.
+  live where the client allows (PeX as the default for newly loaded
+  torrents).
 - Torrent row actions are icons (start, stop, remove, remove with files,
   each named on hover), and the rows are more compact.
 

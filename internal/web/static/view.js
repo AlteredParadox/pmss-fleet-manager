@@ -228,5 +228,33 @@ function rtDiscovery(r) {
   return out;
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery };
+// The wording for rTorrent's toggles. DHT is client-wide and running or
+// not; protocol.pex is only the default rTorrent copies into each torrent
+// when it is loaded, so a torrent already loaded (even one stopped and
+// started again) keeps its own PeX setting (fred on PR 126). The copy says
+// so rather than presenting the default as every torrent's state.
+const rtWhat = (k) => (k === 'pex' ? 'PeX default for new torrents' : 'DHT');
+const PEX_KEEP = '; torrents already loaded keep their own PeX setting';
+function rtDiscoveryHint(d) {
+  let s = `${rtWhat(d.k)} is ${d.on ? 'on' : 'off'} in the rTorrent config`;
+  if (d.pending) s += `, but the running client has it ${d.live ? 'on' : 'off'} until rTorrent restarts`;
+  if (d.k === 'pex') s += PEX_KEEP;
+  return `${s} — click to ${d.on ? 'disable' : 'enable'} (saved to ~/.rtorrent.rc.custom)`;
+}
+function rtDiscoveryToast(k, on, r) {
+  const base = `${rtWhat(k)} ${on ? 'enabled' : 'disabled'}`, keep = k === 'pex' ? PEX_KEEP : '';
+  if (!r?.live) return { text: `${base}: ${r?.note || 'saved to ~/.rtorrent.rc.custom'}${keep}`, kind: 'warn' };
+  return { text: `${base} (saved to ~/.rtorrent.rc.custom)${keep}`, kind: 'ok' };
+}
+// rtDiscoveryOn: what is on in the running client, for the fleet list and
+// the overview, with a title that keeps DHT (running now) apart from the
+// PeX default.
+function rtDiscoveryOn(r) {
+  const labels = [], why = [];
+  if (r?.dht) { labels.push('DHT'); why.push('DHT is running now'); }
+  if (r?.pex) { labels.push('PeX'); why.push('PeX is the default for new torrents (torrents already loaded keep their own setting)'); }
+  return { labels, title: why.length ? `${why.join('; ')} — private trackers usually forbid these` : '' };
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn };
 })();

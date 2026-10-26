@@ -201,3 +201,17 @@ test('rTorrent discovery toggles show the configured value and flag a pending re
   // A build without protocol.pex and no config line: no PeX toggle.
   assert.equal(V.rtDiscovery({ reachable: true, dht: false, pex_known: false }).length, 1);
 });
+
+test('rTorrent PeX is worded as the default for new torrents, DHT as client-wide (fred on PR 126)', () => {
+  const [dht, pex] = V.rtDiscovery({ reachable: true, dht: true, pex: true, pex_known: true, conf_dht: 'on', conf_pex: 'on' });
+  assert.match(V.rtDiscoveryHint(pex), /^PeX default for new torrents is on in the rTorrent config; torrents already loaded keep their own PeX setting — click to disable/);
+  assert.doesNotMatch(V.rtDiscoveryHint(dht), /new torrents|already loaded/);
+  const t = V.rtDiscoveryToast('pex', false, { live: true });
+  assert.deepEqual(t, { text: 'PeX default for new torrents disabled (saved to ~/.rtorrent.rc.custom); torrents already loaded keep their own PeX setting', kind: 'ok' });
+  assert.equal(V.rtDiscoveryToast('dht', true, { live: false, note: 'saved; DHT changes when rTorrent restarts' }).kind, 'warn');
+  assert.doesNotMatch(V.rtDiscoveryToast('dht', true, { live: true }).text, /already loaded/);
+  const on = V.rtDiscoveryOn({ dht: true, pex: true });
+  assert.deepEqual(on.labels, ['DHT', 'PeX']);
+  assert.match(on.title, /DHT is running now; PeX is the default for new torrents \(torrents already loaded keep their own setting\)/);
+  assert.deepEqual(V.rtDiscoveryOn({ dht: false, pex: false }), { labels: [], title: '' });
+});

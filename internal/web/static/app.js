@@ -742,7 +742,7 @@ function ovRtRows(r, both) {
   const state = r.reachable ? '' : r.disabled ? ' <span class="muted" title="~/.rtorrentDisable is set: the Pulsed Media watchdog leaves it stopped">(stopped on purpose)</span>' : ' <span class="warn">(not responding)</span>';
   return `<div><span>rTorrent</span><span>${esc(r.version || '')}${r.library ? ` <span class="muted">· libtorrent ${esc(r.library)}</span>` : ''}${state}${r.endpoint ? ` <span class="muted" title="SCGI endpoint">· ${esc(r.endpoint.replace(/^unix:/, ''))}</span>` : ''}</span></div>
       ${r.enabled && !r.reachable && r.error && !r.disabled ? `<div><span>rTorrent error</span><span class="warn" style="text-align:right">${esc(r.error)}</span></div>` : ''}
-      ${r.reachable && r.listen_port ? `<div><span>rTorrent port</span><span>${r.listen_port}${rtDiscoveryOn(r).length ? ` <span class="warn" title="running now: private trackers usually forbid it">· ${rtDiscoveryOn(r).join(' · ')} on</span>` : ' · DHT / PeX off'}</span></div>` : ''}
+      ${r.reachable && r.listen_port ? `<div><span>rTorrent port</span><span>${r.listen_port}${pfmView.rtDiscoveryOn(r).labels.length ? ` <span class="warn" title="${esc(pfmView.rtDiscoveryOn(r).title)}">· ${pfmView.rtDiscoveryOn(r).labels.join(' · ')} on</span>` : ' · DHT / PeX off'}</span></div>` : ''}
       ${r.reachable ? `<div><span>torrents${both ? ' <span class="muted">(rTorrent)</span>' : ''}</span><span>${r.total} total · ${r.seeding} seeding · ${r.leeching} leeching</span></div>` : ''}`;
 }
 function ovDockerRow(b) {
@@ -929,13 +929,10 @@ function rtDiscoveryNote(r, b) {
   const list = pfmView.rtDiscovery(r);
   if (!list.length) return '';
   return ' · ' + list.map((d) => {
-    const state = `${d.label} is ${d.on ? 'on' : 'off'} in the rTorrent config${d.pending ? `, but the running client has it ${d.live ? 'on' : 'off'} until rTorrent restarts` : ''}`;
-    return `<button class="disc ${d.warn ? 'warn' : ''}" data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(state)} — click to ${d.on ? 'disable' : 'enable'} (saved to ~/.rtorrent.rc.custom)"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(b.name)}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
+    return `<button class="disc ${d.warn ? 'warn' : ''}" data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(pfmView.rtDiscoveryHint(d))}"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(b.name)}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
   }).join(' · ') + ' · <span class="disc na" title="rTorrent has no local service discovery">LSD n/a</span>';
 }
-// The discovery mechanisms rTorrent is running now, for the fleet list
-// and the overview.
-const rtDiscoveryOn = (r) => [r?.dht && 'DHT', r?.pex && 'PeX'].filter(Boolean);
+
 const KIND_COLOR = { seeding: 'var(--ok)', leeching: 'var(--accent)', paused: 'var(--dim)', checking: 'var(--warn)', error: 'var(--bad)', unknown: 'var(--dim)' };
 // Column headings shared by the torrent tables, each a sort button for its
 // table ('qbt', 'rtorrent' or 'all'); the fleet-wide list leads with the
@@ -1025,8 +1022,9 @@ function viewTorrents() {
 // discovery mechanisms in parentheses so private-tracker placement is
 // visible per row.
 function boxCell(b, t) {
-  const on = t?.client === 'rtorrent' ? rtDiscoveryOn(b.rtorrent) : discoveryOn(b.qbt);
-  return `<div class="ellip" title="${esc(b.name)}${on.length ? ' · ' + esc(on.join(', ')) + ' enabled' : ''}"><a href="#/box/${b.id}/torrents">${esc(b.name)}</a>${on.length ? ` <span class="warn">(${esc(on.join(' · '))})</span>` : ''}</div>`;
+  const rt = t?.client === 'rtorrent' ? pfmView.rtDiscoveryOn(b.rtorrent) : null;
+  const on = rt ? rt.labels : discoveryOn(b.qbt);
+  return `<div class="ellip" title="${esc(b.name)}${on.length ? ' · ' + esc(rt ? rt.title : on.join(', ') + ' enabled') : ''}"><a href="#/box/${b.id}/torrents">${esc(b.name)}</a>${on.length ? ` <span class="warn">(${esc(on.join(' · '))})</span>` : ''}</div>`;
 }
 /* ---------- peer discovery (DHT / PeX / LSD) ---------- */
 const DISCOVERY = [['dht', 'DHT'], ['pex', 'PeX'], ['lsd', 'LSD']];
@@ -1830,8 +1828,8 @@ async function discoveryAction(a, act) {
   // rTorrent: saved to ~/.rtorrent.rc.custom, then applied live; the
   // answer says when the running client could not follow (restart).
   const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${rt ? 'rtorrent' : 'qbt'}/discovery`, { [k]: on });
-  if (rt && !r?.live) toast(`${label} ${on ? 'enabled' : 'disabled'}: ${r?.note || 'saved to ~/.rtorrent.rc.custom'}`, 'warn');
-  else toast(`${label} ${on ? 'enabled' : 'disabled'}${rt ? ' (saved to ~/.rtorrent.rc.custom)' : ''}`, 'ok');
+  if (rt) { const m = pfmView.rtDiscoveryToast(k, on, r); toast(m.text, m.kind); }
+  else toast(`${label} ${on ? 'enabled' : 'disabled'}`, 'ok');
   await loadDetail(S.selId);
 }
 async function torAddAction(a, act) {
