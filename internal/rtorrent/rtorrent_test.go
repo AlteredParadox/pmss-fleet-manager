@@ -1547,6 +1547,9 @@ func TestLabelOnlyOnProvenIdentity(t *testing.T) {
 	if _, err := MagnetHash("magnet:?xt=urn:btih:" + a40 + "&xt=urn:btih:" + b40); err == nil {
 		t.Error("two different hashes in one magnet must not be proven")
 	}
+	if _, err := MagnetHash("magnet:?xt=urn:btih:" + a40 + "&xt=urn:btih:01234567890123456789"); err == nil {
+		t.Error("a btih this parser cannot decode leaves the identity unproven")
+	}
 	b32 := "VKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVK" // base32 of twenty 0xAA bytes
 	if h, err := MagnetHash("magnet:?xt=urn:btih:" + strings.Repeat("a", 40) + "&xt=urn:btih:" + b32); err != nil || h != a40 {
 		t.Errorf("one hash written twice is still one: %q %v", h, err)
@@ -1563,10 +1566,10 @@ func TestLabelOnlyOnProvenIdentity(t *testing.T) {
 	c := New(f.dial)
 	res, err := c.Add(context.Background(), AddRequest{
 		Files: [][]byte{[]byte("d4:info" + info + "4:info" + info + "e"), []byte("hello")},
-		URLs:  []string{"magnet:?xt=urn:btih:" + a40 + "&xt=urn:btih:" + b40},
+		URLs:  []string{"magnet:?xt=urn:btih:" + a40 + "&xt=urn:btih:" + b40, "magnet:?xt=urn:btih:" + a40 + "&xt=urn:btih:01234567890123456789"},
 		Label: "tv",
 	})
-	if err != nil || res.Added != 3 || res.Failed != 0 || res.Unlabelled != 3 || sets != 0 {
+	if err != nil || res.Added != 4 || res.Failed != 0 || res.Unlabelled != 4 || sets != 0 {
 		t.Fatalf("loaded unlabelled, no setter: %+v %v sets %d", res, err, sets)
 	}
 }

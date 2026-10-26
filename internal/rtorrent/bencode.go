@@ -170,7 +170,10 @@ func MagnetHash(magnet string) (string, error) {
 			}
 		}
 		if got == "" {
-			continue
+			// A btih value this parser cannot decode may still name a torrent
+			// to rTorrent (libtorrent reads a 20-byte value as raw bytes):
+			// the identity is not proven, so no label (fred on PR 122).
+			return "", ErrNoInfoHash
 		}
 		if one != "" && got != one {
 			return "", ErrNoInfoHash
