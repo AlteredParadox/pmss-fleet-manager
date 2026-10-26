@@ -371,11 +371,37 @@ and starting at boot were not exercised. CI tests the image with Docker.
 
   **Back them up separately.** Podman's default secret driver keeps
   secrets unencrypted (base64 in one JSON file) under
-  `~/.local/share/containers/storage/secrets/`,
-  next to `storage/volumes/`. A backup of that whole tree carries the
-  credential secret together with the database it protects, which
-  *Encrypting stored credentials* says to avoid: back up the volume with
-  `podman volume export` and keep the secret in a password manager.
+  `~/.local/share/containers/storage/secrets/`, next to `storage/volumes/`.
+  A backup of that whole tree carries the credential secret together with
+  the database it protects, which *Encrypting stored credentials* says to
+  avoid: back up the volume on its own and keep the secret in a password
+  manager.
+- **Backup and restore.** Stop the service first: the database runs in
+  SQLite's WAL mode, and an archive taken while it writes can catch the
+  database and its write-ahead log at different moments. A clean stop
+  folds the log into the database, so the archive is that one file.
+
+  ```sh
+  systemctl --user stop pmss-fleet-manager
+  systemctl --user is-active pmss-fleet-manager   # inactive
+  podman volume export pmss-fleet-data -o pmss-fleet-data.tar
+  systemctl --user start pmss-fleet-manager
+  ```
+
+  To restore into a fresh volume, import the archive and give the volume
+  back to the container's user: Podman sets a new volume's owner from the
+  image only when it is empty at first use, so an imported one is left
+  owned by your own user and the dashboard cannot write it ("attempt to
+  write a readonly database").
+
+  ```sh
+  podman volume create pmss-fleet-data
+  podman volume import pmss-fleet-data pmss-fleet-data.tar
+  podman unshare chown -R 65532:65532 "$(podman volume inspect -f '{{.Mountpoint}}' pmss-fleet-data)"
+  ```
+
+  The restored database needs the same credential secret it was
+  encrypted with.
 - **Healthcheck.** Podman does not take the Dockerfile's healthcheck from
   an OCI image, so set it in the unit (`HealthCmd=CMD ...`: the leading
   `CMD` selects exec form, and the image has no `/bin/sh`).
