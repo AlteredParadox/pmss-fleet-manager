@@ -608,6 +608,12 @@ func (p *poller) reportRtRemove(gen, hash, base string, err error) {
 	// strictly after the live notice's and the row's, so it increases per
 	// box across a failed row write, a restart and a clock stepped back
 	// (daybreak blue re-review of PR 123).
+	// Known limit, accepted rather than built around: after a dismiss there
+	// is no notice left to stay after, so a clock stepped back to the exact
+	// time of the dismissed notice could give a later one the same token,
+	// and a browser tab still showing the old one could dismiss the new.
+	// It takes a rollback to that nanosecond plus a stale tab; an opaque
+	// notice id would close it (daybreak blue re-review of PR 123).
 	_, rowAt, _ := p.m.restoredRtRemove(p.box)
 	for _, t := range []time.Time{liveAt, rowAt} {
 		if !now.After(t) {
