@@ -285,7 +285,8 @@ docker run -d --name pmss-fleet-manager \
   box; a bind-mounted directory has to be writable by that uid (`chown
   65532:65532 ./data`), or run the container with `--user "$(id -u)"`. If
   it is not, the container exits at once with a log line naming the
-  directory, the uid it ran as and both fixes.
+  directory, the uid it ran as and both fixes. Rootless Podman maps uids
+  differently: see *Rootless Podman and Quadlet* below.
 - **Unraid:** appdata folders belong to `nobody:users`, so either put
   `--user 99:100` in the template's *Extra Parameters* or `chown -R
   65532:65532 /mnt/user/appdata/pmss-fleet-manager`. The image does not read
@@ -327,6 +328,112 @@ docker run -d --name pmss-fleet-manager \
   read-only root filesystem (`--read-only`, Quadlet `ReadOnly=true`, no
   `/tmp` tmpfs needed), `--cap-drop ALL` and `--security-opt
   no-new-privileges`. CI starts every image that way.
+
+### Rootless Podman and Quadlet
+
+The image runs unchanged under rootless Podman, as a systemd service through
+a Quadlet unit. This section comes from a user running it that way (Podman
+5.4 on Debian 13); the maintainers test the image with Docker only, so
+treat the Podman specifics as field notes rather than CI-checked facts.
+
+- **Ownership of `/data`.** Rootless Podman maps the container's uid 65532
+  to a subordinate uid on the host (for example 165531), not to you, so
+  `chown 65532:65532` on the host gives the wrong owner. A fresh named
+  volume works as it is: Podman copies the image's `nonroot`-owned `/data`
+  into it on first use (a volume that already exists keeps its ownership).
+  For a bind mount, either `podman unshare chown 65532:65532 ./data`, or
+  run with `--userns=keep-id:uid=65532,gid=65532` (Quadlet
+  `UserNS=keep-id:uid=65532,gid=65532`) so the files belong to your own
+  user.
+- **Secrets.** The login, the credential secret and the SSH key can all be
+  Podman secrets, mounted as files under `/run/secrets` with the owner and
+  mode set in the container, so nothing has to be copied or chowned and
+  nothing sits in the unit file or `podman inspect`:
+
+  ```sh
+  read -rsp 'Dashboard login (user:password): ' a; echo
+  printf '%s' "$a" | podman secret create pmss-fleet-auth -; unset a
+  openssl rand -base64 32 | podman secret create pmss-fleet-credkey -
+  podman secret create pmss-fleet-key ~/.ssh/pmss_fleet_ed25519
+  ```
+
+  **Back them up separately.** Podman's default secret driver keeps
+  secrets unencrypted under `~/.local/share/containers/storage/secrets/`,
+  next to `storage/volumes/`. A backup of that whole tree carries the
+  credential secret together with the database it protects, which
+  *Encrypting stored credentials* says to avoid: back up the volume with
+  `podman volume export` and keep the secret in a password manager.
+- **Healthcheck.** Podman does not take the Dockerfile's healthcheck from
+  an OCI image, so set it in the unit (`HealthCmd=CMD ...`: the leading
+  `CMD` selects exec form, and the image has no `/bin/sh`).
+  `Notify=healthy` makes systemd count the unit as started only once the
+  first check passes, and `HealthOnFailure=kill` with `Restart=on-failure`
+  restarts a container that stops serving.
+- **Firewall.** With rootless Podman's default `pasta` networking a
+  published port is an ordinary host socket, so the host firewall's INPUT
+  rules (UFW, nftables) apply to it, unlike rootful Docker. Publishing on
+  one interface address (`PublishPort=100.x.y.z:8080:8080`) works, but the
+  address must exist when the container starts.
+- **Start at boot.** A rootless Quadlet runs in your user's systemd
+  instance; `sudo loginctl enable-linger "$USER"` starts that instance at
+  boot without a login. It cannot wait on the system's
+  `network-online.target`; Quadlet in Podman 5 adds its own user-level
+  wait for the network, so the unit needs no network dependency of its
+  own.
+- **Pin a version.** Releases are tagged `X.Y.Z`, `X.Y` and `latest`. An
+  encrypted database cannot go back to a release before 1.9, and
+  `podman auto-update` restarts onto whatever the tag points to, so pin
+  `X.Y.Z` or a minor tag rather than `latest`.
+
+A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
+
+```ini
+[Unit]
+Description=PMSS Fleet Manager
+
+[Container]
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.11
+ContainerName=pmss-fleet-manager
+PublishPort=127.0.0.1:8080:8080
+Volume=pmss-fleet-data:/data
+Environment=TZ=America/Chicago
+Secret=pmss-fleet-auth,type=mount,target=/run/secrets/pmss-fleet-auth,uid=65532,gid=65532,mode=0400
+Environment=PMSS_AUTH_FILE=/run/secrets/pmss-fleet-auth
+Secret=pmss-fleet-credkey,type=mount,target=/run/secrets/pmss-fleet-credkey,uid=65532,gid=65532,mode=0400
+Environment=PMSS_SECRET_FILE=/run/secrets/pmss-fleet-credkey
+Secret=pmss-fleet-key,type=mount,target=/run/secrets/pmss-fleet-key,uid=65532,gid=65532,mode=0400
+Environment=PMSS_SSH_KEY=/run/secrets/pmss-fleet-key
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+HealthCmd=CMD /pmss-fleet-manager healthcheck
+HealthInterval=60s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=20s
+HealthOnFailure=kill
+Notify=healthy
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+sudo loginctl enable-linger "$USER"
+systemctl --user daemon-reload
+systemctl --user start pmss-fleet-manager
+```
+
+`PMSS_AUTH_FILE`, `PMSS_SSH_KEY` and the healthcheck need the release after
+1.10; with 1.10 or earlier, use `Secret=pmss-fleet-auth,type=env,target=PMSS_AUTH`
+for the login (it then shows in the container's environment), mount the key
+at `/home/nonroot/.ssh/id_ed25519` instead, and leave out the `Health*` and
+`Notify` lines. To listen on another port, set `PMSS_LISTEN` rather than
+passing `-listen`, so the healthcheck finds it.
 
 ### Adding a box
 
@@ -722,7 +829,8 @@ Newest first; each release's full notes are on the
   declared in the Dockerfile. Torrent uploads no longer need a writable
   `/tmp`, so the image runs on a read-only root filesystem with only
   `/data` writable; CI now starts it read-only with every capability
-  dropped. (Requests from a rootless Podman user.)
+  dropped. A new README section covers rootless Podman with a Quadlet
+  unit. (Requests from a rootless Podman user.)
 - qBittorrent's "pause all" / "resume all" are now named "stop all" /
   "start all", as qBittorrent 5 names them (same actions as before).
 - rTorrent's start now also resumes a torrent paused in ruTorrent: d.start
