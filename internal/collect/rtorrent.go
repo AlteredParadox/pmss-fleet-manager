@@ -342,8 +342,8 @@ func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot)
 // rtRemoveTimeout bounds the rm of a torrent's data on the box, as a fresh
 // deadline started after the erase and its bookkeeping: a large tree on a
 // slow disk takes a while. rtRemoveSetupTimeout bounds what comes before
-// it in the detached job: the connection, the erase and the label
-// bookkeeping (including the wait for the edit lock). The two run one
+// it in the detached job: the connection, the port re-check and the
+// erase. The two run one
 // after the other, so a remove-with-data can take up to their sum, about
 // 225 seconds, before the dashboard gives up on it; the request that
 // started it is answered as soon as its own deadline passes.

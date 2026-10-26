@@ -981,14 +981,16 @@ func (m *Manager) DismissRtRemoveFailure(id int64, at time.Time) error {
 	// row (written while the shown notice was a stand-in for an unreadable
 	// row, or by a report whose live publish lost a race) becomes the live
 	// notice instead, so a dismiss never erases an outcome nobody saw; an
-	// unreadable row is kept for the next start (daybreak blue re-review of
-	// PR 123).
+	// unreadable row fails the dismiss before anything changes (daybreak
+	// blue re-review of PR 123).
 	var nextMsg string
 	var nextAt time.Time
 	b := p.box
 	switch rowMsg, rowAt, err := m.restoredRtRemove(b); {
 	case err != nil:
-		m.log.Warn("read rtorrent removal outcome on dismiss; the row is kept", "box", b.Name, "err", err)
+		// Nothing changes, live or durable: the dismiss fails, the notice and
+		// its alert stay (daybreak blue re-review of PR 123).
+		return fmt.Errorf("the removal record could not be read back; nothing was changed: %w", err)
 	case rowMsg != "" && rowAt.After(at):
 		nextMsg, nextAt = rowMsg, rowAt
 	default:
@@ -1044,7 +1046,7 @@ func (m *Manager) restoredRtRemove(b *store.Box) (msg string, at time.Time, err 
 }
 
 // applyRtRemove decides the state's removal notice when a poller starts.
-// On an edit (live) the box's live notice, read under the label guard at
+// On an edit (live) the box's live notice, read under the notice guard at
 // the moment of the call, is authoritative as it stands, set or cleared:
 // it is what the user sees and what a dismiss acted on, and a row that
 // differs is a write that failed since (daybreak blue re-review of PR

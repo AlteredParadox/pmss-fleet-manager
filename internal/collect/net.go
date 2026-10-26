@@ -18,7 +18,6 @@ package collect
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -68,16 +67,16 @@ func gibToBytes(gib float64) int64 {
 // verifyPortNow re-reads the listening sockets on the box and refuses unless
 // port is bound by the account we are logged in as. It is the live
 // counterpart of the probe's check, run immediately before an action that
-// would send WebUI credentials.
+// would send WebUI credentials or an rTorrent command over a loopback port.
 func verifyPortNow(ctx context.Context, cli *sshx.Client, port int) error {
 	vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	out, _, err := cli.Run(vctx, "sh", strings.NewReader(probe.ListenScript))
 	if err != nil && len(out) == 0 {
-		return fmt.Errorf("could not re-check the WebUI port's owner: %w", err)
+		return fmt.Errorf("could not re-check the owner of port %d: %w", port, err)
 	}
 	if ok, reason := probe.PortOwnerNow(out, port); !ok {
-		return errors.New("refusing to send WebUI credentials: " + reason)
+		return fmt.Errorf("refusing to use port %d: %s", port, reason)
 	}
 	return nil
 }

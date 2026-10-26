@@ -191,9 +191,8 @@ func rtFixture(t *testing.T, f *fakeSCGI) (*poller, *probe.Snapshot) {
 	}
 	t.Cleanup(func() { st.Close() })
 	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	// The box exists in the store (cache rows hang off it: labels, erase
-	// tombstones, removal notices) and the poller is the box's current one
-	// (the only one that persists labels).
+	// The box exists in the store (the removal-notice row hangs off it) and
+	// the poller is the box's current one.
 	box := &store.Box{ID: 1, Name: "x", Host: "box.example", User: "u", RtEnabled: true}
 	if err := st.CreateBox(context.Background(), box); err != nil {
 		t.Fatal(err)
@@ -881,8 +880,7 @@ func TestRtRemoveDataOutlivesRequest(t *testing.T) {
 // of its own, so closing the poller's connections (what an edit's
 // stopAndWait, a reconnect or a probe failure do) between the box check
 // and the deletion changes nothing: the erase and the rm complete on the
-// detached transport (fred on PR 123). The poller's client also forgets
-// the label it owed the removed torrent.
+// detached transport (fred on PR 123).
 func TestRtRemoveDataOwnTransport(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
@@ -1496,7 +1494,6 @@ func TestStaleDismissWithDirtyNoticeRow(t *testing.T) {
 // replacement waits for the old client's operation in flight and the old
 // pointer is dead: an operation on it fails with ErrRetired, and a caller
 // going through the poller resolves the current client and succeeds.
-// Pending labels are not carried over (they live in one client's memory).
 func TestRtClientReplacementRetiresOld(t *testing.T) {
 	f := newFakeSCGI(t)
 	gate := make(chan struct{})
@@ -1811,5 +1808,31 @@ func TestStandInNeverDeletesOlderRow(t *testing.T) {
 	}
 	if _, _, ok := rowNotice(m, p.box); !ok {
 		t.Fatal("the row must survive the stand-in's dismiss")
+	}
+}
+
+// Daybreak blue re-review of PR 123: a dismiss whose record cannot be read
+// back changes nothing and fails.
+func TestDismissFailsClosedOnUnreadableRow(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	readyRt(t, p, "unix:/x")
+	shown := time.Now().Round(0)
+	m.mu.Lock()
+	m.states[p.box.ID].Rt.RemoveFailed, m.states[p.box.ID].Rt.RemoveFailedAt = "Alpha: failed", shown
+	m.mu.Unlock()
+	if err := m.st.SetCache(context.Background(), p.box.ID, rtRemoveCacheKind, "unreadable"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DismissRtRemoveFailure(p.box.ID, shown); err == nil {
+		t.Fatal("a dismiss over an unreadable row must fail")
+	}
+	m.mu.RLock()
+	still := m.states[p.box.ID].Rt.RemoveFailed
+	m.mu.RUnlock()
+	if still != "Alpha: failed" {
+		t.Fatalf("the live notice must stay: %q", still)
 	}
 }
