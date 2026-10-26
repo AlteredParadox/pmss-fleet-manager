@@ -118,13 +118,6 @@ func (p *poller) rtClient(ctx context.Context, cli *sshx.Client, ep string) (*rt
 	return p.rt, nil
 }
 
-// currentRt returns the box's current rTorrent client, if any.
-func (p *poller) currentRt() *rtorrent.Client {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.rt
-}
-
 // onRetired runs fn against cli and, when that found the client retired by
 // a handoff since the caller resolved it, once more against the box's
 // current client (daybreak blue re-review of PR 123: a holder of an old
@@ -193,9 +186,7 @@ func (p *poller) detachedTransport(ctx context.Context, ep string) (scriptRunner
 // holding it gets rtorrent.ErrRetired rather than a client the box no
 // longer listens to; p.mu must be held. Retire waits for the operation in
 // flight to complete its remote and local steps, bounded by ctx, so the
-// replacement never overlaps it on the box. The labels the client still
-// owed to magnets go with it: they live in one client's memory only (see
-// rtorrent.Client), and the add's answer told the user so.
+// replacement never overlaps it on the box.
 func (p *poller) dropRtLocked(ctx context.Context) {
 	cli := p.rt
 	p.rt, p.rtSSH = nil, nil
@@ -440,8 +431,6 @@ func (p *poller) rtTorrentAction(ctx context.Context, hash, action string) error
 		return p.rtRemoveData(ctx, cli, sshRunner(sshc), st.Rt.Endpoint, st.Rt.DataDir, hash, release)
 	}
 	defer release()
-	// A remove also drops the client's pending label for the hash (the
-	// client does that itself), so an unlabelled re-add stays unlabelled.
 	return p.onRetired(actx, cli, func(c *rtorrent.Client) error { return c.Action(actx, action, hash) })
 }
 
@@ -533,18 +522,6 @@ func (p *poller) rtRemoveData(ctx context.Context, cli *rtorrent.Client, run scr
 		defer ecancel()
 		if err := dcli.Action(ectx, rtorrent.ActionRemove, hash); err != nil {
 			return fmt.Errorf("rTorrent refused to remove the torrent; nothing was deleted: %w", err)
-		}
-		// The erase ran through a client of its own: the box's current
-		// client, if any, is told to drop its pending label for the hash
-		// (in memory, best effort), so an unlabelled re-add does not inherit
-		// it. A label lost to a reconnect or restart meanwhile is the
-		// documented limit, not something guarded here.
-		if cur := p.m.poller(p.box.ID); cur != nil && cur.generation() == gen {
-			if c := cur.currentRt(); c != nil {
-				fctx, fcancel := context.WithTimeout(dctx, 5*time.Second)
-				_ = c.Forget(fctx, hash)
-				fcancel()
-			}
 		}
 		// The rm gets its own, full budget from here, from the job context
 		// itself rather than this job's deadline, which the connection, the
@@ -691,11 +668,16 @@ func (p *poller) rtAddTorrents(ctx context.Context, req qbt.AddRequest) (rtorren
 	for _, f := range req.Files {
 		r.Files = append(r.Files, f.Data)
 	}
-	// A magnet's label is owed until its metadata arrives (res.Deferred
-	// counts them) and lives in this client's memory only: a reconnect or a
-	// restart before then drops it, by design, and the UI says so. Labels
-	// are a convenience; nothing here guards them beyond that.
+	// A label is attempted once, right after the load; one that could not
+	// be applied or confirmed is counted (res.Unlabelled) and the reasons
+	// logged here (bounded; a hash prefix and the error, never the label
+	// or a URL), so the operator can see why without the add failing
+	// (daybreak blue and fred on PR 122). Labels are a convenience; nothing
+	// here guards them beyond that.
 	var res rtorrent.AddResult
 	err = p.onRetired(actx, cli, func(c *rtorrent.Client) (err error) { res, err = c.Add(actx, r); return err })
+	for _, e := range res.LabelErrors {
+		p.m.log.Warn("rtorrent add: label not applied or confirmed", "box", p.box.Name, "torrent", e)
+	}
 	return res, err
 }

@@ -1529,8 +1529,8 @@ func TestRtClientReplacementRetiresOld(t *testing.T) {
 		t.Fatal(err)
 	}
 	c2 := <-replaced
-	if c2 == c1 || !c1.Retired() || len(c2.Pending()) != 0 {
-		t.Fatalf("retired %v, successor pending %d (labels are not handed over)", c1.Retired(), len(c2.Pending()))
+	if c2 == c1 || !c1.Retired() {
+		t.Fatalf("retired %v", c1.Retired())
 	}
 	if err := c1.Action(context.Background(), rtorrent.ActionStop, rtHashA); !errors.Is(err, rtorrent.ErrRetired) {
 		t.Fatalf("old pointer: %v", err)
@@ -1542,5 +1542,42 @@ func TestRtClientReplacementRetiresOld(t *testing.T) {
 	c3, _ := p.rtClient(context.Background(), &sshx.Client{}, "unix:/y")
 	if c3 == c2 || !c2.Retired() {
 		t.Fatal("transport change must retire the old client")
+	}
+}
+
+// TestRemoveBoxWaitsForMutationLease (daybreak blue re-review of PR 123):
+// a box removal takes the box's rTorrent mutation lease first, so it cannot
+// unpublish the box under an admitted remove-with-data, whose failure report
+// would then have no state to land on; a lease held past the request's
+// deadline fails the request and leaves the box; once free, the removal
+// proceeds.
+func TestRemoveBoxWaitsForMutationLease(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	defer m.cancel()
+	m.mu.Lock()
+	m.states[p.box.ID] = &BoxState{ID: p.box.ID}
+	m.mu.Unlock()
+	release, err := m.rtLease(p.box.ID).Acquire(context.Background()) // a remove-with-data in flight
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := m.RemoveBox(ctx, p.box.ID); err == nil || !strings.Contains(err.Error(), "cannot be removed right now") {
+		t.Fatalf("removal over a held lease: %v", err)
+	}
+	if m.poller(p.box.ID) == nil {
+		t.Fatal("the box must stay while the lease is held")
+	}
+	release()
+	if err := m.RemoveBox(context.Background(), p.box.ID); err != nil {
+		t.Fatal(err)
+	}
+	if m.poller(p.box.ID) != nil {
+		t.Fatal("removed")
 	}
 }

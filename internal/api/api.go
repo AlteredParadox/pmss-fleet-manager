@@ -1236,7 +1236,7 @@ func (s *Server) handleRtAddTorrents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, code, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "links": len(req.URLs), "files": len(req.Files), "added": res.Added, "failed": res.Failed, "unlabelled": res.Unlabelled, "deferred": res.Deferred})
+	writeJSON(w, 200, map[string]any{"ok": true, "links": len(req.URLs), "files": len(req.Files), "added": res.Added, "failed": res.Failed, "unlabelled": res.Unlabelled})
 }
 
 // handleReadLog takes {"path": "<relative path from the box's log list>"}

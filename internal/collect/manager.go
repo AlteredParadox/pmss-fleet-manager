@@ -81,9 +81,10 @@ type Manager struct {
 	jobMu      sync.Mutex
 	jobsClosed bool
 	// rtLeases are per-box mutation leases for rTorrent (add, actions,
-	// remove-with-data for its whole life): one mutation at a time per box,
-	// whatever client or poller carries it. labelGuards serialise the
-	// snapshot-and-write of a box's owed labels.
+	// remove-with-data for its whole life, and a box removal): one mutation
+	// at a time per box, whatever client or poller carries it. labelGuards
+	// serialise the writes of a box's removal notice (its row and its
+	// publication).
 	leaseMu     sync.Mutex
 	rtLeases    map[int64]chan struct{}
 	labelGuards map[int64]*sync.Mutex
@@ -677,6 +678,18 @@ func authEndpointChanged(p *poller, fresh *store.Box) bool {
 
 // RemoveBox stops polling and deletes the box, its alerts and its cache.
 func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
+	// The box's rTorrent mutation lease first (the order the detached job's
+	// own waits use: lease, then the edit lock): a remove-with-data holds
+	// it for its whole life, up to its report, so a removal cannot
+	// unpublish the box under an admitted deletion and leave its failure
+	// with nowhere to land should the row delete then fail and the box
+	// resurface (daybreak blue re-review of PR 123). A deletion in progress
+	// fails the request with its message; it can be repeated.
+	release, err := m.rtLease(id).Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("the box cannot be removed right now: %w", err)
+	}
+	defer release()
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
 	// The removal is a commit like any other: the box leaves memory under
