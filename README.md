@@ -373,18 +373,17 @@ very name being removed, in the instant between the check and the removal,
 can have that directory deleted instead; that data is only recoverable from
 a backup.
 
-**Labels on magnets.** A label (ruTorrent's `custom1`) set on a `.torrent`
-file is applied as the torrent is loaded. A magnet gets its label on the
-placeholder straight away, but rTorrent drops it when the metadata arrives
-and rebuilds the torrent, so the dashboard remembers the label and sets it
-again on the next poll after that. That memory lives in the dashboard
-process only: if the dashboard restarts, or reconnects to the box, before a
-magnet's metadata has arrived, the label is dropped and the torrent shows
-without one (set it in ruTorrent). The add's answer says how many labels
-are still pending ("applied when the metadata arrives"), and how many were
-loaded with the label not applied or confirmed (rTorrent refused the label,
-or its answer was lost, so the label may or may not be set: check
-ruTorrent). Labels are a convenience, and the dashboard does not guard them
+**Labels.** A label (ruTorrent's `custom1`) is attempted once, right after
+the torrent is loaded, and never retried: the add's answer says how many
+torrents were loaded with the label not applied or confirmed (rTorrent
+refused it, or its answer was lost, so the label may or may not be set),
+and the dashboard log says why. For a `.torrent` file that is the end of
+it. A magnet only has a metadata placeholder at that moment; rTorrent drops
+the placeholder's label when the metadata arrives and rebuilds the torrent,
+and the dashboard does not set it again, because a later torrent with the
+same hash cannot be told from the one you labelled and a missing label
+beats a wrong one. Set a magnet's label in ruTorrent once its metadata has
+arrived. Labels are a convenience, and the dashboard does not guard them
 beyond this; what it
 guards without compromise is deleting files, acting on the right machine
 and account, and bounded operations against the box.

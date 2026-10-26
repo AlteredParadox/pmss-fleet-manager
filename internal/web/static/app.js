@@ -1029,24 +1029,8 @@ function discoveryNote(q, b) {
 }
 // Toast after an add. qBittorrent 5.2+ reports per-entry counts; older
 // clients only say that at least one entry was accepted.
-function addToast(r, stopped, client) {
-  const tail = stopped ? ' (stopped)' : '';
-  if (client === 'rtorrent') {
-    const parts = [`${r?.added || 0} sent to rTorrent${tail}`];
-    if (r?.failed) parts.push(`${r.failed} refused (not a magnet/http(s) link or not a torrent)`);
-    if (r?.unlabelled) parts.push(`${r.unlabelled} loaded, label not applied or confirmed`);
-    if (r?.deferred) parts.push(`${r.deferred} magnet label${r.deferred === 1 ? '' : 's'} applied when the metadata arrives (not kept across a dashboard restart or reconnect)`);
-    return parts.join(', ');
-  }
-  if (!r?.counted) {
-    const n = (r?.links || 0) + (r?.files || 0);
-    return `${n} torrent${n === 1 ? '' : 's'} sent to qBittorrent${tail}`;
-  }
-  const parts = [`${r.added} added${tail}`];
-  if (r.pending) parts.push(`${r.pending} still being fetched`);
-  if (r.failed) parts.push(`${r.failed} not added (already present or not a torrent)`);
-  return parts.join(', ');
-}
+// The add's outcome, worded by the pure helper (tested in view_test.mjs).
+function addToast(r, stopped, client) { return pfmView.addSummary(r, stopped, client); }
 // Text for an empty torrent table. After a restart the cached counts are
 // restored but the list is not until the first poll, so say so rather than
 // "no matches".

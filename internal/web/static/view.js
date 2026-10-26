@@ -139,5 +139,29 @@ function torrentsTab(b) {
   return !!(q.enabled || q.installed || r.enabled || r.process_up || r.disabled || r.remove_failed);
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab };
+// addSummary words an add's outcome for the toast. rTorrent: what was
+// added (rTorrent acknowledged the load), what it refused, and how many
+// loaded torrents have a label that could not be applied or confirmed;
+// labels are attempted once and never retried, so nothing is promised about
+// them (daybreak blue re-review of #124). qBittorrent: its own counts, or
+// what was sent when the server did not count.
+function addSummary(r, stopped, client) {
+  const tail = stopped ? ' (stopped)' : '';
+  if (client === 'rtorrent') {
+    const parts = [`${r?.added || 0} added to rTorrent${tail}`];
+    if (r?.failed) parts.push(`${r.failed} refused (not a magnet/http(s) link or not a torrent)`);
+    if (r?.unlabelled) parts.push(`${r.unlabelled} loaded, label not applied or confirmed`);
+    return parts.join('; ');
+  }
+  if (!r?.counted) {
+    const n = (r?.links || 0) + (r?.files || 0);
+    return `${n} torrent${n === 1 ? '' : 's'} sent to qBittorrent${tail}`;
+  }
+  const parts = [`${r.added} added${tail}`];
+  if (r.pending) parts.push(`${r.pending} still being fetched`);
+  if (r.failed) parts.push(`${r.failed} not added (already present or not a torrent)`);
+  return parts.join(', ');
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary };
 })();
