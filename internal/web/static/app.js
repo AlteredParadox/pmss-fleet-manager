@@ -393,7 +393,8 @@ function recomputeTotals() {
     t.disk_used += b.disk.used_bytes; t.disk_quota += b.disk.quota_bytes;
     t.traffic_out += b.traffic.out_month_bytes; t.traffic_in += b.traffic.in_month_bytes;
     t.up_bps += b.rates.up_bps; t.down_bps += b.rates.down_bps;
-    t.torrents += b.qbt.total; t.seeding += b.qbt.seeding; t.containers += b.docker.running;
+    const ct = pfmView.clientTotals(b); // both clients, like the server's totals (fred review on #124)
+    t.torrents += ct.torrents; t.seeding += ct.seeding; t.containers += b.docker.running;
     const r = renewalOf(b);
     if (r && (!t.next_renewal || r < t.next_renewal)) t.next_renewal = r;
     if (serviceActive(b.service) && !seenSvc.has(b.service.id)) { seenSvc.add(b.service.id); t.monthly_cost += b.service.monthly || 0; t.currency = b.service.currency; }
@@ -512,6 +513,14 @@ function trafficPct(b) {
   if (tr.limit_bytes > 0) return Math.min(100, tr.pct);
   return Math.min(100, tr.out_month_bytes / (20 * KIB ** 4) * 100);
 }
+// Torrent count across the monitored clients; the ratio is qBittorrent's
+// (rTorrent reports none fleet-wide). Empty when no client is monitored.
+function torrentsCell(b) {
+  const ct = pfmView.clientTotals(b);
+  if (!ct.clients) return '';
+  const ratio = b.qbt.enabled ? ` <span class="muted">r${b.qbt.global_ratio ? b.qbt.global_ratio.toFixed(2) : '—'}</span>` : '';
+  return `${ct.torrents}${ratio}`;
+}
 function fleetCards() {
   const dt = S.settings.disk_threshold_pct || 90, tt = S.settings.traffic_threshold_pct || 90;
   return `<div class="cards" style="--card-min:${cardMin()}px">${S.boxes.map((b) => {
@@ -521,7 +530,7 @@ function fleetCards() {
       <div class="card-head">
         <div class="card-title"><span class="led ${b.status}" title="${esc(statusLabel(b.status))}${b.status_reason ? ' — ' + esc(b.status_reason) : ''}"></span><span class="n">${esc(b.name)}</span></div>
         <div class="sub">${esc(b.hostname || b.host)}${b.status_reason ? ` · <span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(b.status_reason)}</span>` : ''}${(() => { const n = retryNote(b); return n ? ` · <span class="muted">${esc(n)}</span>` : ''; })()}</div>
-        <div class="tags"><span class="tag">${esc(b.type)}</span>${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}${discoveryTag(b.qbt)}</div>
+        <div class="tags"><span class="tag">${esc(b.type)}</span>${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}${b.rtorrent?.enabled && b.rtorrent.version ? `<span class="tag" title="rTorrent">rt ${esc(b.rtorrent.version)}</span>` : ''}${discoveryTag(b.qbt)}</div>
       </div>
       <div style="display:grid;gap:8px">
         <div><div class="kv"><span>disk</span><b>${b.disk.ok || b.disk.quota_bytes ? `${fmtBytes(b.disk.used_bytes, 1)} / ${fmtBytes(b.disk.quota_bytes, 1)}` : 'n/a'}</b></div>
@@ -531,7 +540,7 @@ function fleetCards() {
       </div>
       <div class="card-foot">
         <div><div class="l">up/down</div><div><span class="up">↑</span>${fmtBits(b.rates.up_bps)} <span class="down">↓</span>${fmtBits(b.rates.down_bps)}</div></div>
-        <div><div class="l">torrents</div><div>${b.qbt.enabled ? `${b.qbt.total} <span class="muted">r${b.qbt.global_ratio ? b.qbt.global_ratio.toFixed(2) : '—'}</span>` : (b.docker.enabled ? `${b.docker.running} <span class="muted">containers</span>` : '—')}</div></div>
+        <div><div class="l">torrents</div><div>${torrentsCell(b) || (b.docker.enabled ? `${b.docker.running} <span class="muted">containers</span>` : '—')}</div></div>
         <div><div class="l">cpu/ram</div><div>${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} / ${b.ram.ok ? fmtPct(b.ram.pct) : '—'}</div></div>
       </div>
     </div>`;
@@ -549,7 +558,7 @@ function fleetTable() {
       <div><div style="font-size:11px">${b.disk.quota_bytes ? `${fmtBytes(b.disk.used_bytes, 1)} / ${fmtBytes(b.disk.quota_bytes, 1)}` : 'n/a'}</div><div class="meter" style="margin-top:4px;height:3px"><i class="${levelClass(b.disk.pct, dt)}" style="width:${Math.min(100, b.disk.pct)}%"></i></div></div>
       <div><div style="font-size:11px">${trafficLabel(b)}</div><div class="meter" style="margin-top:4px;height:3px"><i class="${b.traffic.limit_bytes > 0 ? levelClass(b.traffic.pct, tt) : 'dim'}" style="width:${trafficPct(b)}%"></i></div></div>
       <span class="num"><span class="up">↑</span>${fmtBits(b.rates.up_bps)} <span class="down">↓</span>${fmtBits(b.rates.down_bps)}</span>
-      <span class="num">${b.qbt.enabled ? `${b.qbt.total} <span class="muted">r${b.qbt.global_ratio ? b.qbt.global_ratio.toFixed(2) : '—'}</span>` : '—'}</span>
+      <span class="num">${torrentsCell(b) || '—'}</span>
       <span class="num">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} / ${b.ram.ok ? fmtPct(b.ram.pct) : '—'}</span>
       <span class="muted">${b.host_sys.uptime_sec ? fmtDur(b.host_sys.uptime_sec) : '—'}</span>
     </div>`).join('')}
@@ -566,7 +575,7 @@ function viewBox() {
   const b = curBox();
   if (!b) return `<button class="crumb" data-go="/fleet">← fleet</button><div class="empty">box not found</div>`;
   const tabs = [['overview', 'overview'], ['traffic', 'traffic']];
-  if (b.qbt.enabled || b.qbt.installed) tabs.push(['torrents', 'torrents']);
+  if (pfmView.torrentsTab(b)) tabs.push(['torrents', 'torrents']); // the stopped-on-purpose note and a removal notice live there too
   if (b.docker.enabled || b.docker.socket_up) tabs.push(['containers', 'containers']);
   tabs.push(['services', 'services'], ['logs', 'logs'], ['storage', 'storage'], ['host', 'host']);
   if (!tabs.some(([k]) => k === S.tab)) S.tab = 'overview';
@@ -657,7 +666,7 @@ function ovUploadPanel(b, tt) {
 }
 function ovBandwidthPanel(b) {
   const tr = b.traffic;
-  const rateNote = b.rates.source === 'qbt' ? 'live from qBittorrent' : b.rates.source === 'pmss-15min' ? 'PMSS 15-min average (refreshed twice an hour)' : 'no rate source';
+  const rateNote = pfmView.rateSourceLabel(b.rates.source);
   // PMSS's cap_mbit is the upload rate the account is held to while it is
   // over its traffic limit, not a standing cap: only meter against it then.
   const cap = tr.throttled && tr.cap_mbit ? tr.cap_mbit : 0;
@@ -682,7 +691,8 @@ function ovHostStatusRows(b) {
   return `<div><span>status</span><span class="${b.status === 'online' ? 'ok' : b.status === 'offline' ? 'bad' : 'warn'}">${esc(statusLabel(b.status))}</span></div>
       <div><span>last poll</span><span>${fmtAgo(b.last_poll)}${b.poll_ms ? ` <span class="muted">· ${b.poll_ms} ms</span>` : ''}</span></div>`;
 }
-function ovClientRows(q) {
+function ovClientRows(q, r) {
+  if (!q.enabled && !q.installed && r?.enabled) return ''; // rTorrent alone: its own row says it all
   return `<div><span>client</span><span>${q.enabled ? `qBittorrent ${esc(q.version || '')}${q.reachable ? '' : ' <span class="warn">(not responding)</span>'}` : (q.installed ? 'qbittorrent-nox present, monitoring off' : '—')}${q.pmss_managed ? ' · <span class="muted" title="qBittorrent is switched on in the Pulsed Media panel: PMSS runs, restarts and configures it, so install and autostart here are off">panel-managed</span>' : ''}</span></div>
       ${q.enabled && !q.reachable && q.error ? `<div><span>client error</span><span class="warn" style="text-align:right">${esc(q.error)}</span></div>` : ''}`;
 }
@@ -712,8 +722,23 @@ function ovWebuiAuthRow(q) {
   const bypass = q.local_bypass ? 'localhost bypass on' : q.subnet_bypass ? `subnet bypass on (${esc(q.subnet_list || '')})` : '';
   return q.enabled ? `<div><span>webui auth</span><span class="muted">${bypass ? `<span class="bad" title="qBittorrent accepts WebUI requests from the box's loopback without a password. On a shared host every other tenant can reach that port: turn the bypass off in qBittorrent and give the dashboard the WebUI login instead.">${bypass} — unsafe on a shared host</span>` : 'login required'}${q.has_creds ? ' · credentials set' : ''}${q.conf_user ? ` · user ${esc(q.conf_user)}` : ''}${q.auth_hold ? ' · <span class="warn" title="A login was rejected. To avoid qBittorrent banning the box\'s loopback IP, no further attempts are made until you re-enter the password under edit or restart the client.">login suspended</span>' : ''}</span></div>` : '';
 }
-function ovTorrentsRow(q) {
-  return q.enabled ? `<div><span>torrents</span><span>${q.total} total · ${q.seeding} seeding · ratio ${q.global_ratio ? q.global_ratio.toFixed(2) : '—'}</span></div>` : '';
+function ovTorrentsRow(q, both) {
+  return q.enabled ? `<div><span>torrents${both ? ' <span class="muted">(qBittorrent)</span>' : ''}</span><span>${q.total} total · ${q.seeding} seeding · ratio ${q.global_ratio ? q.global_ratio.toFixed(2) : '—'}</span></div>` : '';
+}
+// rTorrent is PMSS's own client: no binary, autostart or WebUI rows, just
+// whether it answers on its socket and what it holds.
+function ovRtRows(r, both) {
+  if (!r) return '';
+  if (!r.enabled) {
+    if (r.process_up) return `<div><span>rTorrent</span><span>running, monitoring off</span></div>`;
+    if (r.disabled) return `<div><span>rTorrent</span><span class="muted" title="~/.rtorrentDisable is set: the Pulsed Media watchdog leaves it stopped">stopped on purpose · monitoring off</span></div>`;
+    return '';
+  }
+  const state = r.reachable ? '' : r.disabled ? ' <span class="muted" title="~/.rtorrentDisable is set: the Pulsed Media watchdog leaves it stopped">(stopped on purpose)</span>' : ' <span class="warn">(not responding)</span>';
+  return `<div><span>rTorrent</span><span>${esc(r.version || '')}${r.library ? ` <span class="muted">· libtorrent ${esc(r.library)}</span>` : ''}${state}${r.endpoint ? ` <span class="muted" title="SCGI endpoint">· ${esc(r.endpoint.replace(/^unix:/, ''))}</span>` : ''}</span></div>
+      ${r.enabled && !r.reachable && r.error && !r.disabled ? `<div><span>rTorrent error</span><span class="warn" style="text-align:right">${esc(r.error)}</span></div>` : ''}
+      ${r.reachable && r.listen_port ? `<div><span>rTorrent port</span><span>${r.listen_port}${r.dht ? ' <span class="warn" title="DHT is on: private trackers usually forbid it">· DHT on</span>' : ' · DHT off'}</span></div>` : ''}
+      ${r.reachable ? `<div><span>torrents${both ? ' <span class="muted">(rTorrent)</span>' : ''}</span><span>${r.total} total · ${r.seeding} seeding · ${r.leeching} leeching</span></div>` : ''}`;
 }
 function ovDockerRow(b) {
   return b.docker.enabled ? `<div><span>containers</span><span>${b.docker.running} running${b.docker.stopped ? ` · ${b.docker.stopped} stopped` : ''}</span></div>` : '';
@@ -735,11 +760,12 @@ function ovHostAccountRows(b) {
 function ovBoxPanel(b, q) {
   return `<div class="panel rows"><div class="tile-label">box</div>
       ${ovHostStatusRows(b)}
-      ${ovClientRows(q)}
+      ${ovClientRows(q, b.rtorrent)}
       ${ovConnectionRow(q)}
       ${ovAutostartRows(b, q)}
       ${ovWebuiAuthRow(q)}
-      ${ovTorrentsRow(q)}
+      ${ovTorrentsRow(q, q.enabled && b.rtorrent?.enabled)}
+      ${ovRtRows(b.rtorrent, q.enabled && b.rtorrent?.enabled)}
       ${ovDockerRow(b)}
       ${ovServicesRow(b)}
       ${ovHostAccountRows(b)}
@@ -818,30 +844,77 @@ function niceMax(v) {
   const n = m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10;
   return n * p;
 }
+// The torrent clients monitored on a box, in display order. Each entry
+// carries what the tables need: the API segment, the display name and the
+// client's state.
+const CLIENT_LABEL = { qbt: 'qBittorrent', rtorrent: 'rTorrent' };
+function boxClients(b) {
+  const out = [];
+  if (pfmView.showClient(b, 'qbt')) out.push({ key: 'qbt', label: 'qBittorrent', st: b.qbt });
+  if (pfmView.showClient(b, 'rtorrent')) out.push({ key: 'rtorrent', label: 'rTorrent', st: b.rtorrent }); // monitored, or carrying a removal notice
+  return out;
+}
 function tabTorrents(b) {
-  const q = b.qbt;
-  if (!q.enabled) return `<div class="empty">qBittorrent monitoring is off for this box — enable it under <a href="#/edit/${b.id}">edit</a>.</div>`;
+  const clients = boxClients(b);
+  // rTorrent stopped on purpose (~/.rtorrentDisable) with monitoring off:
+  // say so rather than hiding the client, since that is the useful fact.
+  const rtOffNote = !b.rtorrent?.enabled && b.rtorrent?.disabled ? `<div class="empty" style="margin-bottom:12px">rTorrent is stopped on purpose on this box (<code>~/.rtorrentDisable</code>); monitoring is off.</div>` : '';
+  if (clients.length === 0) return `${rtOffNote}<div class="empty">no torrent client is monitored on this box — enable qBittorrent or rTorrent under <a href="#/edit/${b.id}">edit</a>.</div>`;
   const f = S.filter.trim().toLowerCase();
+  // With several clients the torrents are grouped by client, each group
+  // with its own header, counts and add button; the filter spans all.
+  return `${rtOffNote}<div class="table tor-table" style="overflow:hidden">
+    ${clients.map((c, i) => clientSection(b, c, f, clients.length > 1, i === 0)).join('')}
+  </div>`;
+}
+// One client's header line, add form and table.
+function clientSection(b, c, f, grouped, first) {
+  const q = c.st;
   let list = q.torrents || [];
   if (f) list = list.filter((t) => torrentMatches(t, f));
   const shown = list.slice(0, 300);
-  return `<div class="table tor-table" style="overflow:hidden">
-    <div class="thead-tools">
-      <div style="font-size:12px"><b>qBittorrent ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${discoveryNote(q, b)}${connectionNote(q)}${q.reachable ? '' : ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>`}</span></div>
+  const notes = c.key === 'qbt' ? `${discoveryNote(q, b)}${connectionNote(q)}` : rtNote(q);
+  const avail = pfmView.clientAvailability(q); // stopped on purpose is expected: no warning, nothing to add to
+  if (avail.stopped && S.torAdd && (S.torAdd.client || 'qbt') === c.key && !S.torAdd.busy) S.torAdd = null; // an open draft for a client that just stopped is dropped
+  const addOpen = !avail.stopped && S.torAdd && (S.torAdd.client || 'qbt') === c.key;
+  // A remove-with-data that failed after its request had ended: the job
+  // recorded it on the box (it also raised an alert); shown here until
+  // dismissed, since a later success says nothing about these files. The
+  // button names the notice it shows (its time), so it cannot dismiss a
+  // newer one that replaced it meanwhile (daybreak blue re-review of #123).
+  const removeFailed = c.key === 'rtorrent' && q.remove_failed ? `<div class="meta"><span class="bad" title="${q.remove_failed_at && !String(q.remove_failed_at).startsWith('1970') ? esc(fmtAgo(q.remove_failed_at)) + '. ' : ''}The torrent was removed from rTorrent but its files were not (all) deleted; check the download folder on the box.">remove with files failed: ${esc(q.remove_failed)}</span> <button class="small ghost" data-act="rt:dismiss-failure" data-at="${esc(q.remove_failed_at || '')}" title="remove this notice (the alert resolves with it)">dismiss</button></div>` : '';
+  if (!q.enabled) {
+    // Monitoring is off: only the notice is left to show (and dismiss); no
+    // counts, no controls, nothing to add to.
+    return `<div class="thead-tools"${grouped && !first ? ' style="border-top:1px solid var(--line)"' : ''}>
+      <div style="font-size:12px"><b>${c.label}</b> <span class="muted">· monitoring is off</span>${removeFailed}</div>
+    </div>`;
+  }
+  return `<div class="thead-tools"${grouped && !first ? ' style="border-top:1px solid var(--line)"' : ''}>
+      <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span>${removeFailed}</div>
       <div class="actions">
-        <input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">
-        <button class="small" data-act="qbt:pause" data-confirm="Pause all torrents on ${esc(b.name)}?">pause all</button>
-        <button class="small" data-act="qbt:resume">resume all</button>
-        <button class="small" data-act="tor-add:toggle">${S.torAdd ? 'close' : 'add'}</button>
+        ${first ? `<input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">` : ''}
+        ${c.key === 'qbt' ? `<button class="small" data-act="qbt:pause" data-confirm="Pause all torrents in qBittorrent on ${esc(b.name)}?">pause all</button>
+        <button class="small" data-act="qbt:resume">resume all</button>` : ''}
+        ${avail.stopped ? '' : `<button class="small" data-act="tor-add:toggle" data-client="${c.key}">${addOpen ? 'close' : 'add'}</button>`}
       </div>
     </div>
-    ${S.torAdd ? torAddForm(b, q.torrents || []) : ''}
+    ${addOpen ? torAddForm(b, q.torrents || [], c) : ''}
     <div style="overflow:auto">
       ${TOR_HEAD('')}
       ${shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(q.total, q.torrents, b.status)}</span></div>` : shown.map((t) => torrentRow(b, t, '')).join('')}
       ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
-    </div>
-  </div>`;
+    </div>`;
+}
+// rTorrent's header notes: its listen port and DHT state, and the
+// on-purpose stop.
+function rtNote(r) {
+  if (!r.reachable) return r.disabled ? ' · <span class="muted" title="~/.rtorrentDisable is set">stopped on purpose</span>' : '';
+  // Where "+ files" may delete: rTorrent's download folder as read from the
+  // box's own config (never from the client). Said up front so a refusal
+  // for data kept elsewhere is no surprise.
+  const fence = r.data_dir ? ` · <span class="muted" title="Remove with files deletes only inside rTorrent's download folder (${esc(r.data_dir)}, from directory.default in ~/.rtorrent.rc on the box). Data kept anywhere else, or a torrent that never started, is refused and the torrent left in place; plain remove always works. To move the fence, set directory.default.set in ~/.rtorrent.rc.custom.">files: ${esc(r.data_dir)}</span>` : '';
+  return `${r.listen_port ? ` · port ${r.listen_port}` : ''} · <span class="${r.dht ? 'warn' : 'muted'}" title="${r.dht ? 'DHT is on: private trackers usually forbid it' : 'DHT off'}">DHT ${r.dht ? 'on' : 'off'}</span>${fence}`;
 }
 const KIND_COLOR = { seeding: 'var(--ok)', leeching: 'var(--accent)', paused: 'var(--dim)', checking: 'var(--warn)', error: 'var(--bad)', unknown: 'var(--dim)' };
 // Column headings shared by both torrent tables; lead is the optional first
@@ -860,9 +933,13 @@ const torrentMatches = (t, f) => t.name.toLowerCase().includes(f) || (t.category
 // is an optional first cell (the box, in the fleet-wide list).
 function torrentRow(b, t, lead) {
   const color = KIND_COLOR[t.kind] || 'var(--dim)';
+  // In the fleet-wide list every row names its client in parentheses, so
+  // a box running both reads unambiguously.
+  const client = lead ? ` <span class="muted">(${CLIENT_LABEL[t.client] || esc(t.client || 'qBittorrent')})</span>` : '';
+  const hint = t.kind === 'error' && t.state && t.state !== t.kind ? ` — ${esc(t.state)}` : '';
   return `
       <div class="trow">${lead}
-        <div style="min-width:0;display:flex;align-items:center;gap:8px" title="${esc(t.name)}"><span class="led" style="width:6px;height:6px;background:${color}"></span><span class="ellip">${esc(t.name)}</span></div>
+        <div style="min-width:0;display:flex;align-items:center;gap:8px" title="${esc(t.name)}${hint}"><span class="led" style="width:6px;height:6px;background:${color}"></span><span class="ellip">${esc(t.name)}${client}</span></div>
         <span class="muted num">${fmtBytes(t.size, 1)}</span>
         <div><div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted)"><span>${esc(t.kind === 'unknown' ? t.state : t.kind)}</span><span>${(t.progress * 100).toFixed(t.progress < 1 ? 1 : 0)}%</span></div><div class="meter" style="height:3px;margin-top:3px"><i style="width:${t.progress * 100}%;background:${color}"></i></div></div>
         <span class="num ${t.up_bps ? 'up' : 'dim'}">${fmtBps(t.up_bps)}</span>
@@ -885,10 +962,12 @@ function viewTorrents() {
   const rows = [];
   const notes = [];
   for (const b of boxes) {
-    const q = b.qbt;
-    for (const k of Object.keys(sum)) sum[k] += q[k] || 0;
-    if (!q.reachable) notes.push(`<span class="warn">${esc(b.name)}: ${unreachableNote(b)}</span>`);
-    for (const t of q.torrents || []) if (!f || torrentMatches(t, f) || b.name.toLowerCase().includes(f)) rows.push([b, t]);
+    for (const c of boxClients(b)) {
+      const q = c.st;
+      for (const k of Object.keys(sum)) sum[k] += q[k] || 0;
+      if (pfmView.clientAvailability(q).down) notes.push(`<span class="warn">${esc(b.name)} (${c.label}): ${unreachableNote(b, c)}</span>`);
+      for (const t of q.torrents || []) if (!f || torrentMatches(t, f) || b.name.toLowerCase().includes(f) || c.label.toLowerCase().includes(f)) rows.push([b, t]);
+    }
   }
   // Same order as the per-box tab (active first, busiest first), then by
   // box so one box's idle torrents stay together.
@@ -899,18 +978,19 @@ function viewTorrents() {
     return ba.name.localeCompare(bb.name) || ba.id - bb.id;
   });
   const shown = rows.slice(0, 500);
-  const qbtBoxes = boxes.length;
+  const qbtBoxes = boxes.filter((b) => boxClients(b).length).length;
+  const allTorrents = (list) => list.flatMap((b) => boxClients(b).flatMap((c) => c.st.torrents || []));
   return `<div class="head"><div><div class="eyebrow">PMSS</div><h1>Torrents</h1></div></div>
   <div class="table tor-table tor-all" style="overflow:hidden;margin-top:16px">
     <div class="thead-tools">
-      <div style="font-size:12px"><b>${sum.total} torrents</b> <span class="muted">· ${qbtBoxes} seedbox${qbtBoxes === 1 ? '' : 'es'} · ${sum.seeding} seeding · ${sum.leeching} leeching · ${sum.paused} paused${sum.errored ? ` · <span class="bad">${sum.errored} error</span>` : ''}${transferNote(boxes.flatMap((b) => b.qbt.torrents || []))}${notes.length ? ' · ' + notes.join(' · ') : ''}</span></div>
-      <div class="actions"><input class="filter" placeholder="filter name, category, state or box…" data-filter value="${esc(S.filter)}" style="max-width:260px"></div>
+      <div style="font-size:12px"><b>${sum.total} torrents</b> <span class="muted">· ${qbtBoxes} seedbox${qbtBoxes === 1 ? '' : 'es'} · ${sum.seeding} seeding · ${sum.leeching} leeching · ${sum.paused} paused${sum.errored ? ` · <span class="bad">${sum.errored} error</span>` : ''}${transferNote(allTorrents(boxes))}${notes.length ? ' · ' + notes.join(' · ') : ''}</span></div>
+      <div class="actions"><input class="filter" placeholder="filter name, label, state, client or box…" data-filter value="${esc(S.filter)}" style="max-width:260px"></div>
     </div>
     <div style="overflow:auto">
       ${TOR_HEAD('<span>seedbox</span>')}
-      ${qbtBoxes === 0 ? `<div class="trow"><span class="muted">no box has qBittorrent monitoring enabled</span></div>`
-        : shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(sum.total, S.torrents.flatMap((b) => b.qbt?.torrents || []), boxes.some((b) => b.status !== 'disabled' && b.qbt?.total) ? '' : 'disabled')}</span></div>`
-        : shown.map(([b, t]) => torrentRow(b, t, boxCell(b))).join('')}
+      ${qbtBoxes === 0 ? `<div class="trow"><span class="muted">no box has a torrent client monitored</span></div>`
+        : shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(sum.total, allTorrents(S.torrents), boxes.some((b) => b.status !== 'disabled' && boxClients(b).some((c) => c.st.total)) ? '' : 'disabled')}</span></div>`
+        : shown.map(([b, t]) => torrentRow(b, t, boxCell(b, t))).join('')}
       ${rows.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${rows.length} — refine the filter</span></div>` : ''}
     </div>
   </div>`;
@@ -918,8 +998,8 @@ function viewTorrents() {
 // The seedbox cell: a link to the box's own torrents tab, with the enabled
 // discovery mechanisms in parentheses so private-tracker placement is
 // visible per row.
-function boxCell(b) {
-  const on = discoveryOn(b.qbt);
+function boxCell(b, t) {
+  const on = t?.client === 'rtorrent' ? (b.rtorrent?.dht ? ['DHT'] : []) : discoveryOn(b.qbt);
   return `<div class="ellip" title="${esc(b.name)}${on.length ? ' · ' + esc(on.join(', ')) + ' enabled' : ''}"><a href="#/box/${b.id}/torrents">${esc(b.name)}</a>${on.length ? ` <span class="warn">(${esc(on.join(' · '))})</span>` : ''}</div>`;
 }
 /* ---------- peer discovery (DHT / PeX / LSD) ---------- */
@@ -949,17 +1029,8 @@ function discoveryNote(q, b) {
 }
 // Toast after an add. qBittorrent 5.2+ reports per-entry counts; older
 // clients only say that at least one entry was accepted.
-function addToast(r, stopped) {
-  const tail = stopped ? ' (stopped)' : '';
-  if (!r?.counted) {
-    const n = (r?.links || 0) + (r?.files || 0);
-    return `${n} torrent${n === 1 ? '' : 's'} sent to qBittorrent${tail}`;
-  }
-  const parts = [`${r.added} added${tail}`];
-  if (r.pending) parts.push(`${r.pending} still being fetched`);
-  if (r.failed) parts.push(`${r.failed} not added (already present or not a torrent)`);
-  return parts.join(', ');
-}
+// The add's outcome, worded by the pure helper (tested in view_test.mjs).
+function addToast(r, stopped, client) { return pfmView.addSummary(r, stopped, client); }
 // Text for an empty torrent table. After a restart the cached counts are
 // restored but the list is not until the first poll, so say so rather than
 // "no matches".
@@ -972,10 +1043,10 @@ function emptyTorrents(total, list, status) {
 // is down is classified "degraded" with the reason naming qBittorrent, so
 // the reason (plus the client's own error) is shown; when the box itself is
 // down, qBittorrent is not the one to blame and only the box status is.
-function unreachableNote(b) {
+function unreachableNote(b, c) {
   if (b.status === 'disabled') return 'polling disabled';
-  const q = b.qbt || {}, reason = b.status_reason || '';
-  const clientDown = b.status === 'online' || /qbittorrent/i.test(reason);
+  const q = c?.st || b.qbt || {}, reason = b.status_reason || '';
+  const clientDown = b.status === 'online' || /qbittorrent|rtorrent/i.test(reason);
   const detail = clientDown && q.error ? ` — ${esc(q.error)}` : '';
   if (b.status === 'online') return `client not responding${detail}`;
   return `box ${esc(b.status || 'unknown')}${reason ? ` (${esc(reason)})` : ''}${detail}`;
@@ -983,8 +1054,9 @@ function unreachableNote(b) {
 // The add-torrent form. Its draft lives in S.torAdd because every state
 // event re-renders the tab; File objects are kept there too, since a file
 // input cannot be refilled, and the chosen names are listed beside it.
-function torAddForm(b, list) {
+function torAddForm(b, list, c) {
   const a = S.torAdd;
+  const rt = c?.key === 'rtorrent';
   const cats = [...new Set(list.map((t) => t.category).filter(Boolean))].sort((x, y) => x.localeCompare(y));
   return `<form class="tor-add" data-tor-add>
     <label class="f" style="grid-column:1/-1">magnet links or .torrent URLs, one per line
@@ -992,13 +1064,13 @@ function torAddForm(b, list) {
     <label class="f">.torrent files
       <input type="file" accept=".torrent,application/x-bittorrent" multiple data-ta-files>
       ${a.files.length ? `<span class="hint">${a.files.length} chosen: ${esc(a.files.map((f) => f.name).join(', '))}</span>` : ''}</label>
-    <label class="f">category <span class="muted">(optional)</span>
+    <label class="f">${rt ? 'label' : 'category'} <span class="muted">(optional)</span>
       <input data-ta="category" list="tor-cats" value="${esc(a.category)}" placeholder="${cats.length ? 'existing or new' : 'new'}">
       <datalist id="tor-cats">${cats.map((c) => `<option value="${esc(c)}">`).join('')}</datalist></label>
     <label class="row" style="align-self:end"><input type="checkbox" data-ta="stopped" ${a.stopped ? 'checked' : ''}> add stopped</label>
     <div class="actions" style="align-self:end">
-      <button type="submit" class="small" data-act="tor-add:submit" ${a.busy ? 'disabled' : ''}>${a.busy ? 'adding…' : 'add to ' + esc(b.name)}</button>
-      <button type="button" class="small ghost" data-act="tor-add:toggle">cancel</button>
+      <button type="submit" class="small" data-act="tor-add:submit" ${a.busy ? 'disabled' : ''}>${a.busy ? 'adding…' : `add to ${c ? c.label + ' on ' : ''}${esc(b.name)}`}</button>
+      <button type="button" class="small ghost" data-act="tor-add:toggle" data-client="${esc(c?.key || 'qbt')}">cancel</button>
     </div>
   </form>`;
 }
@@ -1006,14 +1078,19 @@ function torAddForm(b, list) {
 // names the size so the two cannot be mistaken for each other.
 function torrentButtons(b, t) {
   if (!t.hash) return '';
-  const off = b.status === 'disabled' ? ' disabled title="polling is disabled for this box; enable it to run actions"' : '';
-  const h = `data-hash="${esc(t.hash)}" data-box="${b.id}"${off}`;
+  const client = t.client || 'qbt', label = esc(CLIENT_LABEL[client] || client); // a closed set today; escaped so the attribute sink stays safe if another client is added
+  const off = b.status === 'disabled' ? ' disabled title="polling is disabled for this box; enable it to run actions"'
+    : !pfmView.clientActionable(b, client) ? ` disabled title="${label} is stopped on purpose on this box (~/.rtorrentDisable); this row is from before it stopped"` : '';
+  const h = `data-hash="${esc(t.hash)}" data-box="${b.id}" data-client="${esc(client)}"${off}`;
   const name = esc(t.name);
-  return `${t.kind === 'paused' || t.kind === 'error' // error/missingFiles are stopped torrents: start is what recovers them
+  const files = client === 'rtorrent'
+    ? `Remove ${name} from rTorrent AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? The box first checks that the path lies inside rTorrent's download directory and refuses otherwise, leaving the torrent in place. If it passes, the torrent is removed and then its files are deleted; should the deletion fail at that point, the torrent is already gone and files may remain. This cannot be undone.`
+    : `Remove ${name} AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? This cannot be undone.`;
+  return `${pfmView.torrentAction(client, t.kind) === 'start'
     ? `<button class="small" data-act="tor:start" ${h}>start</button>`
     : `<button class="small" data-act="tor:stop" ${h} data-confirm="Stop ${name} on ${esc(b.name)}?">stop</button>`}
-    <button class="small ghost" data-act="tor:remove" ${h} data-confirm="Remove ${name} from qBittorrent on ${esc(b.name)}? The downloaded files stay on disk.">remove</button>
-    <button class="small ghost" data-act="tor:remove-data" ${h} data-confirm="Remove ${name} AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? This cannot be undone.">+ files</button>`;
+    <button class="small ghost" data-act="tor:remove" ${h} data-confirm="Remove ${name} from ${label} on ${esc(b.name)}? The downloaded files stay on disk.">remove</button>
+    <button class="small ghost" data-act="tor:remove-data" ${h} data-confirm="${files}">+ files</button>`;
 }
 function tabContainers(b) {
   const d = b.docker;
@@ -1279,7 +1356,7 @@ function liveTrendPanel(b) {
 /* ----- add / edit ----- */
 function blankForm() {
   return { name: '', host: '', port: 22, user: '', auth_method: '', key_path: '', password: '', type: 'seedbox', plan: '', datacenter: '', renewal: '',
-    qbt_enabled: true, qbt_port: 0, qbt_user: '', qbt_pass: '', qbt_start_cmd: '', docker_enabled: false, du_enabled: true, enabled: true, host_key: '' };
+    qbt_enabled: true, qbt_port: 0, qbt_user: '', qbt_pass: '', qbt_start_cmd: '', rt_enabled: false, rt_scgi: '', docker_enabled: false, du_enabled: true, enabled: true, host_key: '' };
 }
 function resetAdd() { S.add = { mode: 'add', step: 1, form: blankForm(), errors: {}, detect: null, busy: false, editId: null, service: null }; }
 async function startEdit(id) {
@@ -1353,6 +1430,11 @@ function addQbtFields(f, edit) {
         </div>
         <label class="f">start command <span class="hint">(used by “start client”; it must detach, e.g. -d or the qbt-start helper: a command left in the foreground is killed after 30 s)</span><input data-f="qbt_start_cmd" value="${esc(f.qbt_start_cmd)}" placeholder='cd "$HOME" && ( "$HOME/bin/qbittorrent-nox" -d </dev/null >/dev/null 2>&1 )'></label>`;
 }
+function addRtFields(f) {
+  const det = S.add.detect?.facts?.rt_endpoint;
+  return `<label class="check"><input type="checkbox" data-f="rt_enabled" ${f.rt_enabled ? 'checked' : ''}> monitor rTorrent via its SCGI socket (over SSH; the Pulsed Media client, started by the panel)</label>
+        <label class="f">SCGI endpoint <span class="hint">(blank = from ~/.rtorrent.rc${det ? `; detected ${esc(det)}` : ''}; unix:/path recommended. tcp:127.0.0.1:port is unauthenticated: on a shared host every tenant can reach it)</span><input data-f="rt_scgi" value="${esc(f.rt_scgi || '')}" placeholder="unix:/home/${esc(f.user || 'user')}/.rtorrent.socket" spellcheck="false"></label>`;
+}
 function addDockerDuFields(f) {
   return `<label class="check"><input type="checkbox" data-f="docker_enabled" ${f.docker_enabled ? 'checked' : ''}> monitor rootless docker containers</label>
         <label class="check"><input type="checkbox" data-f="du_enabled" ${f.du_enabled ? 'checked' : ''}> measure directory usage periodically (du at lowest I/O priority)</label>`;
@@ -1374,8 +1456,9 @@ function addStep1(A, f, E, edit, back) {
         <label class="f">renewal date<input data-f="renewal" type="date" value="${esc(f.renewal)}"></label>
       </div>
       ${addServiceHint(A.service)}
-      <details class="adv" ${edit ? 'open' : ''}><summary>qBittorrent, docker and measurement options</summary><div>
+      <details class="adv" ${edit ? 'open' : ''}><summary>torrent clients, Docker and measurement options</summary><div>
         ${addQbtFields(f, edit)}
+        ${addRtFields(f)}
         ${addDockerDuFields(f)}
         ${addEditExtras(A, f, edit)}
       </div></details>
@@ -1421,7 +1504,10 @@ function addDetectedFacts(f, F, pb) {
         <div><span>resources</span><span>${F.ram_limit_bytes ? fmtBytes(F.ram_limit_bytes, 0) + ' RAM' : '—'}${F.cpu_quota_cpus ? ` · ${F.cpu_quota_cpus.toFixed(1)} CPUs` : ''}</span></div>`;
 }
 function addDetectedServiceFacts(f, F, pb, sv) {
-  return `<div><span>client</span><span>${pb.qbt_enabled ? `qBittorrent ${esc(F.qbt_version || '(not responding)')} on port ${F.qbt_port}` : 'none'}</span></div>
+  const clients = [];
+  if (pb.qbt_enabled) clients.push(`qBittorrent ${esc(F.qbt_version || '(not responding)')} on port ${F.qbt_port}`);
+  if (pb.rt_enabled) clients.push(`rTorrent ${esc(F.rt_version || '(not responding)')}${F.rt_endpoint ? ` on ${esc(F.rt_endpoint)}` : ''}`);
+  return `<div><span>client${clients.length > 1 ? 's' : ''}</span><span>${clients.join(' · ') || 'none'}</span></div>
         <div><span>docker</span><span>${pb.docker_enabled ? `${esc(F.docker_version || 'enabled, daemon down')}${F.containers ? ` · ${F.containers} containers` : ''}` : 'no'}</span></div>
         <div><span>host key</span><span class="muted">${esc(F.host_key_fp || '')}</span></div>
         <div><span>plan / renewal</span><span>${addPlanRenewalCell(f, sv)}</span></div>`;
@@ -1459,7 +1545,7 @@ function validateForm(f) {
 function payload(f) {
   const p = { ...f };
   p.port = Number(p.port) || 22; p.qbt_port = Number(p.qbt_port) || 0;
-  p.host = p.host.trim(); p.user = p.user.trim();
+  p.host = p.host.trim(); p.user = p.user.trim(); p.rt_scgi = (p.rt_scgi || '').trim();
   if (p.auth_method === 'key' || p.auth_method === 'agent') p.password = ''; // typed before switching auth: not used, not stored
   return p;
 }
@@ -1477,6 +1563,7 @@ async function runDetect() {
       // qbt_port stays as typed: 0 follows qBittorrent.conf on every poll, so
       // the detected port is shown as a hint instead of being pinned.
       A.form.qbt_enabled = b.qbt_enabled;
+      A.form.rt_enabled = b.rt_enabled;
       A.form.docker_enabled = b.docker_enabled;
     }
   } catch (e) {
@@ -1698,7 +1785,8 @@ async function qbtAction(a, act) {
 async function torrentAction(a, act) {
   const what = a.slice(4);
   act.disabled = true;
-  await api('POST', `${BASE}/api/boxes/${act.dataset.box || S.selId}/qbt/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
+  const seg = act.dataset.client === 'rtorrent' ? 'rtorrent' : 'qbt';
+  await api('POST', `${BASE}/api/boxes/${act.dataset.box || S.selId}/${seg}/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
   toast(`torrent ${{ stop: 'stopped', start: 'started', remove: 'removed', 'remove-data': 'removed with its files' }[what]}`, 'ok');
   if (S.view === 'torrents') void loadTorrents();
 }
@@ -1709,8 +1797,14 @@ async function discoveryAction(a, act) {
   toast(`${k.toUpperCase()} ${on ? 'enabled' : 'disabled'}`, 'ok');
   await loadDetail(S.selId);
 }
-async function torAddAction(a) {
-  if (a === 'tor-add:toggle') { S.torAdd = S.torAdd ? null : { urls: '', category: '', stopped: false, files: [], busy: false }; render(); return; }
+async function torAddAction(a, act) {
+  if (a === 'tor-add:toggle') {
+    // One draft at a time; the button says which client it is for, and a
+    // click on another client's button moves the (empty) form there.
+    const client = act?.dataset.client || 'qbt';
+    S.torAdd = S.torAdd && (S.torAdd.client || 'qbt') === client ? null : { urls: '', category: '', stopped: false, files: [], busy: false, client };
+    render(); return;
+  }
   const d = S.torAdd;
   if (!d || d.busy) return;
   const fd = new FormData();
@@ -1720,8 +1814,9 @@ async function torAddAction(a) {
   d.files.forEach((f) => fd.append('torrents', f, f.name));
   d.busy = true; render();
   try {
-    const r = await api('POST', `${BASE}/api/boxes/${S.selId}/qbt/torrents`, fd);
-    toast(addToast(r, d.stopped), r?.counted && r.failed ? 'warn' : 'ok');
+    const seg = d.client === 'rtorrent' ? 'rtorrent' : 'qbt';
+    const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${seg}/torrents`, fd);
+    toast(addToast(r, d.stopped, d.client), r?.failed || r?.unlabelled || r?.stopped_early ? 'warn' : 'ok');
     if (S.torAdd === d) S.torAdd = null; // not a draft the user opened meanwhile
   } finally {
     if (S.torAdd) S.torAdd.busy = false;
@@ -1822,7 +1917,8 @@ async function runAction(a, act) {
   if (a === 'refresh-all' || a === 'refresh' || a === 'rescan-logs' || a === 'du' || a === 'remove') await boxAction(a);
   else if (a.startsWith('qbt:')) await qbtAction(a, act);
   else if (a.startsWith('tor:')) await torrentAction(a, act);
-  else if (a.startsWith('tor-add:')) await torAddAction(a);
+  else if (a === 'rt:dismiss-failure') { act.disabled = true; await api('POST', `${BASE}/api/boxes/${S.selId}/rtorrent/remove-failure/dismiss`, { at: act.dataset.at }); toast('notice dismissed', 'ok'); await loadDetail(S.selId); }
+  else if (a.startsWith('tor-add:')) await torAddAction(a, act);
   else if (a.startsWith('disc:')) await discoveryAction(a, act);
   else if (a.startsWith('ctr:')) await containerAction(a, act);
   else if (a === 'app:watch') await appWatchAction(act);

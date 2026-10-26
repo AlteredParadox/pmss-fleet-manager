@@ -59,5 +59,110 @@ function ramLimitMeter(ram, cls = '') {
   return `<div class="meter" title="${esc(title)}"><i class="${esc(cls)}" style="width:${r.ok ? Math.min(100, Math.max(0, Number(r.pct) || 0)) : 0}%"></i></div>`;
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine };
+// clientTotals sums a box's torrent counts over its monitored clients
+// (qBittorrent and rTorrent). A client that is off, or whose block is
+// missing from an older snapshot or event, contributes nothing; a client
+// that is on but unreachable still contributes its carried counts, as the
+// server's totals do. Used by the fleet totals recomputed from SSE events
+// and by the per-box cards, so the two never disagree (fred review on #124).
+function clientTotals(b) {
+  const t = { torrents: 0, seeding: 0, clients: 0 };
+  for (const c of [b?.qbt, b?.rtorrent]) {
+    if (!c || !c.enabled) continue;
+    t.clients++;
+    t.torrents += Number(c.total) || 0;
+    t.seeding += Number(c.seeding) || 0;
+  }
+  return t;
+}
+
+// torrentAction is the one control a torrent row offers besides remove:
+// 'start' for a torrent that is not running, 'stop' otherwise. qBittorrent
+// reports stopped torrents with problems as kind "error" (error,
+// missingFiles), so start is what recovers them; rTorrent's "error" is a
+// running torrent with a tracker message, which only stop can manage
+// (daybreak blue review of #124).
+function torrentAction(client, kind) {
+  if (kind === 'paused') return 'start';
+  if (kind === 'error' && client !== 'rtorrent') return 'start';
+  return 'stop';
+}
+
+// rateSourceLabel names where the live bandwidth figure comes from.
+function rateSourceLabel(source) {
+  switch (source) {
+    case 'qbt': return 'live from qBittorrent';
+    case 'rtorrent': return 'live from rTorrent';
+    case 'clients': return 'live from qBittorrent + rTorrent';
+    case 'pmss-15min': return 'PMSS 15-min average (refreshed twice an hour)';
+    default: return 'no rate source';
+  }
+}
+
+// clientAvailability says how a monitored client's state should read:
+// `down` when it does not answer and that is unexpected, `stopped` when
+// the tenant stopped it on purpose (rTorrent's ~/.rtorrentDisable), which
+// is neither a warning nor a place to add torrents.
+function clientAvailability(st) {
+  if (!st || !st.enabled) return { down: false, stopped: false };
+  if (st.reachable) return { down: false, stopped: false };
+  return { down: !st.disabled, stopped: !!st.disabled };
+}
+
+// clientActionable says whether a torrent in client `client` of box b may be
+// acted on right now: the client is monitored and not stopped on purpose.
+// A row carried over from an earlier poll while the client is stopped keeps
+// no live controls (daybreak blue re-review of #124).
+function clientActionable(b, client) {
+  const st = client === 'rtorrent' ? b?.rtorrent : b?.qbt;
+  if (!st || !st.enabled) return false;
+  return !clientAvailability(st).stopped;
+}
+
+// showClient says whether box b's client `key` gets a section on the
+// torrents tab: when it is monitored, or, for rTorrent, when it carries the
+// recorded outcome of a failed remove-with-data, which must stay visible and
+// dismissable until dismissed even after monitoring was switched off
+// (daybreak blue re-review of #124).
+function showClient(b, key) {
+  const st = key === 'rtorrent' ? b?.rtorrent : b?.qbt;
+  if (!st) return false;
+  if (st.enabled) return true;
+  return key === 'rtorrent' && !!st.remove_failed;
+}
+
+// torrentsTab says whether the box gets a torrents tab at all: a monitored
+// or installed client, rTorrent seen running or stopped on purpose, or a
+// removal notice still to dismiss.
+function torrentsTab(b) {
+  const q = b?.qbt || {}, r = b?.rtorrent || {};
+  return !!(q.enabled || q.installed || r.enabled || r.process_up || r.disabled || r.remove_failed);
+}
+
+// addSummary words an add's outcome for the toast. rTorrent: what was
+// added (rTorrent acknowledged the load), what it refused, and how many
+// loaded torrents have a label that could not be applied or confirmed;
+// labels are attempted once and never retried, so nothing is promised about
+// them (daybreak blue re-review of #124). qBittorrent: its own counts, or
+// what was sent when the server did not count.
+function addSummary(r, stopped, client) {
+  const tail = stopped ? ' (stopped)' : '';
+  if (client === 'rtorrent') {
+    const parts = [`${r?.added || 0} added to rTorrent${tail}`];
+    if (r?.failed) parts.push(`${r.failed} not added (refused by rTorrent or not a torrent)`);
+    if (r?.unlabelled) parts.push(`${r.unlabelled} loaded, label not applied or confirmed`);
+    if (r?.stopped_early) parts.push(`then the batch stopped (${r.stopped_early}); the entry being sent may have been accepted, so check rTorrent before retrying`);
+    return parts.join('; ');
+  }
+  if (!r?.counted) {
+    const n = (r?.links || 0) + (r?.files || 0);
+    return `${n} torrent${n === 1 ? '' : 's'} sent to qBittorrent${tail}`;
+  }
+  const parts = [`${r.added} added${tail}`];
+  if (r.pending) parts.push(`${r.pending} still being fetched`);
+  if (r.failed) parts.push(`${r.failed} not added (already present or not a torrent)`);
+  return parts.join(', ');
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary };
 })();

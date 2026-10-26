@@ -338,16 +338,55 @@ confirm.
 A box can run rTorrent beside or instead of qBittorrent; both are monitored
 when enabled under edit. The dashboard talks to rTorrent over its SCGI
 unix socket (`~/.rtorrent.socket`, read from `~/.rtorrent.rc` and
-`~/.rtorrent.rc.custom`, or set per box as `unix:/path` or
-`tcp:127.0.0.1:port`), through the SSH connection as the tenant, so no
-password is involved: the socket's permissions decide who may connect. The
-client is PMSS's own, started by the panel's watchdog, so there is no
+`~/.rtorrent.rc.custom`, or set per box as `unix:/path`), through the SSH
+connection as the tenant, so no password is involved: the socket's
+permissions decide who may connect. A loopback TCP endpoint
+(`tcp:127.0.0.1:port`) is accepted too, but SCGI has no authentication of
+its own and on a shared host every tenant can reach the same loopback port:
+anyone on the box could then drive your rTorrent. The dashboard checks that
+the port is owned by your account before it connects, which keeps it from
+talking to an impostor (on hosts whose socket-table privacy hides
+established sockets this falls back to the listener check described under
+qBittorrent access, with its narrow release-and-rebind window), but it
+cannot keep others from talking to your rTorrent. Keep the unix socket
+unless the host isolates loopback between tenants. The client is PMSS's own, started by the panel's watchdog, so there is no
 install, start or stop for it here; the tenant's `~/.rtorrentDisable`
-marker is shown and silences the alert. Torrent actions: stop, start,
-remove, remove with data, add. Remove with data asks rTorrent for the
+marker is shown and silences the alert. On a box running both clients the
+torrents tab groups the torrents by client, each group with its own counts
+and add button; the fleet-wide torrents view names the client in
+parentheses after each torrent. Torrent actions: stop, start, remove,
+remove with data, add. Remove with data asks rTorrent for the
 torrent's path, erases the torrent, then deletes on the box only after the
 box itself resolved the path through symlinks and found it strictly inside
 rTorrent's download root, which must itself be strictly inside the home.
+The removal and the deletion then run under the dashboard's own deadlines:
+closing the browser, editing the box or stopping the dashboard does not cut
+them (a stop waits for an admitted deletion to finish). If the deletion
+fails after your request has already ended, the outcome is not lost: it is
+logged, shown under rTorrent on the box's torrents tab until you dismiss
+it, and raised as an alert. Two limits remain.
+A hard kill of the dashboard process after the removal and before the
+deletion has completed leaves the torrent gone and all or part of its files
+behind; those files are visible on the box and can be cleaned up by hand.
+And a process of the same account that renames another directory into the
+very name being removed, in the instant between the check and the removal,
+can have that directory deleted instead; that data is only recoverable from
+a backup.
+
+**Labels.** A label (ruTorrent's `custom1`) is attempted once, right after
+the torrent is loaded, and never retried: the add's answer says how many
+torrents were loaded with the label not applied or confirmed (rTorrent
+refused it, or its answer was lost, so the label may or may not be set),
+and the dashboard log says why. For a `.torrent` file that is the end of
+it. A magnet only has a metadata placeholder at that moment; rTorrent drops
+the placeholder's label when the metadata arrives and rebuilds the torrent,
+and the dashboard does not set it again, because a later torrent with the
+same hash cannot be told from the one you labelled and a missing label
+beats a wrong one. Set a magnet's label in ruTorrent once its metadata has
+arrived. Labels are a convenience, and the dashboard does not guard them
+beyond this; what it
+guards without compromise is deleting files, acting on the right machine
+and account, and bounded operations against the box.
 
 ### qBittorrent access
 
