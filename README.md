@@ -333,6 +333,22 @@ the first connect after forgetting trusts whatever key answers, and with
 password auth sends the SSH password to it, ticking "forget" asks you to
 confirm.
 
+### rTorrent
+
+A box can run rTorrent beside or instead of qBittorrent; both are monitored
+when enabled under edit. The dashboard talks to rTorrent over its SCGI
+unix socket (`~/.rtorrent.socket`, read from `~/.rtorrent.rc` and
+`~/.rtorrent.rc.custom`, or set per box as `unix:/path` or
+`tcp:127.0.0.1:port`), through the SSH connection as the tenant, so no
+password is involved: the socket's permissions decide who may connect. The
+client is PMSS's own, started by the panel's watchdog, so there is no
+install, start or stop for it here; the tenant's `~/.rtorrentDisable`
+marker is shown and silences the alert. Torrent actions: stop, start,
+remove, remove with data, add. Remove with data asks rTorrent for the
+torrent's path, erases the torrent, then deletes on the box only after the
+box itself resolved the path through symlinks and found it strictly inside
+rTorrent's download root, which must itself be strictly inside the home.
+
 ### qBittorrent access
 
 The WebUI port is read from `~/.config/qBittorrent/qBittorrent.conf` on the

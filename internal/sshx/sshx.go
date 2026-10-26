@@ -552,8 +552,131 @@ func (c *Client) dial(ctx context.Context, network, addr string) (net.Conn, erro
 		}
 		return nil, err
 	}
-	return conn, dialErr
+	if dialErr != nil {
+		return nil, dialErr
+	}
+	return &boundedConn{Conn: conn, c: c, cli: cli, idle: make(chan struct{}, 1)}, nil
 }
+
+// boundedConn is a forwarded stream whose Close is guaranteed to end it.
+// An x/crypto/ssh channel supports no deadline (SetDeadline is refused),
+// and its Close only sends a close packet: it neither unblocks a pending
+// Read nor stops a later one, so a stream whose peer stopped answering
+// would hold a Read forever, and with it the poll, the edit, the removal
+// or the shutdown waiting on that poll (daybreak blue re-review 6 of PR
+// 123). Close therefore closes admission first, under the same lock the
+// I/O paths take, so no Read or Write enters after it began (they fail
+// with net.ErrClosed; fred on PR 123); then it gives the I/O already in
+// flight, and the channel close itself, graceWait to finish; past that
+// the owning transport is wedged (see wedged), which fails them. The
+// poller reconnects at its next use, as for any other wedged operation.
+type boundedConn struct {
+	net.Conn
+	c   *Client
+	cli *ssh.Client
+	mu  sync.Mutex
+	// closing is set by Close before anything else; inflight counts the
+	// Reads and Writes admitted and not yet returned; idle is signalled
+	// when the last of them returns after closing was set.
+	closing  bool
+	inflight int
+	idle     chan struct{}
+}
+
+// enter admits one I/O operation, or refuses it once Close began.
+func (b *boundedConn) enter() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closing {
+		return false
+	}
+	b.inflight++
+	return true
+}
+
+// leave retires one admitted operation.
+func (b *boundedConn) leave() {
+	b.mu.Lock()
+	b.inflight--
+	last := b.closing && b.inflight == 0
+	b.mu.Unlock()
+	if last {
+		select {
+		case b.idle <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (b *boundedConn) Read(p []byte) (int, error) {
+	if !b.enter() {
+		return 0, net.ErrClosed
+	}
+	defer b.leave()
+	return b.Conn.Read(p)
+}
+
+func (b *boundedConn) Write(p []byte) (int, error) {
+	if !b.enter() {
+		return 0, net.ErrClosed
+	}
+	defer b.leave()
+	return b.Conn.Write(p)
+}
+
+// Close ends the stream: bounded by graceWait, after which the transport
+// is wedged. Idempotent; a second Close returns at once.
+func (b *boundedConn) Close() error {
+	b.mu.Lock()
+	if b.closing {
+		b.mu.Unlock()
+		return nil
+	}
+	b.closing = true
+	busy := b.inflight > 0
+	b.mu.Unlock()
+	closed := make(chan struct{})
+	go func() { b.Conn.Close(); close(closed) }()
+	timer := time.NewTimer(graceWait)
+	defer timer.Stop()
+	for {
+		select {
+		case <-closed:
+			closed = nil // observed once; never readable again (Codex on PR 123)
+			if !busy {
+				return nil // the close went through and nothing was in flight: the transport is fine
+			}
+		case <-b.idle:
+			busy = false
+			if closed == nil {
+				return nil
+			}
+		case <-timer.C:
+			b.c.wedged(b.cli)
+			return nil
+		}
+	}
+}
+
+// CloseWrite half-closes the stream (an SSH channel supports it) for a
+// peer that waits for EOF before answering.
+func (b *boundedConn) CloseWrite() error {
+	if cw, ok := b.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+// SetDeadline and friends are refused by the channel; they are no-ops
+// here so a caller that sets one as a courtesy gets Close's guarantee
+// instead of an error it would have to special-case. That is sound only
+// because every caller in this repository also closes the stream when its
+// context ends (the SCGI round trip's AfterFunc, the HTTP transports'
+// context plumbing); a caller relying on the deadline alone would not be
+// bounded.
+func (b *boundedConn) SetDeadline(time.Time) error      { return nil }
+func (b *boundedConn) SetReadDeadline(time.Time) error  { return nil }
+func (b *boundedConn) SetWriteDeadline(time.Time) error { return nil }
 
 // Ping sends a keepalive request and reports whether the connection answered.
 func (c *Client) Ping(ctx context.Context) error {

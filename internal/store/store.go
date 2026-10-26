@@ -61,6 +61,12 @@ type Box struct {
 	QbtPass     string `json:"-"`
 	QbtStartCmd string `json:"qbt_start_cmd"`
 
+	// RtEnabled turns rTorrent monitoring on; RtSCGI overrides the SCGI
+	// endpoint read from the box's ~/.rtorrent.rc ("unix:/path" or
+	// "tcp:127.0.0.1:port"; blank = from the config).
+	RtEnabled bool   `json:"rt_enabled"`
+	RtSCGI    string `json:"rt_scgi"`
+
 	DockerEnabled bool `json:"docker_enabled"`
 	DuEnabled     bool `json:"du_enabled"`
 	Enabled       bool `json:"enabled"`
@@ -329,7 +335,34 @@ func (s *Store) migrate() error {
 	if err := s.ensureAppsWatchColumn(); err != nil {
 		return err
 	}
-	return s.ensureRevisionColumn()
+	if err := s.ensureRevisionColumn(); err != nil {
+		return err
+	}
+	return s.ensureRtColumns()
+}
+
+// Columns for rTorrent monitoring (1.10.0); constants like the others.
+const (
+	addRtEnabledColSQL = "ALTER TABLE boxes ADD COLUMN rt_enabled INTEGER NOT NULL DEFAULT 0"
+	addRtSCGIColSQL    = "ALTER TABLE boxes ADD COLUMN rt_scgi TEXT NOT NULL DEFAULT ''"
+)
+
+// ensureRtColumns adds boxes.rt_enabled and boxes.rt_scgi to a database
+// from before they existed.
+func (s *Store) ensureRtColumns() error {
+	for _, c := range []struct{ name, ddl string }{{"rt_enabled", addRtEnabledColSQL}, {"rt_scgi", addRtSCGIColSQL}} {
+		has, err := s.hasBoxesColumn(c.name)
+		if err != nil || has {
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := s.db.Exec(c.ddl); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	return nil
 }
 
 const addRevisionColSQL = "ALTER TABLE boxes ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"
@@ -412,7 +445,7 @@ func (s *Store) SetAppsWatch(ctx context.Context, id int64, keys []string) error
 }
 
 const boxCols = `id, name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
-	qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at, apps_watch, revision`
+	qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at, apps_watch, revision, rt_enabled, rt_scgi`
 
 // The box queries are constants: nothing from a request is ever spliced in.
 const (
@@ -425,7 +458,7 @@ func (s *Store) scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 	var created, updated, watch string
 	err := row.Scan(&b.ID, &b.Name, &b.Host, &b.Port, &b.User, &b.AuthMethod, &b.KeyPath, &b.Password, &b.HostKey,
 		&b.Type, &b.Plan, &b.Datacenter, &b.Renewal, &b.QbtEnabled, &b.QbtPort, &b.QbtUser, &b.QbtPass, &b.QbtStartCmd,
-		&b.DockerEnabled, &b.DuEnabled, &b.Enabled, &created, &updated, &watch, &b.Revision)
+		&b.DockerEnabled, &b.DuEnabled, &b.Enabled, &created, &updated, &watch, &b.Revision, &b.RtEnabled, &b.RtSCGI)
 	if err != nil {
 		return nil, err
 	}
@@ -492,11 +525,11 @@ func (s *Store) CreateBox(ctx context.Context, b *Box) error {
 	// The Box keeps its plaintext: the caller starts the poller from it.
 	pw, qp := s.sealBoxSecrets(b)
 	res, err := s.db.ExecContext(ctx, `INSERT INTO boxes (name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
-		qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at, rt_enabled, rt_scgi)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, pw, b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
 		b.QbtEnabled, b.QbtPort, b.QbtUser, qp, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
-		now.Format(time.RFC3339), now.Format(time.RFC3339))
+		now.Format(time.RFC3339), now.Format(time.RFC3339), b.RtEnabled, b.RtSCGI)
 	if err != nil {
 		return err
 	}
@@ -541,12 +574,12 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 		host_key=CASE WHEN ? THEN '' WHEN ? THEN ? WHEN host_key='' THEN ? ELSE host_key END,
 		type=?, plan=?, datacenter=?, renewal=?,
 		qbt_enabled=?, qbt_port=?, qbt_user=?, qbt_pass=CASE WHEN ? THEN '' WHEN ?='' THEN qbt_pass ELSE ? END, qbt_start_cmd=?,
-		docker_enabled=?, du_enabled=?, enabled=?, updated_at=?, revision=revision+1 WHERE id=? AND revision=?`,
+		docker_enabled=?, du_enabled=?, enabled=?, updated_at=?, rt_enabled=?, rt_scgi=?, revision=revision+1 WHERE id=? AND revision=?`,
 		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clears.Password, pw, pw,
 		clears.ForgetHostKey, clears.ReplaceHostKey, b.HostKey, b.HostKey,
 		b.Type, b.Plan, b.Datacenter, b.Renewal,
 		b.QbtEnabled, b.QbtPort, b.QbtUser, clears.QbtPass, qp, qp, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
-		now.Format(time.RFC3339), b.ID, b.Revision)
+		now.Format(time.RFC3339), b.RtEnabled, b.RtSCGI, b.ID, b.Revision)
 	if err != nil {
 		return err
 	}
@@ -595,8 +628,14 @@ func (s *Store) SetHostKey(ctx context.Context, id int64, host string, port int,
 
 // DeleteBox removes a box and its alerts and cache.
 func (s *Store) DeleteBox(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM boxes WHERE id=?`, id)
-	return err
+	r, err := s.db.ExecContext(ctx, `DELETE FROM boxes WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, err := r.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GetSettings returns settings merged over defaults.

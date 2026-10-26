@@ -69,6 +69,26 @@ func testServer(t *testing.T) net.Addr {
 				defer sc.Close()
 				go ssh.DiscardRequests(reqs)
 				for nc := range chans {
+					if nc.ChannelType() == "direct-tcpip" {
+						// A forwarded stream: echoes what it reads.
+						ch, creqs, err := nc.Accept()
+						if err != nil {
+							continue
+						}
+						go ssh.DiscardRequests(creqs)
+						go func() {
+							defer ch.Close()
+							buf := make([]byte, 256)
+							for {
+								n, err := ch.Read(buf)
+								if err != nil {
+									return
+								}
+								ch.Write(buf[:n])
+							}
+						}()
+						continue
+					}
 					if nc.ChannelType() != "session" {
 						nc.Reject(ssh.UnknownChannelType, "no")
 						continue
@@ -359,4 +379,124 @@ func TestSettleKeepsCancellation(t *testing.T) {
 	if err := c.settle(dctx, cli, done); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("settle with a deadline: %v", err)
 	}
+}
+
+// A forwarded stream (the rTorrent SCGI path) on a transport that stops
+// answering is ended by Close within the grace, by wedging the transport,
+// so a caller's context deadline is honoured although the channel supports
+// no deadline of its own (an application that merely answers slowly is
+// ended by the channel close alone, as before); a healthy stream's Close
+// keeps the transport (daybreak blue re-review 6 of PR 123).
+func TestForwardedStreamCloseIsBounded(t *testing.T) {
+	graceWait = 150 * time.Millisecond
+	t.Cleanup(func() { graceWait = 2 * time.Second })
+	srv := testServer(t)
+	px := newProxy(t, srv)
+	c := dialTest(t, px.addr)
+	// Healthy: a round trip, then Close, and the transport survives.
+	conn, err := c.DialTCP(context.Background(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte("ping\n")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	if n, err := conn.Read(buf); err != nil || string(buf[:n]) != "ping\n" {
+		t.Fatalf("echo: %q %v", buf[:n], err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("a deadline is accepted as a no-op: %v", err)
+	}
+	if cw, ok := conn.(interface{ CloseWrite() error }); !ok || cw.CloseWrite() != nil {
+		t.Fatal("a forwarded stream half-closes like the channel it wraps")
+	}
+	conn.Close()
+	if c.transport() == nil {
+		t.Fatal("a healthy stream's Close must not wedge the transport")
+	}
+	runEcho(t, c)
+	// Frozen transport: the read blocks; the caller's context ends and
+	// closes the stream, as the SCGI round trip does; the read returns
+	// within the grace and the transport is wedged, so the next use
+	// reconnects.
+	conn, err = c.DialTCP(context.Background(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := runtime.NumGoroutine()
+	px.frozen.Store(true)
+	go conn.Write([]byte("ping\n")) // may block on the frozen path: it is ended with the stream
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	start := time.Now()
+	_, err = conn.Read(buf)
+	took := time.Since(start)
+	if err == nil {
+		t.Fatal("the read must fail once the stream is closed")
+	}
+	if took > 200*time.Millisecond+graceWait+time.Second {
+		t.Fatalf("the read outlived the deadline and the grace: %v", took)
+	}
+	if c.transport() != nil {
+		t.Fatal("a stream that did not end within the grace must wedge the transport")
+	}
+	px.frozen.Store(false)
+	goroutinesSettle(t, base)
+	// A Read after Close (no I/O in flight when the context ended: the
+	// decoder was busy with buffered bytes) must not enter the channel and
+	// block without a watchdog (fred on PR 123): it fails at once.
+	px2 := newProxy(t, srv)
+	c2 := dialTest(t, px2.addr)
+	conn, err = c2.DialTCP(context.Background(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	px2.frozen.Store(true)
+	start = time.Now()
+	conn.Close() // nothing in flight; the close packet goes into the buffer and no answer comes
+	if _, err := conn.Read(buf); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("a read after Close: %v", err)
+	}
+	if _, err := conn.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("a write after Close: %v", err)
+	}
+	if took := time.Since(start); took > graceWait+time.Second {
+		t.Fatalf("close plus read took %v", took)
+	}
+	px2.frozen.Store(false)
+	// Admission races Close: many readers take turns (an ssh channel has
+	// one reader at a time, as the SCGI round trip uses it) as Close
+	// begins; each either got in (and is ended by the watchdog) or was
+	// refused; none hangs.
+	px3 := newProxy(t, srv)
+	c3 := dialTest(t, px3.addr)
+	conn, err = c3.DialTCP(context.Background(), "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	px3.frozen.Store(true)
+	var wg sync.WaitGroup
+	var turn sync.Mutex
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			turn.Lock()
+			defer turn.Unlock()
+			conn.Read(make([]byte, 4))
+		}()
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); conn.Close() }() // joined below: the test's cleanup resets graceWait
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(graceWait + 2*time.Second):
+		t.Fatal("reads racing Close were left hanging")
+	}
+	px3.frozen.Store(false)
 }

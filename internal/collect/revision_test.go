@@ -231,7 +231,9 @@ func TestRemoveBoxNotifiesAlertsAfterDelete(t *testing.T) {
 			t.Fatalf("after removal: %+v", got)
 		}
 	}
-	if got[0].Type != "removed" || got[0].Unacked != 1 {
+	// The row is deleted before the box leaves the live view (a failed
+	// delete keeps it), so the removed event already counts the cascade.
+	if got[0].Type != "removed" || got[0].Unacked != 0 {
 		t.Fatalf("first event: %+v", got[0])
 	}
 	if got[1].Type != "alerts" || got[1].Unacked != 0 {

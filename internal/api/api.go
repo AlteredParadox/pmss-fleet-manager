@@ -37,6 +37,7 @@ import (
 	"pmss-fleet-manager/internal/collect"
 	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/qbt"
+	"pmss-fleet-manager/internal/rtorrent"
 	"pmss-fleet-manager/internal/store"
 	"pmss-fleet-manager/internal/web"
 )
@@ -253,6 +254,9 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
 	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
 	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/discovery", s.handleSetDiscovery)
+	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/torrents/{hash}/{action}", s.handleRtTorrentAction)
+	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/torrents", s.handleRtAddTorrents) // literal segment wins over {hash}
+	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/remove-failure/dismiss", s.handleRtDismissRemoveFailure)
 	mux.HandleFunc("POST "+bp+boxRoute+"/containers/{cid}/{action}", s.handleContainerAction)
 	mux.HandleFunc("POST "+bp+boxRoute+"/apps/watch", s.handleAppWatch)
 	mux.HandleFunc("POST "+bp+boxRoute+"/logs/read", s.handleReadLog)                   // runs tail over SSH: POST so the CSRF check applies
@@ -454,8 +458,8 @@ func totals(states []collect.BoxState) Totals {
 		t.TrafficIn += b.Traffic.InMonthBytes
 		t.UpBps += b.Rates.UpBps
 		t.DownBps += b.Rates.DownBps
-		t.Torrents += b.Qbt.Total
-		t.Seeding += b.Qbt.Seeding
+		t.Torrents += b.Qbt.Total + b.Rt.Total
+		t.Seeding += b.Qbt.Seeding + b.Rt.Seeding
 		t.Containers += b.Docker.Running
 		if r := b.EffectiveRenewal(); r != "" && (t.NextRenew == "" || r < t.NextRenew) {
 			t.NextRenew = r
@@ -569,6 +573,8 @@ type boxInput struct {
 	QbtUser       string `json:"qbt_user"`
 	QbtPass       string `json:"qbt_pass"`
 	QbtStartCmd   string `json:"qbt_start_cmd"`
+	RtEnabled     bool   `json:"rt_enabled"`
+	RtSCGI        string `json:"rt_scgi"`
 	DockerEnabled bool   `json:"docker_enabled"`
 	DuEnabled     *bool  `json:"du_enabled"`
 	Enabled       *bool  `json:"enabled"`
@@ -599,6 +605,9 @@ func (in boxInput) validate() error {
 	}
 	if in.QbtPort < 0 || in.QbtPort > 65535 {
 		return errors.New("qbt_port must be 0..65535")
+	}
+	if !collect.ValidRtEndpoint(strings.TrimSpace(in.RtSCGI)) {
+		return errors.New("rt_scgi must be blank, unix:/absolute/path or tcp:127.0.0.1:port")
 	}
 	switch in.Type {
 	case "", "seedbox", "storage":
@@ -635,6 +644,7 @@ func (in boxInput) apply(b *store.Box) {
 	}
 	b.Plan, b.Datacenter, b.Renewal = strings.TrimSpace(in.Plan), strings.TrimSpace(in.Datacenter), in.Renewal
 	b.QbtEnabled, b.QbtPort, b.QbtUser, b.QbtPass, b.QbtStartCmd = in.QbtEnabled, in.QbtPort, in.QbtUser, in.QbtPass, in.QbtStartCmd
+	b.RtEnabled, b.RtSCGI = in.RtEnabled, strings.TrimSpace(in.RtSCGI)
 	b.DockerEnabled = in.DockerEnabled
 	if in.DuEnabled != nil {
 		b.DuEnabled = *in.DuEnabled
@@ -719,18 +729,20 @@ type torrentsBox struct {
 	Status       string           `json:"status"`
 	StatusReason string           `json:"status_reason,omitempty"`
 	Qbt          collect.QbtState `json:"qbt"`
+	Rt           collect.RtState  `json:"rtorrent"`
 }
 
-// handleTorrents returns every box that has qBittorrent monitoring on,
-// with its torrents, for the combined view. Boxes without it are left out.
+// handleTorrents returns every box that has a torrent client monitored
+// (qBittorrent, rTorrent or both), with each client's torrents, for the
+// combined view. Boxes with neither are left out.
 func (s *Server) handleTorrents(w http.ResponseWriter, r *http.Request) {
 	states := s.m.States()
 	out := make([]torrentsBox, 0, len(states))
 	for _, st := range states {
-		if !st.Qbt.Enabled {
+		if !st.Qbt.Enabled && !st.Rt.Enabled {
 			continue
 		}
-		out = append(out, torrentsBox{ID: st.ID, Name: st.Name, Status: st.Status, StatusReason: st.StatusReason, Qbt: st.Qbt})
+		out = append(out, torrentsBox{ID: st.ID, Name: st.Name, Status: st.Status, StatusReason: st.StatusReason, Qbt: st.Qbt, Rt: st.Rt})
 	}
 	writeJSON(w, 200, map[string]any{"boxes": out})
 }
@@ -850,7 +862,11 @@ func (s *Server) handleDeleteBox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.m.RemoveBox(r.Context(), id); err != nil {
-		writeErr(w, 500, err)
+		code := 500
+		if errors.Is(err, store.ErrNotFound) {
+			code = 404
+		}
+		writeErr(w, code, err)
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
@@ -879,7 +895,7 @@ func actionCode(err error) int {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return 404
-	case errors.Is(err, collect.ErrDisabled), errors.Is(err, collect.ErrNotReady):
+	case errors.Is(err, collect.ErrDisabled), errors.Is(err, collect.ErrNotReady), errors.Is(err, collect.ErrStaleNotice):
 		return 409
 	}
 	return 502
@@ -1149,6 +1165,91 @@ func (s *Server) handleTorrentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// handleRtTorrentAction runs stop|start|remove|remove-data on one torrent in
+// the box's rTorrent. rTorrent hashes are v1 only (40 hex).
+func (s *Server) handleRtTorrentAction(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	hash, action := strings.ToLower(r.PathValue("hash")), r.PathValue("action")
+	if !collect.ValidRtAction(action) {
+		writeErr(w, 400, fmt.Errorf("unknown action %q", action))
+		return
+	}
+	if !rtorrent.ValidHash(hash) {
+		writeErr(w, 400, errors.New("invalid torrent hash"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second) // remove-data runs rm on the box
+	defer cancel()
+	if err := s.m.RtTorrentAction(ctx, id, hash, action); err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// handleRtDismissRemoveFailure clears the recorded failure of a detached
+// remove-with-data once the user has seen it.
+func (s *Server) handleRtDismissRemoveFailure(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	var body struct {
+		At time.Time `json:"at"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil || body.At.IsZero() {
+		writeErr(w, 400, errors.New("the notice time (at) is required"))
+		return
+	}
+	if err := s.m.DismissRtRemoveFailure(id, body.At); err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// handleRtAddTorrents is handleAddTorrents for rTorrent: the same multipart
+// form ("category" becomes the ruTorrent label).
+func (s *Server) handleRtAddTorrents(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	req, err := addRequestFromForm(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	res, err := s.m.RtAddTorrents(ctx, id, req)
+	if err != nil && (res.Added > 0 || res.Uncertain > 0) {
+		// Some entries were loaded before the batch stopped: those are
+		// reported as added, with why the rest were not (the entry being sent
+		// when it stopped may or may not have been loaded), not as a failed
+		// add (daybreak blue re-review of PR 123).
+		writeJSON(w, 200, map[string]any{"ok": true, "links": len(req.URLs), "files": len(req.Files), "added": res.Added, "failed": res.Failed, "unlabelled": res.Unlabelled,
+			"uncertain": res.Uncertain, "stopped_early": clipErr(err, 300)})
+		return
+	}
+	if err != nil {
+		code := actionCode(err)
+		var f *rtorrent.Fault
+		if errors.As(err, &f) {
+			code = 422 // rTorrent refused the torrent
+		}
+		writeErr(w, code, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "links": len(req.URLs), "files": len(req.Files), "added": res.Added, "failed": res.Failed, "unlabelled": res.Unlabelled})
 }
 
 // handleReadLog takes {"path": "<relative path from the box's log list>"}
@@ -1495,4 +1596,13 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	s.m.SetSettings(in)
 	s.m.Publish(collect.Event{Type: "settings"}) // other tabs refresh their copy
 	writeJSON(w, 200, in.Public())
+}
+
+// clipErr bounds an error message for a response field.
+func clipErr(err error, n int) string {
+	m := err.Error()
+	if len(m) > n {
+		m = m[:n] + "…"
+	}
+	return m
 }

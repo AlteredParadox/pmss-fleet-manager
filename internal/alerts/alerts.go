@@ -95,6 +95,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 	// unwatched meanwhile resolves at once (the watch list is ours).
 	if s.Unpolled && s.Status != "disabled" {
 		e.resolveUnwatched(ctx, s)
+		e.reconcileLocal(ctx, s)
 		return
 	}
 	set := e.settings()
@@ -113,7 +114,40 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 		active = append(active, wantProbeRules(s, set)...)
 	}
 	active = append(active, wantRenewal(s, set)...)
+	active = append(active, wantRtRemove(s)...)
 	e.reconcile(ctx, s, active, probeOK)
+}
+
+// localKey reports whether an alert key is decided by the dashboard's own
+// records rather than measured by the probe, so it is raised and resolved
+// whatever the probe did: the box's reachability, its renewal date, and the
+// recorded outcome of a detached remove-with-data (Codex on PR 123).
+func localKey(k string) bool {
+	return k == "unreachable" || k == "renewal" || k == "rtorrent-remove"
+}
+
+// reconcileLocal raises or resolves the recorded-removal alert on a state
+// nothing has polled yet (a restart, an edit): the notice is the
+// dashboard's own record, so it needs no poll, and a dismiss while the box
+// is unverified must still resolve it.
+func (e *Evaluator) reconcileLocal(ctx context.Context, s *collect.BoxState) {
+	wanted, changed := e.raise(ctx, s, wantRtRemove(s))
+	if !wanted["rtorrent-remove"] {
+		keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
+		if err != nil {
+			return
+		}
+		for _, k := range keys {
+			if k == "rtorrent-remove" {
+				if err := e.st.ResolveAlert(ctx, s.ID, k); err == nil {
+					changed = true
+				}
+			}
+		}
+	}
+	if changed && e.notify != nil {
+		e.notify()
+	}
 }
 
 // resolveUnwatched resolves the app alerts whose app is no longer watched,
@@ -139,13 +173,19 @@ func (e *Evaluator) resolveUnwatched(ctx context.Context, s *collect.BoxState) {
 // resolveDisabled handles a disabled box.
 func (e *Evaluator) resolveDisabled(ctx context.Context, s *collect.BoxState) {
 	// Nothing is being checked any more: resolve whatever was open so
-	// a disabled box does not keep an "unreachable" alert forever.
+	// a disabled box does not keep an "unreachable" alert forever. The
+	// recorded outcome of a remove-with-data is the dashboard's own, not a
+	// check: its alert stays (or is raised) while the notice is undismissed
+	// (daybreak blue re-review 7 of PR 123).
+	wanted, changed := e.raise(ctx, s, wantRtRemove(s))
 	keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
 	if err != nil {
 		return
 	}
-	changed := false
 	for _, k := range keys {
+		if wanted[k] {
+			continue
+		}
 		if err := e.st.ResolveAlert(ctx, s.ID, k); err == nil {
 			changed = true
 		}
@@ -167,6 +207,7 @@ func wantProbeRules(s *collect.BoxState, set store.Settings) []want {
 	active = append(active, wantDisk(s, set)...)
 	active = append(active, wantTraffic(s, set)...)
 	active = append(active, wantQbt(s)...)
+	active = append(active, wantRt(s)...)
 	active = append(active, wantDocker(s)...)
 	active = append(active, wantApps(s)...)
 	active = append(active, wantRAM(s)...)
@@ -240,6 +281,26 @@ func wantQbt(s *collect.BoxState) []want {
 	return active
 }
 
+// wantRt raises the alert for a monitored rTorrent that does not answer on
+// its SCGI endpoint. A client the tenant stopped on purpose
+// (~/.rtorrentDisable) is not an alert: PMSS's watchdog honours the marker
+// and so does this rule.
+func wantRt(s *collect.BoxState) []want {
+	var out []want
+	if !s.Rt.Enabled || s.Rt.Reachable || s.Rt.Disabled {
+		return out
+	}
+	what := "rTorrent SCGI endpoint not responding"
+	if s.Rt.ProcessKnown && !s.Rt.ProcessUp {
+		what = "rtorrent is not running"
+	}
+	msg := fmt.Sprintf("%s — %s", s.Name, what)
+	if s.Rt.Error != "" && s.Rt.Error != what && !strings.HasPrefix(s.Rt.Error, what) {
+		msg += " (" + s.Rt.Error + ")" // only when it adds to the headline
+	}
+	return append(out, want{"rtorrent", "warn", msg})
+}
+
 // firewalledGrace is how long a client may report no incoming connectivity
 // before it is an alert: after a start libtorrent says "firewalled" until
 // the first peer dials in, which on a quiet box takes minutes.
@@ -309,6 +370,18 @@ func wantRAM(s *collect.BoxState) []want {
 		active = append(active, want{"oom", "bad", fmt.Sprintf("%s: the kernel OOM-killed a process in the slice (noticed %s; %d kills in total)", name, t.Local().Format("Jan 2 15:04"), s.RAM.OOMKills)})
 	}
 	return active
+}
+
+// wantRtRemove raises the alert for a remove-with-data that failed after
+// its request had ended: the only place the outcome reaches the user
+// besides the box's own section (Codex on PR 123). The outcome is the
+// dashboard's own record, not a probe reading, so the rule runs whatever
+// the probe did and the alert is open until the notice is dismissed.
+func wantRtRemove(s *collect.BoxState) []want {
+	if s.Rt.RemoveFailed == "" {
+		return nil
+	}
+	return []want{{"rtorrent-remove", "warn", fmt.Sprintf("%s — rTorrent remove with files failed: %s", s.Name, s.Rt.RemoveFailed)}}
 }
 
 // wantRenewal raises the renewal alert from the effective renewal date; it
@@ -393,7 +466,7 @@ func (e *Evaluator) resolveStale(ctx context.Context, s *collect.BoxState, keys 
 		// plus the ones that need no probe: the box's reachability, its
 		// renewal date, and an app alert the user unwatched (the watch
 		// list is edited here, not read from the box).
-		if !probeOK && k != "unreachable" && k != "renewal" && !unwatchedApp(s, k) {
+		if !probeOK && !localKey(k) && !unwatchedApp(s, k) {
 			continue
 		}
 		if !recheckable(s, k) {

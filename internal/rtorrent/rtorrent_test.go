@@ -339,8 +339,16 @@ func TestTorrentsDecodeAndMapping(t *testing.T) {
 	if b.Hash != strings.ToUpper(hashB) || b.Size != 2000 || b.Completed != 500 || b.DownRate != 99 || b.Started || b.Open {
 		t.Fatalf("b = %+v", b)
 	}
-	if b.Kind() != "error" || b.State() != "closed" {
+	if b.Kind() != "paused" || b.State() != "closed" { // stopped wins over the stale tracker message
 		t.Fatalf("b kind %s state %s", b.Kind(), b.State())
+	}
+	e := Torrent{Started: true, Open: true, Active: true, Message: "Tracker: [Failure reason]"}
+	if e.Kind() != "error" {
+		t.Fatal(e.Kind())
+	}
+	e.DownRate = 1 // transferring: not broken, whatever the tracker said
+	if e.Kind() != "leeching" {
+		t.Fatal(e.Kind())
 	}
 	// Hashing wins over everything; paused when started but inactive; leeching otherwise.
 	h := Torrent{Hashing: 1, Message: "x"}
