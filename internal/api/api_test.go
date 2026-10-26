@@ -455,6 +455,44 @@ func TestAddRequestFromForm(t *testing.T) {
 	}
 }
 
+// Uploads past the old 1 MiB in-memory budget need no temp directory (a
+// read-only root filesystem has none writable): TMPDIR points nowhere and
+// two 5 MiB files still parse. The per-file and file-count caps hold.
+func TestAddRequestFromFormNoTempFiles(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	big := func(n int) []byte { return []byte("d4:info" + strings.Repeat("x", n) + "e") }
+	req, err := addRequestFromForm(multipartAdd(t, nil, map[string][]byte{"a.torrent": big(5 << 20), "b.torrent": big(5 << 20)}))
+	if err != nil || len(req.Files) != 2 || len(req.Files[0].Data) != len(big(5<<20)) {
+		t.Fatalf("large upload: %d files, %v", len(req.Files), err)
+	}
+	if _, err := addRequestFromForm(multipartAdd(t, nil, map[string][]byte{"huge.torrent": big(addMaxFile)})); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("over the per-file cap: %v", err)
+	}
+	many := map[string][]byte{}
+	for i := 0; i <= addMaxFiles; i++ {
+		many[fmt.Sprintf("%d.torrent", i)] = []byte("d4:infoe")
+	}
+	if _, err := addRequestFromForm(multipartAdd(t, nil, many)); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("too many files: %v", err)
+	}
+	r := httptest.NewRequest("POST", "/api/boxes/1/qbt/torrents", strings.NewReader("urls=magnet:?x"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if _, err := addRequestFromForm(r); err == nil || !strings.Contains(err.Error(), "bad upload") {
+		t.Fatalf("not multipart: %v", err)
+	}
+	// The first value of a repeated field counts, as FormValue did.
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("urls", "magnet:?xt=urn:btih:abc")
+	mw.WriteField("urls", "javascript:alert(1)")
+	mw.Close()
+	r = httptest.NewRequest("POST", "/api/boxes/1/qbt/torrents", &buf)
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	if req, err := addRequestFromForm(r); err != nil || len(req.URLs) != 1 {
+		t.Fatalf("repeated field: %+v %v", req, err)
+	}
+}
+
 // The fleet-wide torrent list is a JSON object with a boxes array, limited
 // to boxes with qBittorrent monitoring on.
 func TestTorrentsList(t *testing.T) {

@@ -201,6 +201,7 @@ async function loadState() {
     const d = await api('GET', BASE + '/api/state');
     if (d.instance && S.instance && d.instance !== S.instance) { location.reload(); return; } // server was rebuilt: pick up new JS/CSS
     S.instance = d.instance || S.instance;
+    S.sshKey = d.ssh_key || ''; // the -ssh-key default, named in the edit form's key path hint
     // Loads overlap (a resync, a settings event and a services event can
     // all be in flight): one taken before a snapshot that already landed
     // is superseded and must not put back a box removed between the two.
@@ -1451,7 +1452,7 @@ function addUserAuthFields(f, E) {
 }
 function addKeyPasswordFields(f, E, edit) {
   return `<div class="f2">
-        <label class="f">key path <span class="hint">(empty = ~/.ssh/id_*)</span><input data-f="key_path" value="${esc(f.key_path)}" placeholder="~/.ssh/id_ed25519" ${f.auth_method === 'password' || f.auth_method === 'agent' ? 'disabled' : ''}></label>
+        <label class="f">key path <span class="hint">(empty = ${S.sshKey ? `${esc(S.sshKey)}, then ` : ''}~/.ssh/id_*)</span><input data-f="key_path" value="${esc(f.key_path)}" placeholder="~/.ssh/id_ed25519" ${f.auth_method === 'password' || f.auth_method === 'agent' ? 'disabled' : ''}></label>
         <label class="f">ssh password${edit ? ` <span class="hint">${f.has_password ? '(blank keeps saved)' : '(none saved)'}</span>` : ''}<input data-f="password" type="password" class="${E.password ? 'err' : ''}" value="${esc(f.password)}" autocomplete="new-password" ${f.auth_method === 'key' || f.auth_method === 'agent' ? 'disabled' : ''}>${E.password ? `<span class="err-box">${esc(E.password)}</span>` : ''}</label>
       </div>`;
 }

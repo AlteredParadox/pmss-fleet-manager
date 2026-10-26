@@ -102,14 +102,29 @@ jobs:
           build-args: VERSION=ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      # Smoke test: the distroless image starts as nonroot, creates its
-      # database on the volume and answers the state endpoint.
+      # Smoke test: the distroless image starts as nonroot, hardened the way
+      # the README suggests (read-only root filesystem with no /tmp tmpfs,
+      # every capability dropped, no-new-privileges), creates its database
+      # on the volume and answers the state endpoint; its own HEALTHCHECK
+      # turns healthy; and an upload past 1 MiB is parsed without a writable
+      # temp directory (an unknown box answers 404 after the form is read; a
+      # parse failure would be 400).
       - name: Run image
         run: |
-          docker run -d --name smoke -p 127.0.0.1:8080:8080 pmss-fleet-manager:ci
+          docker run -d --name smoke --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --health-interval 2s -p 127.0.0.1:8080:8080 pmss-fleet-manager:ci
           for i in $(seq 1 30); do
             if out=$(curl -sf http://127.0.0.1:8080/api/state); then break; fi
             sleep 1
           done
           echo "$out" | grep -q '"version":"ci"' || { docker logs smoke; exit 1; }
+          for i in $(seq 1 30); do
+            health=$(docker inspect -f '{{.State.Health.Status}}' smoke)
+            [ "$health" = healthy ] && break
+            sleep 1
+          done
+          [ "$health" = healthy ] || { echo "health: $health"; docker inspect -f '{{json .State.Health}}' smoke; docker logs smoke; exit 1; }
+          python3 -c "import sys; sys.stdout.buffer.write(b'd4:info' + b'x' * (2 << 20) + b'e')" > big.torrent
+          code=$(curl -s -o resp.txt -w '%{http_code}' -H 'X-PMSS-Request: 1' -F torrents=@big.torrent http://127.0.0.1:8080/api/boxes/999/qbt/torrents)
+          [ "$code" = 404 ] || { echo "upload: $code $(cat resp.txt)"; docker logs smoke; exit 1; }
           docker stop smoke >/dev/null

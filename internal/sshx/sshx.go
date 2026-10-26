@@ -186,25 +186,32 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 	return methods, cleanup, nil
 }
 
+// DefaultKey is the key file tried for every box without a key path of its
+// own, before the usual ~/.ssh names (-ssh-key / PMSS_SSH_KEY, e.g. a
+// container secret under /run/secrets). Set once at startup, before any
+// connection is made.
+var DefaultKey string
+
 // unreadableHint names default keys that exist but could not be read, the
-// usual sign of a key mounted into a container that its uid cannot read.
-func unreadableHint(paths []string) string {
-	switch len(paths) {
-	case 0:
+// usual sign of a key mounted into a container that its uid cannot read,
+// and why the -ssh-key default (when set) gave no key.
+func unreadableHint(problems []string) string {
+	if len(problems) == 0 {
 		return ""
-	case 1:
-		return "; found " + paths[0] + " but cannot read it (permission denied)"
 	}
-	return "; found " + strings.Join(paths, ", ") + " but cannot read them (permission denied)"
+	return "; could not use " + strings.Join(problems, ", ")
 }
 
-// keyPaths lists the private key files to try: the configured path, or the
-// usual ~/.ssh names.
+// keyPaths lists the private key files to try: the box's own path, or the
+// -ssh-key default (when set) followed by the usual ~/.ssh names.
 func keyPaths(cfg Config) []string {
 	paths := []string{}
 	if cfg.KeyPath != "" {
 		paths = append(paths, expandHome(cfg.KeyPath))
 	} else {
+		if DefaultKey != "" {
+			paths = append(paths, expandHome(DefaultKey))
+		}
 		home, _ := os.UserHomeDir()
 		for _, n := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
 			paths = append(paths, filepath.Join(home, ".ssh", n))
@@ -222,13 +229,17 @@ func keySigners(cfg Config) ([]ssh.Signer, []string, error) {
 	var signers []ssh.Signer
 	var unreadable []string
 	for _, p := range keyPaths(cfg) {
+		global := cfg.KeyPath == "" && DefaultKey != "" && p == expandHome(DefaultKey)
 		pem, err := os.ReadFile(p)
 		if err != nil {
 			if cfg.KeyPath != "" {
 				return nil, nil, fmt.Errorf("read key %s: %w", p, err)
 			}
-			if errors.Is(err, os.ErrPermission) {
-				unreadable = append(unreadable, p)
+			switch {
+			case global && errors.Is(err, os.ErrNotExist):
+				unreadable = append(unreadable, p+" (the -ssh-key default: no such file)")
+			case errors.Is(err, os.ErrPermission):
+				unreadable = append(unreadable, p+" (permission denied)")
 			}
 			continue
 		}
@@ -236,6 +247,9 @@ func keySigners(cfg Config) ([]ssh.Signer, []string, error) {
 		if err != nil {
 			if cfg.KeyPath != "" {
 				return nil, nil, fmt.Errorf("parse key %s: %w", p, err)
+			}
+			if global {
+				unreadable = append(unreadable, p+" (the -ssh-key default: not an unencrypted private key)")
 			}
 			continue
 		}
@@ -255,7 +269,7 @@ func keyMethods(cfg Config) ([]ssh.AuthMethod, []string, error) {
 	if len(signers) > 0 {
 		return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, unreadable, nil
 	} else if cfg.AuthMethod == "key" {
-		return nil, nil, errors.New("ssh: no usable private key in ~/.ssh (set a key path, or the key needs a passphrase)" + unreadableHint(unreadable))
+		return nil, nil, errors.New("ssh: no usable private key in ~/.ssh or the -ssh-key default (set a key path, or the key needs a passphrase)" + unreadableHint(unreadable))
 	}
 	return nil, unreadable, nil
 }

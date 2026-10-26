@@ -58,5 +58,9 @@ ENV PMSS_LISTEN=0.0.0.0:8080 \
     HOME=/home/nonroot
 VOLUME /data
 EXPOSE 8080
+# Exec form: the image has no shell. Podman ignores this for OCI images and
+# needs HealthCmd=CMD /pmss-fleet-manager healthcheck (see README).
+HEALTHCHECK --interval=60s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["/pmss-fleet-manager", "healthcheck"]
 USER nonroot:nonroot
 ENTRYPOINT ["/pmss-fleet-manager"]

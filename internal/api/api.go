@@ -38,6 +38,7 @@ import (
 	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/rtorrent"
+	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 	"pmss-fleet-manager/internal/web"
 )
@@ -275,6 +276,20 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET "+bp+"/license", s.serveLegalText(func() []byte { return s.license }, "license text unavailable"))
 	mux.HandleFunc("GET "+bp+"/third-party-licenses", s.serveLegalText(func() []byte { return s.thirdParty }, "third-party notices unavailable"))
 	mux.HandleFunc("GET "+bp+"/source", s.handleSource)
+	// Liveness for `pmss-fleet-manager healthcheck`; no login (see
+	// isPublicPath). Served at the root whatever the base path, since the
+	// healthcheck runs as its own process and cannot see a -base-path flag
+	// the server was started with; under the base path too, for a check
+	// that goes through the proxy.
+	healthz := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		io.WriteString(w, "ok\n")
+	}
+	mux.HandleFunc("GET /healthz", healthz)
+	if bp != "" {
+		mux.HandleFunc("GET "+bp+"/healthz", healthz)
+	}
 	mux.HandleFunc("GET "+bp+"/api/services", s.handleServices)
 	mux.HandleFunc("POST "+bp+"/api/services/sync", s.handleServicesSync)
 	mux.HandleFunc("GET "+bp+"/api/pmdb", s.handlePMDB)
@@ -502,6 +517,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"settings":       s.m.Settings().Public(),
 		"instance":       s.instance,
 		"version":        s.Version(),
+		"ssh_key":        sshx.DefaultKey, // the -ssh-key default (a path, not a secret), for the edit form's hint
 		"source_url":     s.sourceURL(),
 	})
 }
@@ -982,15 +998,71 @@ func looksLikeTorrent(b []byte) bool {
 	return len(b) > 2 && b[0] == 'd' && b[len(b)-1] == 'e'
 }
 
+// addMaxField bounds one text field of an add (the links, the category,
+// the stopped flag); the links field holds at most addMaxURLs links.
+const addMaxField = addMaxURLs*(addMaxURLLen+2) + 4096
+
 // addRequestFromForm validates a multipart add: "urls" (one per line),
-// "torrents" files, "category", "stopped".
+// "torrents" files, "category", "stopped". The parts are read one by one
+// into memory, each under its cap, rather than by ParseMultipartForm,
+// which spills anything past its memory budget to temporary files: the
+// files end up in memory either way, and this way nothing needs a writable
+// temp directory, so the image runs on a read-only root filesystem with
+// only /data writable. The first value of a repeated text field counts, as
+// with FormValue; parts with other names are skipped.
 func addRequestFromForm(r *http.Request) (qbt.AddRequest, error) {
 	var req qbt.AddRequest
 	r.Body = http.MaxBytesReader(nil, r.Body, addMaxBody)
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
+	mr, err := r.MultipartReader()
+	if err != nil {
 		return req, fmt.Errorf("bad upload: %v", err)
 	}
-	for _, line := range strings.Split(r.FormValue("urls"), "\n") {
+	fields := map[string]string{}
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return req, fmt.Errorf("bad upload: %v", err)
+		}
+		name := part.FormName()
+		switch {
+		case name == "torrents" && part.FileName() != "":
+			if len(req.Files) == addMaxFiles {
+				return req, fmt.Errorf("at most %d files per request", addMaxFiles)
+			}
+			fname := part.FileName()
+			data, err := io.ReadAll(io.LimitReader(part, addMaxFile+1))
+			if err != nil {
+				return req, fmt.Errorf("bad upload: %v", err)
+			}
+			if len(data) > addMaxFile {
+				return req, fmt.Errorf("%s: larger than %d MB", clipStr(fname, 60), addMaxFile>>20)
+			}
+			if !looksLikeTorrent(data) {
+				return req, fmt.Errorf("%s is not a .torrent file", clipStr(fname, 60))
+			}
+			base := clipStr(path.Base(strings.ReplaceAll(fname, "\\", "/")), addMaxNameLen)
+			if base == "" || base == "." || base == "/" {
+				base = "upload.torrent"
+			}
+			req.Files = append(req.Files, qbt.TorrentFile{Name: base, Data: data})
+		case name == "urls" || name == "category" || name == "stopped":
+			b, err := io.ReadAll(io.LimitReader(part, addMaxField+1))
+			if err != nil {
+				return req, fmt.Errorf("bad upload: %v", err)
+			}
+			if len(b) > addMaxField {
+				return req, fmt.Errorf("the %s field is too long", name)
+			}
+			if _, seen := fields[name]; !seen {
+				fields[name] = string(b)
+			}
+		}
+		part.Close()
+	}
+	for _, line := range strings.Split(fields["urls"], "\n") {
 		u := strings.TrimSpace(line)
 		if u == "" {
 			continue
@@ -1003,37 +1075,11 @@ func addRequestFromForm(r *http.Request) (qbt.AddRequest, error) {
 	if len(req.URLs) > addMaxURLs {
 		return req, fmt.Errorf("at most %d links per request", addMaxURLs)
 	}
-	files := r.MultipartForm.File["torrents"]
-	if len(files) > addMaxFiles {
-		return req, fmt.Errorf("at most %d files per request", addMaxFiles)
-	}
-	for _, fh := range files {
-		if fh.Size > addMaxFile {
-			return req, fmt.Errorf("%s: larger than %d MB", clipStr(fh.Filename, 60), addMaxFile>>20)
-		}
-		f, err := fh.Open()
-		if err != nil {
-			return req, err
-		}
-		data, err := io.ReadAll(io.LimitReader(f, addMaxFile+1))
-		f.Close()
-		if err != nil {
-			return req, err
-		}
-		if !looksLikeTorrent(data) {
-			return req, fmt.Errorf("%s is not a .torrent file", clipStr(fh.Filename, 60))
-		}
-		name := clipStr(path.Base(strings.ReplaceAll(fh.Filename, "\\", "/")), addMaxNameLen)
-		if name == "" || name == "." || name == "/" {
-			name = "upload.torrent"
-		}
-		req.Files = append(req.Files, qbt.TorrentFile{Name: name, Data: data})
-	}
-	req.Category = strings.TrimSpace(r.FormValue("category"))
+	req.Category = strings.TrimSpace(fields["category"])
 	if utf8.RuneCountInString(req.Category) > addMaxCatLen || strings.ContainsAny(req.Category, "\x00\n\r") {
 		return req, errors.New("invalid category")
 	}
-	switch r.FormValue("stopped") {
+	switch fields["stopped"] {
 	case "true", "1", "on":
 		req.Stopped = true
 	}
