@@ -19,9 +19,9 @@ package rtorrent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -42,10 +42,6 @@ type Client struct {
 	// stateMu guards retired.
 	stateMu sync.Mutex
 
-	// noMeta is set once a build answered the listing with d.is_meta in it
-	// with an unknown-method fault (a d.multicall2 is all or nothing): later
-	// listings leave the getter out and Torrent.MetaKnown is false.
-	noMeta atomic.Bool
 	// retired is set by Retire, under the operation token: from then on
 	// every operation fails with ErrRetired, so a caller still holding this
 	// client after a handoff cannot change state the successor never sees.
@@ -56,15 +52,9 @@ type Client struct {
 // resolve the current client and decide whether to retry. Nothing was sent.
 var ErrRetired = errors.New("rtorrent: client retired; resolve the current client")
 
-// Bounds on pending labels: a magnet whose metadata never arrives would
-// otherwise hold its entry forever, and a flood of adds must not grow the
-// map without limit.
-const (
-	pendingTTL = 24 * time.Hour
-	pendingMax = 1000
-	// maxLabelErrors bounds AddResult.LabelErrors.
-	maxLabelErrors = 8
-)
+// maxLabelErrors bounds AddResult.LabelErrors; LabelErrorsOmitted counts
+// the rest.
+const maxLabelErrors = 8
 
 // New returns a client over dial.
 func New(dial Dialer) *Client {
@@ -121,14 +111,6 @@ type Torrent struct {
 	UpTotal   int64
 	DownTotal int64
 	Private   bool
-	// Meta is a magnet's metadata placeholder (d.is_meta): rTorrent replaces
-	// it with the real torrent once the metadata arrives. MetaKnown is false
-	// when the build did not answer d.is_meta (see list): the placeholder
-	// cannot then be told from the real torrent, by size or otherwise, since
-	// the placeholder grows to the advertised metadata size before it is
-	// replaced (fred on PR 122).
-	Meta      bool
-	MetaKnown bool
 }
 
 // Clips for retained strings: a hostile client cannot grow the state.
@@ -140,19 +122,14 @@ const (
 	maxPath    = 4096
 )
 
-// torrentFields are the d.multicall2 getters, in Torrent field order. The
-// last one, d.is_meta, is the only one not confirmed on every rTorrent
-// build PMSS tenants may run (0.9.8 answers it; 0.16 registers it too, but
-// no 0.16 box was available): see list for the fallback without it.
+// torrentFields are the d.multicall2 getters, in Torrent field order, all
+// present on every rTorrent build PMSS tenants run (0.9.8 and 0.16).
 var torrentFields = []any{
 	"d.hash=", "d.name=", "d.size_bytes=", "d.completed_bytes=", "d.down.rate=", "d.up.rate=",
 	"d.ratio=", "d.state=", "d.complete=", "d.is_active=", "d.hashing=", "d.is_open=",
 	"d.message=", "d.custom1=", "d.timestamp.finished=", "d.peers_connected=", "d.peers_complete=",
-	"d.up.total=", "d.down.total=", "d.is_private=", "d.is_meta=",
+	"d.up.total=", "d.down.total=", "d.is_private=",
 }
-
-// metaField is the index of d.is_meta in torrentFields.
-const metaField = 20
 
 // Stats is the client-wide picture.
 type Stats struct {
@@ -401,10 +378,7 @@ func mc(method string) map[string]any {
 	return map[string]any{"methodName": method, "params": []any{""}}
 }
 
-// Torrents lists the main view, then settles any label still owed to a
-// magnet whose torrent has meanwhile been rebuilt from its metadata (see
-// Add): a listed torrent with an empty label and a pending entry gets the
-// label set, by hash, as a literal call; the rows returned already carry it.
+// Torrents lists the main view. It changes nothing on the box.
 func (c *Client) Torrents(ctx context.Context) ([]Torrent, error) {
 	release, err := c.acquire(ctx)
 	if err != nil {
@@ -420,8 +394,7 @@ func (c *Client) Torrents(ctx context.Context) ([]Torrent, error) {
 
 // columnKinds are the XML-RPC kinds of torrentFields, in order: a value of
 // another kind in a row is not rTorrent's answer and fails the listing
-// rather than reading as zero (a false d.is_meta = 0 would otherwise spend
-// a pending label on the placeholder).
+// rather than reading as zero.
 var columnKinds = func() []Kind {
 	k := make([]Kind, len(torrentFields))
 	for i := range k {
@@ -435,18 +408,7 @@ var columnKinds = func() []Kind {
 
 func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 	fields := torrentFields
-	if c.noMeta.Load() {
-		fields = torrentFields[:metaField]
-	}
 	v, err := c.call(ctx, c.maxRows, c.maxValues, "d.multicall2", append([]any{"", "main"}, fields...)...)
-	if err != nil && !c.noMeta.Load() && unknownMethodFault(err, "d.is_meta") {
-		// A build without d.is_meta refuses the whole listing with an
-		// unknown-method fault naming it: ask once more without it and
-		// remember. Any other fault stands (fred on PR 122).
-		c.noMeta.Store(true)
-		fields = torrentFields[:metaField]
-		v, err = c.call(ctx, c.maxRows, c.maxValues, "d.multicall2", append([]any{"", "main"}, fields...)...)
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -478,10 +440,6 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 			Finished: nonNeg(r[14].Int), Peers: nonNeg(r[15].Int), Seeds: nonNeg(r[16].Int),
 			UpTotal: nonNeg(r[17].Int), DownTotal: nonNeg(r[18].Int), Private: r[19].Int == 1,
 		})
-		t := &out[len(out)-1]
-		if len(r) > metaField {
-			t.Meta, t.MetaKnown = r[metaField].Int == 1, true
-		}
 	}
 	return out, nil
 }
@@ -489,8 +447,7 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 // Retire ends the client: it marks the client retired, then waits for the
 // operation in flight, if any, to complete its remote and local steps, so a
 // replacement never overlaps it on the box. Every later error-returning
-// operation fails with ErrRetired. The pending labels go with the client:
-// they are not handed to a successor (see Client). Idempotent; honours ctx
+// operation fails with ErrRetired. Idempotent; honours ctx
 // while an operation holds the token, and a timed-out Retire still retires.
 func (c *Client) Retire(ctx context.Context) error {
 	c.stateMu.Lock()
@@ -574,9 +531,12 @@ type AddResult struct {
 	Failed     int
 	Unlabelled int
 	// LabelErrors says why labels were not applied or confirmed, one entry
-	// per such torrent up to maxLabelErrors: a hash prefix and the error,
-	// never the label, a URL or torrent contents, so the caller can log it.
-	LabelErrors []string
+	// per such torrent up to maxLabelErrors (LabelErrorsOmitted counts the
+	// rest), so the caller can log it. Each is a fixed reason built here: a
+	// hash prefix where there is one and a category with any fault code,
+	// never the label, a URL, torrent contents or the peer's own fault text.
+	LabelErrors        []string
+	LabelErrorsOmitted int
 }
 
 // Add loads every entry; one refused entry does not stop the rest.
@@ -593,7 +553,6 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 		arg        any    // the URL or the file bytes
 		hash       string // for the label; "" when none is wanted or known
 		unlabelled bool   // a label was asked for but cannot be set by hash
-		magnet     bool   // the label must be set again once the metadata arrives
 	}
 	urlMethod, rawMethod := "load.start", "load.raw_start"
 	if req.Stopped {
@@ -608,7 +567,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 		e := entry{method: urlMethod, arg: u}
 		if label != "" {
 			if h, err := MagnetHash(u); err == nil {
-				e.hash, e.magnet = h, true
+				e.hash = h
 			} else {
 				e.unlabelled = true // an http(s) link: loaded, label left to ruTorrent
 			}
@@ -640,6 +599,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 		res.Added++
 		if e.unlabelled {
 			res.Unlabelled++
+			res.labelError("link", "not attempted: the hash of an http(s) link is not known until rTorrent fetches it")
 		}
 		if e.hash != "" {
 			// A literal XML-RPC string: rTorrent's command parser never sees
@@ -656,9 +616,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 			// blue and fred on PR 122). The user sets it in ruTorrent then.
 			if err := c.setLabel(ctx, e.hash, label); err != nil {
 				res.Unlabelled++
-				if len(res.LabelErrors) < maxLabelErrors {
-					res.LabelErrors = append(res.LabelErrors, strings.ToLower(e.hash[:8])+"…: "+clip(err.Error(), 160))
-				}
+				res.labelError(strings.ToLower(e.hash[:8])+"…", labelReason(err))
 			}
 		}
 	}
@@ -666,6 +624,32 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 		return res, lastErr
 	}
 	return res, nil
+}
+
+// labelError records one reason, within the bound.
+func (r *AddResult) labelError(who, why string) {
+	if len(r.LabelErrors) >= maxLabelErrors {
+		r.LabelErrorsOmitted++
+		return
+	}
+	r.LabelErrors = append(r.LabelErrors, who+": "+why)
+}
+
+// labelReason is a fixed category for a failed label set: the peer's own
+// fault text is not repeated (a lower-trust peer controls it).
+func labelReason(err error) string {
+	var f *Fault
+	switch {
+	case errors.As(err, &f):
+		return fmt.Sprintf("rTorrent refused the label (fault %d)", f.Code)
+	case errors.Is(err, ErrUnexpected):
+		return "rTorrent's answer was not the label sent"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return "no answer in time (the label may or may not be set)"
+	case errors.Is(err, ErrRetired):
+		return "the connection was replaced before the label was set"
+	}
+	return "the connection failed (the label may or may not be set)"
 }
 
 // validURL admits what rTorrent should fetch on the user's behalf: a magnet

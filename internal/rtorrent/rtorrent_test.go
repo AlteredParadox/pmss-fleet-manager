@@ -239,7 +239,7 @@ const hashB = "89abcdef0123456789abcdef0123456789abcdef"
 
 func torrentRow(hash, name string, extra ...string) string {
 	// d.hash, d.name, size, completed, down, up, ratio, state, complete, active, hashing, open, message, label, finished, peers, seeds, uptotal, downtotal, private
-	vals := []string{str(hash), str(name), i8(1000), i8(1000), i8(0), i8(2048), i8(1500), i8(1), i8(1), i8(1), i8(0), i8(1), str(""), str("tv"), i8(1700000000), i8(3), i8(2), i8(4000), i8(1000), i8(1), i8(0)}
+	vals := []string{str(hash), str(name), i8(1000), i8(1000), i8(0), i8(2048), i8(1500), i8(1), i8(1), i8(1), i8(0), i8(1), str(""), str("tv"), i8(1700000000), i8(3), i8(2), i8(4000), i8(1000), i8(1)}
 	copy(vals[2:], extra)
 	return row(vals...)
 }
@@ -319,7 +319,7 @@ func TestTorrentsDecodeAndMapping(t *testing.T) {
 			// lower-case hash, mixed int element names, stopped, with a tracker message
 			torrentRow(hashB, "Beta", "<i4>2000</i4>", "<int>500</int>", i8(99), i8(0), i8(250), i8(0), i8(0), i8(0), i8(0), i8(0), str("Tracker: [Failure reason]"), str(""), i8(0), i8(0), i8(0), i8(0), i8(500), i8(0), i8(0)) +
 			// not a torrent row: ignored, not fatal
-			row(str("garbage"), str("x"), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) +
+			row(str("garbage"), str("x"), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) +
 			`</data></array>`)
 	})
 	ts, err := New(f.dial).Torrents(context.Background())
@@ -893,69 +893,18 @@ func TestDialErrorIsReported(t *testing.T) {
 	}
 }
 
-// TestListWithoutIsMeta: a build that does not know d.is_meta refuses the
-// whole listing with an unknown-method fault naming it; the client asks
-// again without the getter and remembers. The placeholder can then not be
-// told from the real torrent (it grows to the advertised metadata size
-// before it is replaced, fred on PR 122), so no label replay happens on
-// such a build: the pending entry is dropped on its first listing and the
-// rebuild is never labelled by the dashboard (a missing label beats a
-// wrong one; daybreak blue re-review of PR 122).
-func TestListWithoutIsMeta(t *testing.T) {
-	f := newFake(t)
-	var lists, sets int
-	label := "tv"    // what the box holds for hashA's custom1
-	size := int64(1) // the placeholder's file: one byte, then the metadata size
-	f.on(func(m string, p []string) string {
-		switch m {
-		case "d.custom1.set":
-			sets++
-			label = p[1]
-			return resp(i8(0))
-		case "d.multicall2":
-			lists++
-			for _, x := range p {
-				if x == "d.is_meta=" {
-					return fault(-506, "Method 'd.is_meta' not defined")
-				}
-			}
-			return resp(`<array><data>` + row(str(hashA), str("Alpha"), i8(size), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(label), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
-		}
-		return resp(i8(0))
-	})
-	c := New(f.dial)
-	rows, err := c.Torrents(context.Background())
-	if err != nil || len(rows) != 1 || lists != 2 || rows[0].MetaKnown {
-		t.Fatalf("%v rows %d lists %d %+v", err, len(rows), lists, rows)
-	}
-	// Remembered: the next listings go without the getter at once.
-	size = 16384
-	label = ""
-	rows, err = c.Torrents(context.Background())
-	if err != nil || lists != 3 || sets != 0 || rows[0].Label != "" {
-		t.Fatalf("listing on a build without d.is_meta: %v lists %d sets %d label %q", err, lists, sets, rows[0].Label)
-	}
-	// A fault that is not about an unknown d.is_meta surfaces unchanged and
-	// does not switch the getter off.
-	g := newFake(t)
-	g.on(func(m string, p []string) string { return fault(-501, "Could not find info-hash.") })
-	d := New(g.dial)
-	if _, err := d.Torrents(context.Background()); !isFault(err) || d.noMeta.Load() {
-		t.Fatalf("%v noMeta %v", err, d.noMeta.Load())
-	}
-	g.on(func(m string, p []string) string { return fault(-506, "Method 'd.hash' not defined") })
-	if _, err := d.Torrents(context.Background()); !isFault(err) || d.noMeta.Load() {
-		t.Fatal("another missing method is not d.is_meta's fault")
-	}
+// unknownMethodFault: a fault means "this build lacks the method" only
+// when it says so for that method (used for the optional stats members).
+func TestUnknownMethodFault(t *testing.T) {
 	for msg, want := range map[string]bool{
-		"Method 'd.is_meta' not defined": true, `Command "d.is_meta" does not exist.`: true, "Unsupported command: d.is_meta": true,
-		"d.is_meta: unknown": true, "Could not find info-hash.": false, "Method 'd.hash' not defined": false,
+		"Method 'network.listen.port' not defined": true, `Command "network.listen.port" does not exist.`: true, "Unsupported command: network.listen.port": true,
+		"network.listen.port: unknown": true, "Could not find info-hash.": false, "Method 'd.hash' not defined": false,
 	} {
-		if got := unknownMethodFault(&Fault{Code: -501, String: msg}, "d.is_meta"); got != want {
+		if got := unknownMethodFault(&Fault{Code: -501, String: msg}, "network.listen.port"); got != want {
 			t.Errorf("%q: %v", msg, got)
 		}
 	}
-	if !unknownMethodFault(&Fault{Code: -506, String: "d.is_meta"}, "d.is_meta") || unknownMethodFault(errors.New("x"), "d.is_meta") {
+	if !unknownMethodFault(&Fault{Code: -506, String: "network.listen.port"}, "network.listen.port") || unknownMethodFault(errors.New("x"), "network.listen.port") {
 		t.Fatal("code -506 with the name counts; a non-fault does not")
 	}
 }
@@ -1013,7 +962,7 @@ func TestNestedAllocationBounded(t *testing.T) {
 }
 
 // Finding 3: a value of the wrong kind in a successful row or multicall
-// member is not rTorrent's answer; in particular a wrong-kind d.is_meta
+// member is not rTorrent's answer; in particular a wrong-kind column
 // never reads as a known false.
 func TestColumnKindsChecked(t *testing.T) {
 	f := newFake(t)
@@ -1078,9 +1027,6 @@ func TestEnvelopeComplete(t *testing.T) {
 		_, err := c.Version(context.Background())
 		if !errors.Is(err, ErrMalformed) {
 			t.Errorf("%.60s: %v", body, err)
-		}
-		if c.noMeta.Load() {
-			t.Fatal("a truncated -506 must not flip the compatibility switch")
 		}
 	}
 	// Trailing whitespace and a comment are fine; a namespaced i8 decodes.
@@ -1325,7 +1271,7 @@ func TestResponseCapIsExact(t *testing.T) {
 	}
 	// A fault is held to the same cap (fred on PR 122): at the cap it is the
 	// fault, one byte over it is ErrTooLarge, and an oversized unknown-method
-	// fault naming d.is_meta must not switch the listing's fallback on.
+	// fault is refused as a whole.
 	fault := `<?xml version="1.0" encoding="UTF-8"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><i4>-506</i4></value></member><member><name>faultString</name><value><string>Method 'd.is_meta' not defined</string></value></member></struct></value></fault></methodResponse>`
 	padF := func(total int) string { return hdr + fault + strings.Repeat(" ", total-len(hdr)-len(fault)) }
 	capF := int64(len(hdr) + len(fault) + 64)
@@ -1339,8 +1285,8 @@ func TestResponseCapIsExact(t *testing.T) {
 	if _, err := c.Version(context.Background()); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("fault one byte over the cap: %v", err)
 	}
-	if _, err := c.Torrents(context.Background()); !errors.Is(err, ErrTooLarge) || c.noMeta.Load() {
-		t.Fatalf("an oversized d.is_meta fault must not flip the fallback: %v noMeta=%v", err, c.noMeta.Load())
+	if _, err := c.Torrents(context.Background()); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("an oversized fault on the listing: %v", err)
 	}
 }
 
@@ -1535,5 +1481,33 @@ func TestOperationsDoNotInterleave(t *testing.T) {
 	mu.Unlock()
 	if len(got) != 4 || !strings.HasPrefix(got[0], "load.start:") || got[1] != "d.custom1.set:A" || !strings.HasPrefix(got[2], "load.start:") || got[3] != "d.custom1.set:B" {
 		t.Fatalf("adds interleaved: %v", got)
+	}
+}
+
+// Daybreak blue re-review of PR 122: every unlabelled outcome carries a
+// fixed reason for the log, an http(s) link included; the peer's fault text
+// is not repeated; past the bound the rest is counted.
+func TestLabelErrorReasons(t *testing.T) {
+	f := newFake(t)
+	f.on(func(m string, p []string) string {
+		if m == "d.custom1.set" {
+			return fault(-501, "secret-peer-text")
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	urls := []string{"https://example.invalid/x.torrent"}
+	for i := 0; i < 10; i++ {
+		urls = append(urls, fmt.Sprintf("magnet:?xt=urn:btih:%040X", i+1))
+	}
+	res, err := c.Add(context.Background(), AddRequest{URLs: urls, Label: "tv"})
+	if err != nil || res.Added != 11 || res.Unlabelled != 11 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	all := strings.Join(res.LabelErrors, "\n")
+	if len(res.LabelErrors) != maxLabelErrors || res.LabelErrorsOmitted != 11-maxLabelErrors ||
+		!strings.Contains(res.LabelErrors[0], "link: not attempted") || !strings.Contains(all, "fault -501") ||
+		strings.Contains(all, "secret-peer-text") || strings.Contains(all, "example.invalid") || strings.Contains(all, "tv") {
+		t.Fatalf("reasons %q omitted %d", res.LabelErrors, res.LabelErrorsOmitted)
 	}
 }
