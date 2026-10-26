@@ -599,7 +599,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 		res.Added++
 		if e.unlabelled {
 			res.Unlabelled++
-			res.labelError("link", "not attempted: the hash of an http(s) link is not known until rTorrent fetches it")
+			res.labelError("entry", "not attempted: no usable v1 info hash to set it by (an http(s) link, or a magnet without one)")
 		}
 		if e.hash != "" {
 			// A literal XML-RPC string: rTorrent's command parser never sees
@@ -646,8 +646,6 @@ func labelReason(err error) string {
 		return "rTorrent's answer was not the label sent"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return "no answer in time (the label may or may not be set)"
-	case errors.Is(err, ErrRetired):
-		return "the connection was replaced before the label was set"
 	}
 	return "the connection failed (the label may or may not be set)"
 }

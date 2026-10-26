@@ -54,7 +54,7 @@ const (
 	// their nesting (a byte limit is not an allocation limit: four million
 	// empty <value/> entries in one inner array are 32 MiB on the wire and
 	// hundreds of MiB retained); maxInner bounds any array below the
-	// outermost one, where a torrent row has 21 entries and a multicall
+	// outermost one, where a torrent row has 20 entries and a multicall
 	// member one.
 	maxValues = 600_000
 	maxInner  = 1024

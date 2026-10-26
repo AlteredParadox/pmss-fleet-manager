@@ -967,7 +967,10 @@ func TestNestedAllocationBounded(t *testing.T) {
 func TestColumnKindsChecked(t *testing.T) {
 	f := newFake(t)
 	wrong := func(col int) string {
-		vals := []string{str(hashA), str("n"), i8(1), i8(1), i8(0), i8(0), i8(0), i8(1), i8(1), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)}
+		vals := []string{str(hashA), str("n"), i8(1), i8(1), i8(0), i8(0), i8(0), i8(1), i8(1), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)}
+		if len(vals) != len(torrentFields) {
+			t.Fatalf("fixture has %d columns, the listing %d: the test would stop at the length check", len(vals), len(torrentFields))
+		}
 		if columnKinds[col] == KindString {
 			vals[col] = i8(7)
 		} else {
@@ -976,6 +979,13 @@ func TestColumnKindsChecked(t *testing.T) {
 		return resp(`<array><data>` + row(vals...) + `</data></array>`)
 	}
 	c := New(f.dial)
+	// The well-formed row decodes, so a failure below is the kind check.
+	f.on(func(m string, p []string) string {
+		return resp(`<array><data>` + row(str(hashA), str("n"), i8(1), i8(1), i8(0), i8(0), i8(0), i8(1), i8(1), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
+	})
+	if rows, err := c.Torrents(context.Background()); err != nil || len(rows) != 1 {
+		t.Fatalf("control row: %v %d", err, len(rows))
+	}
 	for col := range torrentFields {
 		f.on(func(m string, p []string) string { return wrong(col) })
 		rows, err := c.Torrents(context.Background())
@@ -1506,7 +1516,7 @@ func TestLabelErrorReasons(t *testing.T) {
 	}
 	all := strings.Join(res.LabelErrors, "\n")
 	if len(res.LabelErrors) != maxLabelErrors || res.LabelErrorsOmitted != 11-maxLabelErrors ||
-		!strings.Contains(res.LabelErrors[0], "link: not attempted") || !strings.Contains(all, "fault -501") ||
+		!strings.Contains(res.LabelErrors[0], "entry: not attempted") || !strings.Contains(all, "fault -501") ||
 		strings.Contains(all, "secret-peer-text") || strings.Contains(all, "example.invalid") || strings.Contains(all, "tv") {
 		t.Fatalf("reasons %q omitted %d", res.LabelErrors, res.LabelErrorsOmitted)
 	}
