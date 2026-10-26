@@ -140,18 +140,19 @@ button.disc:hover{color:var(--text)}
 .trow.click{cursor:pointer}.trow.click:hover{background:var(--panel2)}
 .fleet-table .trow{grid-template-columns:minmax(170px,1.5fr) 80px minmax(120px,1fr) minmax(130px,1fr) minmax(130px,1fr) 160px 100px 90px 80px;min-width:1120px}
 .fleet-table .trow>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tor-table .trow{grid-template-columns:minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 84px;min-width:1160px;padding:4px 16px} /* compact rows */
+.tor-table .trow{grid-template-columns:minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 124px;min-width:1200px;padding:4px 16px} /* compact rows */
 .tor-table .swarm{font-size:10.5px}
 .tor-table .trow .actions,.tor-table .thead-tools .actions{flex-wrap:nowrap;justify-content:flex-end} /* filter + pause/resume on one line, stop/remove/+files on one line */
 .tor-table .trow .actions{gap:2px}
 button.icon{background:none;border:1px solid transparent;padding:3px;line-height:0;color:var(--muted)} /* torrent row actions: start / stop / remove / remove with files */
 button.icon:hover{color:var(--text);border-color:var(--line)}
 button.icon.danger:hover{color:var(--bad);border-color:var(--bad)}
+button.icon:disabled{opacity:.3}
 button.icon:disabled:hover{color:var(--muted);border-color:transparent}
 button.icon svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
 button.th-sort{background:none;border:0;padding:0;color:inherit;font:inherit;text-transform:inherit;letter-spacing:inherit;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis} /* sortable column headings */
 button.th-sort:hover,button.th-sort.on{color:var(--text)}
-.tor-all .trow{grid-template-columns:minmax(150px,1fr) minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 84px;min-width:1320px} /* fleet-wide list: seedbox column first */
+.tor-all .trow{grid-template-columns:minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 95px minmax(150px,1fr) 100px;min-width:1431px} /* fleet-wide list: client and seedbox after the peers */
 .tor-all .trow a{color:var(--text);text-decoration:none}
 .tor-all .trow a:hover{color:var(--accent)}
 .tor-add{display:grid;grid-template-columns:1fr 1fr auto auto;gap:12px 16px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--bg);align-items:start}

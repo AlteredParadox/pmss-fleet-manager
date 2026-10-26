@@ -70,15 +70,19 @@ test('fleet torrent totals count every monitored client, from a snapshot or an S
   assert.deepEqual(V.clientTotals(undefined), { torrents: 0, seeding: 0, clients: 0 });
 });
 
-test('the row action is client-aware: rTorrent error rows are running and get stop (daybreak blue review of #124)', () => {
-  assert.equal(V.torrentAction('qbt', 'paused'), 'start');
-  assert.equal(V.torrentAction('qbt', 'error'), 'start', 'qBittorrent error/missingFiles are stopped torrents');
-  assert.equal(V.torrentAction('qbt', 'seeding'), 'stop');
-  assert.equal(V.torrentAction('qbt', 'checking'), 'stop');
-  assert.equal(V.torrentAction('rtorrent', 'paused'), 'start');
-  assert.equal(V.torrentAction('rtorrent', 'error'), 'stop', 'an rTorrent error row is active with a tracker message');
-  assert.equal(V.torrentAction('rtorrent', 'leeching'), 'stop');
-  assert.equal(V.torrentAction(undefined, 'error'), 'start', 'rows without a client are qBittorrent\'s');
+test('the row controls are client-aware: rTorrent error rows are running (daybreak blue review of #124)', () => {
+  assert.deepEqual(V.torrentControls('qbt', 'paused'), { start: true, pause: null, stop: false });
+  assert.deepEqual(V.torrentControls('qbt', 'error'), { start: true, pause: null, stop: false }, 'qBittorrent error/missingFiles are stopped torrents');
+  assert.deepEqual(V.torrentControls('qbt', 'seeding'), { start: false, pause: null, stop: true });
+  assert.deepEqual(V.torrentControls('qbt', 'checking'), { start: false, pause: null, stop: true });
+  assert.deepEqual(V.torrentControls(undefined, 'error'), { start: true, pause: null, stop: false }, 'rows without a client are qBittorrent\'s');
+  // rTorrent: paused (started, inactive) resumes or stops; stopped/closed only starts.
+  assert.deepEqual(V.torrentControls('rtorrent', 'paused', 'paused'), { start: true, pause: false, stop: true });
+  assert.deepEqual(V.torrentControls('rtorrent', 'paused', 'stopped'), { start: true, pause: false, stop: false });
+  assert.deepEqual(V.torrentControls('rtorrent', 'paused', 'closed'), { start: true, pause: false, stop: false });
+  assert.deepEqual(V.torrentControls('rtorrent', 'error', 'downloading'), { start: false, pause: true, stop: true }, 'an rTorrent error row is active with a tracker message');
+  assert.deepEqual(V.torrentControls('rtorrent', 'seeding', 'seeding'), { start: false, pause: true, stop: true });
+  assert.deepEqual(V.torrentControls('rtorrent', 'checking', 'checking'), { start: false, pause: true, stop: true });
 });
 
 test('every documented rate source has a label', () => {
@@ -104,7 +108,7 @@ test('the confirmation and action markup of a row carry the client (snapshot of 
   // attribute the action handler routes on, checked in the source itself.
   const app = readFileSync(new URL('./static/app.js', import.meta.url), 'utf8');
   assert.match(app, /data-client="\$\{esc\(client\)\}"/, 'row buttons carry data-client');
-  assert.match(app, /pfmView\.torrentAction\(client, t\.kind\)/, 'the start/stop choice goes through the helper');
+  assert.match(app, /pfmView\.torrentControls\(client, t\.kind, t\.state\)/, 'the start/pause/stop choice goes through the helper');
   assert.match(app, /refuses otherwise, leaving the torrent in place/, 'the rTorrent remove-with-data confirmation states the real ordering');
   assert.match(app, /\/\$\{seg\}\/torrents\//, 'actions are routed per client');
 });
@@ -214,4 +218,12 @@ test('rTorrent PeX is worded as the default for new torrents, DHT as client-wide
   assert.deepEqual(on.labels, ['DHT', 'PeX']);
   assert.match(on.title, /DHT is running now; PeX is the default for new torrents \(torrents already loaded keep their own setting\)/);
   assert.deepEqual(V.rtDiscoveryOn({ dht: false, pex: false }), { labels: [], title: '' });
+});
+
+test('the fleet list sorts by client name, a row without one being qBittorrent', () => {
+  const rows = [[{ name: 'pm1' }, { name: 'a', client: 'rtorrent' }], [{ name: 'pm2' }, { name: 'b' }], [{ name: 'pm3' }, { name: 'c', client: 'qbt' }]];
+  const order = (dir) => V.sortTorrents(rows, { key: 'client', dir }, (r) => r[1], (r) => r[0].name).map((r) => r[1].name).join('');
+  assert.equal(order('asc'), 'bca', 'qBittorrent before rTorrent, ties by name');
+  assert.equal(order('desc'), 'abc');
+  assert.deepEqual(V.nextSort(null, 'client'), { key: 'client', dir: 'asc' });
 });

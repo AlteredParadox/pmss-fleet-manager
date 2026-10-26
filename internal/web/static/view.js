@@ -76,16 +76,23 @@ function clientTotals(b) {
   return t;
 }
 
-// torrentAction is the one control a torrent row offers besides remove:
-// 'start' for a torrent that is not running, 'stop' otherwise. qBittorrent
-// reports stopped torrents with problems as kind "error" (error,
-// missingFiles), so start is what recovers them; rTorrent's "error" is a
-// running torrent with a tracker message, which only stop can manage
-// (daybreak blue review of #124).
-function torrentAction(client, kind) {
-  if (kind === 'paused') return 'start';
-  if (kind === 'error' && client !== 'rtorrent') return 'start';
-  return 'stop';
+// torrentControls says which of a row's start / pause / stop buttons apply
+// (the others are shown disabled). qBittorrent has no pause of its own
+// (5.x renamed pause to stop), so `pause` is null there and no button is
+// drawn. qBittorrent reports stopped torrents with problems as kind
+// "error" (error, missingFiles), so start is what recovers them; rTorrent's
+// "error" is a running torrent with a tracker message, which pause and stop
+// manage (daybreak blue review of #124). rTorrent's state tells a paused
+// torrent (started, inactive: start resumes it, stop closes it) from a
+// stopped or closed one.
+function torrentControls(client, kind, state) {
+  if (client === 'rtorrent') {
+    const stopped = state === 'stopped' || state === 'closed';
+    const paused = state === 'paused';
+    return { start: stopped || paused, pause: !stopped && !paused, stop: !stopped };
+  }
+  const startable = kind === 'paused' || kind === 'error';
+  return { start: startable, pause: null, stop: !startable };
 }
 
 // rateSourceLabel names where the live bandwidth figure comes from.
@@ -169,7 +176,8 @@ function addSummary(r, stopped, client) {
 // reverses, a third returns to the default order (active first, busiest
 // first, as the server and the fleet list give it). Ties fall back to the
 // name so rows do not jump between polls.
-const TOR_TEXT_KEYS = new Set(['name', 'box']);
+const TOR_TEXT_KEYS = new Set(['name', 'box', 'client']);
+const CLIENT_NAMES = { qbt: 'qbittorrent', rtorrent: 'rtorrent' }; // a row without one is qBittorrent's
 const torName = (t) => String(t?.name || '').toLowerCase();
 function torSortValue(t, key) {
   switch (key) {
@@ -192,13 +200,15 @@ function nextSort(cur, key) {
 }
 // sortTorrents returns a sorted copy of rows; get maps a row to its torrent
 // (identity for a plain list) and boxName to its box's name (the fleet
-// list's "seedbox" column). No sort keeps the given order.
+// list's "seedbox" column; "client" sorts by the client's name). No sort
+// keeps the given order.
 function sortTorrents(rows, sort, get = (r) => r, boxName = () => '') {
   if (!sort?.key) return rows.slice();
   const sign = sort.dir === 'asc' ? 1 : -1;
   const val = (r) => {
     if (sort.key === 'box') return String(boxName(r) || '').toLowerCase();
     if (sort.key === 'name') return torName(get(r));
+    if (sort.key === 'client') { const c = get(r)?.client || 'qbt'; return CLIENT_NAMES[c] || String(c).toLowerCase(); }
     return torSortValue(get(r), sort.key);
   };
   return rows.map((r, i) => [r, val(r), i]).sort((a, b) => {
@@ -256,5 +266,5 @@ function rtDiscoveryOn(r) {
   return { labels, title: why.length ? `${why.join('; ')} — private trackers usually forbid these` : '' };
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn };
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn };
 })();

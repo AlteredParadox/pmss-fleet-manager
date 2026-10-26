@@ -519,17 +519,20 @@ func TestActions(t *testing.T) {
 	if err := c.Action(ctx, ActionStart, hashA); err != nil {
 		t.Fatal(err)
 	}
+	if err := c.Action(ctx, ActionPause, hashA); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Action(ctx, ActionRemove, hashA); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"d.stop", "d.close", "d.open", "d.start", "d.erase"}
+	want := []string{"d.stop", "d.close", "d.open", "d.start", "d.resume", "d.pause", "d.erase"}
 	if got := f.methods(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("methods %v", got)
 	}
 	if err := c.Action(ctx, "remove-data", hashA); !errors.Is(err, ErrBadAction) {
 		t.Fatal(err)
 	}
-	if !ValidAction(ActionStop) || !ValidAction(ActionStart) || !ValidAction(ActionRemove) || ValidAction("remove-data") || ValidAction("") {
+	if !ValidAction(ActionStop) || !ValidAction(ActionStart) || !ValidAction(ActionPause) || !ValidAction(ActionRemove) || ValidAction("remove-data") || ValidAction("") {
 		t.Fatal("ValidAction")
 	}
 	if err := c.Action(ctx, ActionStop, "../x"); !errors.Is(err, ErrBadHash) {
@@ -1465,7 +1468,7 @@ func TestOperationsDoNotInterleave(t *testing.T) {
 	if err := <-startDone; err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(f.methods(), ","); got != "d.stop,d.close,d.open,d.start" {
+	if got := strings.Join(f.methods(), ","); got != "d.stop,d.close,d.open,d.start,d.resume" {
 		t.Fatalf("order %s", got)
 	}
 	// Two labelled Adds: whole operations in sequence, so each load is
