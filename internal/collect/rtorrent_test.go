@@ -1329,7 +1329,7 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 	if _, err := m2.st.GetCache(context.Background(), p.box.ID, "state", &cached); err != nil || cached.Rt.RemoveFailed != "" {
 		t.Fatalf("fixture: the state cache should carry no notice: %v %q", err, cached.Rt.RemoveFailed)
 	}
-	m2.applyRtRemove(p.box, &cached)
+	m2.applyRtRemove(p.box, &cached, false)
 	if !strings.Contains(cached.Rt.RemoveFailed, "disk says no") || cached.Rt.RemoveFailedAt.IsZero() {
 		t.Fatalf("the notice must survive a restart: %q", cached.Rt.RemoveFailed)
 	}
@@ -1353,7 +1353,7 @@ func TestRtRemoveDataFailureReportedAfterRequest(t *testing.T) {
 	if _, err := m2.st.GetCache(context.Background(), p.box.ID, "state", &cached); err != nil || cached.Rt.RemoveFailed == "" {
 		t.Fatalf("fixture: the state cache should still carry the notice: %v", err)
 	}
-	m2.applyRtRemove(p.box, &cached)
+	m2.applyRtRemove(p.box, &cached, false)
 	if cached.Rt.RemoveFailed != "" || !cached.Rt.RemoveFailedAt.IsZero() {
 		t.Fatalf("a dismissed notice came back after a restart: %q", cached.Rt.RemoveFailed)
 	}
@@ -1579,5 +1579,61 @@ func TestRemoveBoxWaitsForMutationLease(t *testing.T) {
 	}
 	if m.poller(p.box.ID) != nil {
 		t.Fatal("removed")
+	}
+}
+
+// TestEditKeepsNewerLiveNotice (Codex on PR 123): a removal notice whose
+// row write failed is live but older on disk (or absent there); an edit
+// carrying the live state keeps the newer live notice, while a restart,
+// which has no live state, takes the row.
+func TestEditKeepsNewerLiveNotice(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	readyRt(t, p, "unix:/x")
+	p.reportRtRemove(p.generation(), rtHashA, "/home/u/data/Alpha", errors.New("first"))
+	m.cacheFault = func(kind string) error {
+		if kind == rtRemoveCacheKind {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	time.Sleep(2 * time.Millisecond)
+	p.reportRtRemove(p.generation(), rtHashB, "/home/u/data/Beta", errors.New("second"))
+	m.cacheFault = nil
+	m.mu.RLock()
+	live := *m.states[p.box.ID]
+	m.mu.RUnlock()
+	if !strings.Contains(live.Rt.RemoveFailed, "Beta") {
+		t.Fatalf("fixture: %q", live.Rt.RemoveFailed)
+	}
+	// An edit: the live state is carried; the row still says Alpha.
+	carried := live
+	m.applyRtRemove(p.box, &carried, true)
+	if !strings.Contains(carried.Rt.RemoveFailed, "Beta") {
+		t.Fatalf("an edit must keep the newer live notice: %q", carried.Rt.RemoveFailed)
+	}
+	// No row at all: the live notice still stays across an edit.
+	if err := m.st.DeleteCache(context.Background(), p.box.ID, rtRemoveCacheKind); err != nil {
+		t.Fatal(err)
+	}
+	carried = live
+	m.applyRtRemove(p.box, &carried, true)
+	if !strings.Contains(carried.Rt.RemoveFailed, "Beta") {
+		t.Fatalf("an edit must keep a live notice that has no row: %q", carried.Rt.RemoveFailed)
+	}
+	// A restart (no live state): the row decides, here nothing.
+	restored := live
+	m.applyRtRemove(p.box, &restored, false)
+	if restored.Rt.RemoveFailed != "" {
+		t.Fatalf("a restart takes the row: %q", restored.Rt.RemoveFailed)
+	}
+	// A dismiss (live cleared, row gone) is not undone by an edit either.
+	cleared := live
+	cleared.Rt.RemoveFailed, cleared.Rt.RemoveFailedAt = "", time.Time{}
+	m.applyRtRemove(p.box, &cleared, true)
+	if cleared.Rt.RemoveFailed != "" {
+		t.Fatal("a dismissed notice must stay dismissed across an edit")
 	}
 }

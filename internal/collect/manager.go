@@ -436,7 +436,7 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	// and be overwritten by the older value (Codex on PR 123).
 	g := m.labelGuard(b.ID)
 	g.Lock()
-	m.applyRtRemove(b, &st)
+	m.applyRtRemove(b, &st, prev != nil)
 	// No poll will ever run the hooks of a disabled box: let the alert
 	// rules see the disabled status now so open alerts for it resolve.
 	m.commit(b.ID, func(*BoxState) *BoxState {
@@ -997,9 +997,18 @@ func (m *Manager) restoredRtRemove(b *store.Box) (msg string, at time.Time, ok b
 }
 
 // applyRtRemove sets or clears the state's recorded removal failure from
-// the durable row, whatever the state cache carried.
-func (m *Manager) applyRtRemove(b *store.Box, st *BoxState) {
-	st.Rt.RemoveFailed, st.Rt.RemoveFailedAt, _ = m.restoredRtRemove(b)
+// the durable row, whatever the state cache carried; except that a live
+// notice newer than the row (its own row write failed: reportRtRemove still
+// publishes it, so the user sees it) is kept when the state is carried
+// live across a same-generation edit, or an edit would silently replace an
+// undismissed failure with an older one or nothing (Codex on PR 123). A
+// restart has no live state, so there the row decides.
+func (m *Manager) applyRtRemove(b *store.Box, st *BoxState, live bool) {
+	msg, at, _ := m.restoredRtRemove(b)
+	if live && st.Rt.RemoveFailed != "" && st.Rt.RemoveFailedAt.After(at) {
+		return
+	}
+	st.Rt.RemoveFailed, st.Rt.RemoveFailedAt = msg, at
 }
 
 // RtAddTorrents adds links and/or .torrent files to the box's rTorrent.
