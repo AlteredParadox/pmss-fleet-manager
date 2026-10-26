@@ -42,7 +42,12 @@ const S = {
   logOpen: new Set(), // directories whose "older / rotated" group the user expanded on the logs tab
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
+  torSort: loadTorSort(), // column sort per torrent table ('qbt', 'rtorrent', 'all'): { key, dir } or null for the default order
 };
+// The torrent tables' sort is a per-browser convenience: kept in
+// localStorage when it is available, per tab otherwise.
+function loadTorSort() { try { const v = JSON.parse(window.localStorage.getItem('pfm.torSort') || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
+function saveTorSort() { try { window.localStorage.setItem('pfm.torSort', JSON.stringify(S.torSort)); } catch { /* storage unavailable: this tab only */ } }
 
 /* ---------- helpers ---------- */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -737,7 +742,7 @@ function ovRtRows(r, both) {
   const state = r.reachable ? '' : r.disabled ? ' <span class="muted" title="~/.rtorrentDisable is set: the Pulsed Media watchdog leaves it stopped">(stopped on purpose)</span>' : ' <span class="warn">(not responding)</span>';
   return `<div><span>rTorrent</span><span>${esc(r.version || '')}${r.library ? ` <span class="muted">· libtorrent ${esc(r.library)}</span>` : ''}${state}${r.endpoint ? ` <span class="muted" title="SCGI endpoint">· ${esc(r.endpoint.replace(/^unix:/, ''))}</span>` : ''}</span></div>
       ${r.enabled && !r.reachable && r.error && !r.disabled ? `<div><span>rTorrent error</span><span class="warn" style="text-align:right">${esc(r.error)}</span></div>` : ''}
-      ${r.reachable && r.listen_port ? `<div><span>rTorrent port</span><span>${r.listen_port}${r.dht ? ' <span class="warn" title="DHT is on: private trackers usually forbid it">· DHT on</span>' : ' · DHT off'}</span></div>` : ''}
+      ${r.reachable && r.listen_port ? `<div><span>rTorrent port</span><span>${r.listen_port}${pfmView.rtDiscoveryOn(r).labels.length ? ` <span class="warn" title="${esc(pfmView.rtDiscoveryOn(r).title)}">· ${pfmView.rtDiscoveryOn(r).labels.join(' · ')} on</span>` : ' · <span title="DHT is not running; PeX is off as the default for new torrents (torrents already loaded keep their own setting)">DHT off · PeX default off</span>'}</span></div>` : ''}
       ${r.reachable ? `<div><span>torrents${both ? ' <span class="muted">(rTorrent)</span>' : ''}</span><span>${r.total} total · ${r.seeding} seeding · ${r.leeching} leeching</span></div>` : ''}`;
 }
 function ovDockerRow(b) {
@@ -861,19 +866,18 @@ function tabTorrents(b) {
   const rtOffNote = !b.rtorrent?.enabled && b.rtorrent?.disabled ? `<div class="empty" style="margin-bottom:12px">rTorrent is stopped on purpose on this box (<code>~/.rtorrentDisable</code>); monitoring is off.</div>` : '';
   if (clients.length === 0) return `${rtOffNote}<div class="empty">no torrent client is monitored on this box — enable qBittorrent or rTorrent under <a href="#/edit/${b.id}">edit</a>.</div>`;
   const f = S.filter.trim().toLowerCase();
-  // With several clients the torrents are grouped by client, each group
-  // with its own header, counts and add button; the filter spans all.
-  return `${rtOffNote}<div class="table tor-table" style="overflow:hidden">
-    ${clients.map((c, i) => clientSection(b, c, f, clients.length > 1, i === 0)).join('')}
-  </div>`;
+  // Each client gets a table of its own, with its own header, counts,
+  // add button and column sort; the filter (in the first) spans all.
+  return `${rtOffNote}${clients.map((c, i) => `<div class="table tor-table" style="overflow:hidden${i ? ';margin-top:14px' : ''}">${clientSection(b, c, f, i === 0)}</div>`).join('')}`;
 }
 // One client's header line, add form and table.
-function clientSection(b, c, f, grouped, first) {
+function clientSection(b, c, f, first) {
   const q = c.st;
   let list = q.torrents || [];
   if (f) list = list.filter((t) => torrentMatches(t, f));
+  list = pfmView.sortTorrents(list, S.torSort[c.key]);
   const shown = list.slice(0, 300);
-  const notes = c.key === 'qbt' ? `${discoveryNote(q, b)}${connectionNote(q)}` : rtNote(q);
+  const notes = c.key === 'qbt' ? `${discoveryNote(q, b)}${connectionNote(q)}` : rtNote(q, b);
   const avail = pfmView.clientAvailability(q); // stopped on purpose is expected: no warning, nothing to add to
   if (avail.stopped && S.torAdd && (S.torAdd.client || 'qbt') === c.key && !S.torAdd.busy) S.torAdd = null; // an open draft for a client that just stopped is dropped
   const addOpen = !avail.stopped && S.torAdd && (S.torAdd.client || 'qbt') === c.key;
@@ -886,11 +890,11 @@ function clientSection(b, c, f, grouped, first) {
   if (!q.enabled) {
     // Monitoring is off: only the notice is left to show (and dismiss); no
     // counts, no controls, nothing to add to.
-    return `<div class="thead-tools"${grouped && !first ? ' style="border-top:1px solid var(--line)"' : ''}>
+    return `<div class="thead-tools">
       <div style="font-size:12px"><b>${c.label}</b> <span class="muted">· monitoring is off</span>${removeFailed}</div>
     </div>`;
   }
-  return `<div class="thead-tools"${grouped && !first ? ' style="border-top:1px solid var(--line)"' : ''}>
+  return `<div class="thead-tools">
       <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span>${removeFailed}</div>
       <div class="actions">
         ${first ? `<input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">` : ''}
@@ -901,25 +905,44 @@ function clientSection(b, c, f, grouped, first) {
     </div>
     ${addOpen ? torAddForm(b, q.torrents || [], c) : ''}
     <div style="overflow:auto">
-      ${TOR_HEAD('')}
+      ${TOR_HEAD(c.key)}
       ${shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(q.total, q.torrents, b.status)}</span></div>` : shown.map((t) => torrentRow(b, t, '')).join('')}
       ${list.length > shown.length ? `<div class="trow"><span class="muted">showing ${shown.length} of ${list.length} — refine the filter</span></div>` : ''}
     </div>`;
 }
-// rTorrent's header notes: its listen port and DHT state, and the
-// on-purpose stop.
-function rtNote(r) {
+// rTorrent's header notes: its listen port, the DHT / PeX toggles, and
+// the on-purpose stop.
+function rtNote(r, b) {
   if (!r.reachable) return r.disabled ? ' · <span class="muted" title="~/.rtorrentDisable is set">stopped on purpose</span>' : '';
   // Where "+ files" may delete: rTorrent's download folder as read from the
   // box's own config (never from the client). Said up front so a refusal
   // for data kept elsewhere is no surprise.
   const fence = r.data_dir ? ` · <span class="muted" title="Remove with files deletes only inside rTorrent's download folder (${esc(r.data_dir)}, from directory.default in ~/.rtorrent.rc on the box). Data kept anywhere else, or a torrent that never started, is refused and the torrent left in place; plain remove always works. To move the fence, set directory.default.set in ~/.rtorrent.rc.custom.">files: ${esc(r.data_dir)}</span>` : '';
-  return `${r.listen_port ? ` · port ${r.listen_port}` : ''} · <span class="${r.dht ? 'warn' : 'muted'}" title="${r.dht ? 'DHT is on: private trackers usually forbid it' : 'DHT off'}">DHT ${r.dht ? 'on' : 'off'}</span>${fence}`;
+  return `${r.listen_port ? ` · port ${r.listen_port}` : ''}${rtDiscoveryNote(r, b)}${fence}`;
 }
+// rTorrent's DHT / PeX toggles, styled like qBittorrent's. A click writes
+// the setting to ~/.rtorrent.rc.custom and applies it live; the button
+// shows what the file says, with ↻ while the running client still differs
+// (a change it could not take live waits for a restart). rTorrent has no
+// local service discovery, so LSD is shown as not applicable.
+function rtDiscoveryNote(r, b) {
+  const list = pfmView.rtDiscovery(r);
+  if (!list.length) return '';
+  return ' · ' + list.map((d) => {
+    return `<button class="disc ${d.warn ? 'warn' : ''}" data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(pfmView.rtDiscoveryHint(d))}"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(b.name)}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
+  }).join(' · ') + ' · <span class="disc na" title="rTorrent has no local service discovery">LSD n/a</span>';
+}
+
 const KIND_COLOR = { seeding: 'var(--ok)', leeching: 'var(--accent)', paused: 'var(--dim)', checking: 'var(--warn)', error: 'var(--bad)', unknown: 'var(--dim)' };
-// Column headings shared by both torrent tables; lead is the optional first
-// heading (the seedbox, in the fleet-wide list).
-const TOR_HEAD = (lead) => `<div class="trow head">${lead}<span>name</span><span>size</span><span>progress</span><span>up</span><span>down</span><span title="lifetime uploaded">uploaded</span><span title="lifetime downloaded">downloaded</span><span>ratio</span><span title="connected seeds (swarm total)">seeds</span><span title="connected peers (swarm total)">peers</span><span></span></div>`;
+// Column headings shared by the torrent tables, each a sort button for its
+// table ('qbt', 'rtorrent' or 'all'); the fleet-wide list leads with the
+// seedbox.
+const TOR_COLS = [['name', 'name'], ['size', 'size'], ['progress', 'progress'], ['up', 'up'], ['down', 'down'], ['uploaded', 'uploaded', 'lifetime uploaded'], ['downloaded', 'downloaded', 'lifetime downloaded'], ['ratio', 'ratio'], ['seeds', 'seeds', 'connected seeds (swarm total)'], ['peers', 'peers', 'connected peers (swarm total)']];
+function sortHead(table, key, label, hint) {
+  const s = S.torSort[table], on = s?.key === key;
+  return `<button class="th-sort${on ? ' on' : ''}" data-act="sort:tor" data-table="${table}" data-key="${key}" title="${hint ? hint + ' — ' : ''}sort by ${label}${on ? ' (click again to reverse, a third time for the default order)' : ''}">${label}${on ? (s.dir === 'asc' ? ' ▲' : ' ▼') : ''}</button>`;
+}
+const TOR_HEAD = (table, box = false) => `<div class="trow head">${box ? sortHead(table, 'box', 'seedbox') : ''}${TOR_COLS.map(([k, l, h]) => sortHead(table, k, l, h)).join('')}<span></span></div>`;
 // Lifetime transfer summed over a list, for the table headers.
 function transferNote(list) {
   let up = 0, down = 0;
@@ -977,7 +1000,7 @@ function viewTorrents() {
     if (ra !== rb) return rb - ra;
     return ba.name.localeCompare(bb.name) || ba.id - bb.id;
   });
-  const shown = rows.slice(0, 500);
+  const shown = pfmView.sortTorrents(rows, S.torSort.all, (r) => r[1], (r) => r[0].name).slice(0, 500);
   const qbtBoxes = boxes.filter((b) => boxClients(b).length).length;
   const allTorrents = (list) => list.flatMap((b) => boxClients(b).flatMap((c) => c.st.torrents || []));
   return `<div class="head"><div><div class="eyebrow">PMSS</div><h1>Torrents</h1></div></div>
@@ -987,7 +1010,7 @@ function viewTorrents() {
       <div class="actions"><input class="filter" placeholder="filter name, label, state, client or box…" data-filter value="${esc(S.filter)}" style="max-width:260px"></div>
     </div>
     <div style="overflow:auto">
-      ${TOR_HEAD('<span>seedbox</span>')}
+      ${TOR_HEAD('all', true)}
       ${qbtBoxes === 0 ? `<div class="trow"><span class="muted">no box has a torrent client monitored</span></div>`
         : shown.length === 0 ? `<div class="trow"><span class="muted">${emptyTorrents(sum.total, allTorrents(S.torrents), boxes.some((b) => b.status !== 'disabled' && boxClients(b).some((c) => c.st.total)) ? '' : 'disabled')}</span></div>`
         : shown.map(([b, t]) => torrentRow(b, t, boxCell(b, t))).join('')}
@@ -999,8 +1022,9 @@ function viewTorrents() {
 // discovery mechanisms in parentheses so private-tracker placement is
 // visible per row.
 function boxCell(b, t) {
-  const on = t?.client === 'rtorrent' ? (b.rtorrent?.dht ? ['DHT'] : []) : discoveryOn(b.qbt);
-  return `<div class="ellip" title="${esc(b.name)}${on.length ? ' · ' + esc(on.join(', ')) + ' enabled' : ''}"><a href="#/box/${b.id}/torrents">${esc(b.name)}</a>${on.length ? ` <span class="warn">(${esc(on.join(' · '))})</span>` : ''}</div>`;
+  const rt = t?.client === 'rtorrent' ? pfmView.rtDiscoveryOn(b.rtorrent) : null;
+  const on = rt ? rt.labels : discoveryOn(b.qbt);
+  return `<div class="ellip" title="${esc(b.name)}${on.length ? ' · ' + esc(rt ? rt.title : on.join(', ') + ' enabled') : ''}"><a href="#/box/${b.id}/torrents">${esc(b.name)}</a>${on.length ? ` <span class="warn">(${esc(on.join(' · '))})</span>` : ''}</div>`;
 }
 /* ---------- peer discovery (DHT / PeX / LSD) ---------- */
 const DISCOVERY = [['dht', 'DHT'], ['pex', 'PeX'], ['lsd', 'LSD']];
@@ -1086,12 +1110,19 @@ function torrentButtons(b, t) {
   const files = client === 'rtorrent'
     ? `Remove ${name} from rTorrent AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? The box first checks that the path lies inside rTorrent's download directory and refuses otherwise, leaving the torrent in place. If it passes, the torrent is removed and then its files are deleted; should the deletion fail at that point, the torrent is already gone and files may remain. This cannot be undone.`
     : `Remove ${name} AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? This cannot be undone.`;
+  // Icons; the hover text names each. A disabled button's own title (in h)
+  // comes first and so is the one shown.
   return `${pfmView.torrentAction(client, t.kind) === 'start'
-    ? `<button class="small" data-act="tor:start" ${h}>start</button>`
-    : `<button class="small" data-act="tor:stop" ${h} data-confirm="Stop ${name} on ${esc(b.name)}?">stop</button>`}
-    <button class="small ghost" data-act="tor:remove" ${h} data-confirm="Remove ${name} from ${label} on ${esc(b.name)}? The downloaded files stay on disk.">remove</button>
-    <button class="small ghost" data-act="tor:remove-data" ${h} data-confirm="${files}">+ files</button>`;
+    ? `<button class="icon" data-act="tor:start" ${h} title="start" aria-label="start">${ICON.start}</button>`
+    : `<button class="icon" data-act="tor:stop" ${h} title="stop" aria-label="stop" data-confirm="Stop ${name} on ${esc(b.name)}?">${ICON.stop}</button>`}<button class="icon" data-act="tor:remove" ${h} title="remove (keeps the files)" aria-label="remove, keeping the files" data-confirm="Remove ${name} from ${label} on ${esc(b.name)}? The downloaded files stay on disk.">${ICON.remove}</button><button class="icon danger" data-act="tor:remove-data" ${h} title="remove and delete the files" aria-label="remove and delete the files" data-confirm="${files}">${ICON.trash}</button>`;
 }
+// Torrent row icons (16-unit grid, drawn in the button's colour).
+const ICON = {
+  start: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6L12.5 8z" fill="currentColor"/></svg>',
+  stop: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 1.5h5l4 4v5l-4 4h-5l-4-4v-5z"/><path d="M5 8h6"/></svg>',
+  remove: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
+  trash: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M6.2 4.5V2.5h3.6v2M4 4.5l.8 9h6.4l.8-9M6.6 7v4.5M9.4 7v4.5"/></svg>',
+};
 function tabContainers(b) {
   const d = b.docker;
   if (!d.enabled) return `<div class="empty">docker monitoring is off for this box — enable it under <a href="#/edit/${b.id}">edit</a>.</div>`;
@@ -1791,10 +1822,14 @@ async function torrentAction(a, act) {
   if (S.view === 'torrents') void loadTorrents();
 }
 async function discoveryAction(a, act) {
-  const k = a.slice(5), on = !act.dataset.on;
+  const k = a.slice(5), on = !act.dataset.on, rt = act.dataset.client === 'rtorrent';
+  const label = { dht: 'DHT', pex: 'PeX', lsd: 'LSD' }[k] || esc(k);
   act.disabled = true;
-  await api('POST', `${BASE}/api/boxes/${S.selId}/qbt/discovery`, { [k]: on });
-  toast(`${k.toUpperCase()} ${on ? 'enabled' : 'disabled'}`, 'ok');
+  // rTorrent: saved to ~/.rtorrent.rc.custom, then applied live; the
+  // answer says when the running client could not follow (restart).
+  const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${rt ? 'rtorrent' : 'qbt'}/discovery`, { [k]: on });
+  if (rt) { const m = pfmView.rtDiscoveryToast(k, on, r); toast(m.text, m.kind); }
+  else toast(`${label} ${on ? 'enabled' : 'disabled'}`, 'ok');
   await loadDetail(S.selId);
 }
 async function torAddAction(a, act) {
@@ -1920,6 +1955,7 @@ async function runAction(a, act) {
   else if (a === 'rt:dismiss-failure') { act.disabled = true; await api('POST', `${BASE}/api/boxes/${S.selId}/rtorrent/remove-failure/dismiss`, { at: act.dataset.at }); toast('notice dismissed', 'ok'); await loadDetail(S.selId); }
   else if (a.startsWith('tor-add:')) await torAddAction(a, act);
   else if (a.startsWith('disc:')) await discoveryAction(a, act);
+  else if (a === 'sort:tor') { const tb = act.dataset.table; S.torSort[tb] = pfmView.nextSort(S.torSort[tb], act.dataset.key); saveTorSort(); render(); }
   else if (a.startsWith('ctr:')) await containerAction(a, act);
   else if (a === 'app:watch') await appWatchAction(act);
   else if (a.startsWith('log:')) await logAction(a, act);

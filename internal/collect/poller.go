@@ -96,6 +96,10 @@ type poller struct {
 	// dialDetached is the test hook for the destructive phase's own
 	// transport (see detachedTransport).
 	dialDetached func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error)
+	runConf      scriptRunner // test hook: runs SetRtDiscovery's script in place of the SSH channel
+	// beforeRtPublish is the test hook between SetRtDiscovery's remote
+	// steps and its publication.
+	beforeRtPublish func()
 
 	duMu      sync.Mutex
 	duRunning bool
@@ -121,8 +125,9 @@ type poller struct {
 	// after it treats whatever client is up as a new process, which
 	// matters when the poller has no identity baseline yet (a fresh
 	// poller after a dashboard start or a box edit).
-	restartAt time.Time
-	discWant  map[string]discWrite // per-key SetDiscovery writes, see noteDiscovery
+	restartAt  time.Time
+	discWant   map[string]discWrite   // per-key SetDiscovery writes, see noteDiscovery
+	rtDiscWant map[string]rtDiscWrite // per-key SetRtDiscovery writes, see noteRtDiscovery
 }
 
 // discWrite is one value SetDiscovery wrote and when.
@@ -214,6 +219,7 @@ func (p *poller) afterPoll(start time.Time) func(*BoxState) {
 			s.Qbt.PortOK, s.Qbt.Reachable = false, false
 		}
 		p.overlayDiscovery(start, &s.Qbt.Discovery)
+		p.overlayRtDiscovery(start, &s.Rt)
 	}
 }
 

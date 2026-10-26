@@ -116,6 +116,7 @@ h1{margin:2px 0 0;font-size:22px;font-weight:600;letter-spacing:-.01em}
 button.disc{background:none;border:1px dashed var(--line);padding:0 5px;font-size:inherit;color:var(--muted);line-height:1.4} /* DHT/PeX/LSD toggles in the torrents header */
 button.disc.warn{color:var(--warn);border-color:var(--warn)} /* DHT/PeX/LSD on: not for private-tracker torrents */
 button.disc:hover{color:var(--text)}
+.disc.na{border:1px dashed var(--line);padding:0 5px;color:var(--dim);cursor:default} /* LSD for rTorrent: no such mechanism */
 .meter{height:4px;background:var(--line);border-radius:2px;overflow:hidden}
 .meter>i{display:block;height:100%;background:var(--accent);border-radius:2px}
 .meter.thick{height:6px}
@@ -139,10 +140,18 @@ button.disc:hover{color:var(--text)}
 .trow.click{cursor:pointer}.trow.click:hover{background:var(--panel2)}
 .fleet-table .trow{grid-template-columns:minmax(170px,1.5fr) 80px minmax(120px,1fr) minmax(130px,1fr) minmax(130px,1fr) 160px 100px 90px 80px;min-width:1120px}
 .fleet-table .trow>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tor-table .trow{grid-template-columns:minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 210px;min-width:1280px;padding:10px 16px}
+.tor-table .trow{grid-template-columns:minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 84px;min-width:1160px;padding:4px 16px} /* compact rows */
 .tor-table .swarm{font-size:10.5px}
 .tor-table .trow .actions,.tor-table .thead-tools .actions{flex-wrap:nowrap;justify-content:flex-end} /* filter + pause/resume on one line, stop/remove/+files on one line */
-.tor-all .trow{grid-template-columns:minmax(150px,1fr) minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 210px;min-width:1440px} /* fleet-wide list: seedbox column first */
+.tor-table .trow .actions{gap:2px}
+button.icon{background:none;border:1px solid transparent;padding:3px;line-height:0;color:var(--muted)} /* torrent row actions: start / stop / remove / remove with files */
+button.icon:hover{color:var(--text);border-color:var(--line)}
+button.icon.danger:hover{color:var(--bad);border-color:var(--bad)}
+button.icon:disabled:hover{color:var(--muted);border-color:transparent}
+button.icon svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+button.th-sort{background:none;border:0;padding:0;color:inherit;font:inherit;text-transform:inherit;letter-spacing:inherit;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis} /* sortable column headings */
+button.th-sort:hover,button.th-sort.on{color:var(--text)}
+.tor-all .trow{grid-template-columns:minmax(150px,1fr) minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 84px;min-width:1320px} /* fleet-wide list: seedbox column first */
 .tor-all .trow a{color:var(--text);text-decoration:none}
 .tor-all .trow a:hover{color:var(--accent)}
 .tor-add{display:grid;grid-template-columns:1fr 1fr auto auto;gap:12px 16px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--bg);align-items:start}
@@ -151,7 +160,7 @@ button.disc:hover{color:var(--text)}
 .tor-add label.row{display:flex;gap:6px;align-items:center;font-size:12px;white-space:nowrap}
 .tor-add label.row input{width:auto}
 @media (max-width:900px){.tor-add{grid-template-columns:1fr 1fr}}
-.tor-table .trow.head{padding:8px 16px;font-size:10.5px}
+.tor-table .trow.head{padding:7px 16px;font-size:10.5px}
 .ctr-table .trow{grid-template-columns:minmax(160px,1.3fr) minmax(200px,1.5fr) 110px minmax(140px,1fr) 90px 110px 150px;min-width:960px;padding:10px 16px}
 .ctr-table .trow.head{padding:8px 16px;font-size:10.5px}
 .app-table .trow{grid-template-columns:minmax(170px,1.4fr) 90px 150px 70px 90px 90px minmax(110px,1fr) 70px 90px;min-width:1040px;padding:10px 16px}

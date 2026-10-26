@@ -1315,6 +1315,11 @@ type RtInfo struct {
 	// home. Read from the box's own files over SSH, not from the SCGI peer,
 	// it is the boundary remove-with-data is allowed to delete under.
 	DataDir string
+	// ConfDHT and ConfPeX are the peer-discovery settings the config files
+	// give a restarted rTorrent: "on" or "off" ("" when they say nothing).
+	// DHT "auto" counts as on: it starts for any public torrent.
+	ConfDHT string
+	ConfPeX string
 	// Disabled is the ~/.rtorrentDisable marker: the tenant told PMSS's
 	// watchdog to stop rTorrent and leave it stopped.
 	Disabled bool
@@ -1372,6 +1377,20 @@ func parseRt(s map[string]string, home string) RtInfo {
 			}
 		case "directory.default.set", "directory":
 			r.DataDir = homeDir(v, home)
+		case "dht.mode.set", "dht":
+			switch v {
+			case "on", "auto":
+				r.ConfDHT = "on"
+			case "off", "disable":
+				r.ConfDHT = "off"
+			}
+		case "protocol.pex.set", "peer_exchange":
+			switch strings.ToLower(v) {
+			case "yes", "1", "true":
+				r.ConfPeX = "on"
+			case "no", "0", "false":
+				r.ConfPeX = "off"
+			}
 		}
 	}
 	return r

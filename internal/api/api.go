@@ -257,6 +257,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/torrents/{hash}/{action}", s.handleRtTorrentAction)
 	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/torrents", s.handleRtAddTorrents) // literal segment wins over {hash}
 	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/remove-failure/dismiss", s.handleRtDismissRemoveFailure)
+	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/discovery", s.handleSetRtDiscovery)
 	mux.HandleFunc("POST "+bp+boxRoute+"/containers/{cid}/{action}", s.handleContainerAction)
 	mux.HandleFunc("POST "+bp+boxRoute+"/apps/watch", s.handleAppWatch)
 	mux.HandleFunc("POST "+bp+boxRoute+"/logs/read", s.handleReadLog)                   // runs tail over SSH: POST so the CSRF check applies
@@ -1082,6 +1083,40 @@ func (s *Server) handleSetDiscovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// handleSetRtDiscovery takes {"dht":bool,"pex":bool} (any subset): written
+// to ~/.rtorrent.rc.custom on the box and applied live; the answer says
+// whether the running client has them now (live) or after a restart (note).
+func (s *Server) handleSetRtDiscovery(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	var want map[string]bool
+	if err := decodeStrict(r, &want); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	for k := range want {
+		if !collect.RtDiscoveryKeys[k] {
+			writeErr(w, 400, fmt.Errorf("unknown setting %q (rTorrent has dht and pex)", k))
+			return
+		}
+	}
+	if len(want) == 0 {
+		writeErr(w, 400, errors.New("nothing to change"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	res, err := s.m.SetRtDiscovery(ctx, id, want)
+	if err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "live": res.Live, "note": res.Note})
 }
 
 func (s *Server) handleAddTorrents(w http.ResponseWriter, r *http.Request) {
