@@ -628,8 +628,14 @@ func (s *Store) SetHostKey(ctx context.Context, id int64, host string, port int,
 
 // DeleteBox removes a box and its alerts and cache.
 func (s *Store) DeleteBox(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM boxes WHERE id=?`, id)
-	return err
+	r, err := s.db.ExecContext(ctx, `DELETE FROM boxes WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, err := r.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GetSettings returns settings merged over defaults.

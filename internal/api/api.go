@@ -1231,6 +1231,15 @@ func (s *Server) handleRtAddTorrents(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	res, err := s.m.RtAddTorrents(ctx, id, req)
+	if err != nil && res.Added > 0 {
+		// Some entries were loaded before the batch stopped: those are
+		// reported as added, with why the rest were not (the entry being sent
+		// when it stopped may or may not have been loaded), not as a failed
+		// add (daybreak blue re-review of PR 123).
+		writeJSON(w, 200, map[string]any{"ok": true, "links": len(req.URLs), "files": len(req.Files), "added": res.Added, "failed": res.Failed, "unlabelled": res.Unlabelled,
+			"stopped_early": clipErr(err, 300)})
+		return
+	}
 	if err != nil {
 		code := actionCode(err)
 		var f *rtorrent.Fault
@@ -1587,4 +1596,13 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	s.m.SetSettings(in)
 	s.m.Publish(collect.Event{Type: "settings"}) // other tabs refresh their copy
 	writeJSON(w, 200, in.Public())
+}
+
+// clipErr bounds an error message for a response field.
+func clipErr(err error, n int) string {
+	m := err.Error()
+	if len(m) > n {
+		m = m[:n] + "…"
+	}
+	return m
 }

@@ -82,12 +82,12 @@ type Manager struct {
 	jobsClosed bool
 	// rtLeases are per-box mutation leases for rTorrent (add, actions,
 	// remove-with-data for its whole life, and a box removal): one mutation
-	// at a time per box, whatever client or poller carries it. labelGuards
+	// at a time per box, whatever client or poller carries it. noticeGuards
 	// serialise the writes of a box's removal notice (its row and its
 	// publication).
-	leaseMu     sync.Mutex
-	rtLeases    map[int64]chan struct{}
-	labelGuards map[int64]*sync.Mutex
+	leaseMu      sync.Mutex
+	rtLeases     map[int64]chan struct{}
+	noticeGuards map[int64]*sync.Mutex
 	// cacheFault, when set (tests), fails a cache write of the given kind.
 	cacheFault func(kind string) error
 	// watchMu serialises SetAppWatch's read-modify-write of a box's watch
@@ -140,11 +140,11 @@ type Manager struct {
 // New creates a Manager. Call Start to begin polling.
 func New(st *store.Store, log *slog.Logger) *Manager {
 	m := &Manager{st: st, bus: NewBus(), log: log, states: map[int64]*BoxState{}, pollers: map[int64]*poller{},
-		pmapi:       &pmapi.Client{URL: os.Getenv("PMSS_PMAPI_URL")}, // URL overrides are for testing against a mock
-		pmdb:        &pmdb.Client{URL: os.Getenv("PMSS_PMDB_URL")},
-		pmdbWakeCh:  make(chan struct{}, 1),
-		rtLeases:    map[int64]chan struct{}{},
-		labelGuards: map[int64]*sync.Mutex{}}
+		pmapi:        &pmapi.Client{URL: os.Getenv("PMSS_PMAPI_URL")}, // URL overrides are for testing against a mock
+		pmdb:         &pmdb.Client{URL: os.Getenv("PMSS_PMDB_URL")},
+		pmdbWakeCh:   make(chan struct{}, 1),
+		rtLeases:     map[int64]chan struct{}{},
+		noticeGuards: map[int64]*sync.Mutex{}}
 	m.jobCtx, m.jobCancel = context.WithCancel(context.Background())
 	def := store.DefaultSettings()
 	m.settings.Store(&def)
@@ -340,16 +340,16 @@ func (l *boxLease) Acquire(ctx context.Context) (release func(), err error) {
 	}
 }
 
-// labelGuard serialises the writes of a box's rTorrent records (the
+// noticeGuard serialises the writes of a box's rTorrent records (the
 // removal notice: its row and its publication), so an older state can
 // never be written after a newer one.
-func (m *Manager) labelGuard(id int64) *sync.Mutex {
+func (m *Manager) noticeGuard(id int64) *sync.Mutex {
 	m.leaseMu.Lock()
 	defer m.leaseMu.Unlock()
-	g, ok := m.labelGuards[id]
+	g, ok := m.noticeGuards[id]
 	if !ok {
 		g = &sync.Mutex{}
-		m.labelGuards[id] = g
+		m.noticeGuards[id] = g
 	}
 	return g
 }
@@ -434,7 +434,7 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	// and published under the same per-box guard the recording and the
 	// dismissal hold, so neither can land between the read and the publish
 	// and be overwritten by the older value (Codex on PR 123).
-	g := m.labelGuard(b.ID)
+	g := m.noticeGuard(b.ID)
 	g.Lock()
 	// The box's live notice as it is now, under the guard (an edit's
 	// snapshot may predate a dismiss or a newer report); a start reads the row.
@@ -690,9 +690,14 @@ func authEndpointChanged(p *poller, fresh *store.Box) bool {
 // RemoveBox stops polling and deletes the box, its alerts and its cache.
 func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 	// An unknown box allocates nothing: the lease registry holds entries for
-	// boxes that exist (daybreak blue re-review of PR 123).
+	// boxes that exist (daybreak blue re-review of PR 123). A box no longer
+	// live but still in the store (an earlier removal's row delete failed)
+	// can be removed again, rather than answering not found until a restart
+	// brings it back (daybreak blue re-review of PR 123).
 	if m.poller(id) == nil {
-		return store.ErrNotFound
+		if _, err := m.st.GetBox(ctx, id); err != nil {
+			return err
+		}
 	}
 	// The box's rTorrent mutation lease first (the order the detached job's
 	// own waits use: lease, then the edit lock): a remove-with-data holds
@@ -937,7 +942,7 @@ func (m *Manager) DismissRtRemoveFailure(id int64, at time.Time) error {
 	if p == nil {
 		return store.ErrNotFound
 	}
-	g := m.labelGuard(id)
+	g := m.noticeGuard(id)
 	g.Lock()
 	defer g.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -972,16 +977,32 @@ func (m *Manager) DismissRtRemoveFailure(id int64, at time.Time) error {
 			return fmt.Errorf("the notice could not be read back; nothing was changed: %w", err)
 		}
 	}
-	if err := m.st.DeleteCache(ctx, id, rtRemoveCacheKind); err != nil {
-		return err
+	// The row goes only if it is not newer than what the user saw: a newer
+	// row (written while the shown notice was a stand-in for an unreadable
+	// row, or by a report whose live publish lost a race) becomes the live
+	// notice instead, so a dismiss never erases an outcome nobody saw; an
+	// unreadable row is kept for the next start (daybreak blue re-review of
+	// PR 123).
+	var nextMsg string
+	var nextAt time.Time
+	b := p.box
+	switch rowMsg, rowAt, err := m.restoredRtRemove(b); {
+	case err != nil:
+		m.log.Warn("read rtorrent removal outcome on dismiss; the row is kept", "box", b.Name, "err", err)
+	case rowMsg != "" && rowAt.After(at):
+		nextMsg, nextAt = rowMsg, rowAt
+	default:
+		if err := m.st.DeleteCache(ctx, id, rtRemoveCacheKind); err != nil {
+			return err
+		}
 	}
 	m.commit(id, func(st *BoxState) *BoxState {
 		if st == nil {
 			return nil
 		}
-		next := *st
-		next.Rt.RemoveFailed, next.Rt.RemoveFailedAt = "", time.Time{}
-		return &next
+		n := *st
+		n.Rt.RemoveFailed, n.Rt.RemoveFailedAt = nextMsg, nextAt
+		return &n
 	}, commitOpts{hooks: true, publish: true})
 	return nil
 }
@@ -991,7 +1012,7 @@ func (m *Manager) DismissRtRemoveFailure(id int64, at time.Time) error {
 const rtRemoveCacheKind = "rt_remove"
 
 // rtRemoveCache is the persisted form, scoped to the box's generation like
-// the owed labels: a record moved to another machine carries no notice.
+// a box's other caches: a record moved to another machine carries no notice.
 type rtRemoveCache struct {
 	Generation string    `json:"generation"`
 	Message    string    `json:"message"`

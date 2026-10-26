@@ -573,7 +573,7 @@ func (p *poller) reportRtRemove(gen, hash, base string, err error) {
 	// Stop's drain, whose manager context is gone, writes it too (own
 	// context). The row is written only when the live state still belongs
 	// to gen, like the state itself.
-	g := p.m.labelGuard(p.box.ID)
+	g := p.m.noticeGuard(p.box.ID)
 	g.Lock()
 	defer g.Unlock()
 	p.m.mu.RLock()

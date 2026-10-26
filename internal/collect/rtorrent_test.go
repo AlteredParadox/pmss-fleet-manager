@@ -1415,7 +1415,7 @@ func TestStartPollerPublishesNoticeUnderGuard(t *testing.T) {
 	if err := m.st.CreateBox(context.Background(), &box); err != nil {
 		t.Fatal(err)
 	}
-	g := m.labelGuard(box.ID)
+	g := m.noticeGuard(box.ID)
 	g.Lock() // a report in progress
 	started := make(chan struct{})
 	go func() { m.startPoller(&box, nil); close(started) }()
@@ -1707,5 +1707,70 @@ func TestRemovalNoticeEdges(t *testing.T) {
 	_, rowAt, ok := rowNotice(m, p.box)
 	if !ok || !rowAt.Equal(got) {
 		t.Fatalf("row and live share the new time: %v %v %v", ok, rowAt, got)
+	}
+}
+
+// Daybreak blue re-review of PR 123: a box whose row delete failed is no
+// longer live but can be removed again (not a 404 until a restart); a
+// removal of an id the store does not know is a 404 from the store too.
+func TestRemoveBoxRetryAfterFailedDelete(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	defer m.cancel()
+	// What a removal whose row delete failed leaves: no poller, the row.
+	m.mu.Lock()
+	delete(m.pollers, p.box.ID)
+	m.mu.Unlock()
+	if err := m.RemoveBox(context.Background(), p.box.ID); err != nil {
+		t.Fatalf("a retry must reach the store: %v", err)
+	}
+	if _, err := m.st.GetBox(context.Background(), p.box.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the row must be gone: %v", err)
+	}
+	if err := m.RemoveBox(context.Background(), p.box.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("then not found: %v", err)
+	}
+	if err := m.st.DeleteBox(context.Background(), 4242); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the store reports a delete of nothing: %v", err)
+	}
+}
+
+// Daybreak blue re-review of PR 123: a dismiss never erases a row newer
+// than the notice dismissed (here the shown notice was the stand-in for an
+// unreadable row); the newer row becomes the live notice.
+func TestDismissKeepsNewerRow(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	readyRt(t, p, "unix:/x")
+	shown := time.Now()
+	m.mu.Lock()
+	m.states[p.box.ID].Rt.RemoveFailed, m.states[p.box.ID].Rt.RemoveFailedAt = "stand-in", shown
+	m.mu.Unlock()
+	newer := shown.Add(time.Second)
+	if err := m.st.SetCache(context.Background(), p.box.ID, rtRemoveCacheKind, rtRemoveCache{Generation: boxGeneration(p.box), Message: "Gamma: real failure", At: newer}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DismissRtRemoveFailure(p.box.ID, shown); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.RLock()
+	live := m.states[p.box.ID].Rt
+	m.mu.RUnlock()
+	if live.RemoveFailed != "Gamma: real failure" || !live.RemoveFailedAt.Equal(newer) {
+		t.Fatalf("the newer row must become the live notice: %+v", live)
+	}
+	if msg, _, ok := rowNotice(m, p.box); !ok || msg != "Gamma: real failure" {
+		t.Fatalf("the newer row must survive: %q %v", msg, ok)
+	}
+	if err := m.DismissRtRemoveFailure(p.box.ID, newer); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := rowNotice(m, p.box); ok {
+		t.Fatal("dismissing the newer notice clears it")
 	}
 }
