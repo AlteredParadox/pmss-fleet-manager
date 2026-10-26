@@ -156,22 +156,40 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 	useAgent := cfg.AuthMethod == "agent" || cfg.AuthMethod == ""
 	usePass := cfg.AuthMethod == "password" || (cfg.AuthMethod == "" && cfg.Password != "")
 
+	var files []ssh.Signer
 	var unreadable []string
 	if useKey {
-		m, denied, err := keyMethods(cfg)
+		s, denied, err := keyMethods(cfg)
 		if err != nil {
 			return nil, cleanup, err
 		}
-		methods = append(methods, m...)
-		unreadable = denied
+		files, unreadable = s, denied
 	}
+	var fromAgent func() ([]ssh.Signer, error)
 	if useAgent {
-		m, release, err := agentMethod(cfg)
+		f, release, err := agentMethod(cfg)
 		if err != nil {
 			return nil, cleanup, err
 		}
-		methods = append(methods, m...)
-		cleanup = release
+		fromAgent, cleanup = f, release
+	}
+	// One public-key method for the key files and the agent, in that
+	// order. x/crypto marks a rejected method name as tried and skips any
+	// later method of the same name, so an agent offered as a second
+	// "publickey" method is never asked once a key file (the -ssh-key
+	// default authorized on another box, say) is refused (fred on PR 128).
+	if len(files) > 0 || fromAgent != nil {
+		methods = append(methods, ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+			out := append([]ssh.Signer(nil), files...)
+			if fromAgent != nil {
+				as, err := fromAgent()
+				if err != nil && len(out) == 0 {
+					return nil, err
+				}
+				out = append(out, as...)
+			}
+			return out, nil
+		}))
 	}
 	if usePass {
 		m, err := passwordMethods(cfg)
@@ -258,33 +276,31 @@ func keySigners(cfg Config) ([]ssh.Signer, []string, error) {
 	return signers, unreadable, nil
 }
 
-// keyMethods returns public-key auth from the loaded signers, plus the
-// default keys that could not be read; none is an error only when key auth
-// was selected explicitly.
-func keyMethods(cfg Config) ([]ssh.AuthMethod, []string, error) {
+// keyMethods returns the usable key-file signers, plus the default keys
+// that could not be read; none is an error only when key auth was selected
+// explicitly.
+func keyMethods(cfg Config) ([]ssh.Signer, []string, error) {
 	signers, unreadable, err := keySigners(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(signers) > 0 {
-		return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, unreadable, nil
-	} else if cfg.AuthMethod == "key" {
+	if len(signers) == 0 && cfg.AuthMethod == "key" {
 		return nil, nil, errors.New("ssh: no usable private key in ~/.ssh or the -ssh-key default (set a key path, or the key needs a passphrase)" + unreadableHint(unreadable))
 	}
-	return nil, unreadable, nil
+	return signers, unreadable, nil
 }
 
-// agentMethod returns public-key auth through the agent at SSH_AUTH_SOCK
-// with the function that closes the agent socket; without an agent the
-// methods are empty and the cleanup a no-op, unless agent auth was selected
-// explicitly, which is an error.
-func agentMethod(cfg Config) ([]ssh.AuthMethod, func(), error) {
+// agentMethod returns the agent's signers at SSH_AUTH_SOCK (asked for at
+// the handshake) with the function that closes the agent socket; without
+// an agent the source is nil and the cleanup a no-op, unless agent auth
+// was selected explicitly, which is an error.
+func agentMethod(cfg Config) (func() ([]ssh.Signer, error), func(), error) {
 	noop := func() { /* no agent socket was opened */ }
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 		if conn, err := net.DialTimeout("unix", sock, 5*time.Second); err == nil {
 			ag := agent.NewClient(conn)
 			cleanup := func() { conn.Close() } // only needed during the handshake
-			return []ssh.AuthMethod{ssh.PublicKeysCallback(ag.Signers)}, cleanup, nil
+			return ag.Signers, cleanup, nil
 		} else if cfg.AuthMethod == "agent" {
 			return nil, noop, fmt.Errorf("ssh agent: %w", err)
 		}

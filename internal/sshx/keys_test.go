@@ -17,15 +17,22 @@
 package sshx
 
 import (
+	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 func writeKey(t *testing.T, path string) ssh.PublicKey {
@@ -100,5 +107,108 @@ func TestDefaultKey(t *testing.T) {
 	DefaultKey = "~/secrets/fleet"
 	if p := keyPaths(Config{}); p[0] != filepath.Join(home, "secrets", "fleet") {
 		t.Fatalf("tilde: %v", p)
+	}
+}
+
+// fred on PR 128: a real handshake where the key files offer a valid key
+// the server refuses (the -ssh-key default, authorized on another box)
+// and only the agent holds the accepted one. The agent must still be
+// tried: x/crypto skips a second method of the same name once one has
+// been refused, so files and agent share one public-key method. An
+// explicit auth mode still keeps to its own source.
+func TestAgentAfterRefusedDefaultKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no ~/.ssh keys at all
+	t.Cleanup(func() { DefaultKey = "" })
+	DefaultKey = filepath.Join(home, "fleet")
+	writeKey(t, DefaultKey) // valid, not authorized here
+
+	// The agent holds the only key the server accepts.
+	_, agentPriv, _ := ed25519.GenerateKey(rand.Reader)
+	ring := agent.NewKeyring()
+	if err := ring.Add(agent.AddedKey{PrivateKey: agentPriv}); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(t.TempDir(), "agent.sock")
+	aln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { aln.Close() })
+	go func() {
+		for {
+			c, err := aln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer c.Close(); agent.ServeAgent(ring, c) }()
+		}
+	}()
+	t.Setenv("SSH_AUTH_SOCK", sock)
+	agentPub, _ := ssh.NewPublicKey(agentPriv.Public())
+
+	// A server that accepts only the agent's key.
+	_, hostPriv, _ := ed25519.GenerateKey(rand.Reader)
+	hostSigner, _ := ssh.NewSignerFromKey(hostPriv)
+	var mu sync.Mutex
+	var offered []string
+	cfg := &ssh.ServerConfig{PublicKeyCallback: func(_ ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) {
+		mu.Lock()
+		offered = append(offered, ssh.FingerprintSHA256(k))
+		mu.Unlock()
+		if bytes.Equal(k.Marshal(), agentPub.Marshal()) {
+			return nil, nil
+		}
+		return nil, errors.New("not authorized")
+	}}
+	cfg.AddHostKey(hostSigner)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				sc, chans, reqs, err := ssh.NewServerConn(conn, cfg)
+				if err != nil {
+					conn.Close()
+					return
+				}
+				defer sc.Close()
+				go ssh.DiscardRequests(reqs)
+				for nc := range chans {
+					nc.Reject(ssh.Prohibited, "test")
+				}
+			}()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	dial := func(mode string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		c, err := Dial(ctx, Config{Host: "127.0.0.1", Port: port, User: "u", AuthMethod: mode})
+		if err == nil {
+			c.Close()
+		}
+		return err
+	}
+	if err := dial(""); err != nil {
+		t.Fatalf("auto: the agent was not tried after the default key was refused: %v (offered %v)", err, offered)
+	}
+	mu.Lock()
+	if len(offered) < 2 || offered[len(offered)-1] != ssh.FingerprintSHA256(agentPub) {
+		t.Fatalf("expected the default key first, then the agent's: %v", offered)
+	}
+	mu.Unlock()
+	if err := dial("key"); err == nil {
+		t.Fatal("key mode used the agent")
+	}
+	if err := dial("agent"); err != nil {
+		t.Fatalf("agent mode: %v", err)
 	}
 }
