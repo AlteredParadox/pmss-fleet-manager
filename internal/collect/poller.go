@@ -97,6 +97,9 @@ type poller struct {
 	// transport (see detachedTransport).
 	dialDetached func(ctx context.Context, ep string) (scriptRunner, rtorrent.Dialer, func(), error)
 	runConf      scriptRunner // test hook: runs SetRtDiscovery's script in place of the SSH channel
+	// beforeRtPublish is the test hook between SetRtDiscovery's remote
+	// steps and its publication.
+	beforeRtPublish func()
 
 	duMu      sync.Mutex
 	duRunning bool

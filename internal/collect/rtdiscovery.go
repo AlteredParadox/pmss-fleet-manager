@@ -135,46 +135,41 @@ func (m *Manager) SetRtDiscovery(ctx context.Context, id int64, want map[string]
 	if !p.box.Enabled {
 		return RtDiscoveryResult{}, ErrDisabled
 	}
-	res, stats, err := p.rtSetDiscovery(ctx, want)
-	if err == nil {
-		m.mutateState(id, func(s *BoxState) {
-			for k, w := range p.noteRtDiscovery(want, stats) { // under the store lock, see QbtAction
-				w.apply(k, &s.Rt)
-			}
-		})
-	}
+	res, err := p.rtSetDiscovery(ctx, want)
 	p.wake()
 	return res, err
 }
 
-// rtSetDiscovery saves the settings on the box, then applies them live and
-// reads back what the client has. A failure to save changes nothing; a
-// failure to apply live is reported in the result, not as an error, since
-// the file (what a restart uses) was written.
-func (p *poller) rtSetDiscovery(ctx context.Context, want map[string]bool) (RtDiscoveryResult, *rtorrent.Stats, error) {
+// rtSetDiscovery saves the settings on the box, then applies them live,
+// reads back what the client has and publishes it, all under the per-box
+// lease: two requests cannot publish out of order (fred on PR 126). A
+// failure to save leaves the client alone; a failure to apply live is
+// reported in the result, not as an error, since the file (what a restart
+// uses) was written.
+func (p *poller) rtSetDiscovery(ctx context.Context, want map[string]bool) (RtDiscoveryResult, error) {
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 	cli, sshc, _, err := p.rtReady(actx)
 	if err != nil {
-		return RtDiscoveryResult{}, nil, err
+		return RtDiscoveryResult{}, err
 	}
 	run := sshRunner(sshc)
 	if p.runConf != nil {
 		run = p.runConf
 	}
 	if run == nil {
-		return RtDiscoveryResult{}, nil, ErrUnavailable
+		return RtDiscoveryResult{}, ErrUnavailable
 	}
 	release, err := p.m.rtLease(p.box.ID).Acquire(actx)
 	if err != nil {
-		return RtDiscoveryResult{}, nil, err
+		return RtDiscoveryResult{}, err
 	}
 	defer release()
 	sctx, scancel := context.WithTimeout(actx, 20*time.Second)
 	out, stderr, err := run.Run(sctx, "sh", strings.NewReader(rtDiscoveryVars(want)+rtDiscoveryScript))
 	scancel()
 	if err != nil {
-		return RtDiscoveryResult{}, nil, fmt.Errorf("could not save to ~/.rtorrent.rc.custom, nothing was changed: %s", clip(strings.TrimSpace(string(out)+" "+string(stderr)), 300))
+		return RtDiscoveryResult{}, rtSaveError(out, stderr, err)
 	}
 	keys := make([]string, 0, len(want))
 	for k := range want {
@@ -199,7 +194,40 @@ func (p *poller) rtSetDiscovery(ctx context.Context, want map[string]bool) (RtDi
 			liveErr = err
 		}
 	}
-	return rtDiscoveryOutcome(want, stats, liveErr), stats, nil
+	if p.beforeRtPublish != nil {
+		p.beforeRtPublish()
+	}
+	p.publishRtDiscovery(want, stats)
+	return rtDiscoveryOutcome(want, stats, liveErr), nil
+}
+
+// rtSaveError words a failed save. Every message the script prints comes
+// from a check before the rename (or the rename itself failing), so a
+// script message means the file is unchanged. Without one (the connection
+// dropped, the request ended) the rename may have happened all the same:
+// that is said as it is, without promising anything about the file
+// (fred on PR 126).
+func rtSaveError(out, stderr []byte, err error) error {
+	msg := strings.TrimSpace(string(out))
+	if msg != "" && !strings.HasSuffix(msg, "ok") {
+		return fmt.Errorf("could not save to ~/.rtorrent.rc.custom, nothing was changed: %s", clip(strings.TrimSpace(msg+" "+string(stderr)), 300))
+	}
+	return fmt.Errorf("the save to ~/.rtorrent.rc.custom could not be confirmed (%s); the running client was not changed; check the file on the box", clip(describeErr(err), 200))
+}
+
+// publishRtDiscovery puts a write into the cached state and the overlay
+// that keeps an in-flight poll from undoing it, provided this poller is
+// still the box's: a replacement (an edit) reads the box itself.
+func (p *poller) publishRtDiscovery(want map[string]bool, stats *rtorrent.Stats) {
+	p.m.commit(p.box.ID, func(s *BoxState) *BoxState {
+		if s == nil || p.m.pollers[p.box.ID] != p { // m.mu is held here
+			return nil
+		}
+		for k, w := range p.noteRtDiscovery(want, stats) {
+			w.apply(k, &s.Rt)
+		}
+		return s
+	}, commitOpts{})
 }
 
 // rtDiscoveryOutcome words what the running client has after a save.

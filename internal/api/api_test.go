@@ -941,4 +941,22 @@ func TestRtRoutesAndSettings(t *testing.T) {
 	if code != 400 {
 		t.Fatalf("add without form: %d %s", code, body)
 	}
+	// Discovery: dht and pex only, a strict body; a never-probed box is
+	// 409 and an unknown one 404.
+	for _, tc := range []struct {
+		id   int64
+		body string
+		want int
+	}{
+		{id, `{"lsd":true}`, 400},
+		{id, `{}`, 400},
+		{id, `{"dht":"on"}`, 400},
+		{id, `not json`, 400},
+		{id, `{"dht":true}`, 409},
+		{999, `{"pex":false}`, 404},
+	} {
+		if code, body := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/discovery", tc.id), tc.body, hdr); code != tc.want {
+			t.Errorf("discovery %s: %d %s", tc.body, code, body)
+		}
+	}
 }

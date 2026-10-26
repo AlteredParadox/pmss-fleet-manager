@@ -170,9 +170,9 @@ function addSummary(r, stopped, client) {
 // first, as the server and the fleet list give it). Ties fall back to the
 // name so rows do not jump between polls.
 const TOR_TEXT_KEYS = new Set(['name', 'box']);
+const torName = (t) => String(t?.name || '').toLowerCase();
 function torSortValue(t, key) {
   switch (key) {
-    case 'name': return String(t?.name || '').toLowerCase();
     case 'size': return Number(t?.size) || 0;
     case 'progress': return Number(t?.progress) || 0;
     case 'up': return Number(t?.up_bps) || 0;
@@ -194,12 +194,16 @@ function nextSort(cur, key) {
 // (identity for a plain list) and boxName to its box's name (the fleet
 // list's "seedbox" column). No sort keeps the given order.
 function sortTorrents(rows, sort, get = (r) => r, boxName = () => '') {
-  if (!sort || !sort.key) return rows.slice();
+  if (!sort?.key) return rows.slice();
   const sign = sort.dir === 'asc' ? 1 : -1;
-  const val = (r) => (sort.key === 'box' ? String(boxName(r) || '').toLowerCase() : torSortValue(get(r), sort.key));
+  const val = (r) => {
+    if (sort.key === 'box') return String(boxName(r) || '').toLowerCase();
+    if (sort.key === 'name') return torName(get(r));
+    return torSortValue(get(r), sort.key);
+  };
   return rows.map((r, i) => [r, val(r), i]).sort((a, b) => {
     if (a[1] !== b[1]) return (a[1] < b[1] ? -1 : 1) * sign;
-    const na = torSortValue(get(a[0]), 'name'), nb = torSortValue(get(b[0]), 'name');
+    const na = torName(get(a[0])), nb = torName(get(b[0]));
     if (na !== nb) return na < nb ? -1 : 1;
     return a[2] - b[2];
   }).map((x) => x[0]);
@@ -212,7 +216,7 @@ function sortTorrents(rows, sort, get = (r) => r, boxName = () => '') {
 // the running client's; `pending` is set when the two differ, i.e. the
 // change waits for a restart. `warn` (orange) when either is on.
 function rtDiscovery(r) {
-  if (!r || !r.reachable) return [];
+  if (!r?.reachable) return [];
   const out = [];
   const one = (k, label, live, conf, known = true) => {
     if (!known && !conf) return;
