@@ -893,163 +893,14 @@ func TestDialErrorIsReported(t *testing.T) {
 	}
 }
 
-// TestMagnetLabelSurvivesMetadata: on a magnet, Add labels the metadata
-// placeholder; when rTorrent rebuilds the torrent from the metadata the
-// label is gone and Torrents sets it again, by hash, as a literal call
-// (fred and Codex on PR 122). Pending entries settle when seen set, and
-// expire.
-func TestMagnetLabelSurvivesMetadata(t *testing.T) {
-	f := newFake(t)
-	var label string // what the box holds for hashA's custom1
-	var sets int
-	phase := "placeholder"
-	f.on(func(m string, p []string) string {
-		switch m {
-		case "d.custom1.set":
-			sets++
-			label = p[1]
-			return resp(i8(0))
-		case "d.multicall2":
-			// libtorrent 0.13.8 gives the metadata placeholder a one-byte
-			// file, so size tells nothing; d.is_meta does (Codex on PR 122).
-			lbl, size, meta := label, int64(1), int64(1)
-			if phase == "rebuilt" {
-				lbl = "" // the fresh download does not carry custom1
-				phase = "rebuilt-listed"
-			}
-			if phase != "placeholder" {
-				size, meta = 1000, 0
-			}
-			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(size), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(lbl), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(meta)) + `</data></array>`)
-		}
-		return resp(i8(0))
-	})
-	c := New(f.dial)
-	now := time.Now()
-	c.now = func() time.Time { return now }
-	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
-	if err != nil || label != "tv" || sets != 1 || res.Deferred != 1 {
-		t.Fatalf("add: %v label %q sets %d %+v", err, label, sets, res)
-	}
-	// Still the placeholder (is_meta, one-byte file): the label shows,
-	// nothing to do, and the entry must survive, since the rebuild is still
-	// to come.
-	rows, err := c.Torrents(context.Background())
-	if err != nil || rows[0].Label != "tv" || !rows[0].Meta || rows[0].Size != 1 || sets != 1 {
-		t.Fatalf("placeholder listing: %v %+v sets %d", err, rows, sets)
-	}
-	c.pendMu.Lock()
-	_, kept := c.pending[hashA]
-	c.pendMu.Unlock()
-	if !kept {
-		t.Fatal("a label seen on the placeholder must not settle the entry")
-	}
-	// Metadata arrived: rTorrent rebuilt the torrent without custom1.
-	phase = "rebuilt"
-	rows, err = c.Torrents(context.Background())
-	if err != nil || rows[0].Label != "tv" || label != "tv" || sets != 2 {
-		t.Fatalf("after rebuild: %v %+v box %q sets %d", err, rows, label, sets)
-	}
-	// The entry was spent on the rebuilt torrent: a label the user clears in
-	// ruTorrent afterwards is not put back.
-	c.pendMu.Lock()
-	_, kept = c.pending[hashA]
-	c.pendMu.Unlock()
-	if kept {
-		t.Fatal("entry must be spent once the rebuilt torrent was seen")
-	}
-	label = ""
-	if _, err := c.Torrents(context.Background()); err != nil || sets != 2 || label != "" {
-		t.Fatalf("cleared label put back: %v sets %d %q", err, sets, label)
-	}
-	// A rebuilt torrent seen with a different label is left alone too.
-	c.remember(hashA, "tv")
-	label = "films"
-	if _, err := c.Torrents(context.Background()); err != nil || sets != 2 || label != "films" {
-		t.Fatalf("other label overwritten: %v sets %d %q", err, sets, label)
-	}
-	// A setter that fails keeps the entry for the next poll (Codex on PR 122).
-	c.remember(hashA, "tv")
-	label = ""
-	failSet := true
-	f.on(func(m string, p []string) string {
-		switch m {
-		case "d.custom1.set":
-			if failSet {
-				return fault(-501, "busy")
-			}
-			sets++
-			label = p[1]
-			return resp(i8(0))
-		case "d.multicall2":
-			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(label), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
-		}
-		return resp(i8(0))
-	})
-	if _, err := c.Torrents(context.Background()); err != nil || label != "" || len(c.Pending()) != 1 {
-		t.Fatalf("failed setter must keep the entry: %v %q pending %d", err, label, len(c.Pending()))
-	}
-	failSet = false
-	if _, err := c.Torrents(context.Background()); err != nil || label != "tv" || sets != 3 || len(c.Pending()) != 0 {
-		t.Fatalf("retry: %v %q sets %d pending %d", err, label, sets, len(c.Pending()))
-	}
-	// Expired entries are dropped without a call.
-	base := sets
-	c.remember(hashB, "x")
-	now = now.Add(pendingTTL + time.Minute)
-	phase = "rebuilt"
-	label = ""
-	if _, err := c.Torrents(context.Background()); err != nil || sets != base {
-		t.Fatalf("expired: %v sets %d (base %d)", err, sets, base)
-	}
-	c.pendMu.Lock()
-	n := len(c.pending)
-	c.pendMu.Unlock()
-	if n != 0 {
-		t.Fatalf("pending %d after expiry", n)
-	}
-	// The map is bounded.
-	for i := 0; i < pendingMax+5; i++ {
-		c.remember(fmt.Sprintf("%040X", i), "l")
-	}
-	c.pendMu.Lock()
-	n = len(c.pending)
-	c.pendMu.Unlock()
-	if n != pendingMax {
-		t.Fatalf("pending %d, cap %d", n, pendingMax)
-	}
-}
-
-func TestPendingLabelsPersist(t *testing.T) {
-	c := New(func(ctx context.Context) (net.Conn, error) { return nil, errors.New("unused") })
-	now := time.Now()
-	c.now = func() time.Time { return now }
-	c.remember(hashA, "tv")
-	saved := c.Pending()
-	if len(saved) != 1 || saved[0].Hash != hashA || saved[0].Label != "tv" || !saved[0].Until.After(now) {
-		t.Fatalf("%+v", saved)
-	}
-	// A new client (a reconnect, a restarted dashboard) starts with none:
-	// pending labels live in one client's memory, by design.
-	d := New(c.dial)
-	if len(d.Pending()) != 0 {
-		t.Fatal("a new client owes nothing")
-	}
-	// Hashes are normalised and labels clipped on the way in.
-	c.remember(strings.ToLower(hashB), strings.Repeat("l", 500))
-	for _, p := range c.Pending() {
-		if p.Hash == strings.ToUpper(hashB) && len(p.Label) != maxLabel {
-			t.Fatalf("label not clipped: %d", len(p.Label))
-		}
-	}
-}
-
 // TestListWithoutIsMeta: a build that does not know d.is_meta refuses the
 // whole listing with an unknown-method fault naming it; the client asks
 // again without the getter and remembers. The placeholder can then not be
 // told from the real torrent (it grows to the advertised metadata size
-// before it is replaced, fred on PR 122), so a pending label is kept until
-// the label is seen missing, which is the rebuild, and set then.
+// before it is replaced, fred on PR 122), so no label replay happens on
+// such a build: the pending entry is dropped on its first listing and the
+// rebuild is never labelled by the dashboard (a missing label beats a
+// wrong one; daybreak blue re-review of PR 122).
 func TestListWithoutIsMeta(t *testing.T) {
 	f := newFake(t)
 	var lists, sets int
@@ -1073,21 +924,16 @@ func TestListWithoutIsMeta(t *testing.T) {
 		return resp(i8(0))
 	})
 	c := New(f.dial)
-	c.remember(hashA, "tv")
 	rows, err := c.Torrents(context.Background())
 	if err != nil || len(rows) != 1 || lists != 2 || rows[0].MetaKnown {
 		t.Fatalf("%v rows %d lists %d %+v", err, len(rows), lists, rows)
 	}
 	// Remembered: the next listings go without the getter at once.
-	size = 16384 // the placeholder grew to the metadata size, still a placeholder
-	if _, err := c.Torrents(context.Background()); err != nil || lists != 3 || len(c.Pending()) != 1 {
-		t.Fatalf("%v lists %d pending %d: a labelled placeholder of any size must not spend the entry", err, lists, len(c.Pending()))
-	}
-	// The rebuild: the real torrent arrives without custom1 and gets it.
+	size = 16384
 	label = ""
 	rows, err = c.Torrents(context.Background())
-	if err != nil || sets != 1 || label != "tv" || rows[0].Label != "tv" || len(c.Pending()) != 0 {
-		t.Fatalf("rebuild: %v sets %d label %q pending %d", err, sets, label, len(c.Pending()))
+	if err != nil || lists != 3 || sets != 0 || rows[0].Label != "" {
+		t.Fatalf("listing on a build without d.is_meta: %v lists %d sets %d label %q", err, lists, sets, rows[0].Label)
 	}
 	// A fault that is not about an unknown d.is_meta surfaces unchanged and
 	// does not switch the getter off.
@@ -1163,82 +1009,6 @@ func TestNestedAllocationBounded(t *testing.T) {
 	f.on(func(m string, p []string) string { return resp(b.String()) })
 	if _, err := c.call(context.Background(), 8, 100, "x", ""); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("struct budget: %v", err)
-	}
-}
-
-// Finding 2: operations are serialised as a whole. A Stop whose first call
-// is in flight holds off a Start entirely, so the box never sees
-// d.stop, d.open, d.close, d.start.
-func TestOperationsDoNotInterleave(t *testing.T) {
-	f := newFake(t)
-	gate := make(chan struct{})
-	entered := make(chan struct{}, 1)
-	f.on(func(m string, p []string) string {
-		if m == "d.stop" {
-			entered <- struct{}{}
-			<-gate
-		}
-		return resp(i8(0))
-	})
-	c := New(f.dial)
-	ctx := context.Background()
-	stopDone := make(chan error, 1)
-	go func() { stopDone <- c.Action(ctx, ActionStop, hashA) }()
-	<-entered // Stop holds the operation and is blocked inside d.stop
-	startDone := make(chan error, 1)
-	go func() { startDone <- c.Action(ctx, ActionStart, hashA) }()
-	time.Sleep(50 * time.Millisecond) // Start must be waiting, not calling
-	if got := f.methods(); len(got) != 1 {
-		t.Fatalf("Start ran while Stop was in flight: %v", got)
-	}
-	close(gate)
-	if err := <-stopDone; err != nil {
-		t.Fatal(err)
-	}
-	if err := <-startDone; err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(f.methods(), ","); got != "d.stop,d.close,d.open,d.start" {
-		t.Fatalf("order %s", got)
-	}
-	// Two Adds of the same magnet with labels A then B: whole operations in
-	// sequence, so the pending label is the later one, matching the box.
-	gate2 := make(chan struct{})
-	entered2 := make(chan struct{}, 2)
-	var last string
-	f.on(func(m string, p []string) string {
-		switch m {
-		case "load.start":
-			entered2 <- struct{}{}
-			<-gate2
-		case "d.custom1.set":
-			last = p[1]
-		}
-		return resp(i8(0))
-	})
-	done := make(chan struct{}, 2)
-	go func() {
-		c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}, Label: "A"})
-		done <- struct{}{}
-	}()
-	<-entered2
-	go func() {
-		c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}, Label: "B"})
-		done <- struct{}{}
-	}()
-	time.Sleep(30 * time.Millisecond)
-	close(gate2)
-	<-done
-	<-done
-	pend := c.Pending()
-	var owed string
-	for _, p := range pend {
-		if p.Hash == strings.ToUpper(hashB) {
-			owed = p.Label
-		}
-	}
-	if owed != last || owed == "" {
-		t.Fatalf("box has %q, pending owes %q", last, owed)
 	}
 }
 
@@ -1326,86 +1096,6 @@ func TestEnvelopeComplete(t *testing.T) {
 	}
 }
 
-// Finding 4: an edit of the placeholder's label in ruTorrent is honoured.
-func TestPlaceholderLabelEdits(t *testing.T) {
-	f := newFake(t)
-	var label string
-	meta := int64(1)
-	f.on(func(m string, p []string) string {
-		if m == "d.custom1.set" {
-			label = p[1]
-			return resp(i8(0))
-		}
-		if m == "d.multicall2" {
-			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(label), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(meta)) + `</data></array>`)
-		}
-		return resp(i8(0))
-	})
-	c := New(f.dial)
-	if _, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"}); err != nil {
-		t.Fatal(err)
-	}
-	// The user renames the placeholder's label: the owed label follows.
-	label = "films"
-	if _, err := c.Torrents(context.Background()); err != nil || c.Pending()[0].Label != "films" {
-		t.Fatalf("%v %+v", err, c.Pending())
-	}
-	meta = 0
-	label = ""
-	if _, err := c.Torrents(context.Background()); err != nil || label != "films" {
-		t.Fatalf("rebuilt torrent must get the renamed label: %v %q", err, label)
-	}
-	// The user clears the placeholder's label: nothing is owed any more.
-	meta, label = 1, ""
-	c.remember(hashA, "tv")
-	if _, err := c.Torrents(context.Background()); err != nil || len(c.Pending()) != 0 {
-		t.Fatalf("cleared on the placeholder: %v pending %d", err, len(c.Pending()))
-	}
-	meta = 0
-	if _, err := c.Torrents(context.Background()); err != nil || label != "" {
-		t.Fatalf("a cleared label must stay clear: %q", label)
-	}
-}
-
-// Removing a labelled magnet before its label settled retires the owed
-// label: a later add of the same hash without a label stays unlabelled
-// (Codex on PR 122).
-func TestRemoveRetiresPendingLabel(t *testing.T) {
-	f := newFake(t)
-	var sets []string
-	f.on(func(m string, p []string) string {
-		if m == "d.custom1.set" {
-			sets = append(sets, p[1])
-		}
-		if m == "d.multicall2" {
-			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
-		}
-		return resp(i8(0))
-	})
-	c := New(f.dial)
-	ctx := context.Background()
-	if _, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "old"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Action(ctx, ActionRemove, hashA); err != nil || len(c.Pending()) != 0 {
-		t.Fatalf("%v pending %d", err, len(c.Pending()))
-	}
-	if _, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.Torrents(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(sets, ",") != "old" {
-		t.Fatalf("the re-added torrent inherited a label: %v", sets)
-	}
-	// Stop and start do not touch the owed label.
-	c.remember(hashA, "tv")
-	if err := c.Action(ctx, ActionStop, hashA); err != nil || len(c.Pending()) != 1 {
-		t.Fatal("stop must keep the owed label")
-	}
-}
-
 // Daybreak blue re-review of PR 122, finding 1: every call states the shape
 // of its answer, so a wide root array fails fast on scalar, stats and
 // command calls too, and a command's answer must be rTorrent's integer.
@@ -1462,55 +1152,6 @@ func TestRootArrayBounded(t *testing.T) {
 	}
 }
 
-// Finding 2: Forget is an operation like the others. Paused between an
-// Add's label setter and its remember, a concurrent Forget waits, so the
-// result is linear: the later Forget wins and nothing stays owed.
-func TestForgetIsSerialised(t *testing.T) {
-	f := newFake(t)
-	gate := make(chan struct{})
-	entered := make(chan struct{}, 1)
-	f.on(func(m string, p []string) string {
-		if m == "d.custom1.set" {
-			entered <- struct{}{}
-			<-gate // Add is mid-operation here, before remember
-		}
-		return resp(i8(0))
-	})
-	c := New(f.dial)
-	ctx := context.Background()
-	addDone := make(chan error, 1)
-	go func() {
-		_, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "tv"})
-		addDone <- err
-	}()
-	<-entered
-	forgetDone := make(chan error, 1)
-	go func() { forgetDone <- c.Forget(ctx, hashA) }()
-	select {
-	case <-forgetDone:
-		t.Fatal("Forget ran inside the Add operation")
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(gate)
-	if err := <-addDone; err != nil {
-		t.Fatal(err)
-	}
-	if err := <-forgetDone; err != nil {
-		t.Fatal(err)
-	}
-	if len(c.Pending()) != 0 {
-		t.Fatalf("the later Forget must win: %+v", c.Pending())
-	}
-	// Forget honours its context while waiting.
-	<-c.ops
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
-	defer cancel()
-	if err := c.Forget(cctx, hashA); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal(err)
-	}
-	c.ops <- struct{}{}
-}
-
 // Finding 3: a multicall fault reads as "missing" only when it is a typed
 // unknown-method fault on an optional member.
 func TestStatsFaultsStrict(t *testing.T) {
@@ -1560,44 +1201,6 @@ func TestStatsFaultsStrict(t *testing.T) {
 		if _, err := c.Stats(ctx); !errors.Is(err, ErrUnexpected) {
 			t.Errorf("malformed fault: %v", err)
 		}
-	}
-}
-
-// Finding 4: updating an existing pending entry at capacity evicts nothing,
-// and Restore updates an existing hash regardless of capacity.
-func TestPendingCapacityUpdates(t *testing.T) {
-	c := New(func(ctx context.Context) (net.Conn, error) { return nil, errors.New("unused") })
-	now := time.Now()
-	c.now = func() time.Time { return now }
-	hashes := make([]string, pendingMax)
-	for i := range hashes {
-		hashes[i] = fmt.Sprintf("%040X", i+1)
-		c.remember(hashes[i], "l")
-		now = now.Add(time.Second) // distinct expiries
-	}
-	// Update an existing hash at capacity: the count stays, nothing goes.
-	c.remember(hashes[0], "renamed")
-	pend := c.Pending()
-	if len(pend) != pendingMax {
-		t.Fatalf("update evicted: %d", len(pend))
-	}
-	seen := map[string]string{}
-	for _, p := range pend {
-		seen[p.Hash] = p.Label
-	}
-	if seen[hashes[0]] != "renamed" || seen[hashes[1]] == "" {
-		t.Fatal("update lost or evicted a neighbour")
-	}
-
-	// A new hash at capacity evicts exactly one, the nearest expiry: the
-	// second entry (the first was refreshed by its update just now).
-	c.remember(fmt.Sprintf("%040X", 5000), "new")
-	seen = map[string]string{}
-	for _, p := range c.Pending() {
-		seen[p.Hash] = p.Label
-	}
-	if len(seen) != pendingMax || seen[hashes[1]] != "" || seen[hashes[0]] != "renamed" || seen[hashes[2]] != "l" || seen[fmt.Sprintf("%040X", 5000)] != "new" {
-		t.Fatalf("new entry eviction: %d, second %q third %q", len(seen), seen[hashes[1]], seen[hashes[2]])
 	}
 }
 
@@ -1666,22 +1269,8 @@ func TestLabelSetterContract(t *testing.T) {
 	c := New(f.dial)
 	ctx := context.Background()
 	res, err := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Files: [][]byte{[]byte(torrent)}, Label: "tv"})
-	if err != nil || res.Added != 2 || res.Deferred != 1 || len(c.Pending()) != 1 {
-		t.Fatalf("real contract: %+v %v pending %d", res, err, len(c.Pending()))
-	}
-	// Reconcile sets the label the same way.
-	f.on(func(m string, p []string) string {
-		switch m {
-		case "d.custom1.set":
-			return resp(str(p[1]))
-		case "d.multicall2":
-			return resp(`<array><data>` + torrentRow(hashA, "Alpha", i8(1000), i8(0), i8(0), i8(0), i8(0), i8(1), i8(0), i8(1), i8(0), i8(1), str(""), str(""), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0), i8(0)) + `</data></array>`)
-		}
-		return resp(i8(0))
-	})
-	rows, err := c.Torrents(ctx)
-	if err != nil || rows[0].Label != "tv" || len(c.Pending()) != 0 {
-		t.Fatalf("reconcile: %v %+v pending %d", err, rows, len(c.Pending()))
+	if err != nil || res.Added != 2 || res.Unlabelled != 0 {
+		t.Fatalf("real contract: %+v %v", res, err)
 	}
 	// Wrong answers are refused by the setter; the add itself still
 	// succeeded (the torrent is loaded) and reports the label unconfirmed.
@@ -1797,13 +1386,12 @@ func TestRetire(t *testing.T) {
 	if err := <-queued; !errors.Is(err, ErrRetired) {
 		t.Fatalf("queued operation after retire: %v", err)
 	}
-	if !c.Retired() || len(c.Pending()) != 1 {
-		t.Fatalf("retired %v pending %d (the add's remember completed before the retire)", c.Retired(), len(c.Pending()))
+	if !c.Retired() {
+		t.Fatal("Retired")
 	}
 	for _, err := range []error{
 		func() error { _, e := c.Version(ctx); return e }(),
 		func() error { _, e := c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}}); return e }(),
-		c.Forget(ctx, hashA),
 		func() error { _, e := c.Torrents(ctx); return e }(),
 		c.Retire(ctx),
 	} {
@@ -1839,8 +1427,7 @@ func TestRetire(t *testing.T) {
 
 // fred on PR 122: a torrent whose load was acknowledged but whose label
 // setter lost its answer is reported as added with the label unconfirmed
-// (Unlabelled), never as a failed add; a magnet in that state still owes
-// its label and gets it on the next listing.
+// (Unlabelled), never as a failed add.
 func TestLostLabelAnswerIsAddedUnlabelled(t *testing.T) {
 	f := newFake(t)
 	torrent := "d8:announce9:http://x/4:infod4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee"
@@ -1853,14 +1440,12 @@ func TestLostLabelAnswerIsAddedUnlabelled(t *testing.T) {
 	c := New(f.dial)
 	c.timeout = 150 * time.Millisecond
 	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Files: [][]byte{[]byte(torrent)}, Label: "tv"})
-	if err != nil || res.Added != 2 || res.Failed != 0 || res.Unlabelled != 2 || res.Deferred != 0 {
+	if err != nil || res.Added != 2 || res.Failed != 0 || res.Unlabelled != 2 {
 		t.Fatalf("a lost setter answer is a label warning, not a failed add: %+v %v", res, err)
 	}
-	// Nothing is owed for an unconfirmed placeholder label: the listing
-	// would read the empty placeholder as the user clearing it and drop the
-	// obligation anyway (Codex on PR 122); the user was told.
-	if len(c.Pending()) != 0 {
-		t.Fatalf("an unconfirmed magnet label is not remembered: %d", len(c.Pending()))
+	// The caller can log why, without the label itself.
+	if len(res.LabelErrors) != 2 || !strings.Contains(res.LabelErrors[0], "…: ") || strings.Contains(strings.Join(res.LabelErrors, " "), "tv") {
+		t.Fatalf("label errors for the caller's log, without the label: %q", res.LabelErrors)
 	}
 	// A genuine load failure is still a failure.
 	f.on(func(m string, p []string) string {
@@ -1872,5 +1457,83 @@ func TestLostLabelAnswerIsAddedUnlabelled(t *testing.T) {
 	res, err = c.Add(context.Background(), AddRequest{Files: [][]byte{[]byte(torrent)}, Label: "tv"})
 	if err == nil || res.Added != 0 || res.Failed != 1 {
 		t.Fatalf("a refused load stays a failure: %+v %v", res, err)
+	}
+}
+
+// Finding 2 (daybreak blue review of PR 122): operations are serialised as
+// a whole. A Stop whose first call is in flight holds off a Start entirely,
+// so the box never sees d.stop, d.open, d.close, d.start; two Adds run one
+// after the other, each load followed by its own label set.
+func TestOperationsDoNotInterleave(t *testing.T) {
+	f := newFake(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	f.on(func(m string, p []string) string {
+		if m == "d.stop" {
+			entered <- struct{}{}
+			<-gate
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	ctx := context.Background()
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- c.Action(ctx, ActionStop, hashA) }()
+	<-entered // Stop holds the operation and is blocked inside d.stop
+	startDone := make(chan error, 1)
+	go func() { startDone <- c.Action(ctx, ActionStart, hashA) }()
+	time.Sleep(50 * time.Millisecond) // Start must be waiting, not calling
+	if got := f.methods(); len(got) != 1 {
+		t.Fatalf("Start ran while Stop was in flight: %v", got)
+	}
+	close(gate)
+	if err := <-stopDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-startDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.methods(), ","); got != "d.stop,d.close,d.open,d.start" {
+		t.Fatalf("order %s", got)
+	}
+	// Two labelled Adds: whole operations in sequence, so each load is
+	// followed by its own label set before the other add starts.
+	gate2 := make(chan struct{})
+	entered2 := make(chan struct{}, 2)
+	var mu sync.Mutex
+	var seq []string
+	f.on(func(m string, p []string) string {
+		mu.Lock()
+		seq = append(seq, m+":"+p[len(p)-1])
+		mu.Unlock()
+		if m == "load.start" {
+			entered2 <- struct{}{}
+			<-gate2
+			return resp(i8(0))
+		}
+		if m == "d.custom1.set" {
+			return resp(str(p[1]))
+		}
+		return resp(i8(0))
+	})
+	done := make(chan struct{}, 2)
+	go func() {
+		c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashB}, Label: "A"})
+		done <- struct{}{}
+	}()
+	<-entered2
+	go func() {
+		c.Add(ctx, AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Label: "B"})
+		done <- struct{}{}
+	}()
+	time.Sleep(30 * time.Millisecond)
+	close(gate2)
+	<-done
+	<-done
+	mu.Lock()
+	got := seq
+	mu.Unlock()
+	if len(got) != 4 || !strings.HasPrefix(got[0], "load.start:") || got[1] != "d.custom1.set:A" || !strings.HasPrefix(got[2], "load.start:") || got[3] != "d.custom1.set:B" {
+		t.Fatalf("adds interleaved: %v", got)
 	}
 }

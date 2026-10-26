@@ -39,16 +39,8 @@ type Client struct {
 	maxValues int           // retained-value budget per response, maxValues outside tests
 	ops       chan struct{} // capacity 1: the operation token
 
-	// pending are labels set on a magnet's metadata placeholder that must
-	// be set again on the torrent rTorrent builds once the metadata
-	// arrives (see Add); Torrents reconciles them. Guarded by pendMu. They
-	// live in this client's memory only: a replacement client (a reconnect)
-	// or a dashboard restart starts with none, by design, and the add's
-	// answer says so (Deferred). Labels are a convenience; what must
-	// survive anything is kept elsewhere.
-	pendMu  sync.Mutex
-	pending map[string]pendingLabel
-	now     func() time.Time
+	// stateMu guards retired.
+	stateMu sync.Mutex
 
 	// noMeta is set once a build answered the listing with d.is_meta in it
 	// with an unknown-method fault (a d.multicall2 is all or nothing): later
@@ -64,23 +56,19 @@ type Client struct {
 // resolve the current client and decide whether to retry. Nothing was sent.
 var ErrRetired = errors.New("rtorrent: client retired; resolve the current client")
 
-// pendingLabel is a label owed to a hash until it is seen set or expires.
-type pendingLabel struct {
-	label string
-	until time.Time
-}
-
 // Bounds on pending labels: a magnet whose metadata never arrives would
 // otherwise hold its entry forever, and a flood of adds must not grow the
 // map without limit.
 const (
 	pendingTTL = 24 * time.Hour
 	pendingMax = 1000
+	// maxLabelErrors bounds AddResult.LabelErrors.
+	maxLabelErrors = 8
 )
 
 // New returns a client over dial.
 func New(dial Dialer) *Client {
-	c := &Client{dial: dial, timeout: callTimeout, maxBytes: maxResponse, maxRows: MaxTorrents, maxValues: maxValues, ops: make(chan struct{}, 1), pending: map[string]pendingLabel{}, now: time.Now}
+	c := &Client{dial: dial, timeout: callTimeout, maxBytes: maxResponse, maxRows: MaxTorrents, maxValues: maxValues, ops: make(chan struct{}, 1)}
 	c.ops <- struct{}{}
 	return c
 }
@@ -427,7 +415,6 @@ func (c *Client) Torrents(ctx context.Context) ([]Torrent, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.reconcileLabels(ctx, out)
 	return out, nil
 }
 
@@ -499,88 +486,6 @@ func (c *Client) list(ctx context.Context) ([]Torrent, error) {
 	return out, nil
 }
 
-// reconcileLabels applies pending labels to the listed torrents that lost
-// theirs (rTorrent's process_meta_download builds a fresh download when a
-// magnet's metadata arrives and does not copy custom1: fred and Codex on
-// PR 122). An entry lives through the placeholder phase (d.is_meta; the
-// placeholder's size is not a tell, libtorrent gives it a one-byte file).
-// The first time its torrent is listed with metadata: a torrent that already
-// carries a label (ours or one the user set) spends the entry untouched,
-// so a label changed or cleared in ruTorrent afterwards is left alone; a
-// torrent without one gets the label, and the entry is spent only once
-// that set succeeded, so a failed call (deadline, dropped connection) is
-// retried next poll (Codex on PR 122). Entries also expire after
-// pendingTTL.
-func (c *Client) reconcileLabels(ctx context.Context, rows []Torrent) {
-	c.pendMu.Lock()
-	if len(c.pending) == 0 {
-		c.pendMu.Unlock()
-		return
-	}
-	now := c.now()
-	type todo struct{ hash, label string }
-	var set []todo
-	seen := map[string]int{}
-	for i, r := range rows {
-		seen[r.Hash] = i
-	}
-	for h, p := range c.pending {
-		if now.After(p.until) {
-			delete(c.pending, h)
-			continue
-		}
-		i, ok := seen[h]
-		if !ok {
-			continue // not listed yet (or removed): keep until it expires
-		}
-		if rows[i].Meta {
-			// Still the placeholder. The user may have edited its label in
-			// ruTorrent meanwhile: a cleared label retires the entry, a
-			// changed one becomes what is owed after the rebuild.
-			switch rows[i].Label {
-			case p.label:
-			case "":
-				delete(c.pending, h)
-			default:
-				c.pending[h] = pendingLabel{label: rows[i].Label, until: p.until}
-			}
-			continue
-		}
-		if rows[i].Label != "" {
-			if rows[i].MetaKnown {
-				delete(c.pending, h) // the real torrent carries a label: nothing owed
-			}
-			// Unknown whether this is still the placeholder (a build without
-			// d.is_meta): keep the entry until the label is seen missing,
-			// which is the rebuild, or it expires; a label the user clears
-			// in ruTorrent meanwhile is set once more on such a build.
-			continue
-		}
-		set = append(set, todo{h, p.label})
-	}
-	c.pendMu.Unlock()
-	for _, t := range set {
-		if err := c.setLabel(ctx, t.hash, t.label); err != nil {
-			continue // kept: tried again next poll; expiry bounds it
-		}
-		c.pendMu.Lock()
-		delete(c.pending, t.hash) // spent on success only
-		c.pendMu.Unlock()
-		if i, ok := seen[t.hash]; ok {
-			rows[i].Label = t.label
-		}
-	}
-}
-
-// PendingLabel is a label owed to a magnet's torrent until its metadata
-// arrives, as persisted by the caller across restarts (see Pending and
-// Restore): the client's memory is otherwise the process's.
-type PendingLabel struct {
-	Hash  string    `json:"hash"`
-	Label string    `json:"label"`
-	Until time.Time `json:"until"`
-}
-
 // Retire ends the client: it marks the client retired, then waits for the
 // operation in flight, if any, to complete its remote and local steps, so a
 // replacement never overlaps it on the box. Every later error-returning
@@ -588,9 +493,9 @@ type PendingLabel struct {
 // they are not handed to a successor (see Client). Idempotent; honours ctx
 // while an operation holds the token, and a timed-out Retire still retires.
 func (c *Client) Retire(ctx context.Context) error {
-	c.pendMu.Lock()
+	c.stateMu.Lock()
 	c.retired = true
-	c.pendMu.Unlock()
+	c.stateMu.Unlock()
 	select {
 	case <-c.ops:
 	case <-ctx.Done():
@@ -602,44 +507,9 @@ func (c *Client) Retire(ctx context.Context) error {
 
 // Retired reports whether Retire has run.
 func (c *Client) Retired() bool {
-	c.pendMu.Lock()
-	defer c.pendMu.Unlock()
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	return c.retired
-}
-
-// Pending returns the labels still owed, for the caller to persist.
-func (c *Client) Pending() []PendingLabel {
-	c.pendMu.Lock()
-	defer c.pendMu.Unlock()
-	out := make([]PendingLabel, 0, len(c.pending))
-	for h, p := range c.pending {
-		out = append(out, PendingLabel{Hash: h, Label: p.label, Until: p.until})
-	}
-	return out
-}
-
-// remember records a label owed to hash (a magnet's).
-func (c *Client) remember(hash, label string) {
-	c.pendMu.Lock()
-	defer c.pendMu.Unlock()
-	c.setPendingLocked(strings.ToUpper(hash), pendingLabel{label: clip(label, maxLabel), until: c.now().Add(pendingTTL)})
-}
-
-// setPendingLocked stores an entry; only a NEW hash at capacity evicts the
-// entry nearest expiry (updating an existing one at capacity must not drop
-// an unrelated label; daybreak blue re-review of PR 122). pendMu held.
-func (c *Client) setPendingLocked(hash string, p pendingLabel) {
-	if _, exists := c.pending[hash]; !exists && len(c.pending) >= pendingMax {
-		var oldest string
-		var at time.Time
-		for h, e := range c.pending {
-			if oldest == "" || e.until.Before(at) {
-				oldest, at = h, e.until
-			}
-		}
-		delete(c.pending, oldest)
-	}
-	c.pending[hash] = p
 }
 
 // Action runs one of the valid actions (see ValidAction) on hash.
@@ -670,33 +540,6 @@ func (c *Client) Action(ctx context.Context, action, hash string) error {
 			return err
 		}
 	}
-	if action == ActionRemove {
-		c.forgetLocked(hash) // a removed magnet owes nothing any more (Codex on PR 122)
-	}
-	return nil
-}
-
-// forgetLocked drops any pending label for hash; the caller holds the
-// operation token.
-func (c *Client) forgetLocked(hash string) {
-	c.pendMu.Lock()
-	delete(c.pending, strings.ToUpper(hash))
-	c.pendMu.Unlock()
-}
-
-// Forget drops any label still owed to hash: for a torrent removed through
-// another client over the same box, so a later add of the same hash
-// without a label does not inherit the old one. A public operation like
-// the others, it waits for the operation token, so it cannot slip between
-// an Add's label setter and its remember (daybreak blue re-review of PR
-// 122): whichever of the two runs later decides.
-func (c *Client) Forget(ctx context.Context, hash string) error {
-	release, err := c.acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-	c.forgetLocked(hash)
 	return nil
 }
 
@@ -730,9 +573,10 @@ type AddResult struct {
 	Added      int
 	Failed     int
 	Unlabelled int
-	// Deferred counts magnets whose label is set now on the placeholder and
-	// again once the metadata arrives (see reconcileLabels).
-	Deferred int
+	// LabelErrors says why labels were not applied or confirmed, one entry
+	// per such torrent up to maxLabelErrors: a hash prefix and the error,
+	// never the label, a URL or torrent contents, so the caller can log it.
+	LabelErrors []string
 }
 
 // Add loads every entry; one refused entry does not stop the rest.
@@ -803,22 +647,18 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 			// hash not present yet, which rTorrent does not do for a
 			// synchronous load) or a lost answer leaves it loaded with its
 			// label unconfirmed, which is counted and reported as such,
-			// never as a failed add (fred on PR 122). Nothing more is owed
-			// for it then: a pending label is remembered only for a magnet
-			// whose placeholder label was confirmed set, since the listing
-			// treats an empty placeholder label as the user clearing it
-			// (Codex on PR 122), and the user was told the label is
-			// unconfirmed.
+			// never as a failed add (fred on PR 122). The label is attempted
+			// exactly once: for a magnet it lands on the metadata placeholder
+			// and rTorrent drops it when the metadata arrives and the torrent
+			// is rebuilt; nothing is remembered to set it again, since a
+			// later same-hash torrent cannot be told from this one and a
+			// missing label beats a wrong one (the stated contract; daybreak
+			// blue and fred on PR 122). The user sets it in ruTorrent then.
 			if err := c.setLabel(ctx, e.hash, label); err != nil {
 				res.Unlabelled++
-				continue
-			}
-			if e.magnet {
-				// Set on the metadata placeholder only: rTorrent rebuilds the
-				// torrent when the metadata arrives and drops custom1, so the
-				// label is owed again then (reconciled by Torrents).
-				c.remember(e.hash, label)
-				res.Deferred++
+				if len(res.LabelErrors) < maxLabelErrors {
+					res.LabelErrors = append(res.LabelErrors, strings.ToLower(e.hash[:8])+"…: "+clip(err.Error(), 160))
+				}
 			}
 		}
 	}
