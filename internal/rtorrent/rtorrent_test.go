@@ -577,14 +577,16 @@ func TestAdd(t *testing.T) {
 	label := `$system.shutdown.normal= (d.stop) "x",y\z`
 	sets = nil
 	res, err = c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + strings.ToLower(hashB)}, Files: [][]byte{[]byte(torrent), []byte("not a torrent")}, Label: label, Stopped: true})
-	if err != nil || res.Added != 2 || res.Failed != 1 {
+	// The file that is not a torrent is loaded all the same (rTorrent judges
+	// it; the label never decides the add) and counted unlabelled.
+	if err != nil || res.Added != 3 || res.Failed != 0 || res.Unlabelled != 1 {
 		t.Fatalf("%+v %v", res, err)
 	}
 	if len(sets) != 2 || sets[0].params[0] != strings.ToUpper(hashB) || sets[0].params[1] != label || sets[1].params[0] != want || sets[1].params[1] != label {
 		t.Fatalf("sets %+v", sets)
 	}
 	m := f.methods()
-	if strings.Join(m[len(m)-4:], ",") != "load.normal,d.custom1.set,load.raw,d.custom1.set" {
+	if strings.Join(m[len(m)-5:], ",") != "load.normal,d.custom1.set,load.raw,d.custom1.set,load.raw" {
 		t.Fatalf("%v", m)
 	}
 	for _, c := range f.calls {
@@ -1519,5 +1521,65 @@ func TestLabelErrorReasons(t *testing.T) {
 		!strings.Contains(res.LabelErrors[0], "entry: not attempted") || !strings.Contains(all, "fault -501") ||
 		strings.Contains(all, "secret-peer-text") || strings.Contains(all, "example.invalid") || strings.Contains(all, "tv") {
 		t.Fatalf("reasons %q omitted %d", res.LabelErrors, res.LabelErrorsOmitted)
+	}
+}
+
+// Daybreak blue re-review of PR 122: a label never decides whether a file
+// is loaded, and is set only on a hash proven unique; ambiguity loads the
+// torrent unlabelled.
+func TestLabelOnlyOnProvenIdentity(t *testing.T) {
+	info := "d4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaae"
+	good := "d8:announce9:http://x/4:info" + info + "e"
+	for name, file := range map[string]string{
+		"duplicate info": "d4:info" + info + "4:info" + info + "e",
+		"trailing bytes": good + "junk",
+		"not bencode":    "hello",
+	} {
+		if _, err := InfoHash([]byte(file)); err == nil {
+			t.Errorf("%s: a hash must not be proven", name)
+		}
+	}
+	if _, err := InfoHash([]byte(good)); err != nil {
+		t.Fatal(err)
+	}
+	a40 := strings.Repeat("A", 40)
+	b40 := strings.Repeat("B", 40)
+	if _, err := MagnetHash("magnet:?xt=urn:btih:" + a40 + "&xt=urn:btih:" + b40); err == nil {
+		t.Error("two different hashes in one magnet must not be proven")
+	}
+	b32 := "VKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVK" // base32 of twenty 0xAA bytes
+	if h, err := MagnetHash("magnet:?xt=urn:btih:" + strings.Repeat("a", 40) + "&xt=urn:btih:" + b32); err != nil || h != a40 {
+		t.Errorf("one hash written twice is still one: %q %v", h, err)
+	}
+	f := newFake(t)
+	var sets int
+	f.on(func(m string, p []string) string {
+		if m == "d.custom1.set" {
+			sets++
+			return resp(str(p[1]))
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	res, err := c.Add(context.Background(), AddRequest{
+		Files: [][]byte{[]byte("d4:info" + info + "4:info" + info + "e"), []byte("hello")},
+		URLs:  []string{"magnet:?xt=urn:btih:" + a40 + "&xt=urn:btih:" + b40},
+		Label: "tv",
+	})
+	if err != nil || res.Added != 3 || res.Failed != 0 || res.Unlabelled != 3 || sets != 0 {
+		t.Fatalf("loaded unlabelled, no setter: %+v %v sets %d", res, err, sets)
+	}
+}
+
+// Daybreak blue re-review of PR 122: a batch that stops on a load whose
+// reply was lost marks that entry uncertain, even when it is the first.
+func TestFirstLoadLostReplyIsUncertain(t *testing.T) {
+	f := newFake(t)
+	f.on(func(m string, p []string) string { return "" }) // never answers
+	c := New(f.dial)
+	c.timeout = 150 * time.Millisecond
+	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}})
+	if err == nil || res.Added != 0 || res.Uncertain != 1 {
+		t.Fatalf("%+v %v", res, err)
 	}
 }

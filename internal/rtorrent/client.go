@@ -143,9 +143,10 @@ type Stats struct {
 
 // Actions on one torrent. Stop and Start mirror ruTorrent: stop then
 // close, open then start. Remove erases the torrent from the session and
-// leaves its data alone: rTorrent has no delete-files command, ruTorrent
-// does that itself in PHP, and this dashboard does not run rm on a path a
-// torrent client handed it.
+// leaves its data alone: rTorrent has no delete-files command (ruTorrent
+// does that itself in PHP). The collector's remove-with-data uses the path
+// rTorrent reports only as a candidate, checked on the box against a
+// download root it reads itself, never as the authority on what to delete.
 const (
 	ActionStop   = "stop"
 	ActionStart  = "start"
@@ -537,6 +538,10 @@ type AddResult struct {
 	// never the label, a URL, torrent contents or the peer's own fault text.
 	LabelErrors        []string
 	LabelErrorsOmitted int
+	// Uncertain is 1 when the batch stopped on a load whose answer was not
+	// a refusal (a lost reply, a cut connection): that entry may or may not
+	// have been loaded. Set alongside the error Add returns.
+	Uncertain int
 }
 
 // Add loads every entry; one refused entry does not stop the rest.
@@ -569,20 +574,23 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 			if h, err := MagnetHash(u); err == nil {
 				e.hash = h
 			} else {
-				e.unlabelled = true // an http(s) link: loaded, label left to ruTorrent
+				e.unlabelled = true // no single proven hash (an http(s) link, or an ambiguous magnet)
 			}
 		}
 		entries = append(entries, e)
 	}
 	for _, f := range req.Files {
+		// Loaded whatever the label: an optional label never decides
+		// whether the torrent is added (daybreak blue re-review of PR 122).
+		// rTorrent judges the file; the label is set only on a hash proven
+		// unique here.
 		e := entry{method: rawMethod, arg: f}
 		if label != "" {
-			h, err := InfoHash(f)
-			if err != nil {
-				res.Failed++ // not a torrent: rTorrent would refuse it too
-				continue
+			if h, err := InfoHash(f); err == nil {
+				e.hash = h
+			} else {
+				e.unlabelled = true
 			}
-			e.hash = h
 		}
 		entries = append(entries, e)
 	}
@@ -594,6 +602,7 @@ func (c *Client) Add(ctx context.Context, req AddRequest) (AddResult, error) {
 				lastErr = err
 				continue
 			}
+			res.Uncertain = 1
 			return res, err
 		}
 		res.Added++

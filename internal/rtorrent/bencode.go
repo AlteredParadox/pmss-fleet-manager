@@ -39,7 +39,13 @@ func InfoHash(torrent []byte) (string, error) {
 	if len(torrent) < 2 || torrent[0] != 'd' {
 		return "", ErrNoInfoHash
 	}
+	// The whole top-level dictionary is read: exactly one info entry, and
+	// nothing after the dictionary's end. Anything else is ambiguous about
+	// which torrent rTorrent will build, and a label is only ever set on a
+	// proven identity (a missing label beats a wrong one; daybreak blue
+	// re-review of PR 122).
 	i := 1
+	var found []byte
 	for i < len(torrent) && torrent[i] != 'e' {
 		// key: a byte string
 		key, n, err := benString(torrent[i:])
@@ -54,11 +60,17 @@ func InfoHash(torrent []byte) (string, error) {
 		}
 		i += n
 		if string(key) == "info" {
-			sum := sha1.Sum(torrent[start:i]) // NOSONAR: the BitTorrent v1 info hash is SHA-1 by protocol; it identifies the torrent, it protects nothing
-			return strings.ToUpper(hex.EncodeToString(sum[:])), nil
+			if found != nil {
+				return "", ErrNoInfoHash // two info entries
+			}
+			found = torrent[start:i]
 		}
 	}
-	return "", ErrNoInfoHash
+	if i != len(torrent)-1 || found == nil {
+		return "", ErrNoInfoHash // unterminated, trailing bytes, or no info
+	}
+	sum := sha1.Sum(found) // NOSONAR: the BitTorrent v1 info hash is SHA-1 by protocol; it identifies the torrent, it protects nothing
+	return strings.ToUpper(hex.EncodeToString(sum[:])), nil
 }
 
 // benString reads "<len>:<bytes>" and returns the bytes and the total
@@ -136,22 +148,37 @@ func MagnetHash(magnet string) (string, error) {
 	if err != nil {
 		return "", ErrNoInfoHash
 	}
+	// Every usable v1 hash in the link must name the same torrent: two
+	// different ones leave it open which one rTorrent loads, and a label is
+	// only set on a proven identity (daybreak blue re-review of PR 122).
+	var one string
 	for _, xt := range q["xt"] {
 		if !strings.HasPrefix(strings.ToLower(xt), "urn:btih:") {
 			continue
 		}
 		h := xt[len("urn:btih:"):]
+		var got string
 		switch len(h) {
 		case 40:
 			if ValidHash(h) {
-				return strings.ToUpper(h), nil
+				got = strings.ToUpper(h)
 			}
 		case 32:
 			raw, err := base32.StdEncoding.DecodeString(strings.ToUpper(h))
 			if err == nil && len(raw) == 20 {
-				return strings.ToUpper(hex.EncodeToString(raw)), nil
+				got = strings.ToUpper(hex.EncodeToString(raw))
 			}
 		}
+		if got == "" {
+			continue
+		}
+		if one != "" && got != one {
+			return "", ErrNoInfoHash
+		}
+		one = got
 	}
-	return "", ErrNoInfoHash
+	if one == "" {
+		return "", ErrNoInfoHash
+	}
+	return one, nil
 }
