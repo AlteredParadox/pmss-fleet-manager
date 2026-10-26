@@ -332,12 +332,16 @@ docker run -d --name pmss-fleet-manager \
 ### Rootless Podman and Quadlet
 
 The image runs unchanged under rootless Podman, as a systemd service through
-a Quadlet unit. This section comes from a user running it that way (Podman
-5.4 on Debian 13); the maintainers test the image with Docker only, so
-treat the Podman specifics as field notes rather than CI-checked facts.
+a Quadlet unit. The notes below come from a user running it that way and
+were checked on Podman 5.4.2 with crun on Debian 13: the unit at the end
+started healthy on a read-only root with every capability dropped, the
+login, credential secret and SSH key came from Podman secrets, and the
+ownership recipes behaved as described. Restarting on a failed healthcheck
+and starting at boot were not exercised. CI tests the image with Docker.
 
 - **Ownership of `/data`.** Rootless Podman maps the container's uid 65532
-  to a subordinate uid on the host (for example 165531), not to you, so
+  to a subordinate uid on the host (the start of your `/etc/subuid` range
+  plus 65531, e.g. 231067 for a range starting at 165536), not to you, so
   `chown 65532:65532` on the host gives the wrong owner. A fresh named
   volume works as it is: Podman copies the image's `nonroot`-owned `/data`
   into it on first use (a volume that already exists keeps its ownership).
@@ -357,8 +361,17 @@ treat the Podman specifics as field notes rather than CI-checked facts.
   podman secret create pmss-fleet-key ~/.ssh/pmss_fleet_ed25519
   ```
 
+  **Use crun with a read-only root.** With `ReadOnly=true`, secrets mounted
+  under `/run/secrets` need the crun runtime, Podman's default when it is
+  installed: under runc the container fails to start with "make mountpoint
+  /run/secrets/...: read-only file system". Check with
+  `podman info --format '{{.Host.OCIRuntime.Name}}'`; Podman picks runc
+  when crun is missing, for example when Docker's runc is already there,
+  so `apt install crun` (or drop `ReadOnly=true`).
+
   **Back them up separately.** Podman's default secret driver keeps
-  secrets unencrypted under `~/.local/share/containers/storage/secrets/`,
+  secrets unencrypted (base64 in one JSON file) under
+  `~/.local/share/containers/storage/secrets/`,
   next to `storage/volumes/`. A backup of that whole tree carries the
   credential secret together with the database it protects, which
   *Encrypting stored credentials* says to avoid: back up the volume with
@@ -366,9 +379,13 @@ treat the Podman specifics as field notes rather than CI-checked facts.
 - **Healthcheck.** Podman does not take the Dockerfile's healthcheck from
   an OCI image, so set it in the unit (`HealthCmd=CMD ...`: the leading
   `CMD` selects exec form, and the image has no `/bin/sh`).
-  `Notify=healthy` makes systemd count the unit as started only once the
-  first check passes, and `HealthOnFailure=kill` with `Restart=on-failure`
-  restarts a container that stops serving.
+  `Notify=healthy` makes systemd count the unit as started only once a
+  check passes, and `HealthOnFailure=kill` with `Restart=on-failure`
+  restarts a container that stops serving. The first regular check runs
+  one `HealthInterval` after the start, so on its own `Notify=healthy`
+  holds the start for a minute; the startup check in the unit below
+  (`HealthStartupCmd`, every 2 s until it passes) gets it there in about a
+  second.
 - **Firewall.** With rootless Podman's default `pasta` networking a
   published port is an ordinary host socket, so the host firewall's INPUT
   rules (UFW, nftables) apply to it, unlike rootful Docker. Publishing on
@@ -411,6 +428,8 @@ HealthInterval=60s
 HealthTimeout=5s
 HealthRetries=3
 HealthStartPeriod=20s
+HealthStartupCmd=CMD /pmss-fleet-manager healthcheck
+HealthStartupInterval=2s
 HealthOnFailure=kill
 Notify=healthy
 
