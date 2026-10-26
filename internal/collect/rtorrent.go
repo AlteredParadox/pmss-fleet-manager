@@ -173,6 +173,23 @@ func (p *poller) detachedTransport(ctx context.Context, ep string) (scriptRunner
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// A loopback port is re-verified as this account's on this transport,
+	// just before it is used: the last check ran before the lease, the
+	// path check and this connection, and on a socket-table-privacy host
+	// the dial's accepted-socket check falls back to exactly this listener
+	// check (Codex on PR 123).
+	if strings.HasPrefix(ep, "tcp:") {
+		_, portStr, _ := strings.Cut(ep[len("tcp:"):], ":")
+		port, perr := strconv.Atoi(portStr)
+		if perr != nil {
+			cli.Close()
+			return nil, nil, nil, errors.New("rtorrent: bad endpoint port")
+		}
+		if err := verifyPortNow(cctx, cli, port); err != nil {
+			cli.Close()
+			return nil, nil, nil, err
+		}
+	}
 	dial, err := p.rtDialer(cli, ep)
 	if err != nil {
 		cli.Close()
