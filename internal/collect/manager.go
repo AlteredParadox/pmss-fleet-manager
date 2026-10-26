@@ -436,7 +436,18 @@ func (m *Manager) startPoller(bp *store.Box, prev *BoxState) {
 	// and be overwritten by the older value (Codex on PR 123).
 	g := m.labelGuard(b.ID)
 	g.Lock()
-	m.applyRtRemove(b, &st, prev != nil)
+	// The box's live notice as it is now, under the guard (an edit's
+	// snapshot may predate a dismiss or a newer report); none on a start.
+	var liveMsg string
+	var liveAt time.Time
+	if prev != nil {
+		m.mu.RLock()
+		if cur := m.states[b.ID]; cur != nil {
+			liveMsg, liveAt = cur.Rt.RemoveFailed, cur.Rt.RemoveFailedAt
+		}
+		m.mu.RUnlock()
+	}
+	m.applyRtRemove(b, &st, liveMsg, liveAt)
 	// No poll will ever run the hooks of a disabled box: let the alert
 	// rules see the disabled status now so open alerts for it resolve.
 	m.commit(b.ID, func(*BoxState) *BoxState {
@@ -997,15 +1008,20 @@ func (m *Manager) restoredRtRemove(b *store.Box) (msg string, at time.Time, ok b
 }
 
 // applyRtRemove sets or clears the state's recorded removal failure from
-// the durable row, whatever the state cache carried; except that a live
-// notice newer than the row (its own row write failed: reportRtRemove still
-// publishes it, so the user sees it) is kept when the state is carried
-// live across a same-generation edit, or an edit would silently replace an
-// undismissed failure with an older one or nothing (Codex on PR 123). A
-// restart has no live state, so there the row decides.
-func (m *Manager) applyRtRemove(b *store.Box, st *BoxState, live bool) {
+// the durable row, whatever the state cache carried; except that the
+// box's current live notice, when it is newer than the row (its own row
+// write failed: reportRtRemove still publishes it, so the user sees it),
+// is kept across a same-generation edit, or the edit would silently
+// replace an undismissed failure with an older one or nothing (Codex on PR
+// 123). liveMsg and liveAt are the box's live notice read under the label
+// guard at the moment of the call, not the snapshot the edit took earlier:
+// a dismiss between the two clears both the row and the live notice, and
+// must not be undone by the snapshot (Codex on PR 123). A restart has no
+// live state, so there the row decides.
+func (m *Manager) applyRtRemove(b *store.Box, st *BoxState, liveMsg string, liveAt time.Time) {
 	msg, at, _ := m.restoredRtRemove(b)
-	if live && st.Rt.RemoveFailed != "" && st.Rt.RemoveFailedAt.After(at) {
+	if liveMsg != "" && liveAt.After(at) {
+		st.Rt.RemoveFailed, st.Rt.RemoveFailedAt = liveMsg, liveAt
 		return
 	}
 	st.Rt.RemoveFailed, st.Rt.RemoveFailedAt = msg, at
