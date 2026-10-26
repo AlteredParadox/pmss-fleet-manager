@@ -163,3 +163,41 @@ test('the add toast says what happened: added, refused, label unconfirmed; nothi
   assert.equal(V.addSummary({ links: 2, files: 1 }, false, 'qbt'), '3 torrents sent to qBittorrent');
   assert.equal(V.addSummary({ counted: true, added: 1, pending: 1, failed: 1 }, true, 'qbt'), '1 added (stopped), 1 still being fetched, 1 not added (already present or not a torrent)');
 });
+
+test('torrent columns sort by their value, reverse, then return to the default order', () => {
+  const rows = [
+    { name: 'b', size: 10, ratio: 1.5, up_bps: 0 },
+    { name: 'A', size: 30, ratio: -1, up_bps: 5 },
+    { name: 'c', size: 10, ratio: 0.2, up_bps: 9 },
+  ];
+  const names = (l) => l.map((t) => t.name).join('');
+  assert.equal(names(V.sortTorrents(rows, null)), 'bAc', 'no sort keeps the given order');
+  assert.equal(names(V.sortTorrents(rows, { key: 'name', dir: 'asc' })), 'Abc', 'text ignores case');
+  assert.equal(names(V.sortTorrents(rows, { key: 'size', dir: 'desc' })), 'Abc', 'ties fall back to the name');
+  assert.equal(names(V.sortTorrents(rows, { key: 'ratio', dir: 'desc' })), 'Abc', 'an infinite ratio is the largest');
+  assert.equal(names(V.sortTorrents(rows, { key: 'up', dir: 'asc' })), 'bAc');
+  assert.equal(names(rows), 'bAc', 'the input is not reordered');
+  // The fleet list sorts [box, torrent] pairs, by the box name too.
+  const pairs = [[{ name: 'pm2' }, rows[0]], [{ name: 'pm1' }, rows[1]]];
+  assert.equal(V.sortTorrents(pairs, { key: 'box', dir: 'asc' }, (r) => r[1], (r) => r[0].name)[0][0].name, 'pm1');
+  // Clicks: new column (text up, numbers down), reverse, back to default.
+  assert.deepEqual(V.nextSort(null, 'name'), { key: 'name', dir: 'asc' });
+  assert.deepEqual(V.nextSort(null, 'size'), { key: 'size', dir: 'desc' });
+  assert.deepEqual(V.nextSort({ key: 'size', dir: 'desc' }, 'size'), { key: 'size', dir: 'asc' });
+  assert.equal(V.nextSort({ key: 'size', dir: 'asc' }, 'size'), null);
+  assert.deepEqual(V.nextSort({ key: 'size', dir: 'asc' }, 'name'), { key: 'name', dir: 'asc' });
+});
+
+test('rTorrent discovery toggles show the configured value and flag a pending restart', () => {
+  assert.deepEqual(V.rtDiscovery({ reachable: false }), [], 'nothing to toggle while unreachable');
+  // pm1 after a change it could not apply live: file says on, client off.
+  const [dht, pex] = V.rtDiscovery({ reachable: true, dht: false, conf_dht: 'on', pex: false, pex_known: true, conf_pex: 'off' });
+  assert.deepEqual(dht, { k: 'dht', label: 'DHT', on: true, live: false, pending: true, warn: true });
+  assert.deepEqual(pex, { k: 'pex', label: 'PeX', on: false, live: false, pending: false, warn: false });
+  // No config line: the live value; DHT running is orange even when the file says off.
+  const [d2] = V.rtDiscovery({ reachable: true, dht: true });
+  assert.equal(d2.on, true);
+  assert.equal(V.rtDiscovery({ reachable: true, dht: true, conf_dht: 'off' })[0].warn, true);
+  // A build without protocol.pex and no config line: no PeX toggle.
+  assert.equal(V.rtDiscovery({ reachable: true, dht: false, pex_known: false }).length, 1);
+});

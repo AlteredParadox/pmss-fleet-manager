@@ -1457,3 +1457,31 @@ func TestRtConfShell(t *testing.T) {
 		t.Fatalf("no files: %q", out)
 	}
 }
+
+// Peer discovery as PMSS writes it (pm1, 2026-10-26): the main file turns
+// DHT to auto and peer exchange on, the custom file, imported last, turns
+// both off; dht.add_node schedules are not settings.
+func TestRtConfDiscovery(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	home := t.TempDir()
+	os.WriteFile(home+"/.rtorrent.rc", []byte("dht.mode.set = auto\nschedule2 = dht_node1, 1, 3600, \"dht.add_node=dht.libtorrent.org:25401\"\nprotocol.pex.set = yes\ntry_import = .rtorrent.rc.custom\n"), 0o644)
+	out, _, _ := runSh(t, "home="+home+"\n"+rtConfShell)
+	if r := parseRt(map[string]string{"rt_conf": out}, home); r.ConfDHT != "on" || r.ConfPeX != "on" {
+		t.Fatalf("main file only: %+v from %q", r, out)
+	}
+	os.WriteFile(home+"/.rtorrent.rc.custom", []byte("# custom\ndht.mode.set = disable\nprotocol.pex.set = no\n"), 0o600)
+	out, _, _ = runSh(t, "home="+home+"\n"+rtConfShell)
+	if r := parseRt(map[string]string{"rt_conf": out}, home); r.ConfDHT != "off" || r.ConfPeX != "off" {
+		t.Fatalf("custom overrides: %+v from %q", r, out)
+	}
+	// Old spellings and unknown values.
+	r := parseRt(map[string]string{"rt_conf": "dht = on\npeer_exchange = 0\n"}, home)
+	if r.ConfDHT != "on" || r.ConfPeX != "off" {
+		t.Fatalf("old spellings: %+v", r)
+	}
+	if r := parseRt(map[string]string{"rt_conf": "dht.mode.set = maybe\n"}, home); r.ConfDHT != "" {
+		t.Fatalf("unknown mode: %+v", r)
+	}
+}

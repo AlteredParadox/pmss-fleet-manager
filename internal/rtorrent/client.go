@@ -142,7 +142,14 @@ type Stats struct {
 	DownBPS    int64
 	UpBPS      int64
 	ListenPort int
-	DHT        bool
+	// DHT says whether DHT is running now; DHTMode is the configured mode
+	// (disable, off, auto or on). A client started with "disable" never
+	// initialised DHT, so turning it on takes a restart.
+	DHT      bool
+	DHTMode  string
+	DHTKnown bool // dht.statistics answered
+	PeX      bool // protocol.pex: peer exchange for torrents started from now on
+	PeXKnown bool // protocol.pex answered
 }
 
 // Actions on one torrent. Stop and Start mirror ruTorrent: stop then
@@ -195,11 +202,11 @@ func ValidHash(h string) bool {
 // Per-call answer shapes: how many entries the outermost array may hold
 // and how many Values the whole answer may retain. A scalar answer (a
 // version, a path, a command's 0) needs neither an array nor more than a
-// few values; the stats multicall has exactly six members; only the torrent
+// few values; the stats multicall has exactly seven members; only the torrent
 // listing needs the large ceilings (daybreak blue re-review of PR 122).
 const (
 	scalarRows, scalarValues = 4, 64
-	statsRows, statsValues   = 6, 256
+	statsRows, statsValues   = 7, 256
 )
 
 // call performs one XML-RPC method call under the operation the caller
@@ -315,7 +322,7 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 	calls := []any{
 		mc("system.client_version"), mc("system.library_version"),
 		mc("throttle.global_down.rate"), mc("throttle.global_up.rate"),
-		mc("network.listen.port"), mc("dht.statistics"),
+		mc("network.listen.port"), mc("dht.statistics"), mc("protocol.pex"),
 	}
 	v, err := c.call(ctx, statsRows, statsValues, "system.multicall", calls)
 	if err != nil {
@@ -323,14 +330,14 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 	}
 	// Each result is a one-element array holding the value, or a fault
 	// struct. Only an unknown-method fault, with its typed code and string,
-	// and only for the two members a build may lack (the listen port and
-	// DHT statistics) reads as "missing"; a fault on the version or the
+	// and only for the members a build may lack (the listen port, DHT
+	// statistics and peer exchange) reads as "missing"; a fault on the version or the
 	// rates, or a malformed fault, is an error, not a zero (daybreak blue
 	// re-review of PR 122). A value of the wrong kind fails the call.
 	if v.Kind != KindArray || len(v.Array) != len(calls) {
 		return nil, ErrUnexpected
 	}
-	methods := []string{"system.client_version", "system.library_version", "throttle.global_down.rate", "throttle.global_up.rate", "network.listen.port", "dht.statistics"}
+	methods := []string{"system.client_version", "system.library_version", "throttle.global_down.rate", "throttle.global_up.rate", "network.listen.port", "dht.statistics", "protocol.pex"}
 	member := func(i int, want Kind, optional bool) (Value, error) {
 		e := v.Array[i]
 		if e.Kind == KindStruct {
@@ -353,8 +360,8 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 		return e.Array[0], nil
 	}
 	var st Stats
-	var vals [6]Value
-	for i, want := range []Kind{KindString, KindString, KindInt, KindInt, KindInt, KindStruct} {
+	var vals [7]Value
+	for i, want := range []Kind{KindString, KindString, KindInt, KindInt, KindInt, KindStruct, KindInt} {
 		var err error
 		if vals[i], err = member(i, want, i >= 4); err != nil {
 			return nil, err
@@ -374,8 +381,67 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 			return nil, ErrUnexpected
 		}
 		st.DHT = ok && a.Int == 1
+		if m, ok := d.Struct["dht"]; ok {
+			if m.Kind != KindString {
+				return nil, ErrUnexpected
+			}
+			if dhtModes[m.Str] {
+				st.DHTMode = m.Str
+			}
+		}
+		st.DHTKnown = true
+	}
+	if p := vals[6]; p.Kind == KindInt {
+		st.PeX, st.PeXKnown = p.Int != 0, true
 	}
 	return &st, nil
+}
+
+// dhtModes are rTorrent's dht.mode values.
+var dhtModes = map[string]bool{"disable": true, "off": true, "auto": true, "on": true}
+
+// Discovery settings SetDiscovery changes: rTorrent has DHT and peer
+// exchange, and no local service discovery.
+const (
+	DiscoveryDHT = "dht"
+	DiscoveryPeX = "pex"
+)
+
+// SetDiscovery switches DHT or peer exchange in the running client. DHT
+// off is "off", not "disable": both keep DHT from running, but a client
+// started with "disable" never initialises it, so a later "on" is ignored
+// until a restart (the caller re-reads Stats to tell). Peer exchange
+// applies to torrents started from now on.
+func (c *Client) SetDiscovery(ctx context.Context, key string, on bool) error {
+	release, err := c.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	switch key {
+	case DiscoveryDHT:
+		mode := "off"
+		if on {
+			mode = "on"
+		}
+		return c.command(ctx, "dht.mode.set", "", mode)
+	case DiscoveryPeX:
+		var v int64
+		if on {
+			v = 1
+		}
+		// A value setter answers with the value it set (seen on 0.9.8),
+		// not a command's 0.
+		r, err := c.call(ctx, scalarRows, scalarValues, "protocol.pex.set", "", v)
+		if err != nil {
+			return err
+		}
+		if r.Kind != KindInt || (r.Int != 0 && r.Int != v) {
+			return ErrUnexpected
+		}
+		return nil
+	}
+	return fmt.Errorf("rtorrent: unknown discovery setting %q", key)
 }
 
 // mc is one system.multicall member: method with the empty target.

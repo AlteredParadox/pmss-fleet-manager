@@ -327,15 +327,24 @@ type RtState struct {
 	RemoveFailedAt time.Time `json:"remove_failed_at,omitempty"`
 	// PortOK is set when the endpoint is a loopback port verified as this
 	// account's (a unix socket inside the home needs no such check).
-	PortOK     bool          `json:"port_ok"`
-	ListenPort int           `json:"listen_port,omitempty"`
-	DHT        bool          `json:"dht"`
-	Total      int           `json:"total"`
-	Seeding    int           `json:"seeding"`
-	Leeching   int           `json:"leeching"`
-	Paused     int           `json:"paused"`
-	Errored    int           `json:"errored"`
-	Torrents   []TorrentView `json:"torrents,omitempty"`
+	PortOK     bool `json:"port_ok"`
+	ListenPort int  `json:"listen_port,omitempty"`
+	DHT        bool `json:"dht"` // DHT running now
+	// PeX is peer exchange in the running client (PeXKnown: the build
+	// answered protocol.pex). ConfDHT and ConfPeX are what the config files
+	// give a restart, "on", "off" or "" (not set); they differ from the live
+	// values until rTorrent is restarted after a change that could not be
+	// applied live. See SetRtDiscovery.
+	PeX      bool          `json:"pex"`
+	PeXKnown bool          `json:"pex_known"`
+	ConfDHT  string        `json:"conf_dht,omitempty"`
+	ConfPeX  string        `json:"conf_pex,omitempty"`
+	Total    int           `json:"total"`
+	Seeding  int           `json:"seeding"`
+	Leeching int           `json:"leeching"`
+	Paused   int           `json:"paused"`
+	Errored  int           `json:"errored"`
+	Torrents []TorrentView `json:"torrents,omitempty"`
 }
 
 // Discovery is the client's peer-discovery configuration. Known is false

@@ -227,7 +227,8 @@ var detectRtDial func(ep string) rtorrent.Dialer
 func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot) {
 	running, known := snap.RtProcess()
 	rs := RtState{Enabled: true, ProcessUp: running, ProcessKnown: known, ConfFound: snap.Rt.ConfFound, Disabled: snap.Rt.Disabled,
-		Version: st.Rt.Version, Library: st.Rt.Library, RemoveFailed: st.Rt.RemoveFailed, RemoveFailedAt: st.Rt.RemoveFailedAt}
+		Version: st.Rt.Version, Library: st.Rt.Library, RemoveFailed: st.Rt.RemoveFailed, RemoveFailedAt: st.Rt.RemoveFailedAt,
+		ConfDHT: snap.Rt.ConfDHT, ConfPeX: snap.Rt.ConfPeX}
 	rs.Endpoint = clip(rtEndpoint(rtBox{p.box.RtSCGI}, snap), 600)
 	defer func() { st.Rt = rs }()
 	if known && !running {
@@ -285,6 +286,7 @@ func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot)
 	}
 	rs.Version, rs.Library = clip(stats.Version, 32), clip(stats.Library, 32)
 	rs.ListenPort, rs.DHT = stats.ListenPort, stats.DHT
+	rs.PeX, rs.PeXKnown = stats.PeX, stats.PeXKnown
 	rs.Reachable = true
 	// A socket that answers is a running client, whatever ps said.
 	rs.ProcessUp = true

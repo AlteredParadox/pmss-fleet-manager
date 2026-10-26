@@ -164,5 +164,65 @@ function addSummary(r, stopped, client) {
   return parts.join(', ');
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary };
+// Torrent table sorting. Each column header sorts by its key; a click on
+// a new column sorts it (text A→Z, numbers largest first), a second click
+// reverses, a third returns to the default order (active first, busiest
+// first, as the server and the fleet list give it). Ties fall back to the
+// name so rows do not jump between polls.
+const TOR_TEXT_KEYS = new Set(['name', 'box']);
+function torSortValue(t, key) {
+  switch (key) {
+    case 'name': return String(t?.name || '').toLowerCase();
+    case 'size': return Number(t?.size) || 0;
+    case 'progress': return Number(t?.progress) || 0;
+    case 'up': return Number(t?.up_bps) || 0;
+    case 'down': return Number(t?.down_bps) || 0;
+    case 'uploaded': return Number(t?.uploaded) || 0;
+    case 'downloaded': return Number(t?.downloaded) || 0;
+    case 'ratio': return t?.ratio < 0 ? Infinity : Number(t?.ratio) || 0; // ∞: seeded with nothing downloaded
+    case 'seeds': return Number(t?.seeds) || 0;
+    case 'peers': return Number(t?.peers) || 0;
+  }
+  return 0;
+}
+function nextSort(cur, key) {
+  if (!cur || cur.key !== key) return { key, dir: TOR_TEXT_KEYS.has(key) ? 'asc' : 'desc' };
+  if (cur.dir === (TOR_TEXT_KEYS.has(key) ? 'asc' : 'desc')) return { key, dir: cur.dir === 'asc' ? 'desc' : 'asc' };
+  return null;
+}
+// sortTorrents returns a sorted copy of rows; get maps a row to its torrent
+// (identity for a plain list) and boxName to its box's name (the fleet
+// list's "seedbox" column). No sort keeps the given order.
+function sortTorrents(rows, sort, get = (r) => r, boxName = () => '') {
+  if (!sort || !sort.key) return rows.slice();
+  const sign = sort.dir === 'asc' ? 1 : -1;
+  const val = (r) => (sort.key === 'box' ? String(boxName(r) || '').toLowerCase() : torSortValue(get(r), sort.key));
+  return rows.map((r, i) => [r, val(r), i]).sort((a, b) => {
+    if (a[1] !== b[1]) return (a[1] < b[1] ? -1 : 1) * sign;
+    const na = torSortValue(get(a[0]), 'name'), nb = torSortValue(get(b[0]), 'name');
+    if (na !== nb) return na < nb ? -1 : 1;
+    return a[2] - b[2];
+  }).map((x) => x[0]);
+}
+
+// rtDiscovery describes rTorrent's peer-discovery toggles: DHT and peer
+// exchange (rTorrent has no local service discovery). `on` is what the
+// toggle sets and shows: the config files' value when they name one (what
+// a restart uses, and what a click rewrites), else the live one. `live` is
+// the running client's; `pending` is set when the two differ, i.e. the
+// change waits for a restart. `warn` (orange) when either is on.
+function rtDiscovery(r) {
+  if (!r || !r.reachable) return [];
+  const out = [];
+  const one = (k, label, live, conf, known = true) => {
+    if (!known && !conf) return;
+    const on = conf ? conf === 'on' : !!live;
+    out.push({ k, label, on, live: known ? !!live : null, pending: known && !!conf && on !== !!live, warn: on || (known && !!live) });
+  };
+  one('dht', 'DHT', r.dht, r.conf_dht);
+  one('pex', 'PeX', r.pex, r.conf_pex, !!r.pex_known);
+  return out;
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentAction, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery };
 })();

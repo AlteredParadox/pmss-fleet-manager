@@ -28,7 +28,9 @@ box name (and whichever of DHT / PeX / LSD is enabled on it in parentheses)
 linking to that box's torrents tab; the same columns (size, progress, rates,
 lifetime uploaded / downloaded, ratio, connected seeds and peers with the
 swarm size), filter and per-torrent stop / start / remove controls as the
-per-box tab.
+per-box tab. Every column sorts on a click of its heading (again to reverse,
+a third time for the default order); the choice is remembered per table in
+the browser.
 
 **Per box.**
 
@@ -39,10 +41,11 @@ per-box tab.
 - Host: the shared machine's cpu (busy, iowait, steal), memory and `/home`,
   and PMSS's own 24-hour "node vs. you" statistics (15 min / 1 h / 24 h
   averages and a trend, computed as its panel computes them).
-- Torrents: DHT / PeX / local peer discovery state in the header, each a
+- Torrents: one table per client (qBittorrent, rTorrent), each sortable by
+  any column. DHT / PeX / local peer discovery state in the header, each a
   toggle (and a card tag when any is on, for deciding where private-tracker
-  torrents may go);
-  the full list from qBittorrent with filter; add torrents by
+  torrents may go; rTorrent has DHT and PeX only);
+  the full list from each client with filter; add torrents by
   magnet, URL or `.torrent` file (optionally into a category, or stopped);
   stop / start / remove (with or without the files) per torrent; pause all /
   resume all; and start / stop / restart of the client.
@@ -352,8 +355,8 @@ cannot keep others from talking to your rTorrent. Keep the unix socket
 unless the host isolates loopback between tenants. The client is PMSS's own, started by the panel's watchdog, so there is no
 install, start or stop for it here; the tenant's `~/.rtorrentDisable`
 marker is shown and silences the alert. On a box running both clients the
-torrents tab groups the torrents by client, each group with its own counts
-and add button; the fleet-wide torrents view names the client in
+torrents tab shows a table per client, each with its own counts, add button
+and column sort; the fleet-wide torrents view names the client in
 parentheses after each torrent. Torrent actions: stop, start, remove,
 remove with data, add. Remove with data asks rTorrent for the
 torrent's path, erases the torrent, then deletes on the box only after the
@@ -372,6 +375,21 @@ And a process of the same account that renames another directory into the
 very name being removed, in the instant between the check and the removal,
 can have that directory deleted instead; that data is only recoverable from
 a backup.
+
+**Peer discovery.** The rTorrent header has DHT and PeX toggles like
+qBittorrent's (rTorrent has no local service discovery). A click writes the
+setting to `~/.rtorrent.rc.custom`, which PMSS's own `~/.rtorrent.rc` imports
+last, so it survives a restart: the first line already setting it (either
+spelling, `dht.mode.set` / `dht`, `protocol.pex.set` / `peer_exchange`) is
+replaced, later ones are dropped, and the rest of the file is kept as it
+was; the file is replaced by a rename and keeps its mode, and a symbolic
+link, a non-regular file or one over 1 MiB is refused. The setting is then
+applied to the running client, and what the client reports afterwards is
+shown. DHT off is written as `off`, not `disable`: both keep DHT from
+running, but a client started with `disable` never initialises DHT and so
+cannot turn it on until it is restarted; the toast says so, and the toggle
+carries ↻ until the running client matches the file. Peer exchange applies
+to torrents started after the change.
 
 **Labels.** A label (ruTorrent's `custom1`) is attempted once, right after
 the torrent is loaded, and never retried: the add's answer says how many
@@ -652,6 +670,15 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**Unreleased**
+
+- The torrents tab shows a separate table per client, and every torrent
+  table sorts by any column from its heading.
+- rTorrent DHT / PeX toggles, saved to `~/.rtorrent.rc.custom` and applied
+  live where the client allows.
+- Torrent row actions are icons (start, stop, remove, remove with files,
+  each named on hover), and the rows are more compact.
 
 **1.10.0**
 

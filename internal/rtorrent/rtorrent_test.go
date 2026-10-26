@@ -268,13 +268,13 @@ func TestStatsMulticall(t *testing.T) {
 		return resp(`<array><data>` +
 			row(str("0.16.25")) + row(str("0.16.1")) + row(i8(123)) + row(i8(456)) + row(i8(50123)) +
 			`<value><array><data><value><struct><member><name>dht</name><value><string>auto</string></value></member><member><name>active</name><value><i8>1</i8></value></member></struct></value></data></array></value>` +
-			`</data></array>`)
+			row(i8(1)) + `</data></array>`)
 	})
 	st, err := New(f.dial).Stats(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Version != "0.16.25" || st.Library != "0.16.1" || st.DownBPS != 123 || st.UpBPS != 456 || st.ListenPort != 50123 || !st.DHT {
+	if st.Version != "0.16.25" || st.Library != "0.16.1" || st.DownBPS != 123 || st.UpBPS != 456 || st.ListenPort != 50123 || !st.DHT || st.DHTMode != "auto" || !st.DHTKnown || !st.PeX || !st.PeXKnown {
 		t.Fatalf("%+v", st)
 	}
 	// The mode string is not the state: "off" (and "auto" before any node
@@ -282,15 +282,15 @@ func TestStatsMulticall(t *testing.T) {
 	for _, mode := range []string{"off", "auto", "disable", "on"} {
 		f.on(func(m string, p []string) string {
 			return resp(`<array><data>` + row(str("0.9.8")) + row(str("0.13.8")) + row(i8(1)) + row(i8(2)) + row(i8(3)) +
-				`<value><array><data><value><struct><member><name>dht</name><value><string>` + mode + `</string></value></member><member><name>active</name><value><i8>0</i8></value></member></struct></value></data></array></value></data></array>`)
+				`<value><array><data><value><struct><member><name>dht</name><value><string>` + mode + `</string></value></member><member><name>active</name><value><i8>0</i8></value></member></struct></value></data></array></value>` + row(i8(0)) + `</data></array>`)
 		})
 		st, err := New(f.dial).Stats(context.Background())
-		if err != nil || st.DHT {
+		if err != nil || st.DHT || st.DHTMode != mode || st.PeX || !st.PeXKnown {
 			t.Fatalf("mode %s active=0: %+v %v", mode, st, err)
 		}
 	}
 	// Every member carries the empty target.
-	if got := f.last().params[0]; strings.Count(got, "methodName") != 6 {
+	if got := f.last().params[0]; strings.Count(got, "methodName") != 7 {
 		t.Fatalf("multicall params %q", got)
 	}
 }
@@ -300,7 +300,7 @@ func TestStatsFaultMemberIsZero(t *testing.T) {
 	f.on(func(m string, p []string) string {
 		return resp(`<array><data>` + row(str("0.9.8")) + row(str("0.13.8")) + row(i8(1)) + row(i8(2)) +
 			`<value><struct><member><name>faultCode</name><value><i4>-506</i4></value></member><member><name>faultString</name><value><string>Method 'network.listen.port' not defined</string></value></member></struct></value>` +
-			`<value><array><data><value><struct><member><name>dht</name><value><string>off</string></value></member><member><name>active</name><value><i8>0</i8></value></member></struct></value></data></array></value>` + `</data></array>`)
+			`<value><array><data><value><struct><member><name>dht</name><value><string>off</string></value></member><member><name>active</name><value><i8>0</i8></value></member></struct></value></data></array></value>` + row(i8(0)) + `</data></array>`)
 	})
 	st, err := New(f.dial).Stats(context.Background())
 	if err != nil || st.ListenPort != 0 || st.DHT {
@@ -1005,11 +1005,11 @@ func TestColumnKindsChecked(t *testing.T) {
 	}
 	// Stats: a member of the wrong kind fails; a per-member fault is zero.
 	bad := func(i int, v string) string {
-		parts := []string{row(str("0.9.8")), row(str("0.13.8")), row(i8(1)), row(i8(2)), row(i8(3)), `<value><array><data><value><struct><member><name>active</name><value><i8>1</i8></value></member></struct></value></data></array></value>`}
+		parts := []string{row(str("0.9.8")), row(str("0.13.8")), row(i8(1)), row(i8(2)), row(i8(3)), `<value><array><data><value><struct><member><name>active</name><value><i8>1</i8></value></member></struct></value></data></array></value>`, row(i8(1))}
 		parts[i] = v
 		return resp(`<array><data>` + strings.Join(parts, "") + `</data></array>`)
 	}
-	for i, v := range map[int]string{0: row(i8(1)), 2: row(str("x")), 4: row(str("5000")), 5: row(str("s")), 1: `<value><string>flat</string></value>`} {
+	for i, v := range map[int]string{0: row(i8(1)), 2: row(str("x")), 4: row(str("5000")), 5: row(str("s")), 6: row(str("yes")), 1: `<value><string>flat</string></value>`} {
 		f.on(func(m string, p []string) string { return bad(i, v) })
 		if _, err := c.Stats(context.Background()); !errors.Is(err, ErrUnexpected) {
 			t.Errorf("stats member %d: %v", i, err)
@@ -1128,7 +1128,7 @@ func TestStatsFaultsStrict(t *testing.T) {
 		return `<value><struct><member><name>faultCode</name><value><i4>` + code + `</i4></value></member><member><name>faultString</name><value><string>` + msg + `</string></value></member></struct></value>`
 	}
 	members := func(i int, v string) string {
-		parts := []string{row(str("0.9.8")), row(str("0.13.8")), row(i8(1)), row(i8(2)), row(i8(3)), `<value><array><data><value><struct><member><name>active</name><value><i8>1</i8></value></member></struct></value></data></array></value>`}
+		parts := []string{row(str("0.9.8")), row(str("0.13.8")), row(i8(1)), row(i8(2)), row(i8(3)), `<value><array><data><value><struct><member><name>active</name><value><i8>1</i8></value></member></struct></value></data></array></value>`, row(i8(1))}
 		parts[i] = v
 		return resp(`<array><data>` + strings.Join(parts, "") + `</data></array>`)
 	}
@@ -1143,6 +1143,12 @@ func TestStatsFaultsStrict(t *testing.T) {
 		return members(5, fault("-506", "Method 'dht.statistics' not defined"))
 	})
 	if st, err := c.Stats(ctx); err != nil || st.DHT {
+		t.Fatalf("%+v %v", st, err)
+	}
+	f.on(func(m string, p []string) string {
+		return members(6, fault("-506", "Method 'protocol.pex' not defined"))
+	})
+	if st, err := c.Stats(ctx); err != nil || st.PeX || st.PeXKnown || !st.DHTKnown {
 		t.Fatalf("%+v %v", st, err)
 	}
 	// A fault on a mandatory member surfaces as the fault.
@@ -1602,5 +1608,51 @@ func TestUnsentLoadIsNotUncertain(t *testing.T) {
 	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}})
 	if err == nil || res.Added != 0 || res.Uncertain != 0 {
 		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+// SetDiscovery sends rTorrent's global setters with the empty target:
+// DHT off as "off" (which, unlike "disable", can be turned on again
+// without a restart), peer exchange as 0/1; anything
+// else is refused before reaching the client.
+func TestSetDiscovery(t *testing.T) {
+	f := newFake(t)
+	f.on(func(m string, p []string) string { return resp(i8(0)) })
+	c := New(f.dial)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		key    string
+		on     bool
+		method string
+		param  string
+	}{
+		{DiscoveryDHT, true, "dht.mode.set", "on"},
+		{DiscoveryDHT, false, "dht.mode.set", "off"},
+		{DiscoveryPeX, true, "protocol.pex.set", "1"},
+		{DiscoveryPeX, false, "protocol.pex.set", "0"},
+	} {
+		if err := c.SetDiscovery(ctx, tc.key, tc.on); err != nil {
+			t.Fatalf("%s %v: %v", tc.key, tc.on, err)
+		}
+		got := f.last()
+		if got.method != tc.method || len(got.params) != 2 || got.params[0] != "" || got.params[1] != tc.param {
+			t.Fatalf("%s %v: %+v", tc.key, tc.on, got)
+		}
+	}
+	// protocol.pex.set answers with the value it set (pm1, 0.9.8); another
+	// value, or a string, is not rTorrent.
+	f.on(func(m string, p []string) string { return resp(i8(1)) })
+	if err := c.SetDiscovery(ctx, DiscoveryPeX, true); err != nil {
+		t.Fatalf("pex answering 1: %v", err)
+	}
+	if err := c.SetDiscovery(ctx, DiscoveryPeX, false); !errors.Is(err, ErrUnexpected) {
+		t.Fatalf("pex off answering 1: %v", err)
+	}
+	f.on(func(m string, p []string) string { return resp(str("1")) })
+	if err := c.SetDiscovery(ctx, DiscoveryPeX, true); !errors.Is(err, ErrUnexpected) {
+		t.Fatalf("pex answering a string: %v", err)
+	}
+	if err := c.SetDiscovery(ctx, "lsd", true); err == nil {
+		t.Fatal("lsd accepted")
 	}
 }
