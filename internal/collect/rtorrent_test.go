@@ -673,17 +673,17 @@ func TestRtRemoveDataDeletionOutlivesRPCDeadline(t *testing.T) {
 }
 
 func TestRtEndpointNotCarriedAcrossEdit(t *testing.T) {
-	// A probed state carries its resolved endpoint; after an edit the
-	// record's override (or nothing) is what actions may use until the next
-	// poll resolves it again (Codex on PR 123).
-	st := BoxState{Ready: true, Rt: RtState{Enabled: true, Endpoint: "unix:/home/u/.rtorrent.socket", Reachable: true}}
-	st.adoptIdentity(fromBox(&store.Box{RtEnabled: true, RtSCGI: "tcp:127.0.0.1:5000"}))
-	if st.Rt.Endpoint != "tcp:127.0.0.1:5000" {
-		t.Fatal(st.Rt.Endpoint)
-	}
-	st.adoptIdentity(fromBox(&store.Box{RtEnabled: true}))
-	if st.Rt.Endpoint != "" {
-		t.Fatalf("removed override must not leave the old endpoint: %q", st.Rt.Endpoint)
+	// A probed state carries its resolved endpoint; after an edit nothing
+	// is what actions may use until the next poll resolves and checks it
+	// again: not the old endpoint (Codex on PR 123), and not the edited
+	// override, which may be a socket outside the home (fred / Codex on
+	// PR 130).
+	for _, scgi := range []string{"", "tcp:127.0.0.1:5000", "unix:/tmp/other.sock"} {
+		st := BoxState{Ready: true, Rt: RtState{Enabled: true, Endpoint: "unix:/home/u/.rtorrent.socket", Reachable: true}}
+		st.adoptIdentity(fromBox(&store.Box{RtEnabled: true, RtSCGI: scgi}))
+		if st.Rt.Endpoint != "" {
+			t.Fatalf("override %q: carried endpoint %q", scgi, st.Rt.Endpoint)
+		}
 	}
 	// With no endpoint the action gate refuses rather than guessing.
 	f := newFakeSCGI(t)

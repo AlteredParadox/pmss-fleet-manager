@@ -999,7 +999,7 @@ func TestRtRoutesAndSettings(t *testing.T) {
 			} `json:"rtorrent"`
 		} `json:"boxes"`
 	}
-	if err := json.Unmarshal([]byte(body), &out); err != nil || code != 200 || len(out.Boxes) != 1 || out.Boxes[0].BoxRev != b.Revision || !out.Boxes[0].Rt.Enabled || out.Boxes[0].Rt.Endpoint != "unix:/home/u/.rtorrent.socket" {
+	if err := json.Unmarshal([]byte(body), &out); err != nil || code != 200 || len(out.Boxes) != 1 || out.Boxes[0].BoxRev != b.Revision || !out.Boxes[0].Rt.Enabled || out.Boxes[0].Rt.Endpoint != "" { // the endpoint comes from a poll, which checks it
 		t.Fatalf("list: %d %s", code, body)
 	}
 	// Actions: the action and hash are checked before anything reaches the box.

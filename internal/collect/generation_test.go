@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 )
@@ -448,5 +449,33 @@ func TestTorrentActionNeedsCurrentBoxRevision(t *testing.T) {
 	}
 	if err := m.TorrentAction(ctx, b.ID, after.BoxRev, hash, "stop"); err == nil || errors.Is(err, ErrStaleBox) {
 		t.Fatalf("current revision: %v, want past the check (then the refused endpoint)", err)
+	}
+}
+
+// Editing a ready box to an rTorrent socket outside the home keeps the
+// box ready (same machine) but leaves no endpoint for actions until a poll
+// resolves and checks it, so neither an add nor a torrent action can dial
+// the edited socket in between (fred / Codex on PR 130).
+func TestEditedSocketUnusableUntilPolled(t *testing.T) {
+	ctx := context.Background()
+	m, _, b := genTestManager(t)
+	seedRemote(m, b.ID)
+	m.mutateState(b.ID, func(s *BoxState) {
+		s.Rt = RtState{Enabled: true, Endpoint: "unix:/home/u/.rtorrent.socket", Reachable: true}
+	})
+	ed := *b
+	ed.RtEnabled, ed.RtSCGI = true, "unix:/tmp/other.sock"
+	if err := m.UpdateBox(ctx, &ed, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := m.State(b.ID)
+	if !s.Ready || s.Rt.Endpoint != "" {
+		t.Fatalf("ready=%v endpoint %q", s.Ready, s.Rt.Endpoint)
+	}
+	if _, err := m.RtAddTorrents(ctx, b.ID, qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + strings.Repeat("a", 40)}}); err == nil || !strings.Contains(err.Error(), "no SCGI endpoint") {
+		t.Fatalf("add: %v", err)
+	}
+	if err := m.RtTorrentAction(ctx, b.ID, s.BoxRev, strings.Repeat("a", 40), "remove-data"); err == nil || !strings.Contains(err.Error(), "no SCGI endpoint") {
+		t.Fatalf("remove-data: %v", err)
 	}
 }
