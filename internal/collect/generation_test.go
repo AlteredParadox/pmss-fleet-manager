@@ -479,3 +479,41 @@ func TestEditedSocketUnusableUntilPolled(t *testing.T) {
 		t.Fatalf("remove-data: %v", err)
 	}
 }
+
+// An edit that changes a client's target drops that client's carried rows,
+// so no row drawn from the old target ever carries the new revision; the
+// next poll lists the new target's. Other edits keep them (fred review on
+// PR 130).
+func TestRetargetDropsCarriedRows(t *testing.T) {
+	ctx := context.Background()
+	m, _, b := genTestManager(t)
+	h := strings.Repeat("a", 40)
+	seed := func() {
+		seedRemote(m, b.ID)
+		m.mutateState(b.ID, func(s *BoxState) {
+			s.Qbt.Torrents = []TorrentView{{Hash: h, Name: "Q"}}
+			s.Rt.Torrents = []TorrentView{{Hash: h, Name: "R"}}
+		})
+	}
+	edit := func(f func(*store.Box)) BoxState {
+		cur, _ := m.st.GetBox(ctx, b.ID)
+		f(cur)
+		if err := m.UpdateBox(ctx, cur, store.Clears{}); err != nil {
+			t.Fatal(err)
+		}
+		s, _ := m.State(b.ID)
+		return s
+	}
+	seed()
+	if s := edit(func(x *store.Box) { x.Name = "renamed" }); len(s.Qbt.Torrents) != 1 || len(s.Rt.Torrents) != 1 {
+		t.Fatalf("rename dropped rows: %d %d", len(s.Qbt.Torrents), len(s.Rt.Torrents))
+	}
+	seed()
+	if s := edit(func(x *store.Box) { x.RtEnabled, x.RtSCGI = true, "unix:/home/u/other.sock" }); !s.Ready || len(s.Rt.Torrents) != 0 || len(s.Qbt.Torrents) != 1 {
+		t.Fatalf("socket edit: ready=%v rt %d qbt %d", s.Ready, len(s.Rt.Torrents), len(s.Qbt.Torrents))
+	}
+	seed()
+	if s := edit(func(x *store.Box) { x.QbtPort = 8081 }); len(s.Qbt.Torrents) != 0 || len(s.Rt.Torrents) != 1 {
+		t.Fatalf("port edit: qbt %d rt %d", len(s.Qbt.Torrents), len(s.Rt.Torrents))
+	}
+}

@@ -674,6 +674,9 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 			defer m.Publish(Event{Type: "alerts"}) // after the state event startPoller sends
 		}
 	}
+	if p != nil && prev != nil {
+		prev = dropRetargetedRows(prev, p.box, fresh)
+	}
 	// boxMu serialises edits and removals, so this only guards against a
 	// RemoveBox whose DB delete failed after the in-memory removal.
 	m.mu.Lock()
@@ -684,6 +687,26 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 	}
 	m.startPoller(fresh, prev) // carries the last measured data over; runs the hooks if disabled; publishes
 	return nil
+}
+
+// dropRetargetedRows returns prev without the torrent rows of a client
+// whose target the edit changed (the rTorrent socket setting, the WebUI
+// port). Carried, they would be drawn with the new record revision, and a
+// button on one could act on the same hash at the new target once it is
+// polled (fred review on PR 130); the next poll lists the new target's.
+func dropRetargetedRows(prev *BoxState, old, fresh *store.Box) *BoxState {
+	rt, qb := old.RtSCGI != fresh.RtSCGI, old.QbtPort != fresh.QbtPort
+	if !rt && !qb {
+		return prev
+	}
+	c := *prev
+	if rt {
+		c.Rt.Torrents = nil
+	}
+	if qb {
+		c.Qbt.Torrents = nil
+	}
+	return &c
 }
 
 // authEndpointChanged reports whether an edit moved the WebUI the hold was
