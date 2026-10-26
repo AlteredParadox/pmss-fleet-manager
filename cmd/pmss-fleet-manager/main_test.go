@@ -127,3 +127,17 @@ func TestLoginFrom(t *testing.T) {
 		t.Fatalf("loose mode: %q %q %v", l, w, err)
 	}
 }
+
+func TestSSHKeyWarning(t *testing.T) {
+	if w := sshKeyWarning(""); w != "" {
+		t.Fatalf("unset: %q", w)
+	}
+	p := filepath.Join(t.TempDir(), "key")
+	os.WriteFile(p, []byte("k"), 0o600)
+	if w := sshKeyWarning(p); w != "" {
+		t.Fatalf("readable: %q", w)
+	}
+	if w := sshKeyWarning(p + ".missing"); !strings.Contains(w, "cannot be read by uid") || !strings.Contains(w, "fall back") {
+		t.Fatalf("missing: %q", w)
+	}
+}

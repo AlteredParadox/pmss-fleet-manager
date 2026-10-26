@@ -493,6 +493,59 @@ func TestAddRequestFromFormNoTempFiles(t *testing.T) {
 	}
 }
 
+// /healthz answers at the root and under the base path, without the login
+// the rest of the API asks for, and without counting as a failed login.
+func TestHealthz(t *testing.T) {
+	s, _ := newTestServerWith(t, "me:pw", "/fleet")
+	for i := 0; i < 10; i++ {
+		for _, p := range []string{"/healthz", "/fleet/healthz"} {
+			if code, body := do(t, s, "GET", p, "", nil); code != 200 || body != "ok\n" {
+				t.Fatalf("%s: %d %q", p, code, body)
+			}
+		}
+	}
+	if code, _ := do(t, s, "GET", "/fleet/api/state", "", nil); code != 401 {
+		t.Fatalf("api without login: %d", code)
+	}
+	if code, _ := do(t, s, "POST", "/healthz", "", map[string]string{MutationHeader: "1"}); code == 200 {
+		t.Fatal("POST /healthz served")
+	}
+	plain, _ := newTestServer(t)
+	if code, _ := do(t, plain, "GET", "/healthz", "", nil); code != 200 {
+		t.Fatalf("no base path: %d", code)
+	}
+}
+
+// The streaming parser's refusals: an oversize text field, a body cut off
+// mid-part, and unknown parts skipped.
+func TestAddRequestFromFormRefusals(t *testing.T) {
+	long := strings.Repeat("m", addMaxField+1)
+	if _, err := addRequestFromForm(multipartAdd(t, map[string]string{"urls": long}, nil)); err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("long field: %v", err)
+	}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("other", "ignored")
+	mw.WriteField("urls", "magnet:?xt=urn:btih:abc")
+	mw.Close()
+	r := httptest.NewRequest("POST", "/api/boxes/1/qbt/torrents", bytes.NewReader(buf.Bytes()))
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	if req, err := addRequestFromForm(r); err != nil || len(req.URLs) != 1 {
+		t.Fatalf("unknown part: %+v %v", req, err)
+	}
+	cut := buf.Bytes()[:buf.Len()/2]
+	r = httptest.NewRequest("POST", "/api/boxes/1/qbt/torrents", bytes.NewReader(cut))
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	if _, err := addRequestFromForm(r); err == nil || !strings.Contains(err.Error(), "bad upload") {
+		t.Fatalf("cut body: %v", err)
+	}
+	// "stopped" and the category come through.
+	req, err := addRequestFromForm(multipartAdd(t, map[string]string{"urls": "magnet:?xt=urn:btih:abc", "stopped": "1", "category": "x"}, nil))
+	if err != nil || !req.Stopped || req.Category != "x" {
+		t.Fatalf("fields: %+v %v", req, err)
+	}
+}
+
 // The fleet-wide torrent list is a JSON object with a boxes array, limited
 // to boxes with qBittorrent monitoring on.
 func TestTorrentsList(t *testing.T) {

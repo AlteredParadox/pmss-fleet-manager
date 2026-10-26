@@ -90,14 +90,8 @@ func main() {
 		log.Warn(authWarn)
 	}
 	sshx.DefaultKey = *sshKey
-	if *sshKey != "" {
-		// Said once at startup; a box that needs it names it again in
-		// its connection error.
-		if f, err := os.Open(*sshKey); err != nil {
-			log.Warn("the -ssh-key default cannot be read; boxes without a key path fall back to ~/.ssh/id_*", "path", *sshKey, "uid", os.Getuid(), "err", errors.Unwrap(err))
-		} else {
-			f.Close()
-		}
+	if w := sshKeyWarning(*sshKey); w != "" {
+		log.Warn(w) // said once at startup; a box that needs the key names it again in its connection error
 	}
 
 	if *auth != "" {
@@ -325,6 +319,21 @@ func loginFrom(value, file string) (login, warning string, err error) {
 		warning = fmt.Sprintf("the login file %s is readable by other users (mode %04o); chmod 600 it", file, fi.Mode().Perm())
 	}
 	return s, warning, nil
+}
+
+// sshKeyWarning says, for the startup log, why the -ssh-key default cannot
+// be read ("" when it is unset or readable). Not fatal: boxes without a
+// key path of their own fall back to ~/.ssh/id_* and the agent.
+func sshKeyWarning(path string) string {
+	if path == "" {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Sprintf("the -ssh-key default %s cannot be read by uid %d (%v); boxes without a key path fall back to ~/.ssh/id_*", path, os.Getuid(), errors.Unwrap(err))
+	}
+	f.Close()
+	return ""
 }
 
 // flagGiven reports whether name was passed on the command line.
