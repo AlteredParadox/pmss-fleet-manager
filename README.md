@@ -355,7 +355,7 @@ and starting at boot were not exercised. CI tests the image with Docker.
   nothing sits in the unit file or `podman inspect`:
 
   ```sh
-  read -rsp 'Dashboard login (user:password): ' a; echo
+  IFS= read -rsp 'Dashboard login (user:password): ' a; echo   # IFS= keeps leading/trailing spaces
   printf '%s' "$a" | podman secret create pmss-fleet-auth -; unset a
   openssl rand -base64 32 | podman secret create pmss-fleet-credkey -
   podman secret create pmss-fleet-key ~/.ssh/pmss_fleet_ed25519
