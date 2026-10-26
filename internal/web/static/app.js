@@ -882,7 +882,7 @@ function clientSection(b, c, f, grouped, first) {
   // dismissed, since a later success says nothing about these files. The
   // button names the notice it shows (its time), so it cannot dismiss a
   // newer one that replaced it meanwhile (daybreak blue re-review of #123).
-  const removeFailed = c.key === 'rtorrent' && q.remove_failed ? `<div class="meta"><span class="bad" title="${q.remove_failed_at ? esc(fmtAgo(q.remove_failed_at)) + '. ' : ''}The torrent was removed from rTorrent but its files were not (all) deleted; check the download folder on the box.">remove with files failed: ${esc(q.remove_failed)}</span> <button class="small ghost" data-act="rt:dismiss-failure" data-at="${esc(q.remove_failed_at || '')}" title="remove this notice (the alert resolves with it)">dismiss</button></div>` : '';
+  const removeFailed = c.key === 'rtorrent' && q.remove_failed ? `<div class="meta"><span class="bad" title="${q.remove_failed_at && !String(q.remove_failed_at).startsWith('1970') ? esc(fmtAgo(q.remove_failed_at)) + '. ' : ''}The torrent was removed from rTorrent but its files were not (all) deleted; check the download folder on the box.">remove with files failed: ${esc(q.remove_failed)}</span> <button class="small ghost" data-act="rt:dismiss-failure" data-at="${esc(q.remove_failed_at || '')}" title="remove this notice (the alert resolves with it)">dismiss</button></div>` : '';
   if (!q.enabled) {
     // Monitoring is off: only the notice is left to show (and dismiss); no
     // counts, no controls, nothing to add to.
@@ -1816,7 +1816,7 @@ async function torAddAction(a, act) {
   try {
     const seg = d.client === 'rtorrent' ? 'rtorrent' : 'qbt';
     const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${seg}/torrents`, fd);
-    toast(addToast(r, d.stopped, d.client), r?.failed || r?.unlabelled ? 'warn' : 'ok');
+    toast(addToast(r, d.stopped, d.client), r?.failed || r?.unlabelled || r?.stopped_early ? 'warn' : 'ok');
     if (S.torAdd === d) S.torAdd = null; // not a draft the user opened meanwhile
   } finally {
     if (S.torAdd) S.torAdd.busy = false;

@@ -151,7 +151,7 @@ function addSummary(r, stopped, client) {
     const parts = [`${r?.added || 0} added to rTorrent${tail}`];
     if (r?.failed) parts.push(`${r.failed} not added (refused by rTorrent or not a torrent)`);
     if (r?.unlabelled) parts.push(`${r.unlabelled} loaded, label not applied or confirmed`);
-    if (r?.stopped_early) parts.push(`then stopped, the rest were not sent: ${r.stopped_early}`);
+    if (r?.stopped_early) parts.push(`then the batch stopped (${r.stopped_early}); the entry being sent may have been accepted, so check rTorrent before retrying`);
     return parts.join('; ');
   }
   if (!r?.counted) {
