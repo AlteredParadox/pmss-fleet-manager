@@ -743,6 +743,7 @@ func (s *Server) handleCreateBox(w http.ResponseWriter, r *http.Request) {
 type torrentsBox struct {
 	ID           int64            `json:"id"`
 	Name         string           `json:"name"`
+	BoxRev       int64            `json:"box_rev"` // carried back by torrent actions (collect.ErrStaleBox)
 	Status       string           `json:"status"`
 	StatusReason string           `json:"status_reason,omitempty"`
 	Qbt          collect.QbtState `json:"qbt"`
@@ -759,7 +760,7 @@ func (s *Server) handleTorrents(w http.ResponseWriter, r *http.Request) {
 		if !st.Qbt.Enabled && !st.Rt.Enabled {
 			continue
 		}
-		out = append(out, torrentsBox{ID: st.ID, Name: st.Name, Status: st.Status, StatusReason: st.StatusReason, Qbt: st.Qbt, Rt: st.Rt})
+		out = append(out, torrentsBox{ID: st.ID, Name: st.Name, BoxRev: st.BoxRev, Status: st.Status, StatusReason: st.StatusReason, Qbt: st.Qbt, Rt: st.Rt})
 	}
 	writeJSON(w, 200, map[string]any{"boxes": out})
 }
@@ -912,7 +913,7 @@ func actionCode(err error) int {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return 404
-	case errors.Is(err, collect.ErrDisabled), errors.Is(err, collect.ErrNotReady), errors.Is(err, collect.ErrStaleNotice):
+	case errors.Is(err, collect.ErrDisabled), errors.Is(err, collect.ErrNotReady), errors.Is(err, collect.ErrStaleNotice), errors.Is(err, collect.ErrStaleBox):
 		return 409
 	}
 	return 502
@@ -1224,6 +1225,16 @@ func userChars(u string) bool {
 // case; anything else never reaches the WebUI.
 func validTorrentHash(h string) bool { return qbt.ValidHash(h) }
 
+// boxRevParam reads the required ?rev= box record revision a torrent action
+// was drawn from.
+func boxRevParam(r *http.Request) (int64, error) {
+	rev, err := strconv.ParseInt(r.URL.Query().Get("rev"), 10, 64)
+	if err != nil || rev < 0 {
+		return 0, errors.New("rev (the box revision the action was drawn from) is required")
+	}
+	return rev, nil
+}
+
 func (s *Server) handleTorrentAction(w http.ResponseWriter, r *http.Request) {
 	id, err := idParam(r)
 	if err != nil {
@@ -1239,9 +1250,14 @@ func (s *Server) handleTorrentAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("invalid torrent hash"))
 		return
 	}
+	rev, err := boxRevParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	if err := s.m.TorrentAction(ctx, id, hash, action); err != nil {
+	if err := s.m.TorrentAction(ctx, id, rev, hash, action); err != nil {
 		writeErr(w, actionCode(err), err)
 		return
 	}
@@ -1265,9 +1281,14 @@ func (s *Server) handleRtTorrentAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("invalid torrent hash"))
 		return
 	}
+	rev, err := boxRevParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second) // remove-data runs rm on the box
 	defer cancel()
-	if err := s.m.RtTorrentAction(ctx, id, hash, action); err != nil {
+	if err := s.m.RtTorrentAction(ctx, id, rev, hash, action); err != nil {
 		writeErr(w, actionCode(err), err)
 		return
 	}

@@ -822,6 +822,12 @@ func (s syncState) apply(d *mainDelta, requestedFull bool) (syncState, error) {
 	}
 	updates := make(map[string]Torrent, len(d.torrents))
 	for hash, raw := range d.torrents {
+		// The map key is the torrent's identity; a nested "hash" never
+		// overrides it, so a row cannot describe one torrent while its
+		// actions name another (daybreak blue audit of 7506bd4).
+		if !ValidHash(hash) {
+			return s, fmt.Errorf("torrent key %.80q is not an info-hash", hash)
+		}
 		var t Torrent
 		if !full {
 			t = s.torrents[hash] // zero when new
@@ -829,9 +835,7 @@ func (s syncState) apply(d *mainDelta, requestedFull bool) (syncState, error) {
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return s, fmt.Errorf("torrent %s: %w", hash, err)
 		}
-		if t.Hash == "" {
-			t.Hash = hash
-		}
+		t.Hash = strings.ToLower(hash)
 		updates[hash] = t.clipped()
 	}
 	if full {

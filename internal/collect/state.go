@@ -58,6 +58,11 @@ type BoxState struct {
 	// poll leaves it set: the facts are still that machine's.
 	Ready bool `json:"ready"`
 
+	// BoxRev is the box record's revision (store.Box.Revision). Torrent
+	// actions carry it back, so a button drawn before an edit cannot act on
+	// whatever the record points at after it (ErrStaleBox).
+	BoxRev int64 `json:"box_rev"`
+
 	// Rev is the fleet-wide revision this state was stored at (Manager
 	// .commit); a client drops a state event whose rev is not above the
 	// one it holds for the box.
@@ -544,7 +549,7 @@ func (s BoxState) Summary() BoxState {
 func fromBox(b *store.Box) BoxState {
 	return BoxState{
 		ID: b.ID, Name: b.Name, Host: b.Host, Port: b.Port, User: b.User, Type: b.Type,
-		Plan: b.Plan, Datacenter: b.Datacenter, Renewal: b.Renewal, Enabled: b.Enabled,
+		Plan: b.Plan, Datacenter: b.Datacenter, Renewal: b.Renewal, Enabled: b.Enabled, BoxRev: b.Revision,
 		Status:    "pending",
 		Qbt:       QbtState{Enabled: b.QbtEnabled, Port: b.QbtPort},
 		Rt:        RtState{Enabled: b.RtEnabled, Endpoint: b.RtSCGI},

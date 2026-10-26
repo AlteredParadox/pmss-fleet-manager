@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -45,9 +46,15 @@ import (
 // config named, else PMSS's default socket under the home. A config that
 // names an endpoint the probe refused yields nothing: the default socket
 // could be another daemon's, and the misconfiguration is to be reported,
-// not papered over (daybreak blue review of PR 123).
+// not papered over (daybreak blue review of PR 123). A unix socket set on
+// the box must be inside the home like a discovered one: elsewhere it could
+// be any account's daemon, and remove-with-data trusts the peer's paths
+// (daybreak blue audit of 7506bd4).
 func rtEndpoint(b rtBox, snap *probe.Snapshot) string {
 	if b.RtSCGI != "" {
+		if strings.HasPrefix(b.RtSCGI, "unix:") && !inHome(b.RtSCGI[len("unix:"):], snap.Home) {
+			return ""
+		}
 		return b.RtSCGI
 	}
 	if snap.Rt.SCGI != "" {
@@ -57,6 +64,11 @@ func rtEndpoint(b rtBox, snap *probe.Snapshot) string {
 		return ""
 	}
 	return probe.DefaultSCGI(snap.Home)
+}
+
+// inHome reports whether p is a clean path strictly below home.
+func inHome(p, home string) bool {
+	return home != "" && strings.HasPrefix(p, home+"/") && path.Clean(p) == p
 }
 
 // rtDataDir is the download root remove-with-data may delete under: the
@@ -241,7 +253,9 @@ func (p *poller) pollRt(ctx context.Context, st *BoxState, snap *probe.Snapshot)
 	rs.DataDir = clip(rtDataDir(snap), 600)
 	if rs.Endpoint == "" {
 		rs.Error = "no SCGI endpoint: the probe could not read the home path or ~/.rtorrent.rc"
-		if snap.Rt.ConfError != "" {
+		if p.box.RtSCGI != "" {
+			rs.Error = "the endpoint set under edit is a unix socket outside this account's home; only sockets inside the home are used"
+		} else if snap.Rt.ConfError != "" {
 			rs.Error = clip(snap.Rt.ConfError, 300) + "; set the endpoint under edit to override"
 		}
 		return

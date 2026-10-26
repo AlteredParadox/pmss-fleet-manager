@@ -307,6 +307,11 @@ func detectRt(ctx context.Context, cli *sshx.Client, snap *probe.Snapshot, b *st
 		return
 	}
 	res.Facts.RtEndpoint = clip(ep, 600)
+	if ep == "" && b.RtSCGI != "" {
+		add("warn", "not connecting to rTorrent: the endpoint set for this box is a unix socket outside the account's home")
+		b.RtEnabled = true
+		return
+	}
 	if known && !running {
 		what := "not running"
 		if snap.Rt.Disabled {

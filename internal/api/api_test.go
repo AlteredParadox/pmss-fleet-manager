@@ -991,14 +991,15 @@ func TestRtRoutesAndSettings(t *testing.T) {
 	code, body = do(t, s, "GET", "/api/torrents", "", nil)
 	var out struct {
 		Boxes []struct {
-			ID int64 `json:"id"`
-			Rt struct {
+			ID     int64 `json:"id"`
+			BoxRev int64 `json:"box_rev"`
+			Rt     struct {
 				Enabled  bool   `json:"enabled"`
 				Endpoint string `json:"endpoint"`
 			} `json:"rtorrent"`
 		} `json:"boxes"`
 	}
-	if err := json.Unmarshal([]byte(body), &out); err != nil || code != 200 || len(out.Boxes) != 1 || !out.Boxes[0].Rt.Enabled || out.Boxes[0].Rt.Endpoint != "unix:/home/u/.rtorrent.socket" {
+	if err := json.Unmarshal([]byte(body), &out); err != nil || code != 200 || len(out.Boxes) != 1 || out.Boxes[0].BoxRev != b.Revision || !out.Boxes[0].Rt.Enabled || out.Boxes[0].Rt.Endpoint != "unix:/home/u/.rtorrent.socket" {
 		t.Fatalf("list: %d %s", code, body)
 	}
 	// Actions: the action and hash are checked before anything reaches the box.
@@ -1007,13 +1008,16 @@ func TestRtRoutesAndSettings(t *testing.T) {
 		path string
 		want int
 	}{
-		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/resume", id, strings.Repeat("a", 40)), 400}, // resume is part of start
-		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/pause", id, strings.Repeat("a", 40)), 409},  // valid for rTorrent; the box was never probed
-		{fmt.Sprintf("/api/boxes/%d/qbt/torrents/%s/pause", id, strings.Repeat("a", 40)), 400},       // qBittorrent has no pause of its own
-		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/stop", id, strings.Repeat("a", 64)), 400},   // v2 hashes are qBittorrent's
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/resume", id, strings.Repeat("a", 40)), 400},                   // resume is part of start
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/pause?rev=%d", id, strings.Repeat("a", 40), b.Revision), 409}, // valid for rTorrent; the box was never probed
+		{fmt.Sprintf("/api/boxes/%d/qbt/torrents/%s/pause?rev=%d", id, strings.Repeat("a", 40), b.Revision), 400},      // qBittorrent has no pause of its own
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/stop", id, strings.Repeat("a", 64)), 400},                     // v2 hashes are qBittorrent's
 		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/..%%2F/stop", id), 400},
-		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/remove-data", id, strings.Repeat("A", 40)), 409}, // valid, but the box was never probed: not ready
-		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/stop", 999, strings.Repeat("a", 40)), 404},
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/remove-data?rev=%d", id, strings.Repeat("A", 40), b.Revision), 409},
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/stop", id, strings.Repeat("a", 40)), 400},                      // no box revision
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/stop?rev=%d", id, strings.Repeat("a", 40), b.Revision+1), 409}, // drawn from another revision
+		{fmt.Sprintf("/api/boxes/%d/qbt/torrents/%s/stop?rev=x", id, strings.Repeat("a", 40)), 400},                     // valid, but the box was never probed: not ready
+		{fmt.Sprintf("/api/boxes/%d/rtorrent/torrents/%s/stop?rev=0", 999, strings.Repeat("a", 40)), 404},
 		{fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", id), 400}, // the notice time is required
 	} {
 		code, body := do(t, s, "POST", tc.path, "", hdr)

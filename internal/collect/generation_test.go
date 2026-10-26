@@ -172,7 +172,7 @@ func assertFresh(t *testing.T, m *Manager, st *store.Store, id int64) {
 		"container":      m.ContainerAction(ctx, id, "c1", "start"),
 		"container logs": must1(m.ContainerLogs(ctx, id, "c1")),
 		"read log":       must1(m.ReadLog(ctx, id, ".logs/a.log")),
-		"torrent":        m.TorrentAction(ctx, id, "0123456789abcdef0123456789abcdef01234567", "stop"),
+		"torrent":        m.TorrentAction(ctx, id, s.BoxRev, "0123456789abcdef0123456789abcdef01234567", "stop"),
 	} {
 		if !errors.Is(err, ErrNotReady) {
 			t.Errorf("%s on an unprobed generation: %v, want ErrNotReady", name, err)
@@ -396,5 +396,39 @@ func TestFinishDuRejectsOverflowedOutput(t *testing.T) {
 	}
 	if s, _ := m.State(boxes[0].ID); !strings.Contains(s.Dirs.Error, "exceeded the limit") {
 		t.Fatalf("live state after the overflow: %+v", s.Dirs)
+	}
+}
+
+// A torrent button carries the box record revision it was drawn at; after
+// an edit (here a move to another host that has since been probed, so the
+// box is ready again) the old revision is refused before anything reaches
+// the box, while the current one gets past the check (daybreak blue audit
+// of 7506bd4).
+func TestTorrentActionNeedsCurrentBoxRevision(t *testing.T) {
+	ctx := context.Background()
+	m, _, b := genTestManager(t)
+	seedRemote(m, b.ID)
+	before, _ := m.State(b.ID)
+	if before.BoxRev != b.Revision {
+		t.Fatalf("state box_rev %d, record %d", before.BoxRev, b.Revision)
+	}
+	mv := *b
+	mv.Host = "127.0.0.2"
+	if err := m.UpdateBox(ctx, &mv, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	seedRemote(m, b.ID)
+	after, _ := m.State(b.ID)
+	if after.BoxRev == before.BoxRev {
+		t.Fatalf("an edit must change box_rev (%d)", after.BoxRev)
+	}
+	hash := strings.Repeat("a", 40)
+	for _, action := range []string{"stop", "remove-data"} {
+		if err := m.TorrentAction(ctx, b.ID, before.BoxRev, hash, action); !errors.Is(err, ErrStaleBox) {
+			t.Fatalf("qbt %s with the old revision: %v", action, err)
+		}
+	}
+	if err := m.TorrentAction(ctx, b.ID, after.BoxRev, hash, "stop"); err == nil || errors.Is(err, ErrStaleBox) {
+		t.Fatalf("current revision: %v, want past the check (then the refused endpoint)", err)
 	}
 }

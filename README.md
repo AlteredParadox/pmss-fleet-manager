@@ -521,7 +521,9 @@ when enabled under edit. The dashboard talks to rTorrent over its SCGI
 unix socket (`~/.rtorrent.socket`, read from `~/.rtorrent.rc` and
 `~/.rtorrent.rc.custom`, or set per box as `unix:/path`), through the SSH
 connection as the tenant, so no password is involved: the socket's
-permissions decide who may connect. A loopback TCP endpoint
+permissions decide who may connect. A socket path, discovered or set, must
+be inside the account's home: one elsewhere could be another account's
+daemon, so it is not dialed. A loopback TCP endpoint
 (`tcp:127.0.0.1:port`) is accepted too, but SCGI has no authentication of
 its own and on a shared host every tenant can reach the same loopback port:
 anyone on the box could then drive your rTorrent. The dashboard checks that
@@ -880,6 +882,12 @@ Newest first; each release's full notes are on the
   "start all", as qBittorrent 5 names them (same actions as before).
 - rTorrent's start now also resumes a torrent paused in ruTorrent: d.start
   alone left it paused.
+- Safety fixes from an audit of this batch: a torrent button drawn before
+  the box was edited is refused (reload and retry) rather than acting on
+  whatever the box now points at; an rTorrent socket set under edit must be
+  inside the account's home, like a discovered one; qBittorrent rows always
+  take their hash from the sync key, so a row and its actions name the same
+  torrent; and qBittorrent's version output is capped in bytes.
 
 **1.10.0**
 

@@ -421,7 +421,7 @@ const listenPIDsShell = `timeout 10 ss -Hltnp 2>/dev/null | awk '$1=="LISTEN"{n=
 // user's qBittorrent log on every call and rotates the log once that fills
 // up, so polling it every 30 s drowned the real log in probe noise.
 const qbtVersionShell = `if [ -x "$home/bin/qbittorrent-nox" ] && [ "$(stat -L -c '%s %Y %Z %i' "$home/bin/qbittorrent-nox" 2>/dev/null)" != "${PMSS_QBT_SEEN:-}" ]; then
-  timeout 10 "$home/bin/qbittorrent-nox" --version </dev/null 2>/dev/null | head -n 1
+  timeout 10 "$home/bin/qbittorrent-nox" --version </dev/null 2>/dev/null | head -c 256 | head -n 1
 fi
 `
 

@@ -296,11 +296,17 @@ func TestPollRtGates(t *testing.T) {
 	if !st.Rt.Reachable || !st.Rt.PortOK {
 		t.Fatalf("%+v", st.Rt)
 	}
-	// The box setting overrides the config.
+	// The box setting overrides the config, but only with a socket inside
+	// the home: one elsewhere could be another account's daemon.
+	p.box.RtSCGI = "unix:" + snap.Home + "/rpc.sock"
+	p.pollRt(context.Background(), &st, snap)
+	if st.Rt.Endpoint != p.box.RtSCGI {
+		t.Fatal(st.Rt.Endpoint)
+	}
 	p.box.RtSCGI = "unix:/srv/rpc.sock"
 	p.pollRt(context.Background(), &st, snap)
-	if st.Rt.Endpoint != "unix:/srv/rpc.sock" {
-		t.Fatal(st.Rt.Endpoint)
+	if st.Rt.Endpoint != "" || st.Rt.Reachable || !strings.Contains(st.Rt.Error, "outside this account's home") {
+		t.Fatalf("%+v", st.Rt)
 	}
 }
 
@@ -310,14 +316,23 @@ func TestRtEndpointAndValidation(t *testing.T) {
 		t.Fatal("default")
 	}
 	snap.Rt.SCGI = "tcp:127.0.0.1:5000"
-	if rtEndpoint(rtBox{}, snap) != "tcp:127.0.0.1:5000" || rtEndpoint(rtBox{"unix:/x"}, snap) != "unix:/x" {
+	if rtEndpoint(rtBox{}, snap) != "tcp:127.0.0.1:5000" || rtEndpoint(rtBox{"unix:/home/u/x"}, snap) != "unix:/home/u/x" {
 		t.Fatal("precedence")
 	}
 	// A directive that was found but refused never falls back to the
 	// default socket; the box setting still overrides.
 	snap.Rt = probe.RtInfo{ConfFound: true, ConfError: "unusable SCGI socket in the rTorrent config: scgi_local = ../x"}
-	if rtEndpoint(rtBox{}, snap) != "" || rtEndpoint(rtBox{"unix:/srv/s"}, snap) != "unix:/srv/s" {
+	if rtEndpoint(rtBox{}, snap) != "" || rtEndpoint(rtBox{"unix:/home/u/s"}, snap) != "unix:/home/u/s" {
 		t.Fatal("refused directive must not select the default")
+	}
+	// A box-set unix socket must be clean and strictly below the home.
+	for _, ep := range []string{"unix:/srv/s", "unix:/tmp/s", "unix:/home/u", "unix:/home/u/", "unix:/home/u2/s", "unix:/home/u/a/../../v/s", "unix:/home/u//s"} {
+		if got := rtEndpoint(rtBox{ep}, snap); got != "" {
+			t.Fatalf("%s selected %q", ep, got)
+		}
+	}
+	if rtEndpoint(rtBox{"unix:/home/u/s"}, &probe.Snapshot{}) != "" {
+		t.Fatal("no home known: a box-set socket cannot be checked")
 	}
 	if rtDataDir(&probe.Snapshot{Home: "/home/u"}) != "/home/u/data" || rtDataDir(&probe.Snapshot{Home: "/home/u", Rt: probe.RtInfo{DataDir: "/home/u/dl"}}) != "/home/u/dl" || rtDataDir(&probe.Snapshot{}) != "" {
 		t.Fatal("data dir")
@@ -543,7 +558,7 @@ func TestManagerRtGuards(t *testing.T) {
 	m.mu.Lock()
 	delete(m.pollers, 1) // not registered yet: unknown box
 	m.mu.Unlock()
-	if err := m.RtTorrentAction(ctx, 1, rtHashA, "stop"); !errors.Is(err, store.ErrNotFound) {
+	if err := m.RtTorrentAction(ctx, 1, 0, rtHashA, "stop"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatal(err)
 	}
 	if _, err := m.RtAddTorrents(ctx, 1, qbt.AddRequest{}); !errors.Is(err, store.ErrNotFound) {
@@ -552,10 +567,10 @@ func TestManagerRtGuards(t *testing.T) {
 	m.mu.Lock()
 	m.pollers[1] = p
 	m.mu.Unlock()
-	if err := m.RtTorrentAction(ctx, 1, rtHashA, "resume"); err == nil || !strings.Contains(err.Error(), "unknown rTorrent action") {
+	if err := m.RtTorrentAction(ctx, 1, 0, rtHashA, "resume"); err == nil || !strings.Contains(err.Error(), "unknown rTorrent action") {
 		t.Fatal(err)
 	}
-	if err := m.RtTorrentAction(ctx, 1, rtHashA, "stop"); !errors.Is(err, ErrDisabled) {
+	if err := m.RtTorrentAction(ctx, 1, 0, rtHashA, "stop"); !errors.Is(err, ErrDisabled) {
 		t.Fatal(err)
 	}
 	if _, err := m.RtAddTorrents(ctx, 1, qbt.AddRequest{}); !errors.Is(err, ErrDisabled) {
@@ -563,7 +578,7 @@ func TestManagerRtGuards(t *testing.T) {
 	}
 	p.box.Enabled = true
 	readyRt(t, p, "unix:/home/u/.rtorrent.socket")
-	if err := m.RtTorrentAction(ctx, 1, rtHashA, "start"); err != nil {
+	if err := m.RtTorrentAction(ctx, 1, 0, rtHashA, "start"); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(f.called(), ","); got != "d.open,d.start,d.resume" {
@@ -635,9 +650,16 @@ func TestDetectRt(t *testing.T) {
 		t.Fatal(out)
 	}
 	// The box setting counts as configuration.
-	b2 := &store.Box{RtSCGI: "unix:/srv/s"}
+	b2 := &store.Box{RtSCGI: "unix:/home/u/s"}
 	_, out = run(&probe.Snapshot{Home: "/home/u", ProcsKnown: true}, b2)
-	if !b2.RtEnabled || !strings.Contains(out, "unix:/srv/s") {
+	if !b2.RtEnabled || !strings.Contains(out, "unix:/home/u/s") {
+		t.Fatal(out)
+	}
+	// One outside the home is never dialed.
+	b3 := &store.Box{RtSCGI: "unix:/srv/s"}
+	n = len(f.called())
+	_, out = run(&probe.Snapshot{Home: "/home/u", ProcsKnown: true, Procs: running.Procs}, b3)
+	if !b3.RtEnabled || !strings.Contains(out, "outside the account's home") || len(f.called()) != n {
 		t.Fatal(out)
 	}
 }
