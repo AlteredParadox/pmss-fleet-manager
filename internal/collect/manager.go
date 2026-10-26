@@ -90,6 +90,8 @@ type Manager struct {
 	noticeGuards map[int64]*sync.Mutex
 	// cacheFault, when set (tests), fails a cache write of the given kind.
 	cacheFault func(kind string) error
+	// deleteFault, when set (tests), replaces the box row delete.
+	deleteFault func() error
 	// watchMu serialises SetAppWatch's read-modify-write of a box's watch
 	// list: two toggles at once would otherwise each save a list missing
 	// the other's change.
@@ -713,15 +715,36 @@ func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 	defer release()
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
-	// The removal is a commit like any other: the box leaves memory under
-	// hooksMu (a commit that stored before this has put its event on the
-	// bus first, and none can store after it) and its event goes out under
-	// pubMu at its revision, before any later commit's. The row is deleted
-	// afterwards: the box is gone from the live view either way, and a
-	// failed delete is reported to the caller (and the row resurfaces at
-	// the next start).
-	if p := m.poller(id); p != nil {
+	// The row goes first, with the poller stopped (it writes caches that
+	// hang off the row): only once the delete succeeded does the box leave
+	// the live view. A failed delete restarts the poller with its last
+	// state, so the box stays on screen and can be removed again (daybreak
+	// blue re-review of PR 123). The removal is then a commit like any
+	// other: the box leaves memory under hooksMu and its event goes out
+	// under pubMu at its revision, before any later commit's.
+	p := m.poller(id)
+	var prev *BoxState
+	if p != nil {
 		p.stopAndWait()
+		m.mu.RLock()
+		if st := m.states[id]; st != nil {
+			cp := *st
+			prev = &cp
+		}
+		m.mu.RUnlock()
+	}
+	sctx, scancel := context.WithTimeout(m.ctx, 30*time.Second) // the manager's: a closed browser cannot leave the row behind
+	defer scancel()
+	if m.deleteFault != nil {
+		err = m.deleteFault()
+	} else {
+		err = m.st.DeleteBox(sctx, id)
+	}
+	if err != nil {
+		if p != nil {
+			m.startPoller(p.box, prev)
+		}
+		return err
 	}
 	m.hooksMu.Lock()
 	m.mu.Lock()
@@ -737,13 +760,6 @@ func (m *Manager) RemoveBox(ctx context.Context, id int64) error {
 		m.Publish(Event{Type: "removed", BoxID: id, Rev: rev})
 	}
 	m.pubMu.Unlock()
-	// The box is already gone from memory: finish the delete on the
-	// manager's context so a closed browser cannot leave the row behind.
-	sctx, scancel := context.WithTimeout(m.ctx, 30*time.Second)
-	defer scancel()
-	if err := m.st.DeleteBox(sctx, id); err != nil {
-		return err
-	}
 	// The removed event counted the box's alerts before the delete
 	// cascaded them away: tell every tab the count and list changed.
 	m.Publish(Event{Type: "alerts"})

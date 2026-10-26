@@ -1836,3 +1836,38 @@ func TestDismissFailsClosedOnUnreadableRow(t *testing.T) {
 		t.Fatalf("the live notice must stay: %q", still)
 	}
 }
+
+// Daybreak blue re-review of PR 123: a failed row delete leaves the box
+// live, poller and state, so the UI keeps a remove button that works.
+func TestFailedBoxDeleteKeepsBoxLive(t *testing.T) {
+	f := newFakeSCGI(t)
+	f.reply = rtReplies
+	p, _ := rtFixture(t, f)
+	m := p.m
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	defer m.cancel()
+	p.box.Enabled = false // no poll loop: the restart only republishes
+	m.mu.Lock()
+	m.states[p.box.ID] = &BoxState{ID: p.box.ID, Name: "x", Status: "disabled"}
+	m.mu.Unlock()
+	m.deleteFault = func() error { return errors.New("database is locked") }
+	if err := m.RemoveBox(context.Background(), p.box.ID); err == nil {
+		t.Fatal("a failed delete must be reported")
+	}
+	if m.poller(p.box.ID) == nil {
+		t.Fatal("the box must stay live after a failed delete")
+	}
+	m.mu.RLock()
+	_, ok := m.states[p.box.ID]
+	m.mu.RUnlock()
+	if !ok {
+		t.Fatal("its state must stay published")
+	}
+	m.deleteFault = nil
+	if err := m.RemoveBox(context.Background(), p.box.ID); err != nil {
+		t.Fatal(err)
+	}
+	if m.poller(p.box.ID) != nil {
+		t.Fatal("removed on retry")
+	}
+}
