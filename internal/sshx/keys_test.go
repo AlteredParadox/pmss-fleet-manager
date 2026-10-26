@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -211,4 +212,90 @@ func TestAgentAfterRefusedDefaultKey(t *testing.T) {
 	if err := dial("agent"); err != nil {
 		t.Fatalf("agent mode: %v", err)
 	}
+}
+
+// Codex on PR 128: in auto mode an agent that accepts the connection but
+// never answers must not block a key file that works; the wait is bounded
+// and the key file still authenticates.
+func TestSilentAgentDoesNotBlockKeyFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	pub := writeKey(t, filepath.Join(home, ".ssh", "id_ed25519"))
+	old := agentWait
+	agentWait = 300 * time.Millisecond
+	t.Cleanup(func() { agentWait = old })
+	sock := filepath.Join(t.TempDir(), "agent.sock")
+	aln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { aln.Close() })
+	go func() {
+		for {
+			c, err := aln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { io.Copy(io.Discard, c); c.Close() }() // reads, never answers
+		}
+	}()
+	t.Setenv("SSH_AUTH_SOCK", sock)
+	port := keyServer(t, pub)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	c, err := Dial(ctx, Config{Host: "127.0.0.1", Port: port, User: "u"})
+	if err != nil {
+		t.Fatalf("auto mode with a silent agent: %v", err)
+	}
+	c.Close()
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("took %s", el)
+	}
+	// Explicit agent mode still waits on its only source, until the context.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel2()
+	if _, err := Dial(ctx2, Config{Host: "127.0.0.1", Port: port, User: "u", AuthMethod: "agent"}); err == nil {
+		t.Fatal("agent mode succeeded without an agent answer")
+	}
+}
+
+// keyServer runs an SSH server that accepts only pub and returns its port.
+func keyServer(t *testing.T, pub ssh.PublicKey) int {
+	t.Helper()
+	_, hostPriv, _ := ed25519.GenerateKey(rand.Reader)
+	hostSigner, _ := ssh.NewSignerFromKey(hostPriv)
+	cfg := &ssh.ServerConfig{PublicKeyCallback: func(_ ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) {
+		if bytes.Equal(k.Marshal(), pub.Marshal()) {
+			return nil, nil
+		}
+		return nil, errors.New("not authorized")
+	}}
+	cfg.AddHostKey(hostSigner)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				sc, chans, reqs, err := ssh.NewServerConn(conn, cfg)
+				if err != nil {
+					conn.Close()
+					return
+				}
+				defer sc.Close()
+				go ssh.DiscardRequests(reqs)
+				for nc := range chans {
+					nc.Reject(ssh.Prohibited, "test")
+				}
+			}()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
 }

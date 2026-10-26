@@ -172,6 +172,12 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 			return nil, cleanup, err
 		}
 		fromAgent, cleanup = f, release
+		if f != nil && cfg.AuthMethod == "" {
+			// Optional in auto mode: an agent that takes the connection
+			// but never answers must not hold up key files that would
+			// work, or the password after them (Codex on PR 128).
+			fromAgent = boundedAgent(f, release, agentWait)
+		}
 	}
 	// One public-key method for the key files and the agent, in that
 	// order. x/crypto marks a rejected method name as tried and skips any
@@ -202,6 +208,35 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 		return nil, cleanup, errors.New("ssh: no authentication method available (set a key, agent or password)" + unreadableHint(unreadable))
 	}
 	return methods, cleanup, nil
+}
+
+// agentWait bounds how long auto mode waits for the agent's key list.
+var agentWait = 5 * time.Second
+
+// boundedAgent asks the agent for its signers, giving up after d: the
+// socket is then closed (which ends the request) and no agent keys are
+// offered.
+func boundedAgent(f func() ([]ssh.Signer, error), closeAgent func(), d time.Duration) func() ([]ssh.Signer, error) {
+	return func() ([]ssh.Signer, error) {
+		type answer struct {
+			s   []ssh.Signer
+			err error
+		}
+		ch := make(chan answer, 1)
+		go func() {
+			s, err := f()
+			ch <- answer{s, err}
+		}()
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case a := <-ch:
+			return a.s, a.err
+		case <-t.C:
+			closeAgent()
+			return nil, fmt.Errorf("ssh agent: no answer within %s", d)
+		}
+	}
 }
 
 // DefaultKey is the key file tried for every box without a key path of its
