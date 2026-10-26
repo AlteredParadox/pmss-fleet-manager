@@ -158,8 +158,9 @@ make build                                 # or: go build -o pmss-fleet-manager 
 ```
 
 Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
-`PMSS_AUTH`, `PMSS_LOG`, `PMSS_ALLOWED_HOSTS`, `PMSS_BASE_PATH`,
-`PMSS_SECRET_FILE`, `PMSS_SECRET_PREVIOUS_FILE`,
+`PMSS_AUTH`, `PMSS_AUTH_FILE`, `PMSS_SSH_KEY`, `PMSS_LOG`,
+`PMSS_ALLOWED_HOSTS`, `PMSS_BASE_PATH`, `PMSS_SECRET_FILE`,
+`PMSS_SECRET_PREVIOUS_FILE`,
 `PMSS_FORGET_ENCRYPTED_CREDENTIALS`; `PMSS_SECRET` and
 `PMSS_SECRET_PREVIOUS` exist only as environment variables:
 
@@ -168,6 +169,8 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-listen` | `127.0.0.1:8080` | bind address, or several comma-separated |
 | `-data` | `./data` | directory for the SQLite database (created 0700) |
 | `-auth` | none | HTTP basic auth as `user:password`; set it if you bind to a non-loopback address |
+| `-auth-file` | none | file holding that login as `user:password` (a container secret, say); one trailing line ending is ignored and nothing else, so a password may end in a space. A configured file that is missing, empty or not `user:password` stops the start. Set this or `-auth` / `PMSS_AUTH`, not both |
+| `-ssh-key` | none | private key file tried for every box without a key path of its own, before `~/.ssh/id_*`; a box's own key path always wins |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
 | `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
@@ -302,14 +305,37 @@ docker run -d --name pmss-fleet-manager \
   proxy uses, has to be listed in `PMSS_ALLOWED_HOSTS`. Publishing the port on
   `127.0.0.1` as above and fronting it with a TLS reverse proxy is the
   intended setup.
+- **Secrets as files.** The login, the credential secret and the SSH key can
+  all come from mounted files, which keeps them out of `docker inspect`
+  and the compose file: `-e PMSS_AUTH_FILE=/run/secrets/pmss-auth` (the file
+  holds `user:password`), `-e PMSS_SECRET_FILE=/run/secrets/pmss-credkey`,
+  and `-e PMSS_SSH_KEY=/run/secrets/pmss-key` for boxes without a key path
+  of their own. Each must be readable by the container's uid.
+- **Healthcheck.** The image has no shell or curl; the binary checks itself.
+  `pmss-fleet-manager healthcheck` GETs `/healthz` on the address in
+  `PMSS_LISTEN` (a wildcard bind is reached on loopback) and exits 0 or 1;
+  `/healthz` is served at the root whatever the base path, needs no login
+  and does not count against the failed-login throttle. The check runs as
+  its own process and cannot see the server's flags: if you change the
+  listen address, do it with `PMSS_LISTEN` rather than `-listen` (or set
+  `PMSS_HEALTHCHECK_URL`), or the container reads as unhealthy. The
+  Dockerfile declares it, which Docker uses; Podman ignores a Dockerfile
+  healthcheck in OCI images, so with Podman or Quadlet set it yourself:
+  `HealthCmd=CMD /pmss-fleet-manager healthcheck` (the leading `CMD` selects
+  exec form; the image has no `/bin/sh`).
+- **Hardening.** Only `/data` has to be writable: the image runs with a
+  read-only root filesystem (`--read-only`, Quadlet `ReadOnly=true`, no
+  `/tmp` tmpfs needed), `--cap-drop ALL` and `--security-opt
+  no-new-privileges`. CI starts every image that way.
 
 ### Adding a box
 
 Open the UI and use **add box**. The wizard connects, pins the host key, runs
 the probe and shows what it found (quota, traffic limit, qBittorrent binary and
 WebUI port, Docker socket, CPU) before you confirm. SSH auth can be a key file,
-your ssh-agent, or a password; with "auto" it tries `~/.ssh/id_ed25519`,
-`id_ecdsa` and `id_rsa`, then the agent, then a password if one is set.
+your ssh-agent, or a password; with "auto" it tries the `-ssh-key` default
+if one is set, then `~/.ssh/id_ed25519`, `id_ecdsa` and `id_rsa`, then the
+agent, then a password if one is set.
 
 ### Editing a box
 
@@ -689,6 +715,14 @@ Newest first; each release's full notes are on the
   rTorrent's and offered in its own table (the torrent stays open, start
   resumes it); qBittorrent 5 has no pause of its own (its stop is the old
   pause), and the fleet-wide list keeps start / stop for both.
+- Containers: the login can come from a file (`-auth-file` /
+  `PMSS_AUTH_FILE`), a default SSH key can be set for every box
+  (`-ssh-key` / `PMSS_SSH_KEY`), and `pmss-fleet-manager healthcheck`
+  (with a no-login `/healthz`) gives the distroless image a healthcheck,
+  declared in the Dockerfile. Torrent uploads no longer need a writable
+  `/tmp`, so the image runs on a read-only root filesystem with only
+  `/data` writable; CI now starts it read-only with every capability
+  dropped. (Requests from a rootless Podman user.)
 - qBittorrent's "pause all" / "resume all" are now named "stop all" /
   "start all", as qBittorrent 5 names them (same actions as before).
 - rTorrent's start now also resumes a torrent paused in ruTorrent: d.start

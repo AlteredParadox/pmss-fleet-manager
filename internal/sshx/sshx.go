@@ -156,22 +156,46 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 	useAgent := cfg.AuthMethod == "agent" || cfg.AuthMethod == ""
 	usePass := cfg.AuthMethod == "password" || (cfg.AuthMethod == "" && cfg.Password != "")
 
+	var files []ssh.Signer
 	var unreadable []string
 	if useKey {
-		m, denied, err := keyMethods(cfg)
+		s, denied, err := keyMethods(cfg)
 		if err != nil {
 			return nil, cleanup, err
 		}
-		methods = append(methods, m...)
-		unreadable = denied
+		files, unreadable = s, denied
 	}
+	var fromAgent func() ([]ssh.Signer, error)
 	if useAgent {
-		m, release, err := agentMethod(cfg)
+		f, release, err := agentMethod(cfg)
 		if err != nil {
 			return nil, cleanup, err
 		}
-		methods = append(methods, m...)
-		cleanup = release
+		fromAgent, cleanup = f, release
+		if f != nil && cfg.AuthMethod == "" {
+			// Optional in auto mode: an agent that takes the connection
+			// but never answers must not hold up key files that would
+			// work, or the password after them (Codex on PR 128).
+			fromAgent = boundedAgent(f, release, agentWait)
+		}
+	}
+	// One public-key method for the key files and the agent, in that
+	// order. x/crypto marks a rejected method name as tried and skips any
+	// later method of the same name, so an agent offered as a second
+	// "publickey" method is never asked once a key file (the -ssh-key
+	// default authorized on another box, say) is refused (fred on PR 128).
+	if len(files) > 0 || fromAgent != nil {
+		methods = append(methods, ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+			out := append([]ssh.Signer(nil), files...)
+			if fromAgent != nil {
+				as, err := fromAgent()
+				if err != nil && len(out) == 0 {
+					return nil, err
+				}
+				out = append(out, as...)
+			}
+			return out, nil
+		}))
 	}
 	if usePass {
 		m, err := passwordMethods(cfg)
@@ -186,25 +210,61 @@ func authMethods(cfg Config) ([]ssh.AuthMethod, func(), error) {
 	return methods, cleanup, nil
 }
 
-// unreadableHint names default keys that exist but could not be read, the
-// usual sign of a key mounted into a container that its uid cannot read.
-func unreadableHint(paths []string) string {
-	switch len(paths) {
-	case 0:
-		return ""
-	case 1:
-		return "; found " + paths[0] + " but cannot read it (permission denied)"
+// agentWait bounds how long auto mode waits for the agent's key list.
+var agentWait = 5 * time.Second
+
+// boundedAgent asks the agent for its signers, giving up after d: the
+// socket is then closed (which ends the request) and no agent keys are
+// offered.
+func boundedAgent(f func() ([]ssh.Signer, error), closeAgent func(), d time.Duration) func() ([]ssh.Signer, error) {
+	return func() ([]ssh.Signer, error) {
+		type answer struct {
+			s   []ssh.Signer
+			err error
+		}
+		ch := make(chan answer, 1)
+		go func() {
+			s, err := f()
+			ch <- answer{s, err}
+		}()
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case a := <-ch:
+			return a.s, a.err
+		case <-t.C:
+			closeAgent()
+			return nil, fmt.Errorf("ssh agent: no answer within %s", d)
+		}
 	}
-	return "; found " + strings.Join(paths, ", ") + " but cannot read them (permission denied)"
 }
 
-// keyPaths lists the private key files to try: the configured path, or the
-// usual ~/.ssh names.
+// DefaultKey is the key file tried for every box without a key path of its
+// own, before the usual ~/.ssh names (-ssh-key / PMSS_SSH_KEY, e.g. a
+// container secret under /run/secrets). Set once at startup, before any
+// connection is made.
+var DefaultKey string
+
+// unreadableHint names default keys that exist but could not be read, the
+// usual sign of a key mounted into a container that its uid cannot read,
+// and why the -ssh-key default (when set) gave no key.
+func unreadableHint(problems []string) string {
+	if len(problems) == 0 {
+		return ""
+	}
+	return "; could not use " + strings.Join(problems, ", ")
+}
+
+// keyPaths lists the private key files to try: the box's own path, or the
+// -ssh-key default (when set) followed by the usual ~/.ssh names.
 func keyPaths(cfg Config) []string {
 	paths := []string{}
 	if cfg.KeyPath != "" {
 		paths = append(paths, expandHome(cfg.KeyPath))
 	} else {
+		if DefaultKey != "" {
+			paths = append(paths, expandHome(DefaultKey))
+		}
 		home, _ := os.UserHomeDir()
 		for _, n := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
 			paths = append(paths, filepath.Join(home, ".ssh", n))
@@ -222,13 +282,17 @@ func keySigners(cfg Config) ([]ssh.Signer, []string, error) {
 	var signers []ssh.Signer
 	var unreadable []string
 	for _, p := range keyPaths(cfg) {
+		global := cfg.KeyPath == "" && DefaultKey != "" && p == expandHome(DefaultKey)
 		pem, err := os.ReadFile(p)
 		if err != nil {
 			if cfg.KeyPath != "" {
 				return nil, nil, fmt.Errorf("read key %s: %w", p, err)
 			}
-			if errors.Is(err, os.ErrPermission) {
-				unreadable = append(unreadable, p)
+			switch {
+			case global && errors.Is(err, os.ErrNotExist):
+				unreadable = append(unreadable, p+" (the -ssh-key default: no such file)")
+			case errors.Is(err, os.ErrPermission):
+				unreadable = append(unreadable, p+" (permission denied)")
 			}
 			continue
 		}
@@ -237,6 +301,9 @@ func keySigners(cfg Config) ([]ssh.Signer, []string, error) {
 			if cfg.KeyPath != "" {
 				return nil, nil, fmt.Errorf("parse key %s: %w", p, err)
 			}
+			if global {
+				unreadable = append(unreadable, p+" (the -ssh-key default: not an unencrypted private key)")
+			}
 			continue
 		}
 		signers = append(signers, s)
@@ -244,33 +311,31 @@ func keySigners(cfg Config) ([]ssh.Signer, []string, error) {
 	return signers, unreadable, nil
 }
 
-// keyMethods returns public-key auth from the loaded signers, plus the
-// default keys that could not be read; none is an error only when key auth
-// was selected explicitly.
-func keyMethods(cfg Config) ([]ssh.AuthMethod, []string, error) {
+// keyMethods returns the usable key-file signers, plus the default keys
+// that could not be read; none is an error only when key auth was selected
+// explicitly.
+func keyMethods(cfg Config) ([]ssh.Signer, []string, error) {
 	signers, unreadable, err := keySigners(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(signers) > 0 {
-		return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, unreadable, nil
-	} else if cfg.AuthMethod == "key" {
-		return nil, nil, errors.New("ssh: no usable private key in ~/.ssh (set a key path, or the key needs a passphrase)" + unreadableHint(unreadable))
+	if len(signers) == 0 && cfg.AuthMethod == "key" {
+		return nil, nil, errors.New("ssh: no usable private key in ~/.ssh or the -ssh-key default (set a key path, or the key needs a passphrase)" + unreadableHint(unreadable))
 	}
-	return nil, unreadable, nil
+	return signers, unreadable, nil
 }
 
-// agentMethod returns public-key auth through the agent at SSH_AUTH_SOCK
-// with the function that closes the agent socket; without an agent the
-// methods are empty and the cleanup a no-op, unless agent auth was selected
-// explicitly, which is an error.
-func agentMethod(cfg Config) ([]ssh.AuthMethod, func(), error) {
+// agentMethod returns the agent's signers at SSH_AUTH_SOCK (asked for at
+// the handshake) with the function that closes the agent socket; without
+// an agent the source is nil and the cleanup a no-op, unless agent auth
+// was selected explicitly, which is an error.
+func agentMethod(cfg Config) (func() ([]ssh.Signer, error), func(), error) {
 	noop := func() { /* no agent socket was opened */ }
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 		if conn, err := net.DialTimeout("unix", sock, 5*time.Second); err == nil {
 			ag := agent.NewClient(conn)
 			cleanup := func() { conn.Close() } // only needed during the handshake
-			return []ssh.AuthMethod{ssh.PublicKeysCallback(ag.Signers)}, cleanup, nil
+			return ag.Signers, cleanup, nil
 		} else if cfg.AuthMethod == "agent" {
 			return nil, noop, fmt.Errorf("ssh agent: %w", err)
 		}

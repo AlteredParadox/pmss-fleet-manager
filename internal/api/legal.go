@@ -62,10 +62,12 @@ func (s *Server) sourceURL() string {
 
 // isPublicPath reports whether a route is served without basic auth. AGPL
 // §13 obliges the source offer to every network user, and a login wall
-// would defeat it. The match is exact under the configured base path so
+// would defeat it. /healthz says only that the server answers, for the
+// container healthcheck (which has no login to send, and so is never
+// counted against the failed-login throttle). The match is exact under the configured base path so
 // no other route (an {action} segment named "license", say) escapes auth.
 func (s *Server) isPublicPath(p string) bool {
-	return p == s.basePath+"/license" || p == s.basePath+"/third-party-licenses" || p == s.basePath+"/source"
+	return p == s.basePath+"/license" || p == s.basePath+"/third-party-licenses" || p == s.basePath+"/source" || p == "/healthz" || p == s.basePath+"/healthz"
 }
 
 // serveLegalText serves an embedded text blob as plain UTF-8. The body is

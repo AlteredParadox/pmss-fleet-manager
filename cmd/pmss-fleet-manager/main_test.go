@@ -66,3 +66,78 @@ func TestCredentialOptions(t *testing.T) {
 		t.Fatalf("missing previous file: %v", err)
 	}
 }
+
+// The login file: one trailing line ending is dropped and nothing else;
+// a configured file that does not yield user:password stops the start;
+// value and file together are refused; errors never carry the contents.
+func TestLoginFrom(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string, mode os.FileMode) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+		os.Chmod(p, mode)
+		return p
+	}
+	if l, w, err := loginFrom("me:pw", ""); err != nil || l != "me:pw" || w != "" {
+		t.Fatalf("value only: %q %q %v", l, w, err)
+	}
+	for body, want := range map[string]string{
+		"me:s3cret":     "me:s3cret",
+		"me:s3cret\n":   "me:s3cret",
+		"me:s3cret\r\n": "me:s3cret",
+		"me:ends in ":   "me:ends in ", // a trailing space is part of the password
+		"me:a:b\n":      "me:a:b",      // the first colon splits
+	} {
+		p := write("ok", body, 0o600)
+		if l, w, err := loginFrom("", p); err != nil || l != want || w != "" {
+			t.Errorf("%q: %q %q %v", body, l, w, err)
+		}
+	}
+	for body, why := range map[string]string{
+		"":                                       "is empty",
+		"\n":                                     "is empty",
+		"me:pw\n\n":                              "one line",
+		"me:pw\nother:x":                         "one line",
+		"mepw":                                   "user:password",
+		":pw":                                    "user:password",
+		"me:\n":                                  "user:password",
+		strings.Repeat("a", maxLoginFile) + ":b": "larger than",
+	} {
+		p := write("bad", body, 0o600)
+		_, _, err := loginFrom("", p)
+		if err == nil || !strings.Contains(err.Error(), why) {
+			t.Errorf("%q: %v", body, err)
+		}
+		if err != nil && len(body) > 3 && strings.Contains(err.Error(), body) {
+			t.Errorf("error echoes the contents: %v", err)
+		}
+	}
+	if _, _, err := loginFrom("", filepath.Join(dir, "missing")); err == nil || !strings.Contains(err.Error(), "cannot be read by uid") {
+		t.Fatalf("missing: %v", err)
+	}
+	p := write("both", "me:pw", 0o600)
+	if _, _, err := loginFrom("me:pw", p); err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("both: %v", err)
+	}
+	p = write("loose", "me:hunter2", 0o644)
+	l, w, err := loginFrom("", p)
+	if err != nil || l != "me:hunter2" || !strings.Contains(w, "readable by other users") || strings.Contains(w, "hunter2") {
+		t.Fatalf("loose mode: %q %q %v", l, w, err)
+	}
+}
+
+func TestSSHKeyWarning(t *testing.T) {
+	if w := sshKeyWarning(""); w != "" {
+		t.Fatalf("unset: %q", w)
+	}
+	p := filepath.Join(t.TempDir(), "key")
+	os.WriteFile(p, []byte("k"), 0o600)
+	if w := sshKeyWarning(p); w != "" {
+		t.Fatalf("readable: %q", w)
+	}
+	if w := sshKeyWarning(p + ".missing"); !strings.Contains(w, "cannot be read by uid") || !strings.Contains(w, "fall back") {
+		t.Fatalf("missing: %q", w)
+	}
+}
