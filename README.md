@@ -252,10 +252,12 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
 - **Changing or removing the secret:** for a single start, give the old
   one as `PMSS_SECRET_PREVIOUS` or in a file named by
   `-previous-secret-file` / `PMSS_SECRET_PREVIOUS_FILE`. Credentials are
-  rewritten under the new `PMSS_SECRET`, or back to plain text when it is
-  unset. Remove it once that start has succeeded. In a container, run the
-  rotation as a one-off `docker run --rm` with both files mounted rather
-  than editing the template, so the old secret is never recorded there.
+  rewritten under the new secret, or back to plain text when no current
+  secret is configured at all: neither `PMSS_SECRET`, nor
+  `PMSS_SECRET_FILE`, nor `-secret-file`. Remove the previous one once
+  that start has succeeded. In a container, run the rotation as a one-off
+  `docker run --rm` with both files mounted rather than editing the
+  template, so the old secret is never recorded there.
 - **Lost the secret:** start once with `-forget-encrypted-credentials`
   (or `PMSS_FORGET_ENCRYPTED_CREDENTIALS=1`). Credentials that do not
   decrypt are removed, the rest of each record stays, and the edit forms
@@ -266,7 +268,13 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
 - **Do not roll back to a release before 1.9 with an encrypted
   database.** An older build knows nothing about the encryption and would
   present the ciphertext to your boxes as the password. Switch encryption
-  off first (previous secret set, `PMSS_SECRET` unset), then downgrade.
+  off first: start once with the current secret given as the previous one
+  (`PMSS_SECRET_PREVIOUS`, `-previous-secret-file` or
+  `PMSS_SECRET_PREVIOUS_FILE`) and every current-secret input removed
+  (`PMSS_SECRET`, `PMSS_SECRET_FILE` and `-secret-file`). That start's
+  log no longer says `stored credentials are encrypted` and, if anything
+  was stored, says `rewrote stored credentials ... encrypted=false`; then
+  downgrade.
   The same goes for a release before 1.12 once 1.12 has run with the
   secret: those read the start command and download URL as plain text, so
   starting qBittorrent would run the ciphertext as a command on the box
@@ -925,7 +933,9 @@ Upgrade notes, read these first:
   too. A 1.11 or older build would read them as plain text: starting
   qBittorrent would run the ciphertext as a command on the box, and
   installs would refuse the URL. To downgrade, switch encryption off first
-  (previous secret set, `PMSS_SECRET` unset), then go back. The same first
+  as *Encrypting stored credentials* describes (the current secret given
+  as the previous one, and `PMSS_SECRET`, `PMSS_SECRET_FILE` and
+  `-secret-file` all removed), then go back. The same first
   start also vacuums the database once.
 
 Changes:
@@ -1085,8 +1095,8 @@ nothing changes.
   into the recovery state machine. (#117, #118)
 - **Do not roll back to 1.8.x or earlier with an encrypted database.** An
   older build knows nothing about the encryption and would present the
-  ciphertext as the password. Switch encryption off first (previous
-  secret set, `PMSS_SECRET` unset), then downgrade.
+  ciphertext as the password. Switch encryption off first (see
+  *Encrypting stored credentials*), then downgrade.
 - **Run it on a machine you control.** The README now says plainly that
   the dashboard holds the keys to the whole fleet and must not run on a
   Pulsed Media seedbox, storage box or any other shared host, and states
