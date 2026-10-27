@@ -432,7 +432,7 @@ function renderSide() {
       <div><span>storage</span><b>${fmtBytes(t.disk_quota || 0, 1)}</b></div>
       <div><span>last poll</span><b>${fmtAgo(t.last_poll)}</b></div>
       <div class="conn ${S.live ? 'live' : ''}"><span class="dot"></span>${S.live ? 'live updates' : 'reconnecting…'}</div>
-      ${S.monitorOnly ? '<div class="muted" title="started with -monitor-only: nothing on the boxes is changed from this interface">monitor-only</div>' : ''}
+      ${S.monitorOnly ? '<div class="muted" title="started with -monitor-only: torrent, client, discovery and container actions are refused; monitoring runs as usual">monitor-only</div>' : ''}
     </div>`;
 }
 
@@ -933,7 +933,7 @@ function rtDiscoveryNote(r, b) {
   const list = pfmView.rtDiscovery(r);
   if (!list.length) return '';
   return ' · ' + list.map((d) => {
-    if (S.monitorOnly) return discState(d.label, d.on, d.warn, pfmView.rtDiscoveryHint(d));
+    if (S.monitorOnly) return discState(`${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}`, d.warn, pfmView.rtDiscoveryState(d));
     return `<button class="disc ${d.warn ? 'warn' : ''}" data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(pfmView.rtDiscoveryHint(d))}"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(b.name)}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
   }).join(' · ') + ' · <span class="disc na" title="rTorrent has no local service discovery">LSD n/a</span>';
 }
@@ -1051,14 +1051,14 @@ function connectionNote(q) {
 }
 // A discovery setting as plain text, for monitor-only mode: the state
 // stays visible, the toggle goes.
-function discState(label, on, warn, title) {
-  return `<span class="disc ${warn ? 'warn' : ''}" title="${esc(title)}">${esc(label)} ${on ? 'on' : 'off'}</span>`;
+function discState(text, warn, title) {
+  return `<span class="disc ${warn ? 'warn' : ''}" title="${esc(title)}">${esc(text)}</span>`;
 }
 function discoveryNote(q, b) {
   if (!q.discovery?.known) return q.reachable ? ' · <span class="muted">discovery settings not read</span>' : '';
   return ' · ' + DISCOVERY.map(([k, l]) => {
     const on = q.discovery[k];
-    if (S.monitorOnly) return discState(l, on, on, `${l} ${on ? 'enabled' : 'disabled'}`);
+    if (S.monitorOnly) return discState(`${l} ${on ? 'on' : 'off'}`, on, `${l} ${on ? 'enabled' : 'disabled'}`);
     return `<button class="disc ${on ? 'warn' : ''}" data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(b.name)}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
   }).join(' · ');
 }
@@ -1709,7 +1709,7 @@ function viewSettings() {
     </div>
     <div class="form-foot" style="justify-content:flex-start"><button class="primary" data-act="settings:save">save settings</button></div>
     <div class="panel"><div class="tile-label">about &amp; licensing</div>
-      <div class="row"><span>version</span><span>${esc(S.version || 'dev')}${S.monitorOnly ? ' · <span class="muted" title="started with -monitor-only: nothing on the boxes is changed from this interface">monitor-only</span>' : ''}</span></div>
+      <div class="row"><span>version</span><span>${esc(S.version || 'dev')}${S.monitorOnly ? ' · <span class="muted" title="started with -monitor-only: torrent, client, discovery and container actions are refused; monitoring runs as usual">monitor-only</span>' : ''}</span></div>
       <div class="hint">pmss-fleet-manager is free software under the GNU Affero General Public License v3 or later. Because you are using it over a network, you are entitled to its source code.</div>
       <div class="row" style="justify-content:flex-start;gap:16px"><a href="${esc(BASE)}/license" target="_blank" rel="noopener">license ↗</a><a href="${esc(BASE)}/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || BASE + '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
     </div>

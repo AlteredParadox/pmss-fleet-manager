@@ -262,7 +262,7 @@ func changesNoBox(route string) bool {
 }
 
 // errMonitorOnly is the answer to a box-changing request in monitor-only mode.
-var errMonitorOnly = errors.New("this dashboard runs in monitor-only mode: it does not change anything on the boxes")
+var errMonitorOnly = errors.New("this dashboard runs in monitor-only mode: torrent, client, discovery and container actions are refused")
 
 // boxWrite refuses h in monitor-only mode, before it reads the request or
 // reaches a box.

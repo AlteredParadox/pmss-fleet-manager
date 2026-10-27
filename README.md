@@ -176,7 +176,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-auth` | none | HTTP basic auth as `user:password`; set it if you bind to a non-loopback address |
 | `-auth-file` | none | file holding that login as `user:password` (a container secret, say); one trailing line ending is ignored and nothing else, so a password may end in a space. A configured file that is missing, empty or not `user:password` stops the start. Set this or `-auth` / `PMSS_AUTH`, not both |
 | `-ssh-key` | none | private key file tried for every box without a key path of its own, before `~/.ssh/id_*`; a box's own key path always wins |
-| `-monitor-only` | off | never change anything on the boxes from the web UI (`PMSS_MONITOR_ONLY=1`): torrent, client, discovery and container actions are refused with 403 and their controls hidden. Adding, editing and removing boxes, alerts, settings, refresh, du and log reads still work. It limits this interface, not the SSH keys it holds: see *Security and hardening* |
+| `-monitor-only` | off | refuse the web UI's actions on the boxes (`PMSS_MONITOR_ONLY=1`): torrent, client, discovery and container actions answer 403 and their controls are hidden; monitoring runs as usual. Adding, editing and removing boxes, alerts, settings, refresh, du and log reads still work. It limits this interface, not the SSH keys it holds: see *Security and hardening* |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
 | `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
@@ -742,15 +742,17 @@ These are the design decisions that came out of it.
   edit; an edit landing in the moment between that check and the action
   reaching the box is not locked out, which is accepted for a dashboard
   with one operator.
-- **Monitor-only mode.** `-monitor-only` refuses, server-side, every request
-  that could change something on a box, and the UI leaves those controls
-  out. It is deny-by-default: a mutating route counts as box-changing unless
+- **Monitor-only mode.** `-monitor-only` refuses, server-side, every action
+  on a box's torrents, clients, discovery settings and containers, and the
+  UI leaves those controls out. It is deny-by-default: a mutating route counts as box-changing unless
   it is listed as touching only the dashboard's own records or only reading
   from a box, so a route added later is refused until it is classified. It
   restricts what this web interface can do, not what the SSH accounts can
   do: the dashboard still holds working keys or passwords for every box, and
-  anyone with the database and the secret can use them directly. Probes
-  still run as the account, as they always do.
+  anyone with the database and the secret can use them directly. It is not
+  a promise that nothing is ever written on a box: monitoring runs as
+  usual, as the account, with the side effects it always has (temporary
+  files, and qBittorrent logging its own start when its version is read).
 - **Web surface.** No authentication by default and bound to loopback: use
   `-auth` with a long random password, and put it behind a reverse proxy
   with TLS (and its own authentication or rate limiting) before exposing it
@@ -879,10 +881,11 @@ Newest first; each release's full notes are on the
 
 **Unreleased**
 
-- Monitor-only mode (`-monitor-only` / `PMSS_MONITOR_ONLY=1`): nothing on
-  the boxes is changed from the web UI. Torrent, client, discovery and
-  container actions are refused with 403 and their controls hidden; the
-  discovery settings still show their state. (Request from a rootless
+- Monitor-only mode (`-monitor-only` / `PMSS_MONITOR_ONLY=1`): the web UI
+  takes no actions on the boxes. Torrent, client, discovery and container
+  actions are refused with 403 and their controls hidden; monitoring runs
+  as usual, and the discovery settings still show their state (with ↻ while
+  rTorrent waits for a restart). (Request from a rootless
   Podman user.)
 
 **1.11.0**

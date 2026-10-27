@@ -252,11 +252,17 @@ function rtDiscovery(r) {
 // so rather than presenting the default as every torrent's state.
 const rtWhat = (k) => (k === 'pex' ? 'PeX default for new torrents' : 'DHT');
 const PEX_KEEP = '; torrents already loaded keep their own PeX setting';
-function rtDiscoveryHint(d) {
+// rtDiscoveryState says what the config and the running client have;
+// rtDiscoveryHint adds what a click does (monitor-only mode shows the state
+// alone, fred review on PR 134).
+function rtDiscoveryState(d) {
   let s = `${rtWhat(d.k)} is ${d.on ? 'on' : 'off'} in the rTorrent config`;
   if (d.pending) s += `, but the running client has it ${d.live ? 'on' : 'off'} until rTorrent restarts`;
   if (d.k === 'pex') s += PEX_KEEP;
-  return `${s} — click to ${d.on ? 'disable' : 'enable'} (saved to ~/.rtorrent.rc.custom)`;
+  return s;
+}
+function rtDiscoveryHint(d) {
+  return `${rtDiscoveryState(d)} — click to ${d.on ? 'disable' : 'enable'} (saved to ~/.rtorrent.rc.custom)`;
 }
 function rtDiscoveryToast(k, on, r) {
   const base = `${rtWhat(k)} ${on ? 'enabled' : 'disabled'}`, keep = k === 'pex' ? PEX_KEEP : '';
@@ -273,5 +279,5 @@ function rtDiscoveryOn(r) {
   return { labels, title: why.length ? `${why.join('; ')} — private trackers usually forbid these` : '' };
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn };
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn };
 })();
