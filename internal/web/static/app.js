@@ -202,6 +202,7 @@ async function loadState() {
     if (d.instance && S.instance && d.instance !== S.instance) { location.reload(); return; } // server was rebuilt: pick up new JS/CSS
     S.instance = d.instance || S.instance;
     S.sshKey = d.ssh_key || ''; // the -ssh-key default, named in the edit form's key path hint
+    S.monitorOnly = !!d.monitor_only; // -monitor-only: the server refuses box-changing actions, so their controls are not drawn
     // Loads overlap (a resync, a settings event and a services event can
     // all be in flight): one taken before a snapshot that already landed
     // is superseded and must not put back a box removed between the two.
@@ -431,6 +432,7 @@ function renderSide() {
       <div><span>storage</span><b>${fmtBytes(t.disk_quota || 0, 1)}</b></div>
       <div><span>last poll</span><b>${fmtAgo(t.last_poll)}</b></div>
       <div class="conn ${S.live ? 'live' : ''}"><span class="dot"></span>${S.live ? 'live updates' : 'reconnecting…'}</div>
+      ${S.monitorOnly ? '<div class="muted" title="started with -monitor-only: nothing on the boxes is changed from this interface">monitor-only</div>' : ''}
     </div>`;
 }
 
@@ -605,12 +607,13 @@ function viewBox() {
 }
 // restart/stop (client running) or start (client down) buttons; nothing when monitoring is off.
 function boxPowerBtn(b, q) {
+  if (S.monitorOnly) return '';
   return q.enabled ? (q.process_up
     ? `<button data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(b.name)}? It is asked to exit cleanly, then started again with the box's start command (default: ~/bin/qbt-start when present)">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(b.name)}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
     : `<button data-act="qbt:start">start client</button>`) : '';
 }
 function boxInstallBtn(b, q) {
-  if (q.pmss_managed) return '';
+  if (q.pmss_managed || S.monitorOnly) return '';
   return (q.enabled || q.installed || b.type === 'seedbox')
     ? `<button data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(b.name) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(b.name) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
 }
@@ -717,7 +720,7 @@ function ovBinaryRow(q) {
 function ovAutostartRow(b, q) {
   if (q.pmss_managed) return `<div><span>autostart</span><span class="muted">Pulsed Media watchdog</span></div>`;
   const stale = q.start_helper_stale ? ' <span class="warn" title="~/bin/qbt-start checks for a running client with $USER, which is empty under cron, so every cron run starts another copy. Reapply rewrites the helper (the old one is saved to ~/.config/pmss-fleet-manager/qbt-start.bak).">helper needs a rewrite</span>' : '';
-  return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'}${stale} <button class="small ghost" data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing, or if it keys on $USER, which is empty under cron) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept; a replaced helper is saved first.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button></span></div>`;
+  return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'}${stale}${S.monitorOnly ? '' : ` <button class="small ghost" data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing, or if it keys on $USER, which is empty under cron) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept; a replaced helper is saved first.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button>`}</span></div>`;
 }
 // binary + autostart rows: shown whenever the client is monitored or at least present on the box.
 function ovAutostartRows(b, q) {
@@ -899,9 +902,9 @@ function clientSection(b, c, f, first) {
       <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span>${removeFailed}</div>
       <div class="actions">
         ${first ? `<input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">` : ''}
-        ${c.key === 'qbt' ? `<button class="small" data-act="qbt:pause" title="stop every torrent in qBittorrent" data-confirm="Stop all torrents in qBittorrent on ${esc(b.name)}?">stop all</button>
+        ${c.key === 'qbt' && !S.monitorOnly ? `<button class="small" data-act="qbt:pause" title="stop every torrent in qBittorrent" data-confirm="Stop all torrents in qBittorrent on ${esc(b.name)}?">stop all</button>
         <button class="small" data-act="qbt:resume" title="start every torrent, including any stopped on purpose">start all</button>` : ''}
-        ${avail.stopped ? '' : `<button class="small" data-act="tor-add:toggle" data-client="${c.key}">${addOpen ? 'close' : 'add'}</button>`}
+        ${avail.stopped || S.monitorOnly ? '' : `<button class="small" data-act="tor-add:toggle" data-client="${c.key}">${addOpen ? 'close' : 'add'}</button>`}
       </div>
     </div>
     ${addOpen ? torAddForm(b, q.torrents || [], c) : ''}
@@ -930,6 +933,7 @@ function rtDiscoveryNote(r, b) {
   const list = pfmView.rtDiscovery(r);
   if (!list.length) return '';
   return ' · ' + list.map((d) => {
+    if (S.monitorOnly) return discState(d.label, d.on, d.warn, pfmView.rtDiscoveryHint(d));
     return `<button class="disc ${d.warn ? 'warn' : ''}" data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(pfmView.rtDiscoveryHint(d))}"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(b.name)}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
   }).join(' · ') + ' · <span class="disc na" title="rTorrent has no local service discovery">LSD n/a</span>';
 }
@@ -1045,10 +1049,16 @@ function connectionNote(q) {
   if (!q.reachable || !q.connection || q.connection === 'connected') return '';
   return ` · <span class="warn" title="no incoming connections${q.listen_port ? ` on listen port ${q.listen_port}` : ''}${q.firewalled_since ? ` since ${fmtAgo(q.firewalled_since)}` : ''}">${esc(q.connection)}</span>`;
 }
+// A discovery setting as plain text, for monitor-only mode: the state
+// stays visible, the toggle goes.
+function discState(label, on, warn, title) {
+  return `<span class="disc ${warn ? 'warn' : ''}" title="${esc(title)}">${esc(label)} ${on ? 'on' : 'off'}</span>`;
+}
 function discoveryNote(q, b) {
   if (!q.discovery?.known) return q.reachable ? ' · <span class="muted">discovery settings not read</span>' : '';
   return ' · ' + DISCOVERY.map(([k, l]) => {
     const on = q.discovery[k];
+    if (S.monitorOnly) return discState(l, on, on, `${l} ${on ? 'enabled' : 'disabled'}`);
     return `<button class="disc ${on ? 'warn' : ''}" data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(b.name)}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
   }).join(' · ');
 }
@@ -1102,7 +1112,7 @@ function torAddForm(b, list, c) {
 // Per-torrent controls. Removal always confirms; removing the data as well
 // names the size so the two cannot be mistaken for each other.
 function torrentButtons(b, t, fleet = false) {
-  if (!t.hash) return '';
+  if (!t.hash || S.monitorOnly) return '';
   const client = t.client || 'qbt', label = esc(CLIENT_LABEL[client] || client); // a closed set today; escaped so the attribute sink stays safe if another client is added
   const off = b.status === 'disabled' ? ' disabled title="polling is disabled for this box; enable it to run actions"'
     : !pfmView.clientActionable(b, client) ? ` disabled title="${label} is stopped on purpose on this box (~/.rtorrentDisable); this row is from before it stopped"` : '';
@@ -1149,7 +1159,7 @@ function tabContainers(b) {
         <span class="num">${c.has_stats ? c.cpu_pct.toFixed(1) + '%' : '—'}</span>
         <span class="num">${c.has_stats ? fmtBytes(c.mem_usage, 0) : '—'}</span>
         <span class="actions" style="justify-content:flex-end">
-          ${run ? `<button class="small" data-act="ctr:restart" data-cid="${esc(c.id)}" data-confirm="Restart ${esc(c.name)}?">restart</button><button class="small" data-act="ctr:stop" data-cid="${esc(c.id)}" data-confirm="Stop ${esc(c.name)}?">stop</button>` : `<button class="small" data-act="ctr:start" data-cid="${esc(c.id)}">start</button>`}
+          ${S.monitorOnly ? '' : run ? `<button class="small" data-act="ctr:restart" data-cid="${esc(c.id)}" data-confirm="Restart ${esc(c.name)}?">restart</button><button class="small" data-act="ctr:stop" data-cid="${esc(c.id)}" data-confirm="Stop ${esc(c.name)}?">stop</button>` : `<button class="small" data-act="ctr:start" data-cid="${esc(c.id)}">start</button>`}
         </span>
       </div>`;
       }).join('')}
@@ -1699,7 +1709,7 @@ function viewSettings() {
     </div>
     <div class="form-foot" style="justify-content:flex-start"><button class="primary" data-act="settings:save">save settings</button></div>
     <div class="panel"><div class="tile-label">about &amp; licensing</div>
-      <div class="row"><span>version</span><span>${esc(S.version || 'dev')}</span></div>
+      <div class="row"><span>version</span><span>${esc(S.version || 'dev')}${S.monitorOnly ? ' · <span class="muted" title="started with -monitor-only: nothing on the boxes is changed from this interface">monitor-only</span>' : ''}</span></div>
       <div class="hint">pmss-fleet-manager is free software under the GNU Affero General Public License v3 or later. Because you are using it over a network, you are entitled to its source code.</div>
       <div class="row" style="justify-content:flex-start;gap:16px"><a href="${esc(BASE)}/license" target="_blank" rel="noopener">license ↗</a><a href="${esc(BASE)}/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || BASE + '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
     </div>

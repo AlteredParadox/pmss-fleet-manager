@@ -1073,3 +1073,67 @@ func TestDecodeOneValue(t *testing.T) {
 		}
 	}
 }
+
+// Monitor-only mode refuses exactly the routes that could change a box, and
+// any mutating route that changesNoBox does not list: the guarded set is
+// pinned here, so classifying a new route is a reviewed decision. Routes
+// that only touch the dashboard's records or read from a box still work.
+func TestMonitorOnly(t *testing.T) {
+	srv, st := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080"}
+	want := []string{
+		"POST " + boxRoute + "/qbt/{action}",
+		"POST " + boxRoute + "/qbt/torrents/{hash}/{action}",
+		"POST " + boxRoute + "/qbt/torrents",
+		"POST " + boxRoute + "/qbt/discovery",
+		"POST " + boxRoute + "/rtorrent/torrents/{hash}/{action}",
+		"POST " + boxRoute + "/rtorrent/torrents",
+		"POST " + boxRoute + "/rtorrent/discovery",
+		"POST " + boxRoute + "/containers/{cid}/{action}",
+	}
+	if !slices.Equal(srv.boxWrites, want) {
+		t.Fatalf("guarded routes:\n%s\nwant:\n%s", strings.Join(srv.boxWrites, "\n"), strings.Join(want, "\n"))
+	}
+	if changesNoBox("POST /api/boxes/{id}/something-new") {
+		t.Fatal("an unlisted route must count as box-changing")
+	}
+	b := &store.Box{Name: "x", Host: "h", User: "u", Enabled: true, QbtEnabled: true, RtEnabled: true}
+	if err := st.CreateBox(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	h := strings.Repeat("a", 40)
+	box := fmt.Sprintf("/api/boxes/%d", b.ID)
+	blocked := []string{
+		box + "/qbt/install", box + "/qbt/stop", box + "/qbt/pause",
+		box + "/qbt/torrents/" + h + "/remove-data?rev=0", box + "/qbt/torrents", box + "/qbt/discovery",
+		box + "/rtorrent/torrents/" + h + "/stop?rev=0", box + "/rtorrent/torrents", box + "/rtorrent/discovery",
+		box + "/containers/c1/restart",
+	}
+	// Off: these reach their handlers (which then fail on the unprobed box,
+	// never with the monitor-only refusal).
+	for _, p := range blocked {
+		if code, body := do(t, srv, "POST", p, `{}`, hdr); code == 403 {
+			t.Errorf("off: %s refused: %s", p, body)
+		}
+	}
+	srv.SetMonitorOnly(true)
+	for _, p := range blocked {
+		if code, body := do(t, srv, "POST", p, `{}`, hdr); code != 403 || !strings.Contains(body, "monitor-only") {
+			t.Errorf("on: %s: %d %s", p, code, body)
+		}
+	}
+	// Dashboard-side and read-only routes still work.
+	if code, body := do(t, srv, "POST", box+"/refresh", "", hdr); code == 403 {
+		t.Errorf("refresh refused: %s", body)
+	}
+	if code, body := do(t, srv, "POST", "/api/alerts/ack-all", "", hdr); code != 200 {
+		t.Errorf("ack-all: %d %s", code, body)
+	}
+	code, body := do(t, srv, "GET", "/api/state", "", nil)
+	var state struct {
+		MonitorOnly bool `json:"monitor_only"`
+	}
+	if err := json.Unmarshal([]byte(body), &state); err != nil || code != 200 || !state.MonitorOnly {
+		t.Fatalf("state: %d %s", code, body)
+	}
+}

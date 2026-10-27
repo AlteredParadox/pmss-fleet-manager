@@ -71,6 +71,11 @@ type Server struct {
 	license, thirdParty []byte
 	version             string
 
+	// monitorOnly refuses every box-changing route (SetMonitorOnly);
+	// boxWrites lists the patterns it guards, for the tests.
+	monitorOnly bool
+	boxWrites   []string
+
 	// allowedHosts, when set, is the only set of Host header values served.
 	// Without it a page on an attacker's domain whose DNS is rebound to the
 	// dashboard's IP is same-origin from the browser's point of view and
@@ -237,45 +242,96 @@ func NormalizeBasePath(p string) (string, error) {
 // boxRoute is the per-box API prefix.
 const boxRoute = "/api/boxes/{id}"
 
+// changesNoBox reports whether a mutating route (method and pattern, without
+// the base path) leaves every box as it is: it changes only the dashboard's
+// own records, or only reads from a box (a probe, du, a log tail over SSH).
+// Monitor-only mode serves these and refuses every other mutating route.
+// A closed switch: a route missing here is refused, never allowed.
+func changesNoBox(route string) bool {
+	switch route {
+	case "POST /api/boxes", "PUT " + boxRoute, "DELETE " + boxRoute,
+		"POST " + boxRoute + "/probe", "POST " + boxRoute + "/refresh", "POST " + boxRoute + "/du",
+		"POST " + boxRoute + "/rtorrent/remove-failure/dismiss", "POST " + boxRoute + "/apps/watch",
+		"POST " + boxRoute + "/logs/read", "POST " + boxRoute + "/containers/{cid}/logs",
+		"POST /api/detect",
+		"POST /api/alerts/ack-all", "POST /api/alerts/{id}/ack", "DELETE /api/alerts/{id}", "POST /api/alerts/clear-resolved",
+		"PUT /api/settings", "POST /api/services/sync", "POST /api/pmdb/sync":
+		return true
+	}
+	return false
+}
+
+// errMonitorOnly is the answer to a box-changing request in monitor-only mode.
+var errMonitorOnly = errors.New("this dashboard runs in monitor-only mode: it does not change anything on the boxes")
+
+// boxWrite refuses h in monitor-only mode, before it reads the request or
+// reaches a box.
+func (s *Server) boxWrite(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.monitorOnly {
+			writeErr(w, 403, errMonitorOnly)
+			return
+		}
+		h(w, r)
+	}
+}
+
+// SetMonitorOnly switches monitor-only mode (-monitor-only): every route
+// that could change a box answers 403. It limits this web interface, not
+// the SSH accounts the dashboard holds keys for. Set before serving.
+func (s *Server) SetMonitorOnly(on bool) { s.monitorOnly = on }
+
 func (s *Server) routes() {
 	bp := s.basePath
 	mux := s.mux
-	mux.HandleFunc("GET "+bp+"/api/state", s.handleState)
-	mux.HandleFunc("GET "+bp+"/api/events", s.handleEvents)
-	mux.HandleFunc("GET "+bp+"/api/boxes", s.handleListBoxes)
-	mux.HandleFunc("POST "+bp+"/api/boxes", s.handleCreateBox)
-	mux.HandleFunc("GET "+bp+boxRoute, s.handleGetBox)
-	mux.HandleFunc("GET "+bp+"/api/torrents", s.handleTorrents)
-	mux.HandleFunc("PUT "+bp+boxRoute, s.handleUpdateBox)
-	mux.HandleFunc("DELETE "+bp+boxRoute, s.handleDeleteBox)
-	mux.HandleFunc("POST "+bp+boxRoute+"/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
-	mux.HandleFunc("POST "+bp+boxRoute+"/refresh", s.handleRefresh)
-	mux.HandleFunc("POST "+bp+boxRoute+"/du", s.handleDu)
-	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/{action}", s.handleQbtAction)
-	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
-	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
-	mux.HandleFunc("POST "+bp+boxRoute+"/qbt/discovery", s.handleSetDiscovery)
-	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/torrents/{hash}/{action}", s.handleRtTorrentAction)
-	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/torrents", s.handleRtAddTorrents) // literal segment wins over {hash}
-	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/remove-failure/dismiss", s.handleRtDismissRemoveFailure)
-	mux.HandleFunc("POST "+bp+boxRoute+"/rtorrent/discovery", s.handleSetRtDiscovery)
-	mux.HandleFunc("POST "+bp+boxRoute+"/containers/{cid}/{action}", s.handleContainerAction)
-	mux.HandleFunc("POST "+bp+boxRoute+"/apps/watch", s.handleAppWatch)
-	mux.HandleFunc("POST "+bp+boxRoute+"/logs/read", s.handleReadLog)                   // runs tail over SSH: POST so the CSRF check applies
-	mux.HandleFunc("POST "+bp+boxRoute+"/containers/{cid}/logs", s.handleContainerLogs) // literal segment wins over {action}
-	mux.HandleFunc("POST "+bp+"/api/detect", s.handleDetect)
-	mux.HandleFunc("GET "+bp+"/api/alerts", s.handleAlerts)
-	mux.HandleFunc("POST "+bp+"/api/alerts/ack-all", s.handleAckAll)
-	mux.HandleFunc("POST "+bp+"/api/alerts/{id}/ack", s.handleAck)
-	mux.HandleFunc("DELETE "+bp+"/api/alerts/{id}", s.handleDeleteAlert)
-	mux.HandleFunc("POST "+bp+"/api/alerts/clear-resolved", s.handleClearResolved)
-	mux.HandleFunc("GET "+bp+"/api/settings", s.handleGetSettings)
-	mux.HandleFunc("PUT "+bp+"/api/settings", s.handleSetSettings)
+	// Every API route goes through handle: a route that may change a box
+	// (anything but a GET, unless changesNoBox lists it) is refused in
+	// monitor-only mode, so one added later is refused there until it is
+	// deliberately listed.
+	handle := func(pattern string, h http.HandlerFunc) {
+		method, p, _ := strings.Cut(pattern, " ")
+		if method != "GET" && !changesNoBox(method+" "+strings.TrimPrefix(p, bp)) {
+			h = s.boxWrite(h)
+			s.boxWrites = append(s.boxWrites, pattern)
+		}
+		mux.HandleFunc(pattern, h)
+	}
+	handle("GET "+bp+"/api/state", s.handleState)
+	handle("GET "+bp+"/api/events", s.handleEvents)
+	handle("GET "+bp+"/api/boxes", s.handleListBoxes)
+	handle("POST "+bp+"/api/boxes", s.handleCreateBox)
+	handle("GET "+bp+boxRoute, s.handleGetBox)
+	handle("GET "+bp+"/api/torrents", s.handleTorrents)
+	handle("PUT "+bp+boxRoute, s.handleUpdateBox)
+	handle("DELETE "+bp+boxRoute, s.handleDeleteBox)
+	handle("POST "+bp+boxRoute+"/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
+	handle("POST "+bp+boxRoute+"/refresh", s.handleRefresh)
+	handle("POST "+bp+boxRoute+"/du", s.handleDu)
+	handle("POST "+bp+boxRoute+"/qbt/{action}", s.handleQbtAction)
+	handle("POST "+bp+boxRoute+"/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
+	handle("POST "+bp+boxRoute+"/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
+	handle("POST "+bp+boxRoute+"/qbt/discovery", s.handleSetDiscovery)
+	handle("POST "+bp+boxRoute+"/rtorrent/torrents/{hash}/{action}", s.handleRtTorrentAction)
+	handle("POST "+bp+boxRoute+"/rtorrent/torrents", s.handleRtAddTorrents) // literal segment wins over {hash}
+	handle("POST "+bp+boxRoute+"/rtorrent/remove-failure/dismiss", s.handleRtDismissRemoveFailure)
+	handle("POST "+bp+boxRoute+"/rtorrent/discovery", s.handleSetRtDiscovery)
+	handle("POST "+bp+boxRoute+"/containers/{cid}/{action}", s.handleContainerAction)
+	handle("POST "+bp+boxRoute+"/apps/watch", s.handleAppWatch)
+	handle("POST "+bp+boxRoute+"/logs/read", s.handleReadLog)                   // runs tail over SSH: POST so the CSRF check applies
+	handle("POST "+bp+boxRoute+"/containers/{cid}/logs", s.handleContainerLogs) // literal segment wins over {action}
+	handle("POST "+bp+"/api/detect", s.handleDetect)
+	handle("GET "+bp+"/api/alerts", s.handleAlerts)
+	handle("POST "+bp+"/api/alerts/ack-all", s.handleAckAll)
+	handle("POST "+bp+"/api/alerts/{id}/ack", s.handleAck)
+	handle("DELETE "+bp+"/api/alerts/{id}", s.handleDeleteAlert)
+	handle("POST "+bp+"/api/alerts/clear-resolved", s.handleClearResolved)
+	handle("GET "+bp+"/api/settings", s.handleGetSettings)
+	handle("PUT "+bp+"/api/settings", s.handleSetSettings)
 	// AGPL §13: the license, the third-party notices and the Corresponding
 	// Source offer are served WITHOUT basic auth (see isPublicPath).
-	mux.HandleFunc("GET "+bp+"/license", s.serveLegalText(func() []byte { return s.license }, "license text unavailable"))
-	mux.HandleFunc("GET "+bp+"/third-party-licenses", s.serveLegalText(func() []byte { return s.thirdParty }, "third-party notices unavailable"))
-	mux.HandleFunc("GET "+bp+"/source", s.handleSource)
+	handle("GET "+bp+"/license", s.serveLegalText(func() []byte { return s.license }, "license text unavailable"))
+	handle("GET "+bp+"/third-party-licenses", s.serveLegalText(func() []byte { return s.thirdParty }, "third-party notices unavailable"))
+	handle("GET "+bp+"/source", s.handleSource)
 	// Liveness for `pmss-fleet-manager healthcheck`; no login (see
 	// isPublicPath). Served at the root whatever the base path, since the
 	// healthcheck runs as its own process and cannot see a -base-path flag
@@ -286,14 +342,14 @@ func (s *Server) routes() {
 		w.Header().Set("Cache-Control", "no-store")
 		io.WriteString(w, "ok\n")
 	}
-	mux.HandleFunc("GET /healthz", healthz)
+	handle("GET /healthz", healthz)
 	if bp != "" {
-		mux.HandleFunc("GET "+bp+"/healthz", healthz)
+		handle("GET "+bp+"/healthz", healthz)
 	}
-	mux.HandleFunc("GET "+bp+"/api/services", s.handleServices)
-	mux.HandleFunc("POST "+bp+"/api/services/sync", s.handleServicesSync)
-	mux.HandleFunc("GET "+bp+"/api/pmdb", s.handlePMDB)
-	mux.HandleFunc("POST "+bp+"/api/pmdb/sync", s.handlePMDBSync)
+	handle("GET "+bp+"/api/services", s.handleServices)
+	handle("POST "+bp+"/api/services/sync", s.handleServicesSync)
+	handle("GET "+bp+"/api/pmdb", s.handlePMDB)
+	handle("POST "+bp+"/api/pmdb/sync", s.handlePMDBSync)
 
 	static, _ := fs.Sub(web.FS, "static")
 	fileServer := http.FileServer(http.FS(static))
@@ -518,6 +574,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"instance":       s.instance,
 		"version":        s.Version(),
 		"ssh_key":        sshx.DefaultKey, // the -ssh-key default (a path, not a secret), for the edit form's hint
+		"monitor_only":   s.monitorOnly,   // the UI hides what the server would refuse
 		"source_url":     s.sourceURL(),
 	})
 }
