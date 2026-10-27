@@ -562,8 +562,12 @@ func (c *Client) Action(ctx context.Context, action, hash string) error {
 	case ActionRemove:
 		seq = []string{"d.erase"}
 	}
-	for _, m := range seq {
+	for i, m := range seq {
 		if err := c.command(ctx, m, hash); err != nil {
+			if i > 0 {
+				return fmt.Errorf("%s failed after %s succeeded, so the %s may have partly happened; the next poll shows the torrent's state: %w",
+					m, strings.Join(seq[:i], ", "), action, err)
+			}
 			return err
 		}
 	}

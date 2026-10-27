@@ -58,9 +58,10 @@ type BoxState struct {
 	// poll leaves it set: the facts are still that machine's.
 	Ready bool `json:"ready"`
 
-	// BoxRev is the box record's revision (store.Box.Revision). Torrent
-	// actions carry it back, so a button drawn before an edit cannot act on
-	// whatever the record points at after it (ErrStaleBox).
+	// BoxRev is the box record's revision (store.Box.Revision). Every
+	// request that changes the box carries it back (?rev=), so a control
+	// drawn before an edit cannot act on whatever the record points at
+	// after it (ErrStaleBox).
 	BoxRev int64 `json:"box_rev"`
 
 	// Rev is the fleet-wide revision this state was stored at (Manager
@@ -421,7 +422,7 @@ func (s BoxState) EffectiveRenewal() string {
 func (s *BoxState) adoptIdentity(from BoxState) {
 	s.Name, s.Host, s.Port, s.User, s.Type = from.Name, from.Host, from.Port, from.User, from.Type
 	s.Plan, s.Datacenter, s.Renewal, s.Enabled, s.HostKeyFP = from.Plan, from.Datacenter, from.Renewal, from.Enabled, from.HostKeyFP
-	s.BoxRev = from.BoxRev // torrent actions compare it with the poller's record (Codex on PR 130)
+	s.BoxRev = from.BoxRev // box actions compare it with the poller's record (Codex on PR 130)
 	s.Qbt.Enabled, s.Rt.Enabled, s.Docker.Enabled, s.Dirs.Enabled = from.Qbt.Enabled, from.Rt.Enabled, from.Docker.Enabled, from.Dirs.Enabled
 	// The SCGI endpoint is nothing until the next poll resolves and checks
 	// it on the box: a carried endpoint could be a setting the edit just

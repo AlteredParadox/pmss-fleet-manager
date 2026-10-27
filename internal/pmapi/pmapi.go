@@ -84,7 +84,18 @@ type Usage struct {
 type Amount float64
 
 func (a *Amount) UnmarshalJSON(b []byte) error {
-	*a = Amount(parseAmount(strings.Trim(strings.TrimSpace(string(b)), `"`)))
+	*a = 0
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*a = Amount(parseAmount(s)) // a JSON string, escapes decoded
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err == nil {
+		if f, err := n.Float64(); err == nil && f <= 1e12 && f >= -1e12 {
+			*a = Amount(f) // a number, exponent and all; absurd ones as in parseAmount
+		}
+	}
 	return nil
 }
 

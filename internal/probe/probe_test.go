@@ -627,6 +627,11 @@ func TestTrafficFileCap(t *testing.T) {
 	if ts := parseSeries(trafficOfSize(t, maxTrafficFile+1)); ts.OK {
 		t.Fatalf("over the cap parsed: %+v", ts)
 	}
+	// The cap applies to what was read, not to what is left after trimming:
+	// a capped read that ends in blanks is still too long.
+	if ts := parseSeries(trafficOfSize(t, maxTrafficFile) + "\n"); ts.OK {
+		t.Fatalf("over the cap before trimming parsed: %+v", ts)
+	}
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
 	}

@@ -543,6 +543,27 @@ func TestActions(t *testing.T) {
 	}
 }
 
+// A sequence that fails after an earlier step says so, since the torrent
+// may already have changed; a first-step failure is just the fault.
+func TestActionPartialFailureNamed(t *testing.T) {
+	f := newFake(t)
+	f.on(func(m string, p []string) string {
+		if m == "d.start" || m == "d.stop" {
+			return fault(-501, "boom")
+		}
+		return resp(i8(0))
+	})
+	c := New(f.dial)
+	err := c.Action(context.Background(), ActionStart, hashA)
+	if err == nil || !strings.Contains(err.Error(), "d.start failed after d.open") || !strings.Contains(err.Error(), "the start may have partly happened") || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("partial: %v", err)
+	}
+	err = c.Action(context.Background(), ActionStop, hashA)
+	if err == nil || strings.Contains(err.Error(), "partly") || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("first step: %v", err)
+	}
+}
+
 func TestAdd(t *testing.T) {
 	f := newFake(t)
 	torrent := "d8:announce9:http://x/4:infod4:name1:a12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee"

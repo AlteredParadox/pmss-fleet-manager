@@ -15,8 +15,10 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // Package secrets encrypts the credentials the store keeps (SSH and WebUI
-// passwords, the Pulsed Media API key, the pmdb.fyi upload key) under a key
-// derived from a secret the operator supplies outside the database. With
+// passwords, the Pulsed Media API key, the pmdb.fyi upload key, and the
+// qBittorrent start commands and download URL, which may carry a token)
+// under a key derived from a secret the operator supplies outside the
+// database. With
 // it, a copy of the SQLite file alone (a backup, an appdata share, a file
 // attached to a bug report) does not give the credentials away.
 //

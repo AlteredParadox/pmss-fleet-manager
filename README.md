@@ -139,8 +139,9 @@ Off by default; untick the box or remove the key to stop it. What is
 submitted is what each box reports about itself: turning this on trusts
 your boxes' probe output with the shared key, so a compromised account on
 one box could get a made-up host row submitted in your name (at most 50
-per run, and never over an existing row). Leave it off if that matters to
-you.
+per run and never over an existing row, but not a lifetime limit: a box
+that keeps reporting new hostnames gets each one tried at a later run).
+Leave it off if that matters to you.
 
 ## Run
 
@@ -226,7 +227,11 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
 - **First start with the secret** encrypts the credentials already in the
   database, then vacuums the file and truncates the write-ahead log so the
   plain text is not left in free pages; if that cleanup is interrupted it
-  is finished at the next start before anything is served. The database
+  is finished at the next start before anything is served. The same scrub
+  runs once more when a release adds columns to what is encrypted (1.12
+  added the qBittorrent start command and download URL), so plain text a
+  column held before it was encrypted, even one already cleared, does not
+  stay behind either. The database
   records whether its credentials are encrypted and keeps a small key
   check (a fixed string sealed under the secret), so that marker, not what
   a value looks like, decides: a password that happens to start with
@@ -750,7 +755,10 @@ These are the design decisions that came out of it.
   sessions and remote commands are bounded by contexts; a hung `quota` is run
   through a detached helper so it cannot stall the probe; remote stdout is
   capped at 16 MiB; error texts and alert titles are clipped; directory
-  listings keep the 500 largest entries.
+  listings keep the 500 largest entries. The Docker container list is
+  bounded by that body cap and a container count, not per container (names,
+  ports): only your own account's daemon writes it, and the cap keeps it
+  finite.
 - **Honest state across edits and restarts.** Failed polls are persisted too,
   so a box that is down comes back as down after a dashboard restart and its
   acknowledged alert stays acknowledged. An alert whose source could not be
@@ -933,12 +941,23 @@ Newest first; each release's full notes are on the
   poll, and a decoded traffic value is capped at 16384 array entries
   (real files are a few KiB).
 - Smaller hardening: a `-ssh-key` file other users can read is warned
-  about at startup, like the secret and auth files; each event-stream
+  about at startup, like the secret and auth files (a box's own key path
+  is not checked: it is your file on the dashboard host, as the database
+  is); each event-stream
   frame has a 30 s write deadline, so a tab that stops reading frees its
   stream slot; GitHub release answers are read whole and refused past
   1 MiB or with trailing data; `.dockerignore` also keeps `.aws`,
   `.docker`, `.gnupg`, `.netrc`, `.agents` and `.codex` out of the build
   context.
+- With a secret set, the first start of 1.12 vacuums the database once
+  more (a fourth settings row, `secrets_inventory`, records which columns
+  are encrypted), so a start-command token cleared before the upgrade does
+  not stay in free pages.
+- Small fixes: Pulsed Media amounts are JSON-decoded before they are read
+  (an escaped decimal point or an exponent no longer garbles a price); the
+  download URL must parse as https with a host and no user info; an
+  rTorrent start or stop that fails part-way says so; the traffic file cap
+  is checked before trimming.
 
 **1.11.0**
 
