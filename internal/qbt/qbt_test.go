@@ -776,11 +776,11 @@ func TestSyncEntryCapAndBadDelta(t *testing.T) {
 	if _, err := decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"size":"not a number"}},"torrents_removed":null,"torrents":null}`), MaxTorrents); err != nil {
 		t.Fatal(err)
 	}
-	d, err := decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"size":"not a number"}},"torrents_removed":["x"],"trackers":{"u":[1,[2,{"a":null}]]}}`), MaxTorrents)
+	d, err := decodeMainData(strings.NewReader(`{"rid":4,"torrents":{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"size":"not a number"}},"torrents_removed":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"trackers":{"u":[1,[2,{"a":null}]]}}`), MaxTorrents)
 	if err != nil || d.rid != 4 || len(d.removed) != 1 {
 		t.Fatalf("decode: %+v %v", d, err)
 	}
-	have := syncState{rid: 3, torrents: map[string]Torrent{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Size: 7}, "x": {Hash: "x"}}}
+	have := syncState{rid: 3, torrents: map[string]Torrent{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {Hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Size: 7}, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {Hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
 	next, err := have.apply(d, false)
 	if err == nil || next.rid != 3 || next.torrents["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"].Size != 7 || len(next.torrents) != 2 {
 		t.Fatalf("a bad entry must not advance anything: %+v %v", next, err)
@@ -814,11 +814,20 @@ func TestSyncIdentityIsTheKey(t *testing.T) {
 	if s, err = s.apply(d, false); err != nil || s.torrents[a].Hash != a || s.torrents[a].Progress != 0.5 {
 		t.Fatalf("delta: %+v %v", s.torrents, err)
 	}
-	// Upper-case keys are canonicalised; a key that is not a hash fails the sync.
+	// Upper-case keys and removals are canonicalised (one row, removable in
+	// either case); a key that is not a hash fails the sync.
 	up := strings.ToUpper(a)
-	d, _ = decodeMainData(strings.NewReader(`{"rid":3,"torrents":{"`+up+`":{}}}`), MaxTorrents)
-	if n, err := s.apply(d, false); err != nil || n.torrents[up].Hash != a {
+	d, _ = decodeMainData(strings.NewReader(`{"rid":3,"torrents":{"`+up+`":{"name":"A2"}}}`), MaxTorrents)
+	n, err := s.apply(d, false)
+	if err != nil || len(n.torrents) != 1 || n.torrents[a].Hash != a || n.torrents[a].Name != "A2" || n.torrents[a].Progress != 0.5 {
 		t.Fatalf("upper: %+v %v", n.torrents, err)
+	}
+	d, _ = decodeMainData(strings.NewReader(`{"rid":4,"torrents_removed":["`+up+`"]}`), MaxTorrents)
+	if n, err := n.apply(d, false); err != nil || len(n.torrents) != 0 {
+		t.Fatalf("upper removal: %+v %v", n.torrents, err)
+	}
+	if _, err := decodeMainData(strings.NewReader(`{"rid":4,"torrents_removed":["nothex"]}`), MaxTorrents); err == nil {
+		t.Fatal("a removal that is not a hash decoded")
 	}
 	d, _ = decodeMainData(strings.NewReader(`{"rid":3,"torrents":{"nothex":{}}}`), MaxTorrents)
 	if n, err := s.apply(d, false); err == nil || n.rid != 2 {

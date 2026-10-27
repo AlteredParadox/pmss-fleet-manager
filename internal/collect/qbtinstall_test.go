@@ -161,7 +161,7 @@ func TestAutostartRewritesUserKeyedHelper(t *testing.T) {
 	}
 }
 
-// Install and autostart refuse before connecting when the last snapshot saw
+// Install, autostart and start refuse before connecting when the last snapshot saw
 // the PMSS panel's qBittorrent marker.
 func TestQbtInstallRefusesPMSSManaged(t *testing.T) {
 	m := &Manager{states: map[int64]*BoxState{7: {Ready: true, Qbt: QbtState{PMSSManaged: true}}}}
@@ -171,6 +171,10 @@ func TestQbtInstallRefusesPMSSManaged(t *testing.T) {
 	}
 	if _, err := p.qbtAutostart(context.Background()); !errors.Is(err, errPMSSManagedQbt) {
 		t.Errorf("autostart: %v", err)
+	}
+	// Start too: the panel's watchdog starts its client, ours would be a second.
+	if err := p.qbtAction(context.Background(), "start"); !errors.Is(err, errPMSSManagedStart) {
+		t.Errorf("start: %v", err)
 	}
 	// Before a probe of this generation the marker is unknown: refuse
 	// outright rather than trust the record's default of "not managed".
@@ -331,6 +335,25 @@ func TestVersionPartsNeedLeadingDigit(t *testing.T) {
 	} {
 		if got := versionParts(v); !slices.Equal(got, want) {
 			t.Errorf("%q: %v, want %v", v, got, want)
+		}
+	}
+}
+
+// One rule for the download URL at save time and at install, so a value
+// that saves is one the install accepts (daybreak blue audit of 9e59106).
+func TestValidDownloadURL(t *testing.T) {
+	for u, want := range map[string]bool{
+		store.DefaultQbtDownloadURL:                           true,
+		"https://example.com/build?token=abc&x=1":             true,
+		"http://example.com/qbittorrent-nox":                  false,
+		"https://example.com/a b":                             false,
+		"https://example.com/a\"b":                            false,
+		"https://example.com/`id`":                            false,
+		"https://example.com/" + strings.Repeat("a", 2048-20): true,
+		"https://example.com/" + strings.Repeat("a", 2048-19): false,
+	} {
+		if got := ValidDownloadURL(u); got != want {
+			t.Errorf("%.60q: %v, want %v", u, got, want)
 		}
 	}
 }

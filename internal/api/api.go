@@ -265,11 +265,27 @@ func changesNoBox(route string) bool {
 var errMonitorOnly = errors.New("this dashboard runs in monitor-only mode: torrent, client, discovery and container actions are refused")
 
 // boxWrite refuses h in monitor-only mode, before it reads the request or
-// reaches a box.
+// reaches a box, and otherwise requires ?rev=, the box record revision the
+// page was drawn from (BoxState.BoxRev): an action from a tab drawn before
+// an edit is refused with 409 rather than run against the edited box.
 func (s *Server) boxWrite(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.monitorOnly {
 			writeErr(w, 403, errMonitorOnly)
+			return
+		}
+		id, err := idParam(r)
+		if err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		rev, err := boxRevParam(r)
+		if err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		if err := s.m.CheckBoxRevision(id, rev); err != nil {
+			writeErr(w, actionCode(err), err)
 			return
 		}
 		h(w, r)
@@ -812,7 +828,7 @@ func (s *Server) handleCreateBox(w http.ResponseWriter, r *http.Request) {
 type torrentsBox struct {
 	ID           int64            `json:"id"`
 	Name         string           `json:"name"`
-	BoxRev       int64            `json:"box_rev"` // carried back by torrent actions (collect.ErrStaleBox)
+	BoxRev       int64            `json:"box_rev"` // carried back by box-changing requests (collect.ErrStaleBox)
 	Status       string           `json:"status"`
 	StatusReason string           `json:"status_reason,omitempty"`
 	Qbt          collect.QbtState `json:"qbt"`
@@ -938,7 +954,11 @@ func (s *Server) handleUpdateBox(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	fresh, _ := s.st.GetBox(r.Context(), id)
+	fresh, err := s.st.GetBox(r.Context(), id)
+	if err != nil {
+		writeErr(w, 500, fmt.Errorf("the edit was saved, but reading it back failed: %w", err))
+		return
+	}
 	writeJSON(w, 200, fresh)
 }
 
@@ -1294,8 +1314,8 @@ func userChars(u string) bool {
 // case; anything else never reaches the WebUI.
 func validTorrentHash(h string) bool { return qbt.ValidHash(h) }
 
-// boxRevParam reads the required ?rev= box record revision a torrent action
-// was drawn from.
+// boxRevParam reads the required ?rev= box record revision a box-changing
+// request was drawn from.
 func boxRevParam(r *http.Request) (int64, error) {
 	rev, err := strconv.ParseInt(r.URL.Query().Get("rev"), 10, 64)
 	if err != nil || rev < 0 {
@@ -1319,14 +1339,9 @@ func (s *Server) handleTorrentAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("invalid torrent hash"))
 		return
 	}
-	rev, err := boxRevParam(r)
-	if err != nil {
-		writeErr(w, 400, err)
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	if err := s.m.TorrentAction(ctx, id, rev, hash, action); err != nil {
+	if err := s.m.TorrentAction(ctx, id, hash, action); err != nil {
 		writeErr(w, actionCode(err), err)
 		return
 	}
@@ -1350,14 +1365,9 @@ func (s *Server) handleRtTorrentAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("invalid torrent hash"))
 		return
 	}
-	rev, err := boxRevParam(r)
-	if err != nil {
-		writeErr(w, 400, err)
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second) // remove-data runs rm on the box
 	defer cancel()
-	if err := s.m.RtTorrentAction(ctx, id, rev, hash, action); err != nil {
+	if err := s.m.RtTorrentAction(ctx, id, hash, action); err != nil {
 		writeErr(w, actionCode(err), err)
 		return
 	}
@@ -1375,7 +1385,7 @@ func (s *Server) handleRtDismissRemoveFailure(w http.ResponseWriter, r *http.Req
 	var body struct {
 		At time.Time `json:"at"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil || body.At.IsZero() {
+	if err := decodeStrict(r, &body); err != nil || body.At.IsZero() {
 		writeErr(w, 400, errors.New("the notice time (at) is required"))
 		return
 	}
@@ -1473,9 +1483,10 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"id": cid, "text": text, "lines": collect.LogTailLines})
 }
 
-// validContainerID accepts a full or abbreviated hex container id.
+// validContainerID accepts a full hex container id, the form the poll
+// lists (DockerState.has then requires it to be one of those).
 func validContainerID(cid string) bool {
-	return len(cid) >= 12 && len(cid) <= 64 && strings.Trim(cid, "0123456789abcdef") == ""
+	return len(cid) == 64 && strings.Trim(cid, "0123456789abcdef") == ""
 }
 
 func (s *Server) handleContainerAction(w http.ResponseWriter, r *http.Request) {
@@ -1747,8 +1758,8 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	if in.QbtDownloadURL == "" {
 		in.QbtDownloadURL = store.DefaultQbtDownloadURL
 	}
-	if !strings.HasPrefix(in.QbtDownloadURL, schemeHTTPS) || strings.ContainsAny(in.QbtDownloadURL, " '\"") {
-		writeErr(w, 400, errors.New("qbt_download_url must be an https URL"))
+	if !collect.ValidDownloadURL(in.QbtDownloadURL) {
+		writeErr(w, 400, errors.New("qbt_download_url must be an https URL of URL characters only, at most 2048 bytes"))
 		return
 	}
 	if in.CardMinPx < 240 || in.CardMinPx > 900 {

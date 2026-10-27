@@ -685,6 +685,10 @@ func TestReadLogValidation(t *testing.T) {
 	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/containers/zz/logs", id), "", hdr); code != 400 {
 		t.Fatalf("bad container id: %d", code)
 	}
+	// The poll lists full ids, so an abbreviated one is refused up front.
+	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/containers/%s/logs", id, strings.Repeat("a", 12)), "", hdr); code != 400 {
+		t.Fatalf("abbreviated container id: %d", code)
+	}
 	if code, _ := do(t, s, "POST", "/api/boxes/999999/logs/read", `{"path":".logs/x.log"}`, hdr); code != 404 {
 		t.Fatalf("missing box: %d", code)
 	}
@@ -1033,6 +1037,12 @@ func TestRtRoutesAndSettings(t *testing.T) {
 	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", 999), `{"at":"2026-10-25T10:00:00Z"}`, hdr); code != 404 {
 		t.Errorf("dismiss unknown box: %d", code)
 	}
+	// The body is strict: one value, no unknown fields.
+	for _, body := range []string{`{"at":"2026-10-25T10:00:00Z","x":1}`, `{"at":"2026-10-25T10:00:00Z"}{}`} {
+		if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", id), body, hdr); code != 400 {
+			t.Errorf("dismiss %s: %d", body, code)
+		}
+	}
 	// Add: the shared form validation applies; a never-probed box is 409.
 	code, body = do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/torrents", id), "", hdr)
 	if code != 400 {
@@ -1052,7 +1062,7 @@ func TestRtRoutesAndSettings(t *testing.T) {
 		{id, `{"dht":true}`, 409},
 		{999, `{"pex":false}`, 404},
 	} {
-		if code, body := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/discovery", tc.id), tc.body, hdr); code != tc.want {
+		if code, body := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/discovery?rev=%d", tc.id, b.Revision), tc.body, hdr); code != tc.want {
 			t.Errorf("discovery %s: %d %s", tc.body, code, body)
 		}
 	}
@@ -1135,5 +1145,35 @@ func TestMonitorOnly(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(body), &state); err != nil || code != 200 || !state.MonitorOnly {
 		t.Fatalf("state: %d %s", code, body)
+	}
+}
+
+// Every box-changing route names the box revision it was drawn from: none
+// is refused (400), another is stale (409), both before the handler runs.
+func TestBoxWritesNeedRevision(t *testing.T) {
+	srv, _ := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080"}
+	b := &store.Box{Name: "x", Host: "x.invalid", User: "u", Port: 22, Enabled: true, QbtEnabled: true, RtEnabled: true}
+	if err := srv.m.AddBox(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	h := strings.Repeat("a", 40)
+	box := fmt.Sprintf("/api/boxes/%d", b.ID)
+	cid := strings.Repeat("c", 64)
+	for _, p := range []string{
+		box + "/qbt/install", box + "/qbt/restart", box + "/qbt/pause",
+		box + "/qbt/torrents/" + h + "/stop", box + "/qbt/torrents", box + "/qbt/discovery",
+		box + "/rtorrent/torrents/" + h + "/stop", box + "/rtorrent/torrents", box + "/rtorrent/discovery",
+		box + "/containers/" + cid + "/restart",
+	} {
+		if code, body := do(t, srv, "POST", p, `{}`, hdr); code != 400 || !strings.Contains(body, "rev") {
+			t.Errorf("%s without rev: %d %s", p, code, body)
+		}
+		if code, body := do(t, srv, "POST", fmt.Sprintf("%s?rev=%d", p, b.Revision+1), `{}`, hdr); code != 409 || !strings.Contains(body, "edited since") {
+			t.Errorf("%s with another rev: %d %s", p, code, body)
+		}
+		if code, body := do(t, srv, "POST", fmt.Sprintf("%s?rev=%d", p, b.Revision), `{}`, hdr); strings.Contains(body, "edited since") || strings.Contains(body, "rev (") {
+			t.Errorf("%s with the current rev: %d %s", p, code, body)
+		}
 	}
 }

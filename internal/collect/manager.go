@@ -48,10 +48,10 @@ var ErrDisabled = errors.New("polling is disabled for this box; enable it before
 // current generation has read them (BoxState.Ready).
 var ErrNotReady = errors.New("the box has not been probed since it was added, moved or the dashboard started; wait for the first poll")
 
-// ErrStaleBox is returned by a torrent action that names a box record
-// revision other than the current one: the button was drawn before an edit
-// (perhaps to another machine), so the torrent it names may not be the one
-// the operator saw (daybreak blue audit of 7506bd4).
+// ErrStaleBox is returned by CheckBoxRevision for a request that names a
+// box record revision other than the current one: the button was drawn
+// before an edit (perhaps to another machine), so what it acts on may not
+// be what the operator saw (daybreak blue audits of 7506bd4 and 9e59106).
 var ErrStaleBox = errors.New("this box was edited since the page was drawn; reload and try again")
 
 // Manager owns one poller per box.
@@ -956,16 +956,25 @@ func (m *Manager) ContainerAction(ctx context.Context, id int64, cid, action str
 	return err
 }
 
-// TorrentAction performs one qbt.ValidAction action on a single torrent
-// and wakes the poller so the list reflects it promptly. rev is the box
-// record revision the request was drawn from (BoxState.BoxRev).
-func (m *Manager) TorrentAction(ctx context.Context, id, rev int64, hash, action string) error {
+// CheckBoxRevision refuses a box-changing request drawn from another
+// revision of the box record than the one running (BoxState.BoxRev).
+func (m *Manager) CheckBoxRevision(id, rev int64) error {
 	p := m.poller(id)
 	if p == nil {
 		return store.ErrNotFound
 	}
 	if p.box.Revision != rev {
 		return ErrStaleBox
+	}
+	return nil
+}
+
+// TorrentAction performs one qbt.ValidAction action on a single torrent
+// and wakes the poller so the list reflects it promptly.
+func (m *Manager) TorrentAction(ctx context.Context, id int64, hash, action string) error {
+	p := m.poller(id)
+	if p == nil {
+		return store.ErrNotFound
 	}
 	if !p.box.Enabled {
 		return ErrDisabled
@@ -976,18 +985,14 @@ func (m *Manager) TorrentAction(ctx context.Context, id, rev int64, hash, action
 }
 
 // RtTorrentAction performs one ValidRtAction action on a torrent in the
-// box's rTorrent and wakes the poller so the list reflects it promptly; rev
-// as for TorrentAction.
-func (m *Manager) RtTorrentAction(ctx context.Context, id, rev int64, hash, action string) error {
+// box's rTorrent and wakes the poller so the list reflects it promptly.
+func (m *Manager) RtTorrentAction(ctx context.Context, id int64, hash, action string) error {
 	if !ValidRtAction(action) {
 		return fmt.Errorf("unknown rTorrent action %q", action)
 	}
 	p := m.poller(id)
 	if p == nil {
 		return store.ErrNotFound
-	}
-	if p.box.Revision != rev {
-		return ErrStaleBox
 	}
 	if !p.box.Enabled {
 		return ErrDisabled

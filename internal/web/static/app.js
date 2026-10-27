@@ -606,11 +606,13 @@ function viewBox() {
     ${body}`;
 }
 // restart/stop (client running) or start (client down) buttons; nothing when monitoring is off.
+// A panel-managed client is started by Pulsed Media's watchdog: restart only stops it, and there is no start.
 function boxPowerBtn(b, q) {
   if (S.monitorOnly) return '';
+  const again = q.pmss_managed ? 'then Pulsed Media\'s watchdog starts it again' : 'then started again with the box\'s start command (default: ~/bin/qbt-start when present)';
   return q.enabled ? (q.process_up
-    ? `<button data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(b.name)}? It is asked to exit cleanly, then started again with the box's start command (default: ~/bin/qbt-start when present)">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(b.name)}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
-    : `<button data-act="qbt:start">start client</button>`) : '';
+    ? `<button data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(b.name)}? It is asked to exit cleanly, ${again}">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(b.name)}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
+    : q.pmss_managed ? '' : `<button data-act="qbt:start">start client</button>`) : '';
 }
 function boxInstallBtn(b, q) {
   if (q.pmss_managed || S.monitorOnly) return '';
@@ -1822,11 +1824,18 @@ async function boxAction(a) {
   else if (a === 'du') { const id = S.selId; await api('POST', `${BASE}/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
   else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `${BASE}/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
 }
+// ?rev= for a box-changing request: the box record revision the page shows,
+// so an action drawn before an edit is refused (409) rather than run on the
+// edited box.
+function revQ(id) {
+  const b = S.detail && S.detail.id === id ? S.detail : S.boxes.find((x) => x.id === id);
+  return `?rev=${b ? Number(b.box_rev) || 0 : ''}`;
+}
 async function qbtAction(a, act) {
   const what = a.slice(4);
   act.disabled = true;
   if (what === 'install') toast('downloading qbittorrent-nox on the box…');
-  const r = await api('POST', `${BASE}/api/boxes/${S.selId}/qbt/${what}`);
+  const r = await api('POST', `${BASE}/api/boxes/${S.selId}/qbt/${what}${revQ(S.selId)}`);
   toast(`qBittorrent ${{ pause: 'stop all', resume: 'start all' }[what] || what}: ok${r?.output ? ' — ' + r.output.split('\n').slice(0, 2).join(' · ') : ''}`, 'ok');
 }
 async function torrentAction(a, act) {
@@ -1843,7 +1852,7 @@ async function discoveryAction(a, act) {
   act.disabled = true;
   // rTorrent: saved to ~/.rtorrent.rc.custom, then applied live; the
   // answer says when the running client could not follow (restart).
-  const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${rt ? 'rtorrent' : 'qbt'}/discovery`, { [k]: on });
+  const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${rt ? 'rtorrent' : 'qbt'}/discovery${revQ(S.selId)}`, { [k]: on });
   if (rt) { const m = pfmView.rtDiscoveryToast(k, on, r); toast(m.text, m.kind); }
   else toast(`${label} ${on ? 'enabled' : 'disabled'}`, 'ok');
   await loadDetail(S.selId);
@@ -1866,7 +1875,7 @@ async function torAddAction(a, act) {
   d.busy = true; render();
   try {
     const seg = d.client === 'rtorrent' ? 'rtorrent' : 'qbt';
-    const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${seg}/torrents`, fd);
+    const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${seg}/torrents${revQ(S.selId)}`, fd);
     toast(addToast(r, d.stopped, d.client), r?.failed || r?.unlabelled || r?.stopped_early ? 'warn' : 'ok');
     if (S.torAdd === d) S.torAdd = null; // not a draft the user opened meanwhile
   } finally {
@@ -1901,7 +1910,7 @@ async function appWatchAction(act) {
   await loadDetail(S.selId);
 }
 async function containerAction(a, act) {
-  act.disabled = true; await api('POST', `${BASE}/api/boxes/${S.selId}/containers/${act.dataset.cid}/${a.slice(4)}`); toast(`container ${a.slice(4)} ok`, 'ok');
+  act.disabled = true; await api('POST', `${BASE}/api/boxes/${S.selId}/containers/${act.dataset.cid}/${a.slice(4)}${revQ(S.selId)}`); toast(`container ${a.slice(4)} ok`, 'ok');
 }
 async function alertsAction(a, act) {
   if (a === 'ack') { act.disabled = true; await api('POST', `${BASE}/api/alerts/${act.dataset.id}/ack`); toast('acknowledged', 'ok'); await loadAlerts(); }

@@ -173,7 +173,7 @@ func assertFresh(t *testing.T, m *Manager, st *store.Store, id int64) {
 		"container":      m.ContainerAction(ctx, id, "c1", "start"),
 		"container logs": must1(m.ContainerLogs(ctx, id, "c1")),
 		"read log":       must1(m.ReadLog(ctx, id, ".logs/a.log")),
-		"torrent":        m.TorrentAction(ctx, id, s.BoxRev, "0123456789abcdef0123456789abcdef01234567", "stop"),
+		"torrent":        m.TorrentAction(ctx, id, "0123456789abcdef0123456789abcdef01234567", "stop"),
 	} {
 		if !errors.Is(err, ErrNotReady) {
 			t.Errorf("%s on an unprobed generation: %v, want ErrNotReady", name, err)
@@ -425,7 +425,7 @@ func TestTorrentActionNeedsCurrentBoxRevision(t *testing.T) {
 	if !renamed.Ready || renamed.BoxRev != cos.Revision || renamed.BoxRev == before.BoxRev {
 		t.Fatalf("cosmetic edit: ready=%v box_rev %d, record %d", renamed.Ready, renamed.BoxRev, cos.Revision)
 	}
-	if err := m.TorrentAction(ctx, b.ID, renamed.BoxRev, strings.Repeat("a", 40), "stop"); errors.Is(err, ErrStaleBox) || errors.Is(err, ErrNotReady) {
+	if err := m.CheckBoxRevision(b.ID, renamed.BoxRev); err != nil {
 		t.Fatalf("current revision after a rename: %v", err)
 	}
 	mv := cos
@@ -441,14 +441,14 @@ func TestTorrentActionNeedsCurrentBoxRevision(t *testing.T) {
 	if after.BoxRev == before.BoxRev {
 		t.Fatalf("an edit must change box_rev (%d)", after.BoxRev)
 	}
-	hash := strings.Repeat("a", 40)
-	for _, action := range []string{"stop", "remove-data"} {
-		if err := m.TorrentAction(ctx, b.ID, before.BoxRev, hash, action); !errors.Is(err, ErrStaleBox) {
-			t.Fatalf("qbt %s with the old revision: %v", action, err)
-		}
+	if err := m.CheckBoxRevision(b.ID, before.BoxRev); !errors.Is(err, ErrStaleBox) {
+		t.Fatalf("old revision: %v", err)
 	}
-	if err := m.TorrentAction(ctx, b.ID, after.BoxRev, hash, "stop"); err == nil || errors.Is(err, ErrStaleBox) {
-		t.Fatalf("current revision: %v, want past the check (then the refused endpoint)", err)
+	if err := m.CheckBoxRevision(b.ID, after.BoxRev); err != nil {
+		t.Fatalf("current revision: %v", err)
+	}
+	if err := m.CheckBoxRevision(9999, 0); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown box: %v", err)
 	}
 }
 
@@ -475,7 +475,7 @@ func TestEditedSocketUnusableUntilPolled(t *testing.T) {
 	if _, err := m.RtAddTorrents(ctx, b.ID, qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + strings.Repeat("a", 40)}}); err == nil || !strings.Contains(err.Error(), "no SCGI endpoint") {
 		t.Fatalf("add: %v", err)
 	}
-	if err := m.RtTorrentAction(ctx, b.ID, s.BoxRev, strings.Repeat("a", 40), "remove-data"); err == nil || !strings.Contains(err.Error(), "no SCGI endpoint") {
+	if err := m.RtTorrentAction(ctx, b.ID, strings.Repeat("a", 40), "remove-data"); err == nil || !strings.Contains(err.Error(), "no SCGI endpoint") {
 		t.Fatalf("remove-data: %v", err)
 	}
 }
