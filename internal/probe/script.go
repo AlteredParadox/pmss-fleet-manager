@@ -91,8 +91,8 @@ sec df_home; bounded 10 df -B1 --output=size,used,avail,fstype "$home" | tail -n
 sec quota; bounded 10 quota -v -w
 sec quota_file; cat "$home/.quota" 2>/dev/null
 sec quota_mtime; stat -c %Y "$home/.quota" 2>/dev/null
-sec traffic; cat "$home/.trafficData" 2>/dev/null
-sec traffic_in; cat "$home/.trafficDataIngress" 2>/dev/null
+sec traffic; head -c 262145 "$home/.trafficData" 2>/dev/null
+sec traffic_in; head -c 262145 "$home/.trafficDataIngress" 2>/dev/null
 sec traffic_limit; cat "$home/.trafficLimit" 2>/dev/null
 sec bonus_traffic; cat "$home/.bonusTraffic" 2>/dev/null
 sec throttle; [ -e "$home/.throttle" ] && echo 1 || echo 0

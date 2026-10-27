@@ -133,7 +133,12 @@ the client name), an existing row is never replaced, and the check runs after a
 box's quarter-hourly inventory (asking the catalogue only while a host still
 needs deciding), every six hours, and on demand. The settings
 page lists each host's standing (listed, submitted, pending, or the error).
-Off by default; untick the box or remove the key to stop it.
+Off by default; untick the box or remove the key to stop it. What is
+submitted is what each box reports about itself: turning this on trusts
+your boxes' probe output with the shared key, so a compromised account on
+one box could get a made-up host row submitted in your name (at most 50
+per run, and never over an existing row). Leave it off if that matters to
+you.
 
 ## Run
 
@@ -187,9 +192,11 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 ### Encrypting stored credentials
 
 Box SSH passwords, qBittorrent WebUI passwords, the Pulsed Media API key
-and the pmdb.fyi upload key live in the SQLite file. By default they are in
-plain text, protected by the file's mode (0600 in a 0700 directory). To
-encrypt them, give the dashboard a secret from outside the data directory:
+and the pmdb.fyi upload key live in the SQLite file, as do two settings that
+may carry a token: each box's qBittorrent start command and the qBittorrent
+download URL. By default they are in plain text, protected by the file's
+mode (0600 in a 0700 directory). To encrypt them, give the dashboard a
+secret from outside the data directory:
 
 ```sh
 openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-fleet-manager.secret
@@ -245,13 +252,18 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
 - **Lost the secret:** start once with `-forget-encrypted-credentials`
   (or `PMSS_FORGET_ENCRYPTED_CREDENTIALS=1`). Credentials that do not
   decrypt are removed, the rest of each record stays, and the edit forms
-  ask for the passwords again. It is also the way through a damaged
-  marker: whatever still decrypts with the configured secret is kept.
-  Unset it afterwards.
+  ask for the passwords again (a forgotten start command means the default
+  start, a forgotten download URL the default build). It is also the way
+  through a damaged marker: whatever still decrypts with the configured
+  secret is kept. Unset it afterwards.
 - **Do not roll back to a release before 1.9 with an encrypted
   database.** An older build knows nothing about the encryption and would
   present the ciphertext to your boxes as the password. Switch encryption
   off first (previous secret set, `PMSS_SECRET` unset), then downgrade.
+  The same goes for a release before 1.12 once 1.12 has run with the
+  secret: those read the start command and download URL as plain text, so
+  starting qBittorrent would run the ciphertext as a command on the box
+  and installs would refuse the URL.
 - The format is AES-256-GCM with the column name as additional data, the
   key derived with HKDF-SHA256 from the secret; stored values start with
   `pmss1:`. The SSH key files a box points at are not touched: they are
@@ -678,17 +690,18 @@ These are the design decisions that came out of it.
   SSH host key" after a reinstall, clears it. Saved SSH and WebUI passwords
   are reused only for the exact host, port and user they were saved for;
   moving a box means re-entering them.
-- **Secrets on disk.** Box credentials, the Pulsed Media API key and the
-  pmdb.fyi upload key are stored in the SQLite file, which is created mode
-  0600 before SQLite opens it so the -wal and -shm side files inherit the
-  mode; the data directory is created 0700. They are plain text unless a
-  secret is configured (`PMSS_SECRET` or `-secret-file`), in which case
-  they are AES-256-GCM ciphertext under a key the database does not hold,
-  so a copy of the file alone is harmless; a dashboard started without the
-  secret refuses to run rather than present ciphertext as a password. The
-  design and its limits are under *Encrypting stored credentials*. Prefer
-  SSH keys or the agent regardless. Neither key is ever sent to the browser
-  and passwords are never serialised.
+- **Secrets on disk.** Box credentials, the Pulsed Media API key, the
+  pmdb.fyi upload key, the qBittorrent start commands and download URL are
+  stored in the SQLite file, which is created mode 0600 before SQLite opens
+  it so the -wal and -shm side files inherit the mode; the data directory
+  is created 0700. They are plain text unless a secret is configured
+  (`PMSS_SECRET` or `-secret-file`), in which case they are AES-256-GCM
+  ciphertext under a key the database does not hold, so a copy of the
+  file alone is harmless; a dashboard started without the secret refuses
+  to run rather than present ciphertext as a password. The design and its
+  limits are under *Encrypting stored credentials*. Prefer SSH keys or the
+  agent regardless. Neither key is ever sent to the browser and passwords
+  are never serialised.
 - **The hardware catalogue is untrusted input.** With the pmdb.fyi
   integration on, the dashboard reads a third-party service that could be
   compromised or replaced. Its list is bounded in size and read for one
@@ -811,7 +824,9 @@ cognitive complexity in the 17-25 band for parsers and view renderers);
 anything scoring higher than that has been split. The scan hands
 `SONAR_TOKEN` to pull requests from branches of this repository (not forks or
 Dependabot), so everyone who can push a branch here is trusted with that
-token; today that is the maintainer alone.
+token; today that is the maintainer alone. Before giving anyone else (a
+collaborator, a bot, an app or deploy key) push access, move the scan with
+the token to pushes of `main` only.
 
 The frontend is vanilla JS and CSS in `internal/web/static`, embedded into the
 binary; there is no build step. `docs/ARCHITECTURE.md` lists the tenant-readable
@@ -887,6 +902,14 @@ Newest first; each release's full notes are on the
   as usual, and the discovery settings still show their state (with ↻ while
   rTorrent waits for a restart). (Request from a rootless
   Podman user.)
+- The qBittorrent start command and download URL are encrypted with the
+  stored credentials when a secret is set, since either may carry a token;
+  the first start of this release with a secret encrypts them in place.
+  With an encrypted database, do not go back to an earlier release without
+  switching encryption off first (see *Encrypting stored credentials*).
+- A PMSS traffic file larger than 256 KiB reads as unavailable for that
+  poll, and a decoded traffic value is capped at 16384 array entries
+  (real files are a few KiB).
 
 **1.11.0**
 

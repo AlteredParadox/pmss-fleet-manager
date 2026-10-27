@@ -536,8 +536,8 @@ func TestSealedSecretsLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := s.ResealedOnOpen(); n != 3 {
-		t.Fatalf("resealed %d, want 3", n)
+	if n := s.ResealedOnOpen(); n != 4 { // and the download URL
+		t.Fatalf("resealed %d, want 4", n)
 	}
 	pw, qp, ak := rawSecrets(t, s, b.ID)
 	for _, v := range []string{pw, qp, ak} {
@@ -575,7 +575,7 @@ func TestSealedSecretsLifecycle(t *testing.T) {
 	if _, qp3, _ := rawSecrets(t, s, b.ID); qp3 != "" {
 		t.Fatalf("clear left %q", qp3)
 	}
-	if n := s.ResealedOnOpen(); n != 3 {
+	if n := s.ResealedOnOpen(); n != 4 {
 		t.Fatalf("resealed count changed to %d", n)
 	}
 	s.Close()
@@ -603,7 +603,7 @@ func TestSealedSecretsLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := s.ResealedOnOpen(); n != 2 { // password and API key; the WebUI password was cleared
+	if n := s.ResealedOnOpen(); n != 3 { // password, API key, download URL; the WebUI password was cleared
 		t.Fatalf("rotation resealed %d", n)
 	}
 	if got, err := s.GetBox(ctx, b.ID); err != nil || got.Password != "pw" {
@@ -638,13 +638,100 @@ func TestSealedSecretsLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.ForgottenOnOpen() != 2 || s.ResealedOnOpen() != 0 {
+	if s.ForgottenOnOpen() != 3 || s.ResealedOnOpen() != 0 {
 		t.Fatalf("forget: %d forgotten, %d resealed", s.ForgottenOnOpen(), s.ResealedOnOpen())
 	}
 	got, _ = s.GetBox(ctx, b.ID)
 	gs, _ := s.GetSettings(ctx)
 	if got.Password != "" || got.HasPassword || gs.PMAPIKey != "" || got.Name != "seed-01" {
 		t.Fatalf("after forget: %+v %+v", got, gs)
+	}
+	s.Close()
+}
+
+// The qBittorrent start command and download URL may carry a token, so
+// they are sealed like the passwords: on write, on the first start with a
+// secret (leaving no plaintext in the files), and forgotten with them.
+func TestTokenBearingQbtFieldsAreSealed(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	const cmd, url = "start --token=zebra-unique-cmd", "https://example.com/build?token=zebra-unique-url"
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Box{Name: "seed-01", Host: "odin.example", User: "ragnar", QbtStartCmd: cmd, Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	st := DefaultSettings()
+	st.QbtDownloadURL = url
+	if err := s.SaveSettings(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	raw := func(s *Store) (string, string) {
+		t.Helper()
+		var c string
+		if err := s.db.QueryRow(`SELECT qbt_start_cmd FROM boxes WHERE id=?`, b.ID).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		u, err := s.GetValue(ctx, "qbt_download_url")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, u
+	}
+	s, err = Open(path, WithSealer(mustSealer(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, side := range []string{"", "-wal"} {
+		data, err := os.ReadFile(path + side)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "zebra-unique") {
+			t.Fatalf("plaintext still in %s", path+side)
+		}
+	}
+	if c, u := raw(s); !secrets.IsSealed(c) || !secrets.IsSealed(u) {
+		t.Fatalf("not sealed: %q %q", c, u)
+	}
+	got, err := s.GetBox(ctx, b.ID)
+	if err != nil || got.QbtStartCmd != cmd {
+		t.Fatalf("read back: %+v %v", got, err)
+	}
+	if gs, err := s.GetSettings(ctx); err != nil || gs.QbtDownloadURL != url {
+		t.Fatalf("settings read back: %+v %v", gs, err)
+	}
+	// Writes seal too.
+	got.QbtStartCmd = cmd + "2"
+	if err := s.UpdateBox(ctx, got, Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveSettings(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	if c, u := raw(s); !secrets.IsSealed(c) || !secrets.IsSealed(u) {
+		t.Fatalf("write not sealed: %q %q", c, u)
+	}
+	s.Close()
+
+	// A lost secret: the command goes (the default start), the URL falls
+	// back to the default build.
+	s, err = Open(path, WithForgetUnreadable())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := s.ForgottenOnOpen(); n != 2 {
+		t.Fatalf("forgot %d, want 2", n)
+	}
+	got, _ = s.GetBox(ctx, b.ID)
+	gs, _ := s.GetSettings(ctx)
+	if got.QbtStartCmd != "" || gs.QbtDownloadURL != DefaultQbtDownloadURL {
+		t.Fatalf("after forget: %q %q", got.QbtStartCmd, gs.QbtDownloadURL)
 	}
 	s.Close()
 }
@@ -1099,7 +1186,7 @@ func TestDamagedEncodingMetadataFailsClosed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s.ForgottenOnOpen() != 2 {
+		if s.ForgottenOnOpen() != 3 {
 			t.Fatalf("forgot %d", s.ForgottenOnOpen())
 		}
 		if got, _ := s.GetBox(ctx, id); got.Password != "" || got.Name != "seed-01" {
@@ -1160,7 +1247,7 @@ func TestDamagedEncodingMetadataFailsClosed(t *testing.T) {
 		if s, err = Open(path, WithForgetUnreadable()); err != nil {
 			t.Fatal(err)
 		}
-		if s.ForgottenOnOpen() != 2 {
+		if s.ForgottenOnOpen() != 3 {
 			t.Fatalf("forgot %d without a key", s.ForgottenOnOpen())
 		}
 		if v, _ := s.GetValue(ctx, sealedKey); v != "0" {

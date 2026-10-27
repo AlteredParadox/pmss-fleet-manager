@@ -17,6 +17,7 @@
 package phpserial
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -88,5 +89,29 @@ func TestHostileInputs(t *testing.T) {
 	ok := strings.Repeat("a:1:{i:0;", 8) + "i:1;" + strings.Repeat("}", 8)
 	if _, err := Unserialize([]byte(ok)); err != nil {
 		t.Errorf("moderate nesting should parse: %v", err)
+	}
+}
+
+// The entry budget covers every level together: many small arrays are
+// refused like one big one, and a value right at the budget still parses.
+func TestEntryBudget(t *testing.T) {
+	flat := func(n int) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "a:%d:{", n)
+		for i := range n {
+			fmt.Fprintf(&b, "i:%d;i:0;", i)
+		}
+		return b.String() + "}"
+	}
+	if _, err := Unserialize([]byte(flat(maxEntries))); err != nil {
+		t.Fatalf("at the budget: %v", err)
+	}
+	if _, err := Unserialize([]byte(flat(maxEntries + 1))); err == nil {
+		t.Fatal("over the budget: expected error")
+	}
+	half := flat(maxEntries/2 + 1)
+	nested := "a:2:{i:0;" + half + "i:1;" + half + "}"
+	if _, err := Unserialize([]byte(nested)); err == nil {
+		t.Fatal("nested over the budget: expected error")
 	}
 }

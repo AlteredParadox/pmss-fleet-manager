@@ -336,15 +336,15 @@ func (c secretCell) cleared() secretCell          { c.value = ""; return c }
 // secretCells lists every stored credential with its rewrite.
 func (s *Store) secretCells(ctx context.Context) ([]secretCell, error) {
 	var cells []secretCell
-	rows, err := s.db.QueryContext(ctx, `SELECT id, password, qbt_pass FROM boxes`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, password, qbt_pass, qbt_start_cmd FROM boxes`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id int64
-		var pw, qp string
-		if err := rows.Scan(&id, &pw, &qp); err != nil {
+		var pw, qp, sc string
+		if err := rows.Scan(&id, &pw, &qp, &sc); err != nil {
 			return nil, err
 		}
 		cells = append(cells,
@@ -355,6 +355,10 @@ func (s *Store) secretCells(ctx context.Context) ([]secretCell, error) {
 			secretCell{fmt.Sprintf("box %d WebUI password", id), labelQbtPass, qp, func(tx *sql.Tx, v string) error {
 				_, err := tx.ExecContext(ctx, `UPDATE boxes SET qbt_pass=? WHERE id=?`, v, id)
 				return err
+			}},
+			secretCell{fmt.Sprintf("box %d qBittorrent start command", id), labelQbtStartCmd, sc, func(tx *sql.Tx, v string) error {
+				_, err := tx.ExecContext(ctx, `UPDATE boxes SET qbt_start_cmd=? WHERE id=?`, v, id)
+				return err
 			}})
 	}
 	if err := rows.Err(); err != nil {
@@ -364,6 +368,7 @@ func (s *Store) secretCells(ctx context.Context) ([]secretCell, error) {
 	for _, kv := range []struct{ key, where, label string }{
 		{"pm_api_key", "Pulsed Media API key", labelPMAPIKey},
 		{"pmdb_upload_key", "pmdb upload key", labelPMDBUploadKey},
+		{"qbt_download_url", "qBittorrent download URL", labelQbtDownloadURL},
 	} {
 		v, err := s.GetValue(ctx, kv.key)
 		if err != nil {

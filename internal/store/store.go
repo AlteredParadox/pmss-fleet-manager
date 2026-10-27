@@ -187,6 +187,10 @@ const (
 	labelQbtPass       = "boxes.qbt_pass"
 	labelPMAPIKey      = "settings.pm_api_key"
 	labelPMDBUploadKey = "settings.pmdb_upload_key"
+	// Not passwords, but either may carry a token (a private build's
+	// download link, a start command with a key in it).
+	labelQbtStartCmd    = "boxes.qbt_start_cmd"
+	labelQbtDownloadURL = "settings.qbt_download_url"
 )
 
 // Option configures Open.
@@ -468,6 +472,9 @@ func (s *Store) scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 	if b.QbtPass, err = s.openSecret(labelQbtPass, b.QbtPass); err != nil {
 		return nil, fmt.Errorf("box %d WebUI password: %w", b.ID, err)
 	}
+	if b.QbtStartCmd, err = s.openSecret(labelQbtStartCmd, b.QbtStartCmd); err != nil {
+		return nil, fmt.Errorf("box %d qBittorrent start command: %w", b.ID, err)
+	}
 	b.AppsWatch = []string{}
 	if watch != "" {
 		_ = json.Unmarshal([]byte(watch), &b.AppsWatch) // an unreadable list is an empty one
@@ -523,12 +530,12 @@ func (s *Store) CreateBox(ctx context.Context, b *Box) error {
 		b.Type = "seedbox"
 	}
 	// The Box keeps its plaintext: the caller starts the poller from it.
-	pw, qp := s.sealBoxSecrets(b)
+	pw, qp, sc := s.sealBoxSecrets(b)
 	res, err := s.db.ExecContext(ctx, `INSERT INTO boxes (name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
 		qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at, rt_enabled, rt_scgi)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, pw, b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
-		b.QbtEnabled, b.QbtPort, b.QbtUser, qp, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
+		b.QbtEnabled, b.QbtPort, b.QbtUser, qp, sc, b.DockerEnabled, b.DuEnabled, b.Enabled,
 		now.Format(time.RFC3339), now.Format(time.RFC3339), b.RtEnabled, b.RtSCGI)
 	if err != nil {
 		return err
@@ -568,7 +575,7 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	}
 	// A blank secret seals to blank, so the CASE below still reads it as
 	// "keep the stored value".
-	pw, qp := s.sealBoxSecrets(b)
+	pw, qp, sc := s.sealBoxSecrets(b)
 	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
 		password=CASE WHEN ? THEN '' WHEN ?='' THEN password ELSE ? END,
 		host_key=CASE WHEN ? THEN '' WHEN ? THEN ? WHEN host_key='' THEN ? ELSE host_key END,
@@ -578,7 +585,7 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clears.Password, pw, pw,
 		clears.ForgetHostKey, clears.ReplaceHostKey, b.HostKey, b.HostKey,
 		b.Type, b.Plan, b.Datacenter, b.Renewal,
-		b.QbtEnabled, b.QbtPort, b.QbtUser, clears.QbtPass, qp, qp, b.QbtStartCmd, b.DockerEnabled, b.DuEnabled, b.Enabled,
+		b.QbtEnabled, b.QbtPort, b.QbtUser, clears.QbtPass, qp, qp, sc, b.DockerEnabled, b.DuEnabled, b.Enabled,
 		now.Format(time.RFC3339), b.RtEnabled, b.RtSCGI, b.ID, b.Revision)
 	if err != nil {
 		return err
@@ -607,9 +614,11 @@ func (s *Store) openSecret(label, stored string) (string, error) {
 	return s.sealer.Open(label, stored)
 }
 
-// sealBoxSecrets returns the stored forms of b's SSH and WebUI passwords.
-func (s *Store) sealBoxSecrets(b *Box) (pw, qp string) {
-	return s.sealer.Seal(labelPassword, b.Password), s.sealer.Seal(labelQbtPass, b.QbtPass)
+// sealBoxSecrets returns the stored forms of b's SSH and WebUI passwords
+// and its qBittorrent start command.
+func (s *Store) sealBoxSecrets(b *Box) (pw, qp, sc string) {
+	return s.sealer.Seal(labelPassword, b.Password), s.sealer.Seal(labelQbtPass, b.QbtPass),
+		s.sealer.Seal(labelQbtStartCmd, b.QbtStartCmd)
 }
 
 // SetHostKey pins a key seen while dialling host:port onto the box, only if
@@ -679,11 +688,14 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 	gets("pm_api_key", &out.PMAPIKey)
 	gets("pmdb_upload_key", &out.PMDBUploadKey)
 	out.PMDBEnabled = kv["pmdb_enabled"] == "1"
-	if out.QbtDownloadURL == "" {
-		out.QbtDownloadURL = DefaultQbtDownloadURL
-	}
 	if err := rows.Err(); err != nil {
 		return out, err
+	}
+	if out.QbtDownloadURL, err = s.openSecret(labelQbtDownloadURL, out.QbtDownloadURL); err != nil {
+		return out, fmt.Errorf("qBittorrent download URL: %w", err)
+	}
+	if out.QbtDownloadURL == "" {
+		out.QbtDownloadURL = DefaultQbtDownloadURL
 	}
 	if out.PMAPIKey, err = s.openSecret(labelPMAPIKey, out.PMAPIKey); err != nil {
 		return out, fmt.Errorf("Pulsed Media API key: %w", err)
@@ -705,7 +717,7 @@ func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
 		"theme":                 st.Theme,
 		"fleet_view":            st.FleetView,
 		"client_area_url":       st.ClientAreaURL,
-		"qbt_download_url":      st.QbtDownloadURL,
+		"qbt_download_url":      s.sealer.Seal(labelQbtDownloadURL, st.QbtDownloadURL),
 		"card_min_px":           strconv.Itoa(st.CardMinPx),
 		"pm_api_key":            s.sealer.Seal(labelPMAPIKey, st.PMAPIKey),
 		"pmdb_upload_key":       s.sealer.Seal(labelPMDBUploadKey, st.PMDBUploadKey),
