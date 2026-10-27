@@ -449,7 +449,8 @@ and starting at boot were not exercised. CI tests the image with Docker.
   wait for the network, so the unit needs no network dependency of its
   own.
 - **Pin a version.** Releases are tagged `X.Y.Z`, `X.Y` and `latest`. An
-  encrypted database cannot go back to a release before 1.9, and
+  encrypted database cannot go back to a release before 1.9 (before 1.12
+  once 1.12 has run with the secret) without switching encryption off, and
   `podman auto-update` restarts onto whatever the tag points to, so pin
   `X.Y.Z` or a minor tag rather than `latest`.
 
@@ -460,7 +461,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.11
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.12
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -896,7 +897,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.11.0 is the current release. The code was written against five real Pulsed
+1.12.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -908,7 +909,26 @@ checksums, and a matching container image on GHCR.
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
-**Unreleased**
+**1.12.0**
+
+Upgrade notes, read these first:
+
+- **API change for scripts.** Every request that changes a box (torrent,
+  qBittorrent client, add-torrent, discovery and container actions) must
+  now carry `?rev=` with the box's `box_rev` from `GET /api/state`. Without
+  it the answer is 400; with a revision from before the box was last edited
+  it is 409. The dashboard's own pages already send it; a script or cron job
+  calling these routes directly (a nightly qBittorrent restart, for one)
+  has to read `box_rev` first.
+- **No going back below 1.12 with encryption on.** With a secret set, the
+  first start encrypts the qBittorrent start commands and download URL
+  too. A 1.11 or older build would read them as plain text: starting
+  qBittorrent would run the ciphertext as a command on the box, and
+  installs would refuse the URL. To downgrade, switch encryption off first
+  (previous secret set, `PMSS_SECRET` unset), then go back. The same first
+  start also vacuums the database once.
+
+Changes:
 
 - Monitor-only mode (`-monitor-only` / `PMSS_MONITOR_ONLY=1`): the web UI
   takes no actions on the boxes. Torrent, client, discovery and container
