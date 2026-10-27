@@ -1487,8 +1487,16 @@ func (s *Snapshot) RtProcess() (running, known bool) {
 // binaryStatShape is what `stat -c '%s %Y %Z %i'` prints.
 var binaryStatShape = regexp.MustCompile(`^[0-9]+ [0-9]+ [0-9]+ [0-9]+$`)
 
+// maxVersionLine is the most of the version line looked at; a real one is
+// "qBittorrent v5.1.2".
+const maxVersionLine = 256
+
 // qbtVersionString extracts "v5.2.3" from "qBittorrent v5.2.3" style output.
+// Output longer than any real version line is not a version.
 func qbtVersionString(raw string) string {
+	if len(raw) > maxVersionLine {
+		return ""
+	}
 	for _, f := range strings.Fields(raw) {
 		if strings.HasPrefix(f, "v") && len(f) > 1 && f[1] >= '0' && f[1] <= '9' {
 			return f

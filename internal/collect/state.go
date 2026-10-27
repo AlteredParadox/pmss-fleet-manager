@@ -58,6 +58,11 @@ type BoxState struct {
 	// poll leaves it set: the facts are still that machine's.
 	Ready bool `json:"ready"`
 
+	// BoxRev is the box record's revision (store.Box.Revision). Torrent
+	// actions carry it back, so a button drawn before an edit cannot act on
+	// whatever the record points at after it (ErrStaleBox).
+	BoxRev int64 `json:"box_rev"`
+
 	// Rev is the fleet-wide revision this state was stored at (Manager
 	// .commit); a client drops a state event whose rev is not above the
 	// one it holds for the box.
@@ -416,11 +421,13 @@ func (s BoxState) EffectiveRenewal() string {
 func (s *BoxState) adoptIdentity(from BoxState) {
 	s.Name, s.Host, s.Port, s.User, s.Type = from.Name, from.Host, from.Port, from.User, from.Type
 	s.Plan, s.Datacenter, s.Renewal, s.Enabled, s.HostKeyFP = from.Plan, from.Datacenter, from.Renewal, from.Enabled, from.HostKeyFP
+	s.BoxRev = from.BoxRev // torrent actions compare it with the poller's record (Codex on PR 130)
 	s.Qbt.Enabled, s.Rt.Enabled, s.Docker.Enabled, s.Dirs.Enabled = from.Qbt.Enabled, from.Rt.Enabled, from.Docker.Enabled, from.Dirs.Enabled
-	// The SCGI endpoint is the record's override, or nothing until the next
-	// poll resolves it from the box: a carried endpoint could be a setting
-	// the edit just changed or removed, and actions would reach the old one
-	// (Codex on PR 123). The poller polls at once after an edit.
+	// The SCGI endpoint is nothing until the next poll resolves and checks
+	// it on the box: a carried endpoint could be a setting the edit just
+	// changed or removed (Codex on PR 123), and an edited override has not
+	// been checked against the home yet (fred / Codex on PR 130). The poller
+	// polls at once after an edit.
 	s.Rt.Endpoint = from.Rt.Endpoint
 	s.Apps.Watched = from.Apps.Watched
 	s.Apps.markWatched()
@@ -544,10 +551,10 @@ func (s BoxState) Summary() BoxState {
 func fromBox(b *store.Box) BoxState {
 	return BoxState{
 		ID: b.ID, Name: b.Name, Host: b.Host, Port: b.Port, User: b.User, Type: b.Type,
-		Plan: b.Plan, Datacenter: b.Datacenter, Renewal: b.Renewal, Enabled: b.Enabled,
+		Plan: b.Plan, Datacenter: b.Datacenter, Renewal: b.Renewal, Enabled: b.Enabled, BoxRev: b.Revision,
 		Status:    "pending",
 		Qbt:       QbtState{Enabled: b.QbtEnabled, Port: b.QbtPort},
-		Rt:        RtState{Enabled: b.RtEnabled, Endpoint: b.RtSCGI},
+		Rt:        RtState{Enabled: b.RtEnabled}, // Endpoint: only a poll sets it (rtEndpoint checks it)
 		Docker:    DockerState{Enabled: b.DockerEnabled},
 		Dirs:      DirsState{Enabled: b.DuEnabled},
 		Apps:      AppsState{Watched: append([]string{}, b.AppsWatch...)},

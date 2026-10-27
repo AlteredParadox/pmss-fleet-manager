@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 )
@@ -172,7 +173,7 @@ func assertFresh(t *testing.T, m *Manager, st *store.Store, id int64) {
 		"container":      m.ContainerAction(ctx, id, "c1", "start"),
 		"container logs": must1(m.ContainerLogs(ctx, id, "c1")),
 		"read log":       must1(m.ReadLog(ctx, id, ".logs/a.log")),
-		"torrent":        m.TorrentAction(ctx, id, "0123456789abcdef0123456789abcdef01234567", "stop"),
+		"torrent":        m.TorrentAction(ctx, id, s.BoxRev, "0123456789abcdef0123456789abcdef01234567", "stop"),
 	} {
 		if !errors.Is(err, ErrNotReady) {
 			t.Errorf("%s on an unprobed generation: %v, want ErrNotReady", name, err)
@@ -396,5 +397,123 @@ func TestFinishDuRejectsOverflowedOutput(t *testing.T) {
 	}
 	if s, _ := m.State(boxes[0].ID); !strings.Contains(s.Dirs.Error, "exceeded the limit") {
 		t.Fatalf("live state after the overflow: %+v", s.Dirs)
+	}
+}
+
+// A torrent button carries the box record revision it was drawn at; after
+// an edit (here a move to another host that has since been probed, so the
+// box is ready again) the old revision is refused before anything reaches
+// the box, while the current one gets past the check (daybreak blue audit
+// of 7506bd4).
+func TestTorrentActionNeedsCurrentBoxRevision(t *testing.T) {
+	ctx := context.Background()
+	m, _, b := genTestManager(t)
+	seedRemote(m, b.ID)
+	before, _ := m.State(b.ID)
+	if before.BoxRev != b.Revision {
+		t.Fatalf("state box_rev %d, record %d", before.BoxRev, b.Revision)
+	}
+	// A cosmetic edit keeps the measured state and must still publish the
+	// record's new revision, or every later action would be refused (Codex
+	// on PR 130).
+	cos := *b
+	cos.Name = "renamed"
+	if err := m.UpdateBox(ctx, &cos, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	renamed, _ := m.State(b.ID)
+	if !renamed.Ready || renamed.BoxRev != cos.Revision || renamed.BoxRev == before.BoxRev {
+		t.Fatalf("cosmetic edit: ready=%v box_rev %d, record %d", renamed.Ready, renamed.BoxRev, cos.Revision)
+	}
+	if err := m.TorrentAction(ctx, b.ID, renamed.BoxRev, strings.Repeat("a", 40), "stop"); errors.Is(err, ErrStaleBox) || errors.Is(err, ErrNotReady) {
+		t.Fatalf("current revision after a rename: %v", err)
+	}
+	mv := cos
+	mv.Host = "127.0.0.2"
+	if err := m.UpdateBox(ctx, &mv, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	seedRemote(m, b.ID)
+	after, _ := m.State(b.ID)
+	if after.BoxRev != mv.Revision {
+		t.Fatalf("move: box_rev %d, record %d", after.BoxRev, mv.Revision)
+	}
+	if after.BoxRev == before.BoxRev {
+		t.Fatalf("an edit must change box_rev (%d)", after.BoxRev)
+	}
+	hash := strings.Repeat("a", 40)
+	for _, action := range []string{"stop", "remove-data"} {
+		if err := m.TorrentAction(ctx, b.ID, before.BoxRev, hash, action); !errors.Is(err, ErrStaleBox) {
+			t.Fatalf("qbt %s with the old revision: %v", action, err)
+		}
+	}
+	if err := m.TorrentAction(ctx, b.ID, after.BoxRev, hash, "stop"); err == nil || errors.Is(err, ErrStaleBox) {
+		t.Fatalf("current revision: %v, want past the check (then the refused endpoint)", err)
+	}
+}
+
+// Editing a ready box to an rTorrent socket outside the home keeps the
+// box ready (same machine) but leaves no endpoint for actions until a poll
+// resolves and checks it, so neither an add nor a torrent action can dial
+// the edited socket in between (fred / Codex on PR 130).
+func TestEditedSocketUnusableUntilPolled(t *testing.T) {
+	ctx := context.Background()
+	m, _, b := genTestManager(t)
+	seedRemote(m, b.ID)
+	m.mutateState(b.ID, func(s *BoxState) {
+		s.Rt = RtState{Enabled: true, Endpoint: "unix:/home/u/.rtorrent.socket", Reachable: true}
+	})
+	ed := *b
+	ed.RtEnabled, ed.RtSCGI = true, "unix:/tmp/other.sock"
+	if err := m.UpdateBox(ctx, &ed, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := m.State(b.ID)
+	if !s.Ready || s.Rt.Endpoint != "" {
+		t.Fatalf("ready=%v endpoint %q", s.Ready, s.Rt.Endpoint)
+	}
+	if _, err := m.RtAddTorrents(ctx, b.ID, qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + strings.Repeat("a", 40)}}); err == nil || !strings.Contains(err.Error(), "no SCGI endpoint") {
+		t.Fatalf("add: %v", err)
+	}
+	if err := m.RtTorrentAction(ctx, b.ID, s.BoxRev, strings.Repeat("a", 40), "remove-data"); err == nil || !strings.Contains(err.Error(), "no SCGI endpoint") {
+		t.Fatalf("remove-data: %v", err)
+	}
+}
+
+// An edit that changes a client's target drops that client's carried rows,
+// so no row drawn from the old target ever carries the new revision; the
+// next poll lists the new target's. Other edits keep them (fred review on
+// PR 130).
+func TestRetargetDropsCarriedRows(t *testing.T) {
+	ctx := context.Background()
+	m, _, b := genTestManager(t)
+	h := strings.Repeat("a", 40)
+	seed := func() {
+		seedRemote(m, b.ID)
+		m.mutateState(b.ID, func(s *BoxState) {
+			s.Qbt.Torrents = []TorrentView{{Hash: h, Name: "Q"}}
+			s.Rt.Torrents = []TorrentView{{Hash: h, Name: "R"}}
+		})
+	}
+	edit := func(f func(*store.Box)) BoxState {
+		cur, _ := m.st.GetBox(ctx, b.ID)
+		f(cur)
+		if err := m.UpdateBox(ctx, cur, store.Clears{}); err != nil {
+			t.Fatal(err)
+		}
+		s, _ := m.State(b.ID)
+		return s
+	}
+	seed()
+	if s := edit(func(x *store.Box) { x.Name = "renamed" }); len(s.Qbt.Torrents) != 1 || len(s.Rt.Torrents) != 1 {
+		t.Fatalf("rename dropped rows: %d %d", len(s.Qbt.Torrents), len(s.Rt.Torrents))
+	}
+	seed()
+	if s := edit(func(x *store.Box) { x.RtEnabled, x.RtSCGI = true, "unix:/home/u/other.sock" }); !s.Ready || len(s.Rt.Torrents) != 0 || len(s.Qbt.Torrents) != 1 {
+		t.Fatalf("socket edit: ready=%v rt %d qbt %d", s.Ready, len(s.Rt.Torrents), len(s.Qbt.Torrents))
+	}
+	seed()
+	if s := edit(func(x *store.Box) { x.QbtPort = 8081 }); len(s.Qbt.Torrents) != 0 || len(s.Rt.Torrents) != 1 {
+		t.Fatalf("port edit: qbt %d rt %d", len(s.Qbt.Torrents), len(s.Rt.Torrents))
 	}
 }

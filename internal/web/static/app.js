@@ -1106,7 +1106,7 @@ function torrentButtons(b, t, fleet = false) {
   const client = t.client || 'qbt', label = esc(CLIENT_LABEL[client] || client); // a closed set today; escaped so the attribute sink stays safe if another client is added
   const off = b.status === 'disabled' ? ' disabled title="polling is disabled for this box; enable it to run actions"'
     : !pfmView.clientActionable(b, client) ? ` disabled title="${label} is stopped on purpose on this box (~/.rtorrentDisable); this row is from before it stopped"` : '';
-  const h = `data-hash="${esc(t.hash)}" data-box="${b.id}" data-client="${esc(client)}"${off}`;
+  const h = `data-hash="${esc(t.hash)}" data-box="${b.id}" data-rev="${Number(b.box_rev) || 0}" data-client="${esc(client)}"${off}`;
   const name = esc(t.name);
   const files = client === 'rtorrent'
     ? `Remove ${name} from rTorrent AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? The box first checks that the path lies inside rTorrent's download directory and refuses otherwise, leaving the torrent in place. If it passes, the torrent is removed and then its files are deleted; should the deletion fail at that point, the torrent is already gone and files may remain. This cannot be undone.`
@@ -1470,7 +1470,7 @@ function addQbtFields(f, edit) {
 function addRtFields(f) {
   const det = S.add.detect?.facts?.rt_endpoint;
   return `<label class="check"><input type="checkbox" data-f="rt_enabled" ${f.rt_enabled ? 'checked' : ''}> monitor rTorrent via its SCGI socket (over SSH; the Pulsed Media client, started by the panel)</label>
-        <label class="f">SCGI endpoint <span class="hint">(blank = from ~/.rtorrent.rc${det ? `; detected ${esc(det)}` : ''}; unix:/path recommended. tcp:127.0.0.1:port is unauthenticated: on a shared host every tenant can reach it)</span><input data-f="rt_scgi" value="${esc(f.rt_scgi || '')}" placeholder="unix:/home/${esc(f.user || 'user')}/.rtorrent.socket" spellcheck="false"></label>`;
+        <label class="f">SCGI endpoint <span class="hint">(blank = from ~/.rtorrent.rc${det ? `; detected ${esc(det)}` : ''}; unix:/path inside the home recommended (one outside it is not used). tcp:127.0.0.1:port is unauthenticated: on a shared host every tenant can reach it)</span><input data-f="rt_scgi" value="${esc(f.rt_scgi || '')}" placeholder="unix:/home/${esc(f.user || 'user')}/.rtorrent.socket" spellcheck="false"></label>`;
 }
 function addDockerDuFields(f) {
   return `<label class="check"><input type="checkbox" data-f="docker_enabled" ${f.docker_enabled ? 'checked' : ''}> monitor rootless docker containers</label>
@@ -1823,7 +1823,7 @@ async function torrentAction(a, act) {
   const what = a.slice(4);
   act.disabled = true;
   const seg = act.dataset.client === 'rtorrent' ? 'rtorrent' : 'qbt';
-  await api('POST', `${BASE}/api/boxes/${act.dataset.box || S.selId}/${seg}/torrents/${encodeURIComponent(act.dataset.hash)}/${what}`);
+  await api('POST', `${BASE}/api/boxes/${act.dataset.box || S.selId}/${seg}/torrents/${encodeURIComponent(act.dataset.hash)}/${what}?rev=${encodeURIComponent(act.dataset.rev || '')}`);
   toast(`torrent ${{ stop: 'stopped', start: 'started', pause: 'paused', remove: 'removed', 'remove-data': 'removed with its files' }[what]}`, 'ok');
   if (S.view === 'torrents') void loadTorrents();
 }

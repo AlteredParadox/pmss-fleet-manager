@@ -1485,3 +1485,26 @@ func TestRtConfDiscovery(t *testing.T) {
 		t.Fatalf("unknown mode: %+v", r)
 	}
 }
+
+// The binary is the tenant's: its version output is capped in bytes in the
+// shell, and an over-long line parses as no version (daybreak blue audit of
+// 7506bd4).
+func TestQbtVersionOutputBounded(t *testing.T) {
+	home := t.TempDir()
+	os.Mkdir(home+"/bin", 0o700)
+	fake := "#!/bin/sh\nhead -c 1000000 /dev/zero | tr '\\0' 'x'\n"
+	os.WriteFile(home+"/bin/qbittorrent-nox", []byte(fake), 0o700)
+	cmd := exec.Command("sh")
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Stdin = strings.NewReader("home=$HOME\n" + qbtVersionShell)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > maxVersionLine {
+		t.Fatalf("%d bytes kept", len(out))
+	}
+	if qbtVersionString("qBittorrent v5.2.4") != "v5.2.4" || qbtVersionString(strings.Repeat("x ", maxVersionLine)+"v5.2.4") != "" {
+		t.Fatal("version parse")
+	}
+}
