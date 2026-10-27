@@ -953,3 +953,17 @@ func TestRetainedStringsBounded(t *testing.T) {
 		t.Fatal("an unclipped string need not be copied")
 	}
 }
+
+// New builds a client with its own guard; the poller uses NewWithGuard so
+// the hold outlives the client.
+func New(dial Dialer, hostport, user, pass string) *Client {
+	return NewWithGuard(dial, hostport, user, pass, &AuthGuard{})
+}
+
+// Login runs one login attempt under the guard's lock, as the guarded
+// request paths do.
+func (c *Client) Login(ctx context.Context) error {
+	c.guard.loginMu.Lock()
+	defer c.guard.loginMu.Unlock()
+	return c.attempt(ctx)
+}

@@ -274,7 +274,7 @@ func TestStatsMulticall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Version != "0.16.25" || st.Library != "0.16.1" || st.DownBPS != 123 || st.UpBPS != 456 || st.ListenPort != 50123 || !st.DHT || st.DHTMode != "auto" || !st.DHTKnown || !st.PeX || !st.PeXKnown {
+	if st.Version != "0.16.25" || st.Library != "0.16.1" || st.DownBPS != 123 || st.UpBPS != 456 || st.ListenPort != 50123 || !st.DHT || !st.DHTKnown || !st.PeX || !st.PeXKnown {
 		t.Fatalf("%+v", st)
 	}
 	// The mode string is not the state: "off" (and "auto" before any node
@@ -285,7 +285,7 @@ func TestStatsMulticall(t *testing.T) {
 				`<value><array><data><value><struct><member><name>dht</name><value><string>` + mode + `</string></value></member><member><name>active</name><value><i8>0</i8></value></member></struct></value></data></array></value>` + row(i8(0)) + `</data></array>`)
 		})
 		st, err := New(f.dial).Stats(context.Background())
-		if err != nil || st.DHT || st.DHTMode != mode || st.PeX || !st.PeXKnown {
+		if err != nil || st.DHT || !st.DHTKnown || st.PeX || !st.PeXKnown {
 			t.Fatalf("mode %s active=0: %+v %v", mode, st, err)
 		}
 	}

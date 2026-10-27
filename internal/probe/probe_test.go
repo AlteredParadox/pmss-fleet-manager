@@ -1508,3 +1508,11 @@ func TestQbtVersionOutputBounded(t *testing.T) {
 		t.Fatal("version parse")
 	}
 }
+
+// Sections splits untagged probe output into named sections; production
+// runs use SectionsTagged.
+func Sections(raw []byte) map[string]string { return SectionsTagged(raw, "") }
+
+// Parse turns untagged probe output into a Snapshot; production runs use
+// ParseTagged.
+func Parse(raw []byte, now time.Time) (*Snapshot, error) { return ParseTagged(raw, "", now) }

@@ -16,10 +16,10 @@
 
 /* Pure rendering helpers for the page: no DOM, no state, loaded before
    app.js and exposed as globalThis.pfmView so `node --test` can exercise
-   the markup they produce (internal/web/view_test.mjs). Today: the
-   overview's cpu / ram meters against your own quota and limit, and the
-   predicates that say when your share of the host is a measurement rather
-   than a zero-initialised field. */
+   the markup and wording they produce (internal/web/view_test.mjs): the
+   overview's cpu / ram meters and host-share predicates, client
+   availability and per-torrent controls, add summaries, table sorting and
+   the rTorrent DHT / PeX toggle wording. */
 (() => {
 'use strict';
 

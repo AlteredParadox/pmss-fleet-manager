@@ -240,17 +240,12 @@ func (g *AuthGuard) Restore(s AuthState) {
 	g.fail(err, s.Until, s.Key)
 }
 
-// New builds a client with its own guard. Test support: the poller uses
-// NewWithGuard so the hold outlives the client. hostport is what qBittorrent
-// should see in the Host header (its host-header validation accepts localhost/127.0.0.1 by default),
-// e.g. "127.0.0.1:8080". user/pass may be empty when the WebUI bypasses
-// authentication for localhost.
-func New(dial Dialer, hostport, user, pass string) *Client {
-	return NewWithGuard(dial, hostport, user, pass, &AuthGuard{})
-}
-
 // NewWithGuard builds a client whose auth holds live in a guard that
 // survives the client being rebuilt (SSH reconnects, port changes).
+// hostport is what qBittorrent should see in the Host header (its
+// host-header validation accepts localhost/127.0.0.1 by default), e.g.
+// "127.0.0.1:8080". user/pass may be empty when the WebUI bypasses
+// authentication for localhost.
 func NewWithGuard(dial Dialer, hostport, user, pass string, g *AuthGuard) *Client {
 	if g == nil {
 		g = &AuthGuard{}
@@ -323,14 +318,6 @@ func (c *Client) send(ctx context.Context, method, path, ctype string, body []by
 // is a few MiB; every poller may hold one of these at once. A larger
 // response is an error, never silently truncated.
 const maxBody = 16 << 20
-
-// Login authenticates. With localhost auth bypass qBittorrent answers Ok. to
-// anything. One attempt runs at a time per guard.
-func (c *Client) Login(ctx context.Context) error {
-	c.guard.loginMu.Lock()
-	defer c.guard.loginMu.Unlock()
-	return c.attempt(ctx)
-}
 
 // attempt runs one login and publishes its outcome as a new generation.
 // Caller holds guard.loginMu.
@@ -1037,8 +1024,16 @@ const (
 	ActionRemoveData = "remove-data" // deletes them too
 )
 
-// TorrentActions is the set of accepted per-torrent operations.
-var TorrentActions = map[string]bool{ActionStop: true, ActionStart: true, ActionRemove: true, ActionRemoveData: true}
+// ValidAction reports whether a is one of the per-torrent operations
+// TorrentAction runs. A closed switch rather than a map: nothing can add a
+// key that validates but matches no case.
+func ValidAction(a string) bool {
+	switch a {
+	case ActionStop, ActionStart, ActionRemove, ActionRemoveData:
+		return true
+	}
+	return false
+}
 
 // TorrentAction stops, starts or removes one torrent. "remove" keeps the
 // downloaded files on disk; "remove-data" deletes them too. The caller has

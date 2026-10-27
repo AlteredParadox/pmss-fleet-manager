@@ -187,7 +187,7 @@ func (s *Server) hostAllowed(hostport string) bool {
 }
 
 // csp is the Content-Security-Policy for the embedded UI: own origin only,
-// plus Google Fonts for the stylesheet and font files. Inline styles are
+// fonts included (they are embedded and served here). Inline styles are
 // used for widths and the like, hence 'unsafe-inline' on styles only.
 const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
 	"font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
@@ -1126,7 +1126,7 @@ func (s *Server) handleSetDiscovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for k := range want {
-		if !collect.DiscoveryKeys[k] {
+		if !collect.ValidDiscoveryKey(k) {
 			writeErr(w, 400, fmt.Errorf("unknown setting %q", k))
 			return
 		}
@@ -1159,7 +1159,7 @@ func (s *Server) handleSetRtDiscovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for k := range want {
-		if !collect.RtDiscoveryKeys[k] {
+		if !collect.ValidRtDiscoveryKey(k) {
 			writeErr(w, 400, fmt.Errorf("unknown setting %q (rTorrent has dht and pex)", k))
 			return
 		}
@@ -1254,7 +1254,7 @@ func (s *Server) handleTorrentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash, action := strings.ToLower(r.PathValue("hash")), r.PathValue("action")
-	if !qbt.TorrentActions[action] {
+	if !qbt.ValidAction(action) {
 		writeErr(w, 400, fmt.Errorf("unknown action %q", action))
 		return
 	}
