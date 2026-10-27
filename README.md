@@ -478,8 +478,8 @@ systemctl --user daemon-reload
 systemctl --user start pmss-fleet-manager
 ```
 
-`PMSS_AUTH_FILE`, `PMSS_SSH_KEY` and the healthcheck need the release after
-1.10; with 1.10 or earlier, use `Secret=pmss-fleet-auth,type=env,target=PMSS_AUTH`
+`PMSS_AUTH_FILE`, `PMSS_SSH_KEY` and the healthcheck need 1.11.0 or later;
+with 1.10 or earlier, use `Secret=pmss-fleet-auth,type=env,target=PMSS_AUTH`
 for the login (it then shows in the container's environment), mount the key
 at `/home/nonroot/.ssh/id_ed25519` instead, and leave out the `Health*` and
 `Notify` lines. To listen on another port, set `PMSS_LISTEN` rather than
@@ -855,7 +855,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.10.0 is the current release. The code was written against five real Pulsed
+1.11.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -867,7 +867,7 @@ checksums, and a matching container image on GHCR.
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
-**Unreleased**
+**1.11.0**
 
 - The torrents tab shows a separate table per client, and every torrent
   table sorts by any column from its heading. The fleet-wide list puts the
