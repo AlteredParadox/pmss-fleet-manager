@@ -1198,3 +1198,38 @@ func TestBoxWritesNeedRevision(t *testing.T) {
 		t.Errorf("bad box id: %d %s", code, body)
 	}
 }
+
+// The revision is checked again by the action itself, after the body was
+// read: a box edited while a slow request body was still arriving is
+// refused, not acted on as the edited box (fred on PR 136).
+func TestBoxRevisionRecheckedAfterBody(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx := context.Background()
+	b := &store.Box{Name: "x", Host: "x.invalid", User: "u", Port: 22, Enabled: true, QbtEnabled: true}
+	if err := srv.m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	pr, pw := io.Pipe()
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/boxes/%d/qbt/discovery?rev=%d", b.ID, b.Revision), pr)
+	req.Host = "dash.local:8080"
+	req.Header.Set(MutationHeader, "1")
+	req.Header.Set("Origin", "http://dash.local:8080")
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { srv.ServeHTTP(rr, req); close(done) }()
+	// The handler is reading the body, so the admission check has passed.
+	if _, err := pw.Write([]byte(`{"dht":`)); err != nil {
+		t.Fatal(err)
+	}
+	ed := *b
+	ed.Name = "edited"
+	if err := srv.m.UpdateBox(ctx, &ed, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	pw.Write([]byte(`true}`))
+	pw.Close()
+	<-done
+	if rr.Code != 409 || !strings.Contains(rr.Body.String(), "edited since") {
+		t.Fatalf("%d %s", rr.Code, rr.Body.String())
+	}
+}

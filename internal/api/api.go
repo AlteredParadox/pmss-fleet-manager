@@ -284,11 +284,13 @@ func (s *Server) boxWrite(h http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, 400, err)
 			return
 		}
+		// Checked here before the body is read (a quick 409), and again by
+		// the action on the poller it runs on, after the body is in.
 		if err := s.m.CheckBoxRevision(id, rev); err != nil {
 			writeErr(w, actionCode(err), err)
 			return
 		}
-		h(w, r)
+		h(w, r.WithContext(collect.WithBoxRevision(r.Context(), rev)))
 	}
 }
 
