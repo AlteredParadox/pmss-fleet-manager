@@ -1413,7 +1413,10 @@ func TestLostLabelAnswerIsAddedUnlabelled(t *testing.T) {
 		return resp(i8(0))
 	})
 	c := New(f.dial)
-	c.timeout = 150 * time.Millisecond
+	// Short enough that the two hung setters stay quick, long enough that a
+	// loaded CI runner (coverage, parallel packages) dials the fake in time:
+	// at 150 ms a slow dial made a load "not sent" (PR 131's Sonar run).
+	c.timeout = time.Second
 	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}, Files: [][]byte{[]byte(torrent)}, Label: "tv"})
 	if err != nil || res.Added != 2 || res.Failed != 0 || res.Unlabelled != 2 {
 		t.Fatalf("a lost setter answer is a label warning, not a failed add: %+v %v", res, err)
@@ -1597,7 +1600,7 @@ func TestFirstLoadLostReplyIsUncertain(t *testing.T) {
 	f := newFake(t)
 	f.on(func(m string, p []string) string { return "" }) // never answers
 	c := New(f.dial)
-	c.timeout = 150 * time.Millisecond
+	c.timeout = time.Second // the dial must complete for the load to count as sent, even on a loaded runner
 	res, err := c.Add(context.Background(), AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + hashA}})
 	if err == nil || res.Added != 0 || res.Uncertain != 1 {
 		t.Fatalf("%+v %v", res, err)
