@@ -520,3 +520,42 @@ func TestRetargetDropsCarriedRows(t *testing.T) {
 		t.Fatalf("port edit: qbt %d rt %d", len(s.Qbt.Torrents), len(s.Rt.Torrents))
 	}
 }
+
+// Every action selects its poller through actionPoller: a revision on ctx
+// that is not the running record's is refused before anything runs, and
+// an unknown box is not found (fred on PR 136).
+func TestActionsRecheckTheRevision(t *testing.T) {
+	ctx := context.Background()
+	m, _, b := genTestManager(t)
+	seedRemote(m, b.ID)
+	h := strings.Repeat("a", 40)
+	add := qbt.AddRequest{URLs: []string{"magnet:?xt=urn:btih:" + h}}
+	run := func(ctx context.Context, id int64) map[string]error {
+		_, qe := m.QbtAction(ctx, id, "stop")
+		_, ae := m.AddTorrents(ctx, id, add)
+		_, re := m.RtAddTorrents(ctx, id, add)
+		_, de := m.SetRtDiscovery(ctx, id, map[string]bool{"dht": true})
+		return map[string]error{
+			"qbt": qe, "add": ae, "rt add": re, "rt discovery": de,
+			"container":  m.ContainerAction(ctx, id, "c1", "start"),
+			"discovery":  m.SetDiscovery(ctx, id, map[string]bool{"dht": true}),
+			"torrent":    m.TorrentAction(ctx, id, h, "stop"),
+			"rt torrent": m.RtTorrentAction(ctx, id, h, "stop"),
+		}
+	}
+	for name, err := range run(WithBoxRevision(ctx, b.Revision+1), b.ID) {
+		if !errors.Is(err, ErrStaleBox) {
+			t.Errorf("%s with another revision: %v", name, err)
+		}
+	}
+	for name, err := range run(WithBoxRevision(ctx, b.Revision), b.ID) {
+		if errors.Is(err, ErrStaleBox) {
+			t.Errorf("%s with the current revision: %v", name, err)
+		}
+	}
+	for name, err := range run(ctx, 9999) {
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("%s on an unknown box: %v", name, err)
+		}
+	}
+}
