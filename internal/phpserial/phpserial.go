@@ -81,9 +81,10 @@ func ToFloat(v any) (float64, bool) {
 }
 
 type decoder struct {
-	b     []byte
-	pos   int
-	depth int
+	b       []byte
+	pos     int
+	depth   int
+	entries int // array elements decoded so far, across every level
 }
 
 // Limits on remote-sourced input. PMSS traffic files are a few KiB with two
@@ -92,6 +93,9 @@ const (
 	maxDepth     = 32
 	maxMapHint   = 1024 // the declared count is only a size hint, never trusted
 	minElemBytes = 4    // "i:0;" is the shortest possible array element
+	// maxEntries caps the elements of one value, all levels together:
+	// a daily series is hundreds of entries, never tens of thousands.
+	maxEntries = 16384
 )
 
 // Unserialize decodes a PHP serialized value. Supported types: i, d, s, b, N, a.
@@ -208,6 +212,9 @@ func (d *decoder) value() (any, error) {
 		arr := &Array{Values: make(map[any]any, min(cnt, maxMapHint))}
 		d.depth++
 		defer func() { d.depth-- }()
+		if d.entries += cnt; d.entries > maxEntries {
+			return nil, fmt.Errorf("phpserial: more than %d array entries", maxEntries)
+		}
 		for i := 0; i < cnt; i++ {
 			k, err := d.value()
 			if err != nil {

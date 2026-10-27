@@ -604,6 +604,55 @@ func TestListenersContestedAndUnknownUID(t *testing.T) {
 	}
 }
 
+// trafficOfSize is a valid PMSS traffic series padded to exactly n bytes.
+func trafficOfSize(t *testing.T, n int) string {
+	t.Helper()
+	const head, tail = `a:2:{s:3:"raw";a:1:{s:5:"month";d:5;}s:3:"pad";s:`, `";}`
+	for pad := n - len(head) - len(tail) - 2; pad > 0; pad-- {
+		if v := head + strconv.Itoa(pad) + `:"` + strings.Repeat("x", pad) + tail; len(v) == n {
+			return v
+		}
+	}
+	t.Fatalf("no padding gives %d bytes", n)
+	return ""
+}
+
+// A traffic file is read up to its cap and parsed only within it: a
+// larger one (a tenant can write anything there) is unavailable for that
+// poll, the other direction unaffected.
+func TestTrafficFileCap(t *testing.T) {
+	if ts := parseSeries(trafficOfSize(t, maxTrafficFile)); !ts.OK || ts.MonthMiB != 5 {
+		t.Fatalf("at the cap: %+v", ts)
+	}
+	if ts := parseSeries(trafficOfSize(t, maxTrafficFile+1)); ts.OK {
+		t.Fatalf("over the cap parsed: %+v", ts)
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	dir := t.TempDir()
+	os.WriteFile(dir+"/.trafficData", []byte(trafficOfSize(t, 1<<20)), 0o600)
+	os.WriteFile(dir+"/.trafficDataIngress", []byte(trafficOfSize(t, 4096)), 0o600)
+	t.Setenv("HOME", dir)
+	tag := NewTag()
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(ScriptWithTag(tag))
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("script: %v", err)
+	}
+	if sec, _ := sectionsTagged(out, tag); len(sec["traffic"]) != maxTrafficFile+1 {
+		t.Fatalf("script sent %d bytes of traffic", len(sec["traffic"]))
+	}
+	snap, err := ParseTagged(out, tag, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Traffic.Out.OK || !snap.Traffic.In.OK {
+		t.Fatalf("out %+v in %+v", snap.Traffic.Out, snap.Traffic.In)
+	}
+}
+
 func TestFiniteTraffic(t *testing.T) {
 	snap, err := Parse([]byte("@@uid\n1\n@@traffic\na:2:{s:3:\"raw\";a:2:{s:5:\"15min\";d:1.0E+308;s:5:\"month\";d:NAN;}s:5:\"daily\";a:1:{s:10:\"2026/10/16\";d:INF;}}\n@@end\n"), time.Now())
 	if err != nil {

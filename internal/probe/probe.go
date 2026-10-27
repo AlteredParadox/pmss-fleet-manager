@@ -1132,10 +1132,15 @@ func parseQuota(s map[string]string, now time.Time) QuotaInfo {
 	return q
 }
 
+// maxTrafficFile bounds one PMSS traffic file (a few KiB in practice);
+// the script sends one byte more, so a larger file reads as unavailable
+// rather than as a truncated series.
+const maxTrafficFile = 256 << 10
+
 func parseSeries(raw string) TrafficSeries {
 	ts := TrafficSeries{Daily: map[string]float64{}}
 	raw = strings.TrimSpace(raw)
-	if raw == "" {
+	if raw == "" || len(raw) > maxTrafficFile {
 		return ts
 	}
 	v, err := phpserial.Unserialize([]byte(raw))
