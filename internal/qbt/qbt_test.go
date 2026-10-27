@@ -967,3 +967,11 @@ func (c *Client) Login(ctx context.Context) error {
 	defer c.guard.loginMu.Unlock()
 	return c.attempt(ctx)
 }
+
+func TestValidAction(t *testing.T) {
+	for a, ok := range map[string]bool{"stop": true, "start": true, "remove": true, "remove-data": true, "pause": false, "recheck": false, "": false, "Stop": false} {
+		if ValidAction(a) != ok {
+			t.Errorf("ValidAction(%q) = %v", a, !ok)
+		}
+	}
+}
