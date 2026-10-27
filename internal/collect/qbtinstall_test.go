@@ -31,6 +31,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/store"
@@ -361,6 +362,27 @@ func TestValidDownloadURL(t *testing.T) {
 	} {
 		if got := ValidDownloadURL(u); got != want {
 			t.Errorf("%.60q: %v, want %v", u, got, want)
+		}
+	}
+}
+
+// A release object is read whole, bounded, and alone: an oversized body or
+// one with trailing data is refused rather than half-read (daybreak blue
+// audit of 9e59106).
+func TestDecodeRelease(t *testing.T) {
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := decodeRelease(strings.NewReader(`{"tag_name":"release-5.1.2_v2.0.11"} `), &rel); err != nil || rel.TagName != "release-5.1.2_v2.0.11" {
+		t.Fatalf("ok: %v %+v", err, rel)
+	}
+	if err := decodeRelease(iotest.ErrReader(errors.New("reset")), &rel); err == nil {
+		t.Error("read error: decoded")
+	}
+	pad := `{"tag_name":"x","pad":"` + strings.Repeat("a", maxRelease) + `"}`
+	for name, body := range map[string]string{"oversized": pad, "trailing": `{"tag_name":"x"}{"tag_name":"y"}`, "truncated": `{"tag_name":`} {
+		if err := decodeRelease(strings.NewReader(body), &rel); err == nil {
+			t.Errorf("%s: decoded", name)
 		}
 	}
 }

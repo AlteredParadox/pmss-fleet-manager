@@ -932,6 +932,13 @@ Newest first; each release's full notes are on the
 - A PMSS traffic file larger than 256 KiB reads as unavailable for that
   poll, and a decoded traffic value is capped at 16384 array entries
   (real files are a few KiB).
+- Smaller hardening: a `-ssh-key` file other users can read is warned
+  about at startup, like the secret and auth files; each event-stream
+  frame has a 30 s write deadline, so a tab that stops reading frees its
+  stream slot; GitHub release answers are read whole and refused past
+  1 MiB or with trailing data; `.dockerignore` also keeps `.aws`,
+  `.docker`, `.gnupg`, `.netrc`, `.agents` and `.codex` out of the build
+  context.
 
 **1.11.0**
 

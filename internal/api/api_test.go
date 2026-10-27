@@ -17,10 +17,12 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,6 +34,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -776,6 +779,86 @@ func TestAuthThrottleAndSSECap(t *testing.T) {
 	<-done
 	if rr.Code != 200 || len(s.sseSlots) != maxSSEStreams-1 {
 		t.Fatalf("stream: code %d slots %d", rr.Code, len(s.sseSlots))
+	}
+}
+
+// failingWriter is a response whose body writes fail, like a client that
+// stopped reading once the frame's write deadline passed.
+type failingWriter struct{ *httptest.ResponseRecorder }
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write deadline exceeded") }
+func (failingWriter) WriteString(string) (int, error) {
+	return 0, errors.New("write deadline exceeded")
+}
+
+// A stream whose writes fail ends and frees its slot, without waiting for
+// the client to go away.
+func TestEventsEndOnWriteError(t *testing.T) {
+	s, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/api/events", nil)
+	req.Host = "dash.local:8080"
+	done := make(chan struct{})
+	go func() { s.ServeHTTP(failingWriter{httptest.NewRecorder()}, req); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream kept its slot after a failed write")
+	}
+	if len(s.sseSlots) != 0 {
+		t.Fatalf("slots held: %d", len(s.sseSlots))
+	}
+}
+
+// laterFailingWriter accepts the stream's opening frame, then fails.
+type laterFailingWriter struct {
+	*httptest.ResponseRecorder
+	writes *atomic.Int32
+}
+
+func (w laterFailingWriter) WriteString(s string) (int, error) {
+	if w.writes.Add(1) > 1 {
+		return 0, errors.New("write deadline exceeded")
+	}
+	return w.ResponseRecorder.WriteString(s)
+}
+
+// A write that fails mid-stream (an event after the opening frame) ends
+// the stream too.
+func TestEventsEndOnLaterWriteError(t *testing.T) {
+	s, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/api/events", nil)
+	req.Host = "dash.local:8080"
+	w := laterFailingWriter{httptest.NewRecorder(), new(atomic.Int32)}
+	done := make(chan struct{})
+	go func() { s.ServeHTTP(w, req); close(done) }()
+	for w.writes.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, rev := s.m.Snapshot()
+	s.m.Publish(collect.Event{Type: "state", BoxID: 1, Rev: rev + 1, State: &collect.BoxState{ID: 1}})
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream kept its slot after a failed event write")
+	}
+}
+
+// Over a real connection, where the per-frame write deadline applies, the
+// stream still opens and delivers its frames.
+func TestEventsOverRealConnection(t *testing.T) {
+	s, _ := newTestServer(t)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	req, _ := http.NewRequest("GET", srv.URL+"/api/events", nil)
+	req.Host = "dash.local:8080"
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil || resp.StatusCode != 200 || line != "retry: 3000\n" {
+		t.Fatalf("%d %q %v", resp.StatusCode, line, err)
 	}
 }
 

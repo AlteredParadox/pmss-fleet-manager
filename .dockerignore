@@ -26,3 +26,9 @@ package-lock.json
 .ssh
 id_*
 secret
+.agents
+.codex
+.aws
+.docker
+.gnupg
+.netrc

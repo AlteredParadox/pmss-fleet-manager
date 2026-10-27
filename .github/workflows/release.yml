@@ -84,8 +84,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # A dispatch run has no tag, so stamp "dev" — the binary always reports
-      # something, and only a tag build claims a version.
+      # A run on a tag ref (pushed, or dispatched on the tag) stamps the tag;
+      # one on a branch stamps "dev". Only a tag push publishes (see publish).
       - name: Build
         env:
           CGO_ENABLED: '0'
@@ -125,8 +125,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # v1.2.3 -> 1.2.3, 1.2 and latest; a dispatch run gets a `dev` tag that
-      # is never pushed.
+      # v1.2.3 -> 1.2.3, 1.2 and latest; a run on a branch gets a `dev` tag.
+      # Nothing is pushed unless the run is a tag push (the event guard).
       - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         id: meta
         with:
