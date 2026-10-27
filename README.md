@@ -520,7 +520,10 @@ confirm the port is still bound by your account. Switching SSH auth to a key or 
 removes the saved SSH password; a checkbox removes the saved WebUI password.
 Over the API, an edit (`PUT /api/boxes/{id}`) must carry the record's
 `revision` as `GET` returned it; a stale one is refused with 409 and the
-current record, which the edit form reloads into itself.
+current record, which the edit form reloads into itself. Every request
+that acts on a box (torrent, client, discovery and container actions,
+adding torrents) must carry `?rev=` with the box's `box_rev` from
+`GET /api/state`: 400 without it, 409 when the box was edited since.
 An edit that moves the box to another host, port or account, or forgets
 the pinned host key, starts it over as a new machine: nothing the old one
 reported is carried or restored, its alerts except the renewal one are
@@ -908,7 +911,11 @@ Newest first; each release's full notes are on the
 - Every action on a box, not only torrent actions, carries the box revision
   the page was drawn at (`?rev=`, required over the API) and is refused with
   409 after an edit, so a tab drawn before an edit cannot act on the edited
-  box.
+  box. **API change:** a script that calls these routes directly (a nightly
+  qBittorrent restart, adding torrents, discovery or container actions)
+  now gets 400 without `?rev=` and 409 with an old one. Read the box's
+  `box_rev` from `GET /api/state` first and pass it as `?rev=`. The
+  dashboard's own pages already do.
 - Panel-managed qBittorrent: start is refused and restart only stops the
   client, leaving the start to Pulsed Media's watchdog, as install and
   autostart already were.
