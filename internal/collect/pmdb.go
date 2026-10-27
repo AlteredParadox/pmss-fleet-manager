@@ -159,9 +159,6 @@ func (m *Manager) pmdbCandidates() map[string]pmdbCandidate {
 			continue
 		}
 		c := out[row.ServerName]
-		if c.ids == nil {
-			c.row = row
-		}
 		c.ids = append(c.ids, st.ID)
 		out[row.ServerName] = c
 	}
@@ -359,8 +356,7 @@ func (m *Manager) pmdbCurrent(run *pmdbRun) bool {
 }
 
 type pmdbCandidate struct {
-	row pmdb.Row
-	ids []int64
+	ids []int64 // the boxes on this host; the row is rebuilt at submit time (pmdbRowFor)
 }
 
 // pmdbPlan decides every host against the catalogue list (fetched, or the

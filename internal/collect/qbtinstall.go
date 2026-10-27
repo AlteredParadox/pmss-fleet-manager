@@ -183,6 +183,22 @@ fi
 
 var safeURL = regexp.MustCompile(`^https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$`)
 
+// maxRelease bounds a GitHub release object (a few KiB in practice).
+const maxRelease = 1 << 20
+
+// decodeRelease decodes one GitHub release object: the whole body, at most
+// maxRelease bytes, one JSON value and nothing after it.
+func decodeRelease(r io.Reader, v any) error {
+	b, err := io.ReadAll(io.LimitReader(r, maxRelease+1))
+	if err != nil {
+		return err
+	}
+	if len(b) > maxRelease {
+		return fmt.Errorf("release object larger than %d bytes", maxRelease)
+	}
+	return json.Unmarshal(b, v) // refuses trailing data
+}
+
 // maxDownloadURL bounds the download URL setting.
 const maxDownloadURL = 2048
 
@@ -251,7 +267,7 @@ func releaseDigest(ctx context.Context, download string) (digest, reason string)
 			Digest string `json:"digest"`
 		} `json:"assets"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
+	if err := decodeRelease(resp.Body, &rel); err != nil {
 		return "", "GitHub API: " + err.Error()
 	}
 	for _, a := range rel.Assets {
@@ -436,8 +452,7 @@ func (l *latestRelease) get(ctx context.Context) string {
 	var rel struct {
 		TagName string `json:"tag_name"`
 	}
-	// The release object is a few KiB; anything past 1 MiB is not one.
-	if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel) != nil {
+	if resp.StatusCode != 200 || decodeRelease(resp.Body, &rel) != nil {
 		return l.version
 	}
 	if m := releaseTag.FindStringSubmatch(rel.TagName); m != nil {

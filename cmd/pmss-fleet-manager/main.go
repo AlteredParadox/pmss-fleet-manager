@@ -327,8 +327,10 @@ func loginFrom(value, file string) (login, warning string, err error) {
 }
 
 // sshKeyWarning says, for the startup log, why the -ssh-key default cannot
-// be read ("" when it is unset or readable). Not fatal: boxes without a
-// key path of their own fall back to ~/.ssh/id_* and the agent.
+// be read, or that other users can read it ("" when it is unset and
+// private). Not fatal: boxes without a key path of their own fall back to
+// ~/.ssh/id_* and the agent, and a mounted secret's mode may not be the
+// operator's to set (as for the secret file).
 func sshKeyWarning(path string) string {
 	if path == "" {
 		return ""
@@ -337,7 +339,10 @@ func sshKeyWarning(path string) string {
 	if err != nil {
 		return fmt.Sprintf("the -ssh-key default %s cannot be read by uid %d (%v); boxes without a key path fall back to ~/.ssh/id_*", path, os.Getuid(), errors.Unwrap(err))
 	}
-	f.Close()
+	defer f.Close()
+	if fi, err := f.Stat(); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Sprintf("the -ssh-key default %s is readable by other users (mode %04o); chmod 600 it", path, fi.Mode().Perm())
+	}
 	return ""
 }
 

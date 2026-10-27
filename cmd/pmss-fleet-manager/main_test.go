@@ -140,4 +140,8 @@ func TestSSHKeyWarning(t *testing.T) {
 	if w := sshKeyWarning(p + ".missing"); !strings.Contains(w, "cannot be read by uid") || !strings.Contains(w, "fall back") {
 		t.Fatalf("missing: %q", w)
 	}
+	os.Chmod(p, 0o644)
+	if w := sshKeyWarning(p); !strings.Contains(w, "readable by other users (mode 0644)") {
+		t.Fatalf("loose mode: %q", w)
+	}
 }

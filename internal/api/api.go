@@ -598,8 +598,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	fl, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok {
 		http.Error(w, "streaming unsupported", 500)
 		return
 	}
@@ -618,17 +617,29 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(hdrCacheControl, noStore)
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(200)
-	fmt.Fprint(w, "retry: 3000\n\n")
-	fl.Flush()
+	// The server has no WriteTimeout (this stream is long-lived), so every
+	// frame gets its own deadline: a client that stops reading loses the
+	// stream and frees its slot instead of holding it.
+	rc := http.NewResponseController(w)
+	send := func(frame string) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)) // ErrNotSupported only off a real connection
+		if _, err := io.WriteString(w, frame); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
+	if !send("retry: 3000\n\n") {
+		return
+	}
 	ping := time.NewTicker(25 * time.Second)
 	defer ping.Stop()
 	for {
+		var frame string
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ping.C:
-			fmt.Fprint(w, ": ping\n\n")
-			fl.Flush()
+			frame = ": ping\n\n"
 		case ev, ok := <-ch:
 			if !ok {
 				return // dropped as a slow subscriber: the client reconnects and resyncs
@@ -637,15 +648,19 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				// An unencodable state (should be impossible after sanitising)
 				// must not become an empty frame the client cannot parse.
-				fmt.Fprint(w, ": skipped unencodable event\n\n")
-				fl.Flush()
-				continue
+				frame = ": skipped unencodable event\n\n"
+			} else {
+				frame = fmt.Sprintf("event: %s\ndata: %s\n\n", ev.Type, b)
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, b)
-			fl.Flush()
+		}
+		if !send(frame) {
+			return
 		}
 	}
 }
+
+// sseWriteTimeout bounds one event-stream frame's write.
+const sseWriteTimeout = 30 * time.Second
 
 // boxInput is the writable box shape, including secrets.
 type boxInput struct {
