@@ -450,6 +450,9 @@ func TestTorrentActionNeedsCurrentBoxRevision(t *testing.T) {
 	if err := m.CheckBoxRevision(9999, 0); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown box: %v", err)
 	}
+	if err := m.TorrentAction(ctx, 9999, strings.Repeat("a", 40), "stop"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("torrent action on an unknown box: %v", err)
+	}
 }
 
 // Editing a ready box to an rTorrent socket outside the home keeps the

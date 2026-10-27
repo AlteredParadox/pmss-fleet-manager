@@ -932,6 +932,24 @@ func TestEventsSubscribedBeforeOpen(t *testing.T) {
 	<-done
 }
 
+// The download URL is saved under the same rule the install applies.
+func TestSettingsDownloadURL(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for body, want := range map[string]int{
+		`{"qbt_download_url":"https://example.com/b?token=x"}`:                         200,
+		`{"qbt_download_url":"http://example.com/b"}`:                                  400,
+		`{"qbt_download_url":"https://example.com/a b"}`:                               400,
+		`{"qbt_download_url":"https://example.com/` + strings.Repeat("a", 2048) + `"}`: 400,
+	} {
+		if code, out := do(t, srv, "PUT", "/api/settings", body, nil); code != want {
+			t.Errorf("%.60s: %d %s", body, code, out)
+		}
+	}
+	if got := srv.m.Settings().QbtDownloadURL; got != "https://example.com/b?token=x" {
+		t.Fatalf("stored %q", got)
+	}
+}
+
 // The pmdb upload key follows the PM API key's rules (kept on an empty
 // PUT, never echoed, cleared by its flag), and enabling the catalogue
 // without a key is refused rather than silently doing nothing.
@@ -1175,5 +1193,8 @@ func TestBoxWritesNeedRevision(t *testing.T) {
 		if code, body := do(t, srv, "POST", fmt.Sprintf("%s?rev=%d", p, b.Revision), `{}`, hdr); strings.Contains(body, "edited since") || strings.Contains(body, "rev (") {
 			t.Errorf("%s with the current rev: %d %s", p, code, body)
 		}
+	}
+	if code, body := do(t, srv, "POST", "/api/boxes/x/qbt/stop?rev=0", `{}`, hdr); code != 400 {
+		t.Errorf("bad box id: %d %s", code, body)
 	}
 }

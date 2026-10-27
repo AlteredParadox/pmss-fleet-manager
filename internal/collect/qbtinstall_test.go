@@ -172,6 +172,13 @@ func TestQbtInstallRefusesPMSSManaged(t *testing.T) {
 	if _, err := p.qbtAutostart(context.Background()); !errors.Is(err, errPMSSManagedQbt) {
 		t.Errorf("autostart: %v", err)
 	}
+	// A URL the save-time rule refuses is refused at install too, before
+	// connecting (here: on an account that is not panel-managed).
+	m.states[7].Qbt.PMSSManaged = false
+	if _, err := p.qbtInstall(context.Background(), "http://example.com/qbittorrent-nox"); err == nil || !strings.Contains(err.Error(), "must be https") {
+		t.Errorf("install from an http URL: %v", err)
+	}
+	m.states[7].Qbt.PMSSManaged = true
 	// Start too: the panel's watchdog starts its client, ours would be a second.
 	if err := p.qbtAction(context.Background(), "start"); !errors.Is(err, errPMSSManagedStart) {
 		t.Errorf("start: %v", err)
