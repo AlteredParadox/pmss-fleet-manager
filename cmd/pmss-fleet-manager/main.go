@@ -66,6 +66,7 @@ func main() {
 	logLevel := flag.String("log", envOr("PMSS_LOG", "info"), "log level: debug, info, warn, error")
 	secretFile := flag.String("secret-file", os.Getenv("PMSS_SECRET_FILE"), "file holding the secret that encrypts stored credentials (or set PMSS_SECRET to the secret itself, which -h never prints); unset keeps them in plain text")
 	previousSecretFile := flag.String("previous-secret-file", os.Getenv("PMSS_SECRET_PREVIOUS_FILE"), "when changing or removing the secret: file holding the one the credentials are encrypted with now (or set PMSS_SECRET_PREVIOUS); remove it after one successful start")
+	monitorOnly := flag.Bool("monitor-only", os.Getenv("PMSS_MONITOR_ONLY") == "1", "refuse the web UI's actions on the boxes: torrent, client, discovery and container actions answer 403 and their controls are hidden; monitoring runs as usual (or set PMSS_MONITOR_ONLY=1); limits this interface, not the SSH accounts")
 	forgetCreds := flag.Bool("forget-encrypted-credentials", os.Getenv("PMSS_FORGET_ENCRYPTED_CREDENTIALS") == "1", "after losing the secret: remove every stored credential that does not decrypt with the configured one, then start; the edit forms ask for them again")
 	flag.Parse()
 	if !flagGiven("auth") {
@@ -170,6 +171,10 @@ func main() {
 	handler.SetVersion(version)
 	hosts, wildcard := allowedHostList(addrs, *allowedHosts)
 	handler.SetAllowedHosts(hosts, wildcard)
+	handler.SetMonitorOnly(*monitorOnly)
+	if *monitorOnly {
+		log.Info("monitor-only mode: requests that would change a box are refused")
+	}
 	if wildcard && *allowedHosts == "" {
 		log.Warn("listening on a wildcard address without -allowed-hosts: requests by IP address or localhost are served, any other hostname is refused until it is listed in -allowed-hosts")
 	}

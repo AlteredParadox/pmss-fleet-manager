@@ -228,3 +228,12 @@ test('the fleet list sorts by client name, a row without one being qBittorrent',
   assert.equal(order('desc'), 'abc');
   assert.deepEqual(V.nextSort(null, 'client'), { key: 'client', dir: 'asc' });
 });
+
+test('monitor-only shows the rTorrent discovery state without a click hint, keeping the pending note (fred on PR 134)', () => {
+  const [dht] = V.rtDiscovery({ reachable: true, dht: false, conf_dht: 'on' });
+  assert.equal(dht.pending, true);
+  const s = V.rtDiscoveryState(dht);
+  assert.match(s, /until rTorrent restarts/);
+  assert.doesNotMatch(s, /click/);
+  assert.equal(V.rtDiscoveryHint(dht), `${s} — click to disable (saved to ~/.rtorrent.rc.custom)`);
+});

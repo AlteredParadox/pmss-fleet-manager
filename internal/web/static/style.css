@@ -114,7 +114,8 @@ h1{margin:2px 0 0;font-size:22px;font-weight:600;letter-spacing:-.01em}
 .tag{font-size:10px;padding:2px 7px;border:1px solid var(--line);border-radius:2px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;flex:none;max-width:100%;overflow-wrap:anywhere;line-height:1.4}
 .tag.discovery{color:var(--warn);border-color:var(--warn);text-transform:none}
 button.disc{background:none;border:1px dashed var(--line);padding:0 5px;font-size:inherit;color:var(--muted);line-height:1.4} /* DHT/PeX/LSD toggles in the torrents header */
-button.disc.warn{color:var(--warn);border-color:var(--warn)} /* DHT/PeX/LSD on: not for private-tracker torrents */
+button.disc.warn,span.disc.warn{color:var(--warn);border-color:var(--warn)} /* DHT/PeX/LSD on: not for private-tracker torrents */
+span.disc{border:1px dashed var(--line);padding:0 5px;color:var(--muted);cursor:default} /* monitor-only: the state without the toggle */
 button.disc:hover{color:var(--text)}
 .disc.na{border:1px dashed var(--line);padding:0 5px;color:var(--dim);cursor:default} /* LSD for rTorrent: no such mechanism */
 .meter{height:4px;background:var(--line);border-radius:2px;overflow:hidden}
