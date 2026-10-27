@@ -443,7 +443,7 @@ func sshRunner(c *sshx.Client) scriptRunner {
 	return c
 }
 
-// rtTorrentAction runs one RtTorrentActions entry on hash.
+// rtTorrentAction runs one ValidRtAction action on hash.
 func (p *poller) rtTorrentAction(ctx context.Context, hash, action string) error {
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()

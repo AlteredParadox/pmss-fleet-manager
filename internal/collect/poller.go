@@ -1640,7 +1640,7 @@ func (p *poller) qbtWebUI(ctx context.Context) (*qbt.Client, error) {
 	return cli, nil
 }
 
-// torrentAction runs one qbt.TorrentActions entry against a single torrent.
+// torrentAction runs one qbt.ValidAction action against a single torrent.
 func (p *poller) torrentAction(ctx context.Context, hash, action string) error {
 	actx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()

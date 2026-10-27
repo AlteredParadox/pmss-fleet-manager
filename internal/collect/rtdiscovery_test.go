@@ -354,3 +354,16 @@ func (l lostAnswer) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byt
 	l.r.Run(ctx, cmd, stdin)
 	return nil, nil, errors.New("ssh: connection lost")
 }
+
+func TestValidDiscoveryKeys(t *testing.T) {
+	for k, ok := range map[string]bool{"dht": true, "pex": true, "lsd": true, "upnp": false, "": false, "DHT": false} {
+		if ValidDiscoveryKey(k) != ok {
+			t.Errorf("ValidDiscoveryKey(%q) = %v", k, !ok)
+		}
+	}
+	for k, ok := range map[string]bool{"dht": true, "pex": true, "lsd": false, "": false} {
+		if ValidRtDiscoveryKey(k) != ok {
+			t.Errorf("ValidRtDiscoveryKey(%q) = %v", k, !ok)
+		}
+	}
+}

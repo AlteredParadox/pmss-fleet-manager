@@ -956,7 +956,7 @@ func (m *Manager) ContainerAction(ctx context.Context, id int64, cid, action str
 	return err
 }
 
-// TorrentAction performs one qbt.TorrentActions entry on a single torrent
+// TorrentAction performs one qbt.ValidAction action on a single torrent
 // and wakes the poller so the list reflects it promptly. rev is the box
 // record revision the request was drawn from (BoxState.BoxRev).
 func (m *Manager) TorrentAction(ctx context.Context, id, rev int64, hash, action string) error {
@@ -975,7 +975,7 @@ func (m *Manager) TorrentAction(ctx context.Context, id, rev int64, hash, action
 	return err
 }
 
-// RtTorrentAction performs one RtTorrentActions entry on a torrent in the
+// RtTorrentAction performs one ValidRtAction action on a torrent in the
 // box's rTorrent and wakes the poller so the list reflects it promptly; rev
 // as for TorrentAction.
 func (m *Manager) RtTorrentAction(ctx context.Context, id, rev int64, hash, action string) error {
@@ -1159,8 +1159,15 @@ func (m *Manager) RtAddTorrents(ctx context.Context, id int64, req qbt.AddReques
 	return res, err
 }
 
-// DiscoveryKeys are the preferences SetDiscovery may change.
-var DiscoveryKeys = map[string]bool{"dht": true, "pex": true, "lsd": true}
+// ValidDiscoveryKey reports whether k is a qBittorrent preference
+// SetDiscovery may change (a closed switch, like ValidRtAction).
+func ValidDiscoveryKey(k string) bool {
+	switch k {
+	case "dht", "pex", "lsd":
+		return true
+	}
+	return false
+}
 
 // SetDiscovery flips peer-discovery switches on the box's qBittorrent and
 // reflects them in the cached state at once; the next poll re-reads them.
@@ -1174,7 +1181,7 @@ func (m *Manager) SetDiscovery(ctx context.Context, id int64, want map[string]bo
 	}
 	prefs := make(map[string]any, len(want))
 	for k, v := range want {
-		if !DiscoveryKeys[k] {
+		if !ValidDiscoveryKey(k) {
 			return fmt.Errorf("unknown discovery setting %q", k)
 		}
 		prefs[k] = v

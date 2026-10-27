@@ -142,11 +142,9 @@ type Stats struct {
 	DownBPS    int64
 	UpBPS      int64
 	ListenPort int
-	// DHT says whether DHT is running now; DHTMode is the configured mode
-	// (disable, off, auto or on). A client started with "disable" never
-	// initialised DHT, so turning it on takes a restart.
+	// DHT says whether DHT is running now. A client started with mode
+	// "disable" never initialised DHT, so turning it on takes a restart.
 	DHT      bool
-	DHTMode  string
 	DHTKnown bool // dht.statistics answered
 	PeX      bool // protocol.pex: peer exchange for torrents started from now on
 	PeXKnown bool // protocol.pex answered
@@ -180,7 +178,7 @@ func ValidAction(a string) bool {
 }
 
 var (
-	// ErrBadAction is an action outside TorrentActions.
+	// ErrBadAction is an action ValidAction refuses.
 	ErrBadAction = errors.New("rtorrent: unknown torrent action")
 	// ErrBadHash is a hash that is not 40 hex characters.
 	ErrBadHash = errors.New("rtorrent: invalid torrent hash")
@@ -378,8 +376,9 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 	}
 	if d := vals[5]; d.Kind == KindStruct {
 		// dht.statistics: "active" says whether DHT is running now; the
-		// "dht" mode string has disable/off/auto/on and would read "off" as
-		// on (Codex on PR 122). A non-integer active is not rTorrent.
+		// "dht" mode string (disable/off/auto/on) is not read, as it would
+		// read "off" as on (Codex on PR 122). A non-integer active or a
+		// non-string mode is not rTorrent.
 		a, ok := d.Struct["active"]
 		if ok && a.Kind != KindInt {
 			return nil, ErrUnexpected
@@ -389,9 +388,6 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 			if m.Kind != KindString {
 				return nil, ErrUnexpected
 			}
-			if dhtModes[m.Str] {
-				st.DHTMode = m.Str
-			}
 		}
 		st.DHTKnown = true
 	}
@@ -400,9 +396,6 @@ func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 	}
 	return &st, nil
 }
-
-// dhtModes are rTorrent's dht.mode values.
-var dhtModes = map[string]bool{"disable": true, "off": true, "auto": true, "on": true}
 
 // Discovery settings SetDiscovery changes: rTorrent has DHT and peer
 // exchange, and no local service discovery.

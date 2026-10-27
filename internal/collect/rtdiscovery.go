@@ -36,8 +36,15 @@ import (
 // reports afterwards is what the UI shows: a client started with DHT
 // "disable" cannot turn it on until it is restarted, and the toast says so.
 
-// RtDiscoveryKeys are the settings SetRtDiscovery may change.
-var RtDiscoveryKeys = map[string]bool{rtorrent.DiscoveryDHT: true, rtorrent.DiscoveryPeX: true}
+// ValidRtDiscoveryKey reports whether k is a setting SetRtDiscovery may
+// change (a closed switch, like ValidRtAction).
+func ValidRtDiscoveryKey(k string) bool {
+	switch k {
+	case rtorrent.DiscoveryDHT, rtorrent.DiscoveryPeX:
+		return true
+	}
+	return false
+}
 
 // RtDiscoveryResult is a SetRtDiscovery outcome: the file was saved; Live
 // says the running client now has every value asked for, Note why not.
@@ -121,7 +128,7 @@ func (m *Manager) SetRtDiscovery(ctx context.Context, id int64, want map[string]
 		if k == "lsd" {
 			return RtDiscoveryResult{}, errors.New("rTorrent has no local service discovery")
 		}
-		if !RtDiscoveryKeys[k] {
+		if !ValidRtDiscoveryKey(k) {
 			return RtDiscoveryResult{}, fmt.Errorf("unknown discovery setting %q", k)
 		}
 	}
