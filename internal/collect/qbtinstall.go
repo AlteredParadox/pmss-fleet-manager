@@ -183,6 +183,15 @@ fi
 
 var safeURL = regexp.MustCompile(`^https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$`)
 
+// maxDownloadURL bounds the download URL setting.
+const maxDownloadURL = 2048
+
+// ValidDownloadURL is the one rule for the qBittorrent download URL, at
+// save time and again at install: https, URL characters only, bounded.
+func ValidDownloadURL(u string) bool {
+	return len(u) <= maxDownloadURL && safeURL.MatchString(u)
+}
+
 // githubAPI is the API base the digest lookup uses; a test points it at a
 // local server.
 var githubAPI = "https://api.github.com"
@@ -270,6 +279,11 @@ func shellQuote(s string) string {
 // build would fight it.
 var errPMSSManagedQbt = errors.New("qBittorrent on this account is managed by Pulsed Media's panel; disable it there before installing or autostarting your own build")
 
+// errPMSSManagedStart refuses start for the same reason: the panel's
+// watchdog starts its own client, so ours would be a second one. Restart
+// only stops it and leaves the start to the watchdog.
+var errPMSSManagedStart = errors.New("qBittorrent on this account is managed by Pulsed Media's panel: its watchdog starts it")
+
 // pmssManagedQbt reports whether the last snapshot saw the PMSS panel's
 // qBittorrent marker on this account.
 func (p *poller) pmssManagedQbt() bool {
@@ -284,8 +298,8 @@ func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, er
 	if p.pmssManagedQbt() {
 		return "", errPMSSManagedQbt
 	}
-	if !safeURL.MatchString(downloadURL) {
-		return "", errors.New("download URL must be https and contain only URL characters")
+	if !ValidDownloadURL(downloadURL) {
+		return "", errors.New("download URL must be https, contain only URL characters and be at most 2048 bytes")
 	}
 	// The digest comes from GitHub's API on the dashboard host, the file
 	// from GitHub's CDN on the box: a swapped download on either path fails
@@ -346,6 +360,9 @@ func (p *poller) qbtRestart(ctx context.Context) (string, error) {
 	text := strings.TrimSpace(string(out) + "\n" + string(stderr))
 	if err != nil {
 		return text, fmt.Errorf("restart failed: %s", firstLine(text, err))
+	}
+	if p.pmssManagedQbt() {
+		return text + "\nnot started here: Pulsed Media's watchdog starts the panel's qBittorrent again", nil
 	}
 	cmd := p.startCommand()
 	_, stderr, err = cli.Run(rctx, startViaStdin, strings.NewReader(cmd+"\n"))

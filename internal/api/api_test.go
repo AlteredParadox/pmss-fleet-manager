@@ -685,6 +685,10 @@ func TestReadLogValidation(t *testing.T) {
 	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/containers/zz/logs", id), "", hdr); code != 400 {
 		t.Fatalf("bad container id: %d", code)
 	}
+	// The poll lists full ids, so an abbreviated one is refused up front.
+	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/containers/%s/logs", id, strings.Repeat("a", 12)), "", hdr); code != 400 {
+		t.Fatalf("abbreviated container id: %d", code)
+	}
 	if code, _ := do(t, s, "POST", "/api/boxes/999999/logs/read", `{"path":".logs/x.log"}`, hdr); code != 404 {
 		t.Fatalf("missing box: %d", code)
 	}
@@ -928,6 +932,24 @@ func TestEventsSubscribedBeforeOpen(t *testing.T) {
 	<-done
 }
 
+// The download URL is saved under the same rule the install applies.
+func TestSettingsDownloadURL(t *testing.T) {
+	srv, _ := newTestServer(t)
+	for body, want := range map[string]int{
+		`{"qbt_download_url":"https://example.com/b?token=x"}`:                         200,
+		`{"qbt_download_url":"http://example.com/b"}`:                                  400,
+		`{"qbt_download_url":"https://example.com/a b"}`:                               400,
+		`{"qbt_download_url":"https://example.com/` + strings.Repeat("a", 2048) + `"}`: 400,
+	} {
+		if code, out := do(t, srv, "PUT", "/api/settings", body, nil); code != want {
+			t.Errorf("%.60s: %d %s", body, code, out)
+		}
+	}
+	if got := srv.m.Settings().QbtDownloadURL; got != "https://example.com/b?token=x" {
+		t.Fatalf("stored %q", got)
+	}
+}
+
 // The pmdb upload key follows the PM API key's rules (kept on an empty
 // PUT, never echoed, cleared by its flag), and enabling the catalogue
 // without a key is refused rather than silently doing nothing.
@@ -1033,6 +1055,12 @@ func TestRtRoutesAndSettings(t *testing.T) {
 	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", 999), `{"at":"2026-10-25T10:00:00Z"}`, hdr); code != 404 {
 		t.Errorf("dismiss unknown box: %d", code)
 	}
+	// The body is strict: one value, no unknown fields.
+	for _, body := range []string{`{"at":"2026-10-25T10:00:00Z","x":1}`, `{"at":"2026-10-25T10:00:00Z"}{}`} {
+		if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/remove-failure/dismiss", id), body, hdr); code != 400 {
+			t.Errorf("dismiss %s: %d", body, code)
+		}
+	}
 	// Add: the shared form validation applies; a never-probed box is 409.
 	code, body = do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/torrents", id), "", hdr)
 	if code != 400 {
@@ -1052,7 +1080,7 @@ func TestRtRoutesAndSettings(t *testing.T) {
 		{id, `{"dht":true}`, 409},
 		{999, `{"pex":false}`, 404},
 	} {
-		if code, body := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/discovery", tc.id), tc.body, hdr); code != tc.want {
+		if code, body := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/rtorrent/discovery?rev=%d", tc.id, b.Revision), tc.body, hdr); code != tc.want {
 			t.Errorf("discovery %s: %d %s", tc.body, code, body)
 		}
 	}
@@ -1135,5 +1163,73 @@ func TestMonitorOnly(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(body), &state); err != nil || code != 200 || !state.MonitorOnly {
 		t.Fatalf("state: %d %s", code, body)
+	}
+}
+
+// Every box-changing route names the box revision it was drawn from: none
+// is refused (400), another is stale (409), both before the handler runs.
+func TestBoxWritesNeedRevision(t *testing.T) {
+	srv, _ := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080"}
+	b := &store.Box{Name: "x", Host: "x.invalid", User: "u", Port: 22, Enabled: true, QbtEnabled: true, RtEnabled: true}
+	if err := srv.m.AddBox(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	h := strings.Repeat("a", 40)
+	box := fmt.Sprintf("/api/boxes/%d", b.ID)
+	cid := strings.Repeat("c", 64)
+	for _, p := range []string{
+		box + "/qbt/install", box + "/qbt/restart", box + "/qbt/pause",
+		box + "/qbt/torrents/" + h + "/stop", box + "/qbt/torrents", box + "/qbt/discovery",
+		box + "/rtorrent/torrents/" + h + "/stop", box + "/rtorrent/torrents", box + "/rtorrent/discovery",
+		box + "/containers/" + cid + "/restart",
+	} {
+		if code, body := do(t, srv, "POST", p, `{}`, hdr); code != 400 || !strings.Contains(body, "rev") {
+			t.Errorf("%s without rev: %d %s", p, code, body)
+		}
+		if code, body := do(t, srv, "POST", fmt.Sprintf("%s?rev=%d", p, b.Revision+1), `{}`, hdr); code != 409 || !strings.Contains(body, "edited since") {
+			t.Errorf("%s with another rev: %d %s", p, code, body)
+		}
+		if code, body := do(t, srv, "POST", fmt.Sprintf("%s?rev=%d", p, b.Revision), `{}`, hdr); strings.Contains(body, "edited since") || strings.Contains(body, "rev (") {
+			t.Errorf("%s with the current rev: %d %s", p, code, body)
+		}
+	}
+	if code, body := do(t, srv, "POST", "/api/boxes/x/qbt/stop?rev=0", `{}`, hdr); code != 400 {
+		t.Errorf("bad box id: %d %s", code, body)
+	}
+}
+
+// The revision is checked again by the action itself, after the body was
+// read: a box edited while a slow request body was still arriving is
+// refused, not acted on as the edited box (fred on PR 136).
+func TestBoxRevisionRecheckedAfterBody(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx := context.Background()
+	b := &store.Box{Name: "x", Host: "x.invalid", User: "u", Port: 22, Enabled: true, QbtEnabled: true}
+	if err := srv.m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	pr, pw := io.Pipe()
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/boxes/%d/qbt/discovery?rev=%d", b.ID, b.Revision), pr)
+	req.Host = "dash.local:8080"
+	req.Header.Set(MutationHeader, "1")
+	req.Header.Set("Origin", "http://dash.local:8080")
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { srv.ServeHTTP(rr, req); close(done) }()
+	// The handler is reading the body, so the admission check has passed.
+	if _, err := pw.Write([]byte(`{"dht":`)); err != nil {
+		t.Fatal(err)
+	}
+	ed := *b
+	ed.Name = "edited"
+	if err := srv.m.UpdateBox(ctx, &ed, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	pw.Write([]byte(`true}`))
+	pw.Close()
+	<-done
+	if rr.Code != 409 || !strings.Contains(rr.Body.String(), "edited since") {
+		t.Fatalf("%d %s", rr.Code, rr.Body.String())
 	}
 }

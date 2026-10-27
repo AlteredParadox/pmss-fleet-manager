@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"pmss-fleet-manager/internal/rtorrent"
-	"pmss-fleet-manager/internal/store"
 )
 
 // rTorrent's peer discovery (DHT and peer exchange; it has no local service
@@ -135,12 +134,9 @@ func (m *Manager) SetRtDiscovery(ctx context.Context, id int64, want map[string]
 	if len(want) == 0 {
 		return RtDiscoveryResult{}, errors.New("nothing to change")
 	}
-	p := m.poller(id)
-	if p == nil {
-		return RtDiscoveryResult{}, store.ErrNotFound
-	}
-	if !p.box.Enabled {
-		return RtDiscoveryResult{}, ErrDisabled
+	p, err := m.actionPoller(ctx, id)
+	if err != nil {
+		return RtDiscoveryResult{}, err
 	}
 	res, err := p.rtSetDiscovery(ctx, want)
 	p.wake()

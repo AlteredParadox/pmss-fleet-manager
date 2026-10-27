@@ -558,7 +558,7 @@ func TestManagerRtGuards(t *testing.T) {
 	m.mu.Lock()
 	delete(m.pollers, 1) // not registered yet: unknown box
 	m.mu.Unlock()
-	if err := m.RtTorrentAction(ctx, 1, 0, rtHashA, "stop"); !errors.Is(err, store.ErrNotFound) {
+	if err := m.RtTorrentAction(ctx, 1, rtHashA, "stop"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatal(err)
 	}
 	if _, err := m.RtAddTorrents(ctx, 1, qbt.AddRequest{}); !errors.Is(err, store.ErrNotFound) {
@@ -567,10 +567,10 @@ func TestManagerRtGuards(t *testing.T) {
 	m.mu.Lock()
 	m.pollers[1] = p
 	m.mu.Unlock()
-	if err := m.RtTorrentAction(ctx, 1, 0, rtHashA, "resume"); err == nil || !strings.Contains(err.Error(), "unknown rTorrent action") {
+	if err := m.RtTorrentAction(ctx, 1, rtHashA, "resume"); err == nil || !strings.Contains(err.Error(), "unknown rTorrent action") {
 		t.Fatal(err)
 	}
-	if err := m.RtTorrentAction(ctx, 1, 0, rtHashA, "stop"); !errors.Is(err, ErrDisabled) {
+	if err := m.RtTorrentAction(ctx, 1, rtHashA, "stop"); !errors.Is(err, ErrDisabled) {
 		t.Fatal(err)
 	}
 	if _, err := m.RtAddTorrents(ctx, 1, qbt.AddRequest{}); !errors.Is(err, ErrDisabled) {
@@ -578,7 +578,7 @@ func TestManagerRtGuards(t *testing.T) {
 	}
 	p.box.Enabled = true
 	readyRt(t, p, "unix:/home/u/.rtorrent.socket")
-	if err := m.RtTorrentAction(ctx, 1, 0, rtHashA, "start"); err != nil {
+	if err := m.RtTorrentAction(ctx, 1, rtHashA, "start"); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(f.called(), ","); got != "d.open,d.start,d.resume" {

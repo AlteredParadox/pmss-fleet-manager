@@ -237,3 +237,15 @@ test('monitor-only shows the rTorrent discovery state without a click hint, keep
   assert.doesNotMatch(s, /click/);
   assert.equal(V.rtDiscoveryHint(dht), `${s} — click to disable (saved to ~/.rtorrent.rc.custom)`);
 });
+
+test('a box control sends the revision it was drawn from, not a later one (fred on PR 136)', () => {
+  const html = `<button ${V.boxRef({ id: 3, box_rev: 7 })} data-act="qbt:restart">`;
+  const ds = Object.fromEntries([...html.matchAll(/data-(box|rev)="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+  assert.deepEqual(ds, { box: '3', rev: '7' });
+  // The record moves on to revision 8; the control drawn at 7 still says 7.
+  assert.equal(V.boxPath(ds, 'qbt/restart'), '/api/boxes/3/qbt/restart?rev=7');
+  assert.equal(V.boxPath(ds, 'containers/abc/stop'), '/api/boxes/3/containers/abc/stop?rev=7');
+  // A control without a reference sends none, which the server refuses (400).
+  assert.equal(V.boxPath({}, 'qbt/stop'), '/api/boxes//qbt/stop?rev=');
+  assert.equal(V.boxRef({ id: '<x>', box_rev: '"' }), 'data-box="0" data-rev="0"', 'numbers only in the markup');
+});

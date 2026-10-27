@@ -18,8 +18,9 @@
    app.js and exposed as globalThis.pfmView so `node --test` can exercise
    the markup and wording they produce (internal/web/view_test.mjs): the
    overview's cpu / ram meters and host-share predicates, client
-   availability and per-torrent controls, add summaries, table sorting and
-   the rTorrent DHT / PeX toggle wording. */
+   availability and per-torrent controls, add summaries, table sorting,
+   the rTorrent DHT / PeX toggle wording and the box/revision a box control
+   carries. */
 (() => {
 'use strict';
 
@@ -261,6 +262,18 @@ function rtDiscoveryState(d) {
   if (d.k === 'pex') s += PEX_KEEP;
   return s;
 }
+// A box control names the box and the record revision it was drawn from
+// (data-box / data-rev), and its request sends them back (boxPath, from the
+// control's dataset or an add draft opened from one): a control drawn
+// before an edit is refused (409) rather than run on the edited box, even
+// when the page has not redrawn yet (fred on PR 136).
+function boxRef(b) {
+  return `data-box="${Number(b?.id) || 0}" data-rev="${Number(b?.box_rev) || 0}"`;
+}
+function boxPath(ref, path) {
+  return `/api/boxes/${encodeURIComponent(ref?.box ?? '')}/${path}?rev=${encodeURIComponent(ref?.rev ?? '')}`;
+}
+
 function rtDiscoveryHint(d) {
   return `${rtDiscoveryState(d)} — click to ${d.on ? 'disable' : 'enable'} (saved to ~/.rtorrent.rc.custom)`;
 }
@@ -279,5 +292,5 @@ function rtDiscoveryOn(r) {
   return { labels, title: why.length ? `${why.join('; ')} — private trackers usually forbid these` : '' };
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn };
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath };
 })();

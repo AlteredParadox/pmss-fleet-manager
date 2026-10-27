@@ -709,10 +709,10 @@ func decodeRemoved(dec *json.Decoder, maxEntries int) ([]string, error) {
 		if err := dec.Decode(&h); err != nil {
 			return nil, err
 		}
-		if len(h) > maxHashLen {
-			return nil, fmt.Errorf("removed key longer than %d bytes", maxHashLen)
+		if !ValidHash(h) {
+			return nil, fmt.Errorf("removed key %.80q is not an info-hash", h)
 		}
-		out = append(out, h)
+		out = append(out, strings.ToLower(h))
 	}
 	return out, expectDelim(dec, ']')
 }
@@ -812,9 +812,12 @@ func (s syncState) apply(d *mainDelta, requestedFull bool) (syncState, error) {
 		// The map key is the torrent's identity; a nested "hash" never
 		// overrides it, so a row cannot describe one torrent while its
 		// actions name another (daybreak blue audit of 7506bd4).
+		// Kept lower-cased, as removals are, so a peer that varies the
+		// case cannot leave a stale or duplicate row.
 		if !ValidHash(hash) {
 			return s, fmt.Errorf("torrent key %.80q is not an info-hash", hash)
 		}
+		hash = strings.ToLower(hash)
 		var t Torrent
 		if !full {
 			t = s.torrents[hash] // zero when new
@@ -822,7 +825,7 @@ func (s syncState) apply(d *mainDelta, requestedFull bool) (syncState, error) {
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return s, fmt.Errorf("torrent %s: %w", hash, err)
 		}
-		t.Hash = strings.ToLower(hash)
+		t.Hash = hash
 		updates[hash] = t.clipped()
 	}
 	if full {

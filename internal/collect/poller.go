@@ -1578,6 +1578,9 @@ func (p *poller) qbtAction(ctx context.Context, action string) error {
 	defer cancel()
 	switch action {
 	case "start":
+		if p.pmssManagedQbt() {
+			return errPMSSManagedStart
+		}
 		cli, err := p.conn(actx)
 		if err != nil {
 			return err

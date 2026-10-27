@@ -93,7 +93,9 @@ the dashboard flags such a helper next to the autostart row, and "reapply"
 rewrites it after saving the old one to
 `~/.config/pmss-fleet-manager/qbt-start.bak`. Where qBittorrent is enabled in
 the Pulsed Media panel, PMSS runs and configures it itself: the dashboard
-still monitors it, but refuses to install or autostart a build of its own.
+still monitors it, but refuses to install, autostart or start a build of its
+own, and its restart only stops the client and leaves starting it to the
+panel's watchdog.
 
 **Alerts.** Unreachable box, suspended account, disk at threshold or over
 quota, traffic at threshold, throttled, qBittorrent or Docker down,
@@ -518,7 +520,10 @@ confirm the port is still bound by your account. Switching SSH auth to a key or 
 removes the saved SSH password; a checkbox removes the saved WebUI password.
 Over the API, an edit (`PUT /api/boxes/{id}`) must carry the record's
 `revision` as `GET` returned it; a stale one is refused with 409 and the
-current record, which the edit form reloads into itself.
+current record, which the edit form reloads into itself. Every request
+that acts on a box (torrent, client, discovery and container actions,
+adding torrents) must carry `?rev=` with the box's `box_rev` from
+`GET /api/state`: 400 without it, 409 when the box was edited since.
 An edit that moves the box to another host, port or account, or forgets
 the pinned host key, starts it over as a new machine: nothing the old one
 reported is carried or restored, its alerts except the renewal one are
@@ -750,9 +755,10 @@ These are the design decisions that came out of it.
   so a box that is down comes back as down after a dashboard restart and its
   acknowledged alert stays acknowledged. An alert whose source could not be
   read on a poll is kept rather than resolved and re-raised. Retries back off
-  to every ten minutes, with "retry now" to reconnect at once. A torrent
-  button carries the box revision it was drawn at and is refused after an
-  edit; an edit landing in the moment between that check and the action
+  to every ten minutes, with "retry now" to reconnect at once. Every
+  request that acts on a box (torrent, client, discovery and container
+  actions, adding torrents) carries the box revision the page was drawn at
+  as `?rev=` and is refused with 409 after an edit; an edit landing in the moment between that check and the action
   reaching the box is not locked out, which is accepted for a dashboard
   with one operator.
 - **Monitor-only mode.** `-monitor-only` refuses, server-side, every action
@@ -902,6 +908,22 @@ Newest first; each release's full notes are on the
   as usual, and the discovery settings still show their state (with ↻ while
   rTorrent waits for a restart). (Request from a rootless
   Podman user.)
+- Every action on a box, not only torrent actions, carries the box revision
+  the page was drawn at (`?rev=`, required over the API) and is refused with
+  409 after an edit, so a tab drawn before an edit cannot act on the edited
+  box. **API change:** a script that calls these routes directly (a nightly
+  qBittorrent restart, adding torrents, discovery or container actions)
+  now gets 400 without `?rev=` and 409 with an old one. Read the box's
+  `box_rev` from `GET /api/state` first and pass it as `?rev=`. The
+  dashboard's own pages already do.
+- Panel-managed qBittorrent: start is refused and restart only stops the
+  client, leaving the start to Pulsed Media's watchdog, as install and
+  autostart already were.
+- Container actions and log reads take the full container id the poll
+  lists; an abbreviated one is refused. qBittorrent sync keeps removed
+  hashes lower-cased like the rows; the download URL is checked by one rule
+  at save and at install (https, URL characters, at most 2048 bytes); an
+  edit whose read-back fails says so instead of answering 200 with nothing.
 - The qBittorrent start command and download URL are encrypted with the
   stored credentials when a secret is set, since either may carry a token;
   the first start of this release with a secret encrypts them in place.

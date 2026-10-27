@@ -107,7 +107,7 @@ jobs:
       # every capability dropped, no-new-privileges), creates its database
       # on the volume and answers the state endpoint; its own HEALTHCHECK
       # turns healthy; and an upload past 1 MiB is parsed without a writable
-      # temp directory (an unknown box answers 404 after the form is read; a
+      # temp directory (a disabled box answers 409 after the form is read; a
       # parse failure would be 400).
       - name: Run image
         run: |
@@ -125,6 +125,10 @@ jobs:
           done
           [ "$health" = healthy ] || { echo "health: $health"; docker inspect -f '{{json .State.Health}}' smoke; docker logs smoke; exit 1; }
           python3 -c "import sys; sys.stdout.buffer.write(b'd4:info' + b'x' * (2 << 20) + b'e')" > big.torrent
-          code=$(curl -s -o resp.txt -w '%{http_code}' -H 'X-PMSS-Request: 1' -F torrents=@big.torrent http://127.0.0.1:8080/api/boxes/999/qbt/torrents)
-          [ "$code" = 404 ] || { echo "upload: $code $(cat resp.txt)"; docker logs smoke; exit 1; }
+          box=$(curl -sf -H 'X-PMSS-Request: 1' -H 'Content-Type: application/json' \
+            -d '{"name":"smoke","host":"smoke.invalid","user":"u","enabled":false}' http://127.0.0.1:8080/api/boxes) \
+            || { echo "create box failed"; docker logs smoke; exit 1; }
+          id=$(echo "$box" | jq -r .id) rev=$(echo "$box" | jq -r .revision)
+          code=$(curl -s -o resp.txt -w '%{http_code}' -H 'X-PMSS-Request: 1' -F torrents=@big.torrent "http://127.0.0.1:8080/api/boxes/$id/qbt/torrents?rev=$rev")
+          [ "$code" = 409 ] && grep -q disabled resp.txt || { echo "upload: $code $(cat resp.txt)"; docker logs smoke; exit 1; }
           docker stop smoke >/dev/null

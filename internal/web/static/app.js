@@ -606,16 +606,18 @@ function viewBox() {
     ${body}`;
 }
 // restart/stop (client running) or start (client down) buttons; nothing when monitoring is off.
+// A panel-managed client is started by Pulsed Media's watchdog: restart only stops it, and there is no start.
 function boxPowerBtn(b, q) {
   if (S.monitorOnly) return '';
+  const again = q.pmss_managed ? 'then Pulsed Media\'s watchdog starts it again' : 'then started again with the box\'s start command (default: ~/bin/qbt-start when present)';
   return q.enabled ? (q.process_up
-    ? `<button data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(b.name)}? It is asked to exit cleanly, then started again with the box's start command (default: ~/bin/qbt-start when present)">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(b.name)}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
-    : `<button data-act="qbt:start">start client</button>`) : '';
+    ? `<button ${boxRef(b)} data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(b.name)}? It is asked to exit cleanly, ${again}">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button ${boxRef(b)} data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(b.name)}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
+    : q.pmss_managed ? '' : `<button ${boxRef(b)} data-act="qbt:start">start client</button>`) : '';
 }
 function boxInstallBtn(b, q) {
   if (q.pmss_managed || S.monitorOnly) return '';
   return (q.enabled || q.installed || b.type === 'seedbox')
-    ? `<button data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(b.name) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(b.name) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
+    ? `<button ${boxRef(b)} data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(b.name) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(b.name) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
 }
 function boxActions(b) {
   return `<div class="actions">
@@ -720,7 +722,7 @@ function ovBinaryRow(q) {
 function ovAutostartRow(b, q) {
   if (q.pmss_managed) return `<div><span>autostart</span><span class="muted">Pulsed Media watchdog</span></div>`;
   const stale = q.start_helper_stale ? ' <span class="warn" title="~/bin/qbt-start checks for a running client with $USER, which is empty under cron, so every cron run starts another copy. Reapply rewrites the helper (the old one is saved to ~/.config/pmss-fleet-manager/qbt-start.bak).">helper needs a rewrite</span>' : '';
-  return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'}${stale}${S.monitorOnly ? '' : ` <button class="small ghost" data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing, or if it keys on $USER, which is empty under cron) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept; a replaced helper is saved first.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button>`}</span></div>`;
+  return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'}${stale}${S.monitorOnly ? '' : ` <button class="small ghost" ${boxRef(b)} data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing, or if it keys on $USER, which is empty under cron) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept; a replaced helper is saved first.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button>`}</span></div>`;
 }
 // binary + autostart rows: shown whenever the client is monitored or at least present on the box.
 function ovAutostartRows(b, q) {
@@ -902,9 +904,9 @@ function clientSection(b, c, f, first) {
       <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span>${removeFailed}</div>
       <div class="actions">
         ${first ? `<input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">` : ''}
-        ${c.key === 'qbt' && !S.monitorOnly ? `<button class="small" data-act="qbt:pause" title="stop every torrent in qBittorrent" data-confirm="Stop all torrents in qBittorrent on ${esc(b.name)}?">stop all</button>
-        <button class="small" data-act="qbt:resume" title="start every torrent, including any stopped on purpose">start all</button>` : ''}
-        ${avail.stopped || S.monitorOnly ? '' : `<button class="small" data-act="tor-add:toggle" data-client="${c.key}">${addOpen ? 'close' : 'add'}</button>`}
+        ${c.key === 'qbt' && !S.monitorOnly ? `<button class="small" ${boxRef(b)} data-act="qbt:pause" title="stop every torrent in qBittorrent" data-confirm="Stop all torrents in qBittorrent on ${esc(b.name)}?">stop all</button>
+        <button class="small" ${boxRef(b)} data-act="qbt:resume" title="start every torrent, including any stopped on purpose">start all</button>` : ''}
+        ${avail.stopped || S.monitorOnly ? '' : `<button class="small" ${boxRef(b)} data-act="tor-add:toggle" data-client="${c.key}">${addOpen ? 'close' : 'add'}</button>`}
       </div>
     </div>
     ${addOpen ? torAddForm(b, q.torrents || [], c) : ''}
@@ -934,7 +936,7 @@ function rtDiscoveryNote(r, b) {
   if (!list.length) return '';
   return ' · ' + list.map((d) => {
     if (S.monitorOnly) return discState(`${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}`, d.warn, pfmView.rtDiscoveryState(d));
-    return `<button class="disc ${d.warn ? 'warn' : ''}" data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(pfmView.rtDiscoveryHint(d))}"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(b.name)}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
+    return `<button class="disc ${d.warn ? 'warn' : ''}" ${boxRef(b)} data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(pfmView.rtDiscoveryHint(d))}"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(b.name)}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
   }).join(' · ') + ' · <span class="disc na" title="rTorrent has no local service discovery">LSD n/a</span>';
 }
 
@@ -1059,7 +1061,7 @@ function discoveryNote(q, b) {
   return ' · ' + DISCOVERY.map(([k, l]) => {
     const on = q.discovery[k];
     if (S.monitorOnly) return discState(`${l} ${on ? 'on' : 'off'}`, on, `${l} ${on ? 'enabled' : 'disabled'}`);
-    return `<button class="disc ${on ? 'warn' : ''}" data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(b.name)}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
+    return `<button class="disc ${on ? 'warn' : ''}" ${boxRef(b)} data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(b.name)}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
   }).join(' · ');
 }
 // Toast after an add. qBittorrent 5.2+ reports per-entry counts; older
@@ -1104,8 +1106,8 @@ function torAddForm(b, list, c) {
       <datalist id="tor-cats">${cats.map((c) => `<option value="${esc(c)}">`).join('')}</datalist></label>
     <label class="row" style="align-self:end"><input type="checkbox" data-ta="stopped" ${a.stopped ? 'checked' : ''}> add stopped</label>
     <div class="actions" style="align-self:end">
-      <button type="submit" class="small" data-act="tor-add:submit" ${a.busy ? 'disabled' : ''}>${a.busy ? 'adding…' : `add to ${c ? c.label + ' on ' : ''}${esc(b.name)}`}</button>
-      <button type="button" class="small ghost" data-act="tor-add:toggle" data-client="${esc(c?.key || 'qbt')}">cancel</button>
+      <button type="submit" class="small" ${boxRef(b)} data-act="tor-add:submit" ${a.busy ? 'disabled' : ''}>${a.busy ? 'adding…' : `add to ${c ? c.label + ' on ' : ''}${esc(b.name)}`}</button>
+      <button type="button" class="small ghost" ${boxRef(b)} data-act="tor-add:toggle" data-client="${esc(c?.key || 'qbt')}">cancel</button>
     </div>
   </form>`;
 }
@@ -1159,7 +1161,7 @@ function tabContainers(b) {
         <span class="num">${c.has_stats ? c.cpu_pct.toFixed(1) + '%' : '—'}</span>
         <span class="num">${c.has_stats ? fmtBytes(c.mem_usage, 0) : '—'}</span>
         <span class="actions" style="justify-content:flex-end">
-          ${S.monitorOnly ? '' : run ? `<button class="small" data-act="ctr:restart" data-cid="${esc(c.id)}" data-confirm="Restart ${esc(c.name)}?">restart</button><button class="small" data-act="ctr:stop" data-cid="${esc(c.id)}" data-confirm="Stop ${esc(c.name)}?">stop</button>` : `<button class="small" data-act="ctr:start" data-cid="${esc(c.id)}">start</button>`}
+          ${S.monitorOnly ? '' : run ? `<button class="small" ${boxRef(b)} data-act="ctr:restart" data-cid="${esc(c.id)}" data-confirm="Restart ${esc(c.name)}?">restart</button><button class="small" ${boxRef(b)} data-act="ctr:stop" data-cid="${esc(c.id)}" data-confirm="Stop ${esc(c.name)}?">stop</button>` : `<button class="small" ${boxRef(b)} data-act="ctr:start" data-cid="${esc(c.id)}">start</button>`}
         </span>
       </div>`;
       }).join('')}
@@ -1822,11 +1824,14 @@ async function boxAction(a) {
   else if (a === 'du') { const id = S.selId; await api('POST', `${BASE}/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
   else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `${BASE}/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
 }
+// The box and revision a control was drawn from (see pfmView.boxRef).
+function boxRef(b) { return pfmView.boxRef(b); }
+function boxURL(ref, path) { return BASE + pfmView.boxPath(ref, path); }
 async function qbtAction(a, act) {
   const what = a.slice(4);
   act.disabled = true;
   if (what === 'install') toast('downloading qbittorrent-nox on the box…');
-  const r = await api('POST', `${BASE}/api/boxes/${S.selId}/qbt/${what}`);
+  const r = await api('POST', boxURL(act.dataset, `qbt/${what}`));
   toast(`qBittorrent ${{ pause: 'stop all', resume: 'start all' }[what] || what}: ok${r?.output ? ' — ' + r.output.split('\n').slice(0, 2).join(' · ') : ''}`, 'ok');
 }
 async function torrentAction(a, act) {
@@ -1843,7 +1848,7 @@ async function discoveryAction(a, act) {
   act.disabled = true;
   // rTorrent: saved to ~/.rtorrent.rc.custom, then applied live; the
   // answer says when the running client could not follow (restart).
-  const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${rt ? 'rtorrent' : 'qbt'}/discovery`, { [k]: on });
+  const r = await api('POST', boxURL(act.dataset, `${rt ? 'rtorrent' : 'qbt'}/discovery`), { [k]: on });
   if (rt) { const m = pfmView.rtDiscoveryToast(k, on, r); toast(m.text, m.kind); }
   else toast(`${label} ${on ? 'enabled' : 'disabled'}`, 'ok');
   await loadDetail(S.selId);
@@ -1853,7 +1858,7 @@ async function torAddAction(a, act) {
     // One draft at a time; the button says which client it is for, and a
     // click on another client's button moves the (empty) form there.
     const client = act?.dataset.client || 'qbt';
-    S.torAdd = S.torAdd && (S.torAdd.client || 'qbt') === client ? null : { urls: '', category: '', stopped: false, files: [], busy: false, client };
+    S.torAdd = S.torAdd && (S.torAdd.client || 'qbt') === client ? null : { urls: '', category: '', stopped: false, files: [], busy: false, client, box: act?.dataset.box, rev: act?.dataset.rev };
     render(); return;
   }
   const d = S.torAdd;
@@ -1866,7 +1871,7 @@ async function torAddAction(a, act) {
   d.busy = true; render();
   try {
     const seg = d.client === 'rtorrent' ? 'rtorrent' : 'qbt';
-    const r = await api('POST', `${BASE}/api/boxes/${S.selId}/${seg}/torrents`, fd);
+    const r = await api('POST', boxURL(d, `${seg}/torrents`), fd);
     toast(addToast(r, d.stopped, d.client), r?.failed || r?.unlabelled || r?.stopped_early ? 'warn' : 'ok');
     if (S.torAdd === d) S.torAdd = null; // not a draft the user opened meanwhile
   } finally {
@@ -1901,7 +1906,7 @@ async function appWatchAction(act) {
   await loadDetail(S.selId);
 }
 async function containerAction(a, act) {
-  act.disabled = true; await api('POST', `${BASE}/api/boxes/${S.selId}/containers/${act.dataset.cid}/${a.slice(4)}`); toast(`container ${a.slice(4)} ok`, 'ok');
+  act.disabled = true; await api('POST', boxURL(act.dataset, `containers/${encodeURIComponent(act.dataset.cid)}/${a.slice(4)}`)); toast(`container ${a.slice(4)} ok`, 'ok');
 }
 async function alertsAction(a, act) {
   if (a === 'ack') { act.disabled = true; await api('POST', `${BASE}/api/alerts/${act.dataset.id}/ack`); toast('acknowledged', 'ok'); await loadAlerts(); }

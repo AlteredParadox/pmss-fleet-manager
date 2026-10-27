@@ -48,10 +48,10 @@ var ErrDisabled = errors.New("polling is disabled for this box; enable it before
 // current generation has read them (BoxState.Ready).
 var ErrNotReady = errors.New("the box has not been probed since it was added, moved or the dashboard started; wait for the first poll")
 
-// ErrStaleBox is returned by a torrent action that names a box record
-// revision other than the current one: the button was drawn before an edit
-// (perhaps to another machine), so the torrent it names may not be the one
-// the operator saw (daybreak blue audit of 7506bd4).
+// ErrStaleBox is returned by CheckBoxRevision for a request that names a
+// box record revision other than the current one: the button was drawn
+// before an edit (perhaps to another machine), so what it acts on may not
+// be what the operator saw (daybreak blue audits of 7506bd4 and 9e59106).
 var ErrStaleBox = errors.New("this box was edited since the page was drawn; reload and try again")
 
 // Manager owns one poller per box.
@@ -838,15 +838,11 @@ var ErrUnavailable = errors.New("box not reachable")
 // QbtAction performs pause|resume|start|stop|restart|install|autostart on the
 // box's qBittorrent and returns any output worth showing.
 func (m *Manager) QbtAction(ctx context.Context, id int64, action string) (string, error) {
-	p := m.poller(id)
-	if p == nil {
-		return "", store.ErrNotFound
-	}
-	if !p.box.Enabled {
-		return "", ErrDisabled
+	p, err := m.actionPoller(ctx, id)
+	if err != nil {
+		return "", err
 	}
 	var out string
-	var err error
 	switch action {
 	case "install":
 		out, err = p.qbtInstall(ctx, m.Settings().QbtDownloadURL)
@@ -944,22 +940,18 @@ func (m *Manager) SetAppWatch(ctx context.Context, id int64, key string, on bool
 
 // ContainerAction performs start|stop|restart on a container.
 func (m *Manager) ContainerAction(ctx context.Context, id int64, cid, action string) error {
-	p := m.poller(id)
-	if p == nil {
-		return store.ErrNotFound
+	p, err := m.actionPoller(ctx, id)
+	if err != nil {
+		return err
 	}
-	if !p.box.Enabled {
-		return ErrDisabled
-	}
-	err := p.containerAction(ctx, cid, action)
+	err = p.containerAction(ctx, cid, action)
 	p.wake()
 	return err
 }
 
-// TorrentAction performs one qbt.ValidAction action on a single torrent
-// and wakes the poller so the list reflects it promptly. rev is the box
-// record revision the request was drawn from (BoxState.BoxRev).
-func (m *Manager) TorrentAction(ctx context.Context, id, rev int64, hash, action string) error {
+// CheckBoxRevision refuses a box-changing request drawn from another
+// revision of the box record than the one running (BoxState.BoxRev).
+func (m *Manager) CheckBoxRevision(id, rev int64) error {
 	p := m.poller(id)
 	if p == nil {
 		return store.ErrNotFound
@@ -967,32 +959,59 @@ func (m *Manager) TorrentAction(ctx context.Context, id, rev int64, hash, action
 	if p.box.Revision != rev {
 		return ErrStaleBox
 	}
-	if !p.box.Enabled {
-		return ErrDisabled
+	return nil
+}
+
+type boxRevKey struct{}
+
+// WithBoxRevision records on ctx the box record revision a request was
+// drawn from; every action then checks it against the poller it runs on
+// (actionPoller), after the request body was read, so a box edited while
+// a slow upload arrived is refused rather than acted on (fred on PR 136).
+func WithBoxRevision(ctx context.Context, rev int64) context.Context {
+	return context.WithValue(ctx, boxRevKey{}, rev)
+}
+
+// actionPoller is the poller an action on box id runs on: it exists, it
+// is the revision ctx names (if any, see WithBoxRevision), and polling is
+// enabled.
+func (m *Manager) actionPoller(ctx context.Context, id int64) (*poller, error) {
+	p := m.poller(id)
+	if p == nil {
+		return nil, store.ErrNotFound
 	}
-	err := p.torrentAction(ctx, hash, action)
+	if rev, ok := ctx.Value(boxRevKey{}).(int64); ok && p.box.Revision != rev {
+		return nil, ErrStaleBox
+	}
+	if !p.box.Enabled {
+		return nil, ErrDisabled
+	}
+	return p, nil
+}
+
+// TorrentAction performs one qbt.ValidAction action on a single torrent
+// and wakes the poller so the list reflects it promptly.
+func (m *Manager) TorrentAction(ctx context.Context, id int64, hash, action string) error {
+	p, err := m.actionPoller(ctx, id)
+	if err != nil {
+		return err
+	}
+	err = p.torrentAction(ctx, hash, action)
 	p.wake()
 	return err
 }
 
 // RtTorrentAction performs one ValidRtAction action on a torrent in the
-// box's rTorrent and wakes the poller so the list reflects it promptly; rev
-// as for TorrentAction.
-func (m *Manager) RtTorrentAction(ctx context.Context, id, rev int64, hash, action string) error {
+// box's rTorrent and wakes the poller so the list reflects it promptly.
+func (m *Manager) RtTorrentAction(ctx context.Context, id int64, hash, action string) error {
 	if !ValidRtAction(action) {
 		return fmt.Errorf("unknown rTorrent action %q", action)
 	}
-	p := m.poller(id)
-	if p == nil {
-		return store.ErrNotFound
+	p, err := m.actionPoller(ctx, id)
+	if err != nil {
+		return err
 	}
-	if p.box.Revision != rev {
-		return ErrStaleBox
-	}
-	if !p.box.Enabled {
-		return ErrDisabled
-	}
-	err := p.rtTorrentAction(ctx, hash, action)
+	err = p.rtTorrentAction(ctx, hash, action)
 	p.wake()
 	return err
 }
@@ -1147,12 +1166,9 @@ func (m *Manager) applyRtRemove(b *store.Box, st *BoxState, live bool, liveMsg s
 
 // RtAddTorrents adds links and/or .torrent files to the box's rTorrent.
 func (m *Manager) RtAddTorrents(ctx context.Context, id int64, req qbt.AddRequest) (rtorrent.AddResult, error) {
-	p := m.poller(id)
-	if p == nil {
-		return rtorrent.AddResult{}, store.ErrNotFound
-	}
-	if !p.box.Enabled {
-		return rtorrent.AddResult{}, ErrDisabled
+	p, err := m.actionPoller(ctx, id)
+	if err != nil {
+		return rtorrent.AddResult{}, err
 	}
 	res, err := p.rtAddTorrents(ctx, req)
 	p.wake()
@@ -1172,12 +1188,9 @@ func ValidDiscoveryKey(k string) bool {
 // SetDiscovery flips peer-discovery switches on the box's qBittorrent and
 // reflects them in the cached state at once; the next poll re-reads them.
 func (m *Manager) SetDiscovery(ctx context.Context, id int64, want map[string]bool) error {
-	p := m.poller(id)
-	if p == nil {
-		return store.ErrNotFound
-	}
-	if !p.box.Enabled {
-		return ErrDisabled
+	p, err := m.actionPoller(ctx, id)
+	if err != nil {
+		return err
 	}
 	prefs := make(map[string]any, len(want))
 	for k, v := range want {
@@ -1189,7 +1202,7 @@ func (m *Manager) SetDiscovery(ctx context.Context, id int64, want map[string]bo
 	if len(prefs) == 0 {
 		return errors.New("nothing to change")
 	}
-	err := p.setDiscovery(ctx, prefs)
+	err = p.setDiscovery(ctx, prefs)
 	if err == nil {
 		m.mutateState(id, func(s *BoxState) {
 			p.noteDiscovery(want) // under the store lock, see QbtAction
@@ -1214,12 +1227,9 @@ func (m *Manager) SetDiscovery(ctx context.Context, id int64, want map[string]bo
 
 // AddTorrents adds links and/or .torrent files to the box's qBittorrent.
 func (m *Manager) AddTorrents(ctx context.Context, id int64, req qbt.AddRequest) (qbt.AddResult, error) {
-	p := m.poller(id)
-	if p == nil {
-		return qbt.AddResult{}, store.ErrNotFound
-	}
-	if !p.box.Enabled {
-		return qbt.AddResult{}, ErrDisabled
+	p, err := m.actionPoller(ctx, id)
+	if err != nil {
+		return qbt.AddResult{}, err
 	}
 	res, err := p.addTorrents(ctx, req)
 	p.wake()
