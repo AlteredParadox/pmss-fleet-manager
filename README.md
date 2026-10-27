@@ -160,7 +160,7 @@ root are on the same kernel as the database and the process memory. That
 is outside the threat model; see *Security and hardening*.
 
 ```sh
-make build                                 # or: go build -o pmss-fleet-manager ./cmd/pmss-fleet-manager
+make build -j $(nproc)                     # or: go build -o pmss-fleet-manager ./cmd/pmss-fleet-manager
 ./pmss-fleet-manager                       # http://127.0.0.1:8080, data in ./data
 mkdir -p -m 700 ~/.config/pmss-fleet-manager
 (umask 077; printf '%s' 'me:secret' > ~/.config/pmss-fleet-manager/auth)
