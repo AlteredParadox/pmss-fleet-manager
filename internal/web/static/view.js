@@ -158,7 +158,14 @@ function addSummary(r, stopped, client) {
     const parts = [`${r?.added || 0} added to rTorrent${tail}`];
     if (r?.failed) parts.push(`${r.failed} not added (refused by rTorrent or not a torrent)`);
     if (r?.unlabelled) parts.push(`${r.unlabelled} loaded, label not applied or confirmed`);
-    if (r?.stopped_early) parts.push(`then the batch stopped (${r.stopped_early}); the entry being sent may have been accepted, so check rTorrent before retrying`);
+    // uncertain is set only when the stopping entry was sent and its reply
+    // lost; otherwise that entry was refused before sending (daybreak blue
+    // audit of 7506bd4).
+    if (r?.stopped_early) {
+      parts.push(r.uncertain > 0
+        ? `then the batch stopped (${r.stopped_early}); the entry being sent may have been accepted, so check rTorrent before retrying`
+        : `then the batch stopped (${r.stopped_early}); the next entry was not sent and the rest were not tried`);
+    }
     return parts.join('; ');
   }
   if (!r?.counted) {

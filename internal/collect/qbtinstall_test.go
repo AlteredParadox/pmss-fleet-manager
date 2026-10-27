@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -318,5 +319,18 @@ func TestVerifyChecksumShell(t *testing.T) {
 	}
 	if out, err, kept := run(""); err != nil || !kept || !strings.Contains(out, "not verified") {
 		t.Fatalf("no digest: %v kept=%v %s", err, kept, out)
+	}
+}
+
+// A version part must start with a digit; only its digit prefix counts
+// (daybreak blue audit of 7506bd4).
+func TestVersionPartsNeedLeadingDigit(t *testing.T) {
+	for v, want := range map[string][]int{
+		"v5.1.2": {5, 1, 2}, "5.0.4-1": {5, 0, 4}, "4.6.3rc1": {4, 6, 3},
+		"v5.foo2.1": nil, "x5.1.2": nil, "5.1": nil, "": nil,
+	} {
+		if got := versionParts(v); !slices.Equal(got, want) {
+			t.Errorf("%q: %v, want %v", v, got, want)
+		}
 	}
 }

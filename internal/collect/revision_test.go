@@ -301,3 +301,31 @@ func TestAlertRevisionOrdersCounts(t *testing.T) {
 		last = ev.AlertsRev
 	}
 }
+
+// A count that cannot be read is published as the last one read, not as
+// zero under a new revision (daybreak blue audit of 7506bd4).
+func TestAlertCountKeptWhenUnreadable(t *testing.T) {
+	ctx := context.Background()
+	m, boxes := revTestManager(t, 1)
+	if _, err := m.st.RaiseAlert(ctx, boxes[0].ID, "disk", "warn", "disk"); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := m.AlertsView(ctx); n != 1 {
+		t.Fatalf("count %d", n)
+	}
+	m.Stop()
+	m.st.Close() // every read fails from here
+	n, rev := m.AlertsView(ctx)
+	ch, cancel := m.Bus().Subscribe()
+	defer cancel()
+	m.Publish(Event{Type: "alerts"})
+	var ev Event
+	select {
+	case ev = <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event")
+	}
+	if n != 1 || ev.Unacked != 1 || ev.AlertsRev != rev+1 {
+		t.Fatalf("unreadable count: view %d@%d, event %+v", n, rev, ev)
+	}
+}

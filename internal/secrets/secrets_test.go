@@ -17,6 +17,7 @@
 package secrets
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"os"
@@ -236,5 +237,22 @@ func TestEnvelope(t *testing.T) {
 		case tc.version == 1 && !tc.ok && !errors.Is(err, ErrWrongKey):
 			t.Errorf("Open(%q) = %q %v, want ErrWrongKey", tc.in, got, err)
 		}
+	}
+}
+
+// The secret file is read with a cap (daybreak blue audit of 7506bd4).
+func TestLoadRefusesHugeFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("s"), maxSecretFile+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(CurrentNames, "", path); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("huge file: %v", err)
+	}
+	if err := os.WriteFile(path, bytes.Repeat([]byte("s"), maxSecretFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := Load(CurrentNames, "", path); err != nil || len(l.Master) != maxSecretFile {
+		t.Fatalf("at the cap: %v", err)
 	}
 }

@@ -154,8 +154,13 @@ is outside the threat model; see *Security and hardening*.
 ```sh
 make build                                 # or: go build -o pmss-fleet-manager ./cmd/pmss-fleet-manager
 ./pmss-fleet-manager                       # http://127.0.0.1:8080, data in ./data
-./pmss-fleet-manager -listen 127.0.0.1:8080,10.11.0.13:8080 -auth me:secret -data /var/lib/pmss-fleet-manager
+mkdir -p -m 700 ~/.config/pmss-fleet-manager
+(umask 077; printf '%s' 'me:secret' > ~/.config/pmss-fleet-manager/auth)
+./pmss-fleet-manager -listen 127.0.0.1:8080,10.11.0.13:8080 -auth-file ~/.config/pmss-fleet-manager/auth -data /var/lib/pmss-fleet-manager
 ```
+
+`-auth me:secret` works too, but it puts the password in the process list,
+where every user on the machine can read it.
 
 Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 `PMSS_AUTH`, `PMSS_AUTH_FILE`, `PMSS_SSH_KEY`, `PMSS_LOG`,
@@ -731,7 +736,11 @@ These are the design decisions that came out of it.
   so a box that is down comes back as down after a dashboard restart and its
   acknowledged alert stays acknowledged. An alert whose source could not be
   read on a poll is kept rather than resolved and re-raised. Retries back off
-  to every ten minutes, with "retry now" to reconnect at once.
+  to every ten minutes, with "retry now" to reconnect at once. A torrent
+  button carries the box revision it was drawn at and is refused after an
+  edit; an edit landing in the moment between that check and the action
+  reaching the box is not locked out, which is accepted for a dashboard
+  with one operator.
 - **Web surface.** No authentication by default and bound to loopback: use
   `-auth` with a long random password, and put it behind a reverse proxy
   with TLS (and its own authentication or rate limiting) before exposing it
@@ -787,7 +796,10 @@ the project deliberately does not follow are listed in
 `sonar-project.properties` with a reason each (the escaped-innerHTML rendering
 style of the single-file frontend, the two loopback `http://` URLs, and
 cognitive complexity in the 17-25 band for parsers and view renderers);
-anything scoring higher than that has been split.
+anything scoring higher than that has been split. The scan hands
+`SONAR_TOKEN` to pull requests from branches of this repository (not forks or
+Dependabot), so everyone who can push a branch here is trusted with that
+token; today that is the maintainer alone.
 
 The frontend is vanilla JS and CSS in `internal/web/static`, embedded into the
 binary; there is no build step. `docs/ARCHITECTURE.md` lists the tenant-readable
@@ -888,6 +900,14 @@ Newest first; each release's full notes are on the
   inside the account's home, like a discovered one; qBittorrent rows always
   take their hash from the sync key, so a row and its actions name the same
   torrent; and qBittorrent's version output is capped in bytes.
+- Smaller fixes from the same audit: an rTorrent add that stopped before
+  sending its next entry no longer says that entry may have been accepted;
+  the alert badge keeps its last count when the count cannot be read,
+  instead of dropping to zero; an alert raised in a poll that then fails to
+  list the open ones is still notified; JSON request bodies must hold
+  exactly one value; a version part like "foo2" no longer reads as 2; the
+  GitHub release lookup and the secret file are read with a size cap; and
+  the Docker build context leaves out common local secret files.
 
 **1.10.0**
 

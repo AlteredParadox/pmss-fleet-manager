@@ -18,3 +18,11 @@ sonar-project.properties
 node_modules
 package.json
 package-lock.json
+# Local secrets never reach a (possibly remote) builder.
+.env
+.env.*
+*.pem
+*.key
+.ssh
+id_*
+secret

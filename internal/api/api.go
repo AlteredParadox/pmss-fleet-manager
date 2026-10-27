@@ -692,7 +692,19 @@ func endpointChanged(stored, edited *store.Box) (hostChanged, userChanged bool) 
 
 func decode(r *http.Request, v any) error {
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
-	return dec.Decode(v)
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	return onlyValue(dec)
+}
+
+// onlyValue refuses a body that has anything but whitespace after its one
+// JSON value (daybreak blue audit of 7506bd4).
+func onlyValue(dec *json.Decoder) error {
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("bad body: more than one JSON value")
+	}
+	return nil
 }
 
 // decodeStrict reads a small JSON body (4 KiB) and refuses unknown fields:
@@ -703,7 +715,7 @@ func decodeStrict(r *http.Request, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("bad body: %v", err)
 	}
-	return nil
+	return onlyValue(dec)
 }
 
 func (s *Server) handleListBoxes(w http.ResponseWriter, r *http.Request) {
