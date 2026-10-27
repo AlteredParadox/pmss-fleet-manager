@@ -31,6 +31,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/store"
@@ -374,6 +375,9 @@ func TestDecodeRelease(t *testing.T) {
 	}
 	if err := decodeRelease(strings.NewReader(`{"tag_name":"release-5.1.2_v2.0.11"} `), &rel); err != nil || rel.TagName != "release-5.1.2_v2.0.11" {
 		t.Fatalf("ok: %v %+v", err, rel)
+	}
+	if err := decodeRelease(iotest.ErrReader(errors.New("reset")), &rel); err == nil {
+		t.Error("read error: decoded")
 	}
 	pad := `{"tag_name":"x","pad":"` + strings.Repeat("a", maxRelease) + `"}`
 	for name, body := range map[string]string{"oversized": pad, "trailing": `{"tag_name":"x"}{"tag_name":"y"}`, "truncated": `{"tag_name":`} {

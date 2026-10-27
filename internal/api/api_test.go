@@ -34,6 +34,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -805,6 +806,40 @@ func TestEventsEndOnWriteError(t *testing.T) {
 	}
 	if len(s.sseSlots) != 0 {
 		t.Fatalf("slots held: %d", len(s.sseSlots))
+	}
+}
+
+// laterFailingWriter accepts the stream's opening frame, then fails.
+type laterFailingWriter struct {
+	*httptest.ResponseRecorder
+	writes *atomic.Int32
+}
+
+func (w laterFailingWriter) WriteString(s string) (int, error) {
+	if w.writes.Add(1) > 1 {
+		return 0, errors.New("write deadline exceeded")
+	}
+	return w.ResponseRecorder.WriteString(s)
+}
+
+// A write that fails mid-stream (an event after the opening frame) ends
+// the stream too.
+func TestEventsEndOnLaterWriteError(t *testing.T) {
+	s, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/api/events", nil)
+	req.Host = "dash.local:8080"
+	w := laterFailingWriter{httptest.NewRecorder(), new(atomic.Int32)}
+	done := make(chan struct{})
+	go func() { s.ServeHTTP(w, req); close(done) }()
+	for w.writes.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, rev := s.m.Snapshot()
+	s.m.Publish(collect.Event{Type: "state", BoxID: 1, Rev: rev + 1, State: &collect.BoxState{ID: 1}})
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream kept its slot after a failed event write")
 	}
 }
 
