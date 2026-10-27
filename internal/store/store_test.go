@@ -1512,3 +1512,45 @@ func TestRepairOfLostRowsOwesTheScrub(t *testing.T) {
 	s.Close()
 	noPlaintextIn(t, path, "zebra-unique-password")
 }
+
+// A store encrypted before the start command joined the secret columns
+// may hold a token that was cleared before the upgrade: nothing to
+// rewrite, but its old bytes can sit in free space. The inventory
+// advancing owes one scrub (daybreak blue audit of e8fe98c).
+func TestNewSecretColumnsScrubClearedPlaintext(t *testing.T) {
+	path, id := sealedFixture(t)
+	const token = "zebra-cleared-start-token"
+	// What a pre-1.12 build did: the command stored plain, later cleared,
+	// in a store marked sealed with no scrub owed and no inventory row.
+	rawExec(t, path, `UPDATE boxes SET qbt_start_cmd=? WHERE id=?`, "start --token="+token+strings.Repeat(" pad", 64), id)
+	rawExec(t, path, `UPDATE boxes SET qbt_start_cmd='' WHERE id=?`, id)
+	rawExec(t, path, `DELETE FROM settings WHERE key=?`, inventoryKey)
+	rawExec(t, path, `UPDATE settings SET value='0' WHERE key=?`, cleanupKey)
+	rawExec(t, path, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	contains := func() bool {
+		for _, side := range []string{"", "-wal"} {
+			data, err := os.ReadFile(path + side)
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), token) {
+				return true
+			}
+		}
+		return false
+	}
+	if !contains() {
+		t.Skip("SQLite overwrote the cleared bytes itself; nothing to scrub")
+	}
+	s, err := Open(path, WithSealer(mustSealer(t, keyA)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if contains() {
+		t.Fatal("the cleared token survived the upgrade")
+	}
+	if v, _ := s.GetValue(context.Background(), inventoryKey); v != inventoryVersion {
+		t.Fatalf("inventory %q", v)
+	}
+}

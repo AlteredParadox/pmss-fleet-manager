@@ -109,6 +109,21 @@ func TestParseAmount(t *testing.T) {
 	}
 }
 
+// The JSON token is decoded before it is normalised: an escaped string
+// keeps its decimal point and a number its exponent (daybreak blue audit
+// of e8fe98c).
+func TestAmountDecodesJSON(t *testing.T) {
+	for in, want := range map[string]float64{
+		`"11.94"`: 11.94, `"1\u002e99"`: 1.99, `"\u20ac5,50"`: 5.5, `1e3`: 1000, `44.97`: 44.97,
+		`null`: 0, `true`: 0, `{}`: 0, `1e300`: 0, `"x"`: 0,
+	} {
+		var a Amount
+		if err := a.UnmarshalJSON([]byte(in)); err != nil || math.Abs(float64(a)-want) > 1e-9 {
+			t.Errorf("%s: %v %v, want %v", in, float64(a), err, want)
+		}
+	}
+}
+
 // The feed sends cpu_hours with one decimal, and any usage counter may be
 // null; neither may reject the feed and with it every service on the account.
 func TestParseUsage(t *testing.T) {

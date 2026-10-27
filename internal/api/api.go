@@ -1327,10 +1327,6 @@ func userChars(u string) bool {
 	return true
 }
 
-// validTorrentHash accepts a v1 (40 hex) or v2 (64 hex) info-hash, in either
-// case; anything else never reaches the WebUI.
-func validTorrentHash(h string) bool { return qbt.ValidHash(h) }
-
 // boxRevParam reads the required ?rev= box record revision a box-changing
 // request was drawn from.
 func boxRevParam(r *http.Request) (int64, error) {
@@ -1352,7 +1348,7 @@ func (s *Server) handleTorrentAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, fmt.Errorf("unknown action %q", action))
 		return
 	}
-	if !validTorrentHash(hash) {
+	if !qbt.ValidHash(hash) { // v1 or v2, either case; anything else never reaches the WebUI
 		writeErr(w, 400, errors.New("invalid torrent hash"))
 		return
 	}

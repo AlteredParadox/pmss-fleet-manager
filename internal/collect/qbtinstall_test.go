@@ -357,6 +357,10 @@ func TestValidDownloadURL(t *testing.T) {
 		"https://example.com/a b":                             false,
 		"https://example.com/a\"b":                            false,
 		"https://example.com/`id`":                            false,
+		"https:///path":                                       false,
+		"https://user:pw@example.com/b":                       false,
+		"https://:443/b":                                      false,
+		"https:example.com/b":                                 false,
 		"https://example.com/" + strings.Repeat("a", 2048-20): true,
 		"https://example.com/" + strings.Repeat("a", 2048-19): false,
 	} {

@@ -1139,8 +1139,11 @@ const maxTrafficFile = 256 << 10
 
 func parseSeries(raw string) TrafficSeries {
 	ts := TrafficSeries{Daily: map[string]float64{}}
+	if len(raw) > maxTrafficFile { // before trimming: the script's limit+1 prefix may end in blanks
+		return ts
+	}
 	raw = strings.TrimSpace(raw)
-	if raw == "" || len(raw) > maxTrafficFile {
+	if raw == "" {
 		return ts
 	}
 	v, err := phpserial.Unserialize([]byte(raw))

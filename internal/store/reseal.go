@@ -49,6 +49,14 @@ const (
 	// It is an obligation, so only an explicit "0" means none: a row that
 	// is missing or unreadable in a store with encoding metadata scrubs.
 	cleanupKey = "secrets_cleanup"
+	// inventoryKey names the set of columns secretCells covers. A store
+	// encrypted before a column joined the set may still hold that
+	// column's old plaintext in free pages or the WAL (one cleared before
+	// the upgrade has no value to rewrite), so a sealed store owes one
+	// scrub when the inventory advances. Bump it when a column is added.
+	// 2: the qBittorrent start command and download URL (1.12).
+	inventoryKey     = "secrets_inventory"
+	inventoryVersion = "2"
 )
 
 // vacuumSQL is what the cleanup runs; a test swaps it for a failing
@@ -93,8 +101,9 @@ type secretCell struct {
 // is cleared when forgetting was asked for; otherwise the open fails,
 // naming the row.
 //
-// After a rewrite, and the first time encryption is switched on (earlier,
-// since-deleted plaintext may sit in free pages), the database is vacuumed
+// After a rewrite, the first time encryption is switched on, and when the
+// set of secret columns grew (inventoryKey) (earlier, since-deleted
+// plaintext may sit in free pages), the database is vacuumed
 // and the WAL truncated. Revisions are not bumped: the record's content is
 // unchanged, only its encoding.
 func (s *Store) resealSecrets(ctx context.Context) error {
@@ -114,10 +123,15 @@ func (s *Store) resealSecrets(ctx context.Context) error {
 		return err
 	}
 
+	inv, _, err := s.lookup(ctx, inventoryKey)
+	if err != nil {
+		return err
+	}
+	newInventory := inv != inventoryVersion
 	sealedAfter := s.sealer.Enabled()
 	check, checkChanged := s.planCheck(enc, sealedAfter)
-	cleanup := enc.cleanup || len(pending) > 0 || (sealedAfter && !enc.sealed)
-	if len(pending) > 0 || checkChanged || cleanup || sealedAfter != enc.sealed || !enc.explicit || enc.repair {
+	cleanup := enc.cleanup || len(pending) > 0 || (sealedAfter && (!enc.sealed || newInventory))
+	if len(pending) > 0 || checkChanged || cleanup || sealedAfter != enc.sealed || !enc.explicit || enc.repair || newInventory {
 		if err := s.rewriteSecrets(ctx, pending, sealedAfter, cleanup, check); err != nil {
 			return err
 		}
@@ -384,9 +398,9 @@ func (s *Store) secretCells(ctx context.Context) ([]secretCell, error) {
 }
 
 // rewriteSecrets stores the pending cells' plaintext in the current
-// encoding and records the encoding, the key check and, when due, the
-// cleanup, in one transaction: the markers can never disagree with the
-// rows.
+// encoding and records the encoding, the key check, the inventory and,
+// when due, the cleanup, in one transaction: the markers can never
+// disagree with the rows.
 func (s *Store) rewriteSecrets(ctx context.Context, pending []secretCell, sealed, cleanup bool, check string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -399,7 +413,7 @@ func (s *Store) rewriteSecrets(ctx context.Context, pending []secretCell, sealed
 		}
 	}
 	const upsert = `INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`
-	for _, m := range []struct{ key, value string }{{sealedKey, boolKV(sealed)}, {cleanupKey, boolKV(cleanup)}} {
+	for _, m := range []struct{ key, value string }{{sealedKey, boolKV(sealed)}, {cleanupKey, boolKV(cleanup)}, {inventoryKey, inventoryVersion}} {
 		if _, err := tx.ExecContext(ctx, upsert, m.key, m.value); err != nil {
 			return err
 		}

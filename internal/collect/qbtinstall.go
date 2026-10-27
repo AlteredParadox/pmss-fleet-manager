@@ -203,9 +203,15 @@ func decodeRelease(r io.Reader, v any) error {
 const maxDownloadURL = 2048
 
 // ValidDownloadURL is the one rule for the qBittorrent download URL, at
-// save time and again at install: https, URL characters only, bounded.
+// save time and again at install: bounded, URL characters only (it goes
+// into a shell command, quoted), and a well-formed https URL with a host
+// and no user info.
 func ValidDownloadURL(u string) bool {
-	return len(u) <= maxDownloadURL && safeURL.MatchString(u)
+	if len(u) > maxDownloadURL || !safeURL.MatchString(u) {
+		return false
+	}
+	p, err := url.Parse(u)
+	return err == nil && p.Scheme == "https" && p.Host != "" && p.Hostname() != "" && p.User == nil
 }
 
 // githubAPI is the API base the digest lookup uses; a test points it at a
