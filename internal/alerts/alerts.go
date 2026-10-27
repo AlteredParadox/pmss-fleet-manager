@@ -135,7 +135,7 @@ func (e *Evaluator) reconcileLocal(ctx context.Context, s *collect.BoxState) {
 	if !wanted["rtorrent-remove"] {
 		keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
 		if err != nil {
-			return
+			e.log.Warn("list alerts", "err", err) // what raise changed is still notified
 		}
 		for _, k := range keys {
 			if k == "rtorrent-remove" {
@@ -180,7 +180,7 @@ func (e *Evaluator) resolveDisabled(ctx context.Context, s *collect.BoxState) {
 	wanted, changed := e.raise(ctx, s, wantRtRemove(s))
 	keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
 	if err != nil {
-		return
+		e.log.Warn("list alerts", "err", err) // what raise changed is still notified
 	}
 	for _, k := range keys {
 		if wanted[k] {
@@ -419,15 +419,15 @@ func daysUntilDate(ymd string, now time.Time) (int, bool) {
 }
 
 // reconcile persists the wanted alerts, resolves the open ones this poll no
-// longer wants and could re-check, and notifies when anything changed.
+// longer wants and could re-check, and notifies when anything changed:
+// an alert raise wrote is notified even when listing the open ones then
+// fails (daybreak blue audit of 7506bd4).
 func (e *Evaluator) reconcile(ctx context.Context, s *collect.BoxState, active []want, probeOK bool) {
 	wanted, changed := e.raise(ctx, s, active)
 	keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
 	if err != nil {
 		e.log.Warn("list alerts", "err", err)
-		return
-	}
-	if e.resolveStale(ctx, s, keys, wanted, probeOK) {
+	} else if e.resolveStale(ctx, s, keys, wanted, probeOK) {
 		changed = true
 	}
 	if changed && e.notify != nil {

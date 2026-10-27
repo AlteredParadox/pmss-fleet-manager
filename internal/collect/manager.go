@@ -120,10 +120,12 @@ type Manager struct {
 	// Lock order: pubMu before alertMu; nothing is taken under alertMu.
 	alertMu  sync.Mutex
 	alertRev uint64
-	pmapi    *pmapi.Client
-	svcMu    sync.RWMutex
-	svc      servicesCache
-	syncMu   sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
+	// lastUnacked is the last unacknowledged count read (under alertMu).
+	lastUnacked int
+	pmapi       *pmapi.Client
+	svcMu       sync.RWMutex
+	svc         servicesCache
+	syncMu      sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
 
 	// The pmdb.fyi catalogue integration (pmdb.go): pmdbMu guards pmdbSt,
 	// pmdbSyncMu serialises SyncPMDB, pmdbWakeCh nudges the loop.
@@ -172,12 +174,16 @@ func (m *Manager) Bus() *Bus { return m.bus }
 // revision restarts with the process; a page that reconnects after a
 // restart reloads itself on the changed instance id before it could refuse
 // the low numbers.
+//
+// A count that cannot be read is the last one read, not zero: a zero under
+// a new revision would clear the badge on every page (daybreak blue audit
+// of 7506bd4).
 func (m *Manager) Publish(e Event) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	m.alertMu.Lock()
 	defer m.alertMu.Unlock()
-	e.Unacked, _ = m.st.CountUnacked(ctx)
+	e.Unacked = m.unackedLocked(ctx)
 	m.alertRev++
 	e.AlertsRev = m.alertRev
 	m.bus.Publish(e)
@@ -189,9 +195,21 @@ func (m *Manager) Publish(e Event) {
 func (m *Manager) AlertsView(ctx context.Context) (int, uint64) {
 	m.alertMu.Lock()
 	defer m.alertMu.Unlock()
-	n, _ := m.st.CountUnacked(ctx)
+	n := m.unackedLocked(ctx)
 	m.alertRev++
 	return n, m.alertRev
+}
+
+// unackedLocked reads the unacknowledged count, or keeps the last one read
+// when that fails; alertMu is held.
+func (m *Manager) unackedLocked(ctx context.Context) int {
+	n, err := m.st.CountUnacked(ctx)
+	if err != nil {
+		m.log.Warn("count alerts", "err", err)
+		return m.lastUnacked
+	}
+	m.lastUnacked = n
+	return n
 }
 
 // Settings returns the current settings snapshot.

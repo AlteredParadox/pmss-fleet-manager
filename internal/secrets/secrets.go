@@ -44,6 +44,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -214,7 +215,7 @@ func Load(n Names, envValue, filePath string) (*Loaded, error) {
 	case filePath == "":
 		return nil, nil
 	}
-	b, err := os.ReadFile(filePath)
+	b, err := readSmall(filePath, maxSecretFile)
 	if err != nil {
 		return nil, fmt.Errorf("secret file: %w", err)
 	}
@@ -223,6 +224,27 @@ func Load(n Names, envValue, filePath string) (*Loaded, error) {
 		l.Warning = fmt.Sprintf("the secret file %s is readable by other users (mode %04o); chmod 600 it", filePath, fi.Mode().Perm())
 	}
 	return l, nil
+}
+
+// maxSecretFile bounds the secret file read at startup; a secret is a few
+// dozen bytes (daybreak blue audit of 7506bd4).
+const maxSecretFile = 64 << 10
+
+// readSmall reads a file of at most max bytes, refusing a larger one.
+func readSmall(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s is larger than %d KiB; it should hold only the secret", path, max>>10)
+	}
+	return b, nil
 }
 
 // Resolved is what the process configuration asks for.

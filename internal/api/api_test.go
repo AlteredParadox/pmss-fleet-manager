@@ -1057,3 +1057,19 @@ func TestRtRoutesAndSettings(t *testing.T) {
 		}
 	}
 }
+
+// A body is one JSON value: anything after it but whitespace is refused
+// (daybreak blue audit of 7506bd4).
+func TestDecodeOneValue(t *testing.T) {
+	var v map[string]any
+	for body, ok := range map[string]bool{`{"a":1}`: true, "{\"a\":1}\n \t": true, `{"a":1}{"b":2}`: false, `{"a":1} x`: false, `{"a":1}]`: false} {
+		r := httptest.NewRequest("POST", "/", strings.NewReader(body))
+		if err := decode(r, &v); (err == nil) != ok {
+			t.Errorf("decode %q: %v", body, err)
+		}
+		r = httptest.NewRequest("POST", "/", strings.NewReader(body))
+		if err := decodeStrict(r, &v); (err == nil) != ok {
+			t.Errorf("decodeStrict %q: %v", body, err)
+		}
+	}
+}

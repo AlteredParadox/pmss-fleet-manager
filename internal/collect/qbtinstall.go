@@ -419,7 +419,8 @@ func (l *latestRelease) get(ctx context.Context) string {
 	var rel struct {
 		TagName string `json:"tag_name"`
 	}
-	if resp.StatusCode != 200 || json.NewDecoder(resp.Body).Decode(&rel) != nil {
+	// The release object is a few KiB; anything past 1 MiB is not one.
+	if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel) != nil {
 		return l.version
 	}
 	if m := releaseTag.FindStringSubmatch(rel.TagName); m != nil {
@@ -452,8 +453,10 @@ func versionParts(v string) []int {
 	}
 	out := make([]int, 3)
 	for i, s := range f {
-		// Keep the leading digits only: "4-1" (distro suffix) and "3rc1" compare as 4 and 3.
-		digits := strings.TrimLeftFunc(s, func(r rune) bool { return r < '0' || r > '9' })
+		// Keep the leading digits only: "4-1" (distro suffix) and "3rc1"
+		// compare as 4 and 3; a part that does not start with a digit
+		// ("foo2") is unparsable.
+		digits := s
 		if j := strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }); j >= 0 {
 			digits = digits[:j]
 		}
