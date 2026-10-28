@@ -134,6 +134,18 @@ func TestXferDirsResultNeedsACompleteRun(t *testing.T) {
 	}
 }
 
+// A folder whose name is a newline, reached as "safe/.", is refused, not
+// listed as the home (fred on PR 145).
+func TestXferDirsPathBytesSurvive(t *testing.T) {
+	home := t.TempDir()
+	os.Mkdir(filepath.Join(home, "\n"), 0o700)
+	os.Symlink(filepath.Join(home, "\n"), filepath.Join(home, "safe"))
+	l, err := listLocal(t, home, "safe/.")
+	if err == nil || !strings.Contains(err.Error(), "control character") {
+		t.Errorf("listed %+v (%v)", l, err)
+	}
+}
+
 // Output past what the script can print is refused before it is parsed,
 // and a dense run of names is walked only up to the bound, counting
 // entries as sent: skipped names still count toward "truncated"

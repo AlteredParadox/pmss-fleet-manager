@@ -47,13 +47,19 @@ const xferDirsOutCap = 2*4096 + (xferDirsMax+1)*256 + 64
 // symlinks, which a copy would not follow either.
 const xferDirsScript = `set -u
 LC_ALL=C; export LC_ALL
-die() { echo "ERR $*"; exit 3; }
-home=$(realpath -e -- "$HOME") || die "cannot resolve HOME"
+die() { printf 'ERR %s\n' "$*"; exit 3; }
+# canon sets CANON to realpath's answer byte for byte: $(...) alone drops
+# trailing newlines, which can belong to a name (fred on PR 145).
+canon() { CANON=$(realpath "$@" && printf .) || return 1; CANON=${CANON%?.}; }
+canon -e -- "$HOME" || die "cannot resolve HOME"
+home=$CANON
 case "$P" in "") p=$home;; /*) p=$P;; *) p="$home/$P";; esac
-d=$(realpath -e -- "$p" 2>/dev/null) || die "no such directory"
+canon -e -- "$p" 2>/dev/null || die "no such directory"
+d=$CANON
 case "$d/" in "$home"/*) ;; *) die "that folder is outside your home directory";; esac
 [ -d "$d" ] || die "not a directory"
 [ -r "$d" ] && [ -x "$d" ] || die "cannot read that directory"
+case "$d$home" in *[[:cntrl:]]*) die "that folder's path contains a control character";; esac
 printf 'DIR %s\nHOME %s\n' "$d" "$home"
 find "$d" -mindepth 1 -maxdepth 1 -type d -printf '%f\0' 2>/dev/null | head -z -n ` + "1001" + `
 exit 0
@@ -105,7 +111,7 @@ func xferDirsHeaders(out []byte) (path, home string, rest []byte, err error) {
 			home = v
 		}
 	}
-	if path == "" || home == "" {
+	if path == "" || home == "" || !utf8.ValidString(path+home) {
 		return "", "", nil, fmt.Errorf("unexpected listing output")
 	}
 	return path, home, out, nil

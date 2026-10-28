@@ -33,6 +33,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"pmss-fleet-manager/internal/sshx"
 )
@@ -49,6 +51,12 @@ const xferJobDir = ".config/pmss-fleet-manager/transfers"
 // for instance over ~/.ssh/authorized_keys (Codex security review on PR
 // 142, reproduced against rrsync 3.2.7).
 const xferRrsyncOpts = "-wo -no-del -munge"
+
+// xferRrsync is the rrsync the job key is forced into: the system's, at
+// a fixed path (Debian's rsync package; all PMSS boxes), never whatever
+// PATH finds first (daybreak review: a user-writable rrsync ahead in PATH
+// would run instead of the confinement). The claim checks it is root's.
+const xferRrsync = "/usr/bin/rrsync"
 
 // xferOutCap bounds what any job script may send back; the largest, a
 // status read, stays under 18 KiB (the job files are bounded by cap.pl and
@@ -108,9 +116,15 @@ func validXferPath(p string, dest bool) error {
 const xferPrelude = `set -u
 LC_ALL=C; export LC_ALL
 umask 077
-die() { echo "ERR $*"; exit 3; }
+# Fields go out with printf '%s': dash's echo turns a backslash sequence in
+# a name (\n) into the byte it names (fred on PR 145).
+die() { printf 'ERR %s\n' "$*"; exit 3; }
+# canon sets CANON to realpath's answer byte for byte: $(...) alone drops
+# trailing newlines, which can belong to a name (fred on PR 145).
+canon() { CANON=$(realpath "$@" && printf .) || return 1; CANON=${CANON%?.}; }
 case "$TOKEN" in *[!0-9a-f]*|"") die "bad token";; esac
-home=$(realpath -e -- "$HOME") || die "cannot resolve HOME"
+canon -e -- "$HOME" || die "cannot resolve HOME"
+home=$CANON
 ctl="$home/.config/pmss-fleet-manager"
 J="$ctl/transfers/$TOKEN"
 case "$J" in *[!A-Za-z0-9/._-]*) die "home path has characters this feature does not handle";; esac
@@ -125,41 +139,55 @@ alive() { pid=$(head -c 20 "$J/pid" 2>/dev/null | tr -cd 0-9); [ -n "$pid" ] && 
 // directory is created with mkdir (not -p), so a token is used once.
 const xferSrcPrepareScript = `p=$(abspath "$SRC")
 [ -L "$p" ] && die "source is a symlink"
-src=$(realpath -e -- "$p") || die "source does not exist"
+canon -e -- "$p" || die "source does not exist"
+src=$CANON
+# The typed path has no control characters, but a symlink on the way can
+# resolve to one; a newline would break the SRC line below (daybreak).
+case "$src" in *[[:cntrl:]]*) die "the resolved source path contains a control character";; esac
 [ -d "$src" ] || die "source is not a directory"
 inside "$src" "$home" || die "source is not inside your home directory"
 [ "$src" = "$home" ] && die "source is your whole home directory (it holds the transfer control directory)"
-c=$(realpath -m -- "$ctl")
+canon -m -- "$ctl"
+c=$CANON
 if inside "$src" "$c" || inside "$c" "$src" || [ "$src" = "$c" ]; then die "source overlaps the dashboard's control directory $c"; fi
 for t in rsync ssh ssh-keygen perl setsid mkfifo; do command -v "$t" >/dev/null 2>&1 || die "$t not found on the source"; done
 mkdir -p -- "$ctl/transfers" || die "cannot create $ctl/transfers"
 # A symlinked transfers directory could point into the source: the chmod
 # and the key would land there, and the copy would carry the key.
-[ "$(realpath -e -- "$ctl/transfers")" = "$c/transfers" ] || die "$ctl/transfers is a symlink; not using it"
+canon -e -- "$ctl/transfers" && [ "$CANON" = "$c/transfers" ] || die "$ctl/transfers is a symlink; not using it"
 chmod 700 -- "$ctl/transfers" || die "cannot chmod $ctl/transfers"
 mkdir -- "$J" || die "job directory already exists"
 ssh-keygen -q -t ed25519 -N '' -C "pfm-xfer-$TOKEN" -f "$J/key" </dev/null >/dev/null || die "ssh-keygen failed"
-echo "SRC $src"
-echo "PUB $(cat "$J/key.pub")"
+printf 'SRC %s\n' "$src"
+printf 'PUB %s\n' "$(cat "$J/key.pub")"
 `
 
 // xferDstClaimScript checks the destination and claims it: mkdir (not -p)
 // fails if the path exists, so a collision or a second job aimed at the
 // same path is refused here.
-const xferDstClaimScript = `rr=$(command -v rrsync) || die "rrsync not found on the destination: a restricted transfer key is not possible"
+const xferDstClaimScript = `rr=` + xferRrsync + `
+rt=$(realpath -e -- "$rr" 2>/dev/null) || die "$rr not found on the destination: a restricted transfer key is not possible"
+# Root's, and writable only by root, as is the folder it sits in: a
+# program the account could replace would run in place of the confinement.
+for f in "$rt" "$(dirname -- "$rt")"; do
+  [ "$(stat -c %u -- "$f")" = 0 ] && [ $(( 0$(stat -c %a -- "$f") & 022 )) = 0 ] || die "$f is not root-owned and root-only writable: not trusting it as rrsync"
+done
+[ -f "$rt" ] && [ -x "$rt" ] || die "$rr is not an executable file"
 p=$(abspath "$DST")
 p=${p%/}
+case "$p" in */) die "destination must name a new directory";; esac
 [ -e "$p" ] || [ -L "$p" ] && die "destination already exists"
-parent=$(realpath -e -- "$(dirname -- "$p")") || die "destination's parent directory does not exist"
-d="$parent/$(basename -- "$p")"
+canon -e -- "${p%/*}/" || die "destination's parent directory does not exist"
+d="${CANON%/}/${p##*/}"
 inside "$d" "$home" || die "destination is not inside your home directory"
 inside "$d" "$home/.ssh" && die "destination is inside ~/.ssh"
-inside "$d" "$(realpath -m -- "$ctl")" && die "destination is inside the dashboard's control directory"
-# Both go into command="..." in authorized_keys: the typed path was
+canon -m -- "$ctl"
+inside "$d" "$CANON" && die "destination is inside the dashboard's control directory"
+# It goes into command="..." in authorized_keys: the typed path was
 # checked, but a symlinked parent can resolve to anything.
-case "$d$rr" in *[\"\\,\']*|*[[:cntrl:]]*) die "the resolved destination or rrsync path has characters authorized_keys cannot carry";; esac
+case "$d" in *[\"\\,\']*|*[[:cntrl:]]*) die "the resolved destination path has characters authorized_keys cannot carry";; esac
 mkdir -- "$d" || die "could not create the destination directory"
-echo "DST $d"
+printf 'DST %s\n' "$d"
 `
 
 // xferKeyAddScript appends the job's key line to authorized_keys under a
@@ -186,7 +214,7 @@ fi
 exp=$(date -d '+30 minutes' +%Y%m%d%H%M) || die "date failed"
 line="restrict,expiry-time=\"$exp\",command=\"$rr ` + xferRrsyncOpts + ` '$d'\" ssh-ed25519 $BLOB pfm-xfer-$TOKEN$flags"
 printf '%s\n' "$line" >>"$tmp" && mv -f -- "$tmp" "$ak" || { rm -f -- "$tmp"; die "cannot write authorized_keys"; }
-echo "KEYLINE $line"
+printf 'KEYLINE %s\n' "$line"
 `
 
 // xferKeyRemoveScript removes the one line carrying this job's blob and
@@ -289,12 +317,13 @@ J=$(cd "$(dirname -- "$0")" && pwd -P) || exit 1
 LC_ALL=C; export LC_ALL
 umask 077
 mkdir "$J/started" 2>/dev/null || exit 0
-echo $$ >"$J/pid.tmp" && mv -f "$J/pid.tmp" "$J/pid"
-date +%s >"$J/started_at"
 rpid=""
 finish() { rm -f "$J/key" "$J/key.pub" "$J/out" "$J/err"; printf '%s\n' "$1" >"$J/rc.tmp" && mv -f "$J/rc.tmp" "$J/rc"; }
 trap 'rm -f "$J/key" "$J/key.pub"' EXIT
 trap '[ -n "$rpid" ] && kill "$rpid" 2>/dev/null; finish cancelled; exit 143' TERM INT HUP
+# Without a pid the copy could not be cancelled: no pid, no copy.
+{ echo $$ >"$J/pid.tmp" && mv -f "$J/pid.tmp" "$J/pid"; } 2>/dev/null || { finish "error: cannot write the pid file"; exit 1; }
+date +%s >"$J/started_at"
 mkfifo "$J/out" "$J/err" || { finish "error: mkfifo failed"; exit 1; }
 perl "$J/cap.pl" progress "$J" <"$J/out" &
 perl "$J/cap.pl" errors "$J" <"$J/err" &
@@ -353,8 +382,8 @@ exit 0
 // failed after the claim. Never a non-empty one.
 const xferDstRmdirScript = `p=$(abspath "$DST")
 p=${p%/}
-parent=$(realpath -e -- "$(dirname -- "$p")" 2>/dev/null) || { echo "GONE"; exit 0; }
-d="$parent/$(basename -- "$p")"
+canon -e -- "${p%/*}/" 2>/dev/null || { echo "GONE"; exit 0; }
+d="${CANON%/}/${p##*/}"
 inside "$d" "$home" || die "not inside home"
 [ -d "$d" ] && [ ! -L "$d" ] || { echo "GONE"; exit 0; }
 if rmdir -- "$d" 2>/dev/null; then echo "REMOVED"; else echo "KEPT not empty"; fi
@@ -424,11 +453,36 @@ func xferSrcPrepare(ctx context.Context, cli *sshx.Client, token, src string) (r
 	if err != nil {
 		return "", "", err
 	}
-	f := strings.Fields(xferField(lines, "PUB"))
-	if len(f) < 2 || f[0] != "ssh-ed25519" || !xferBlobRe.MatchString(f[1]) {
+	return parseSrcPrepare(lines)
+}
+
+// parseSrcPrepare reads the source's answer: its resolved path and the
+// job key's blob.
+func parseSrcPrepare(lines []string) (resolved, blob string, err error) {
+	// Exactly one of each, well formed: the script refuses a resolved
+	// path with a newline, and an answer that still has a second SRC or
+	// PUB line is not one this script wrote (daybreak review).
+	pub, ok := xferOnly(lines, "PUB")
+	f := strings.Fields(pub)
+	if !ok || len(f) != 3 || f[0] != "ssh-ed25519" || !xferBlobRe.MatchString(f[1]) {
 		return "", "", errors.New("source returned no usable public key")
 	}
-	return xferField(lines, "SRC"), f[1], nil
+	resolved, ok = xferOnly(lines, "SRC")
+	if !ok || !strings.HasPrefix(resolved, "/") || strings.ContainsFunc(resolved, unicode.IsControl) || !utf8.ValidString(resolved) {
+		return "", "", errors.New("source returned no usable resolved path")
+	}
+	return resolved, f[1], nil
+}
+
+// xferOnly is key's value when exactly one line carries it.
+func xferOnly(lines []string, key string) (string, bool) {
+	v, n := "", 0
+	for _, l := range lines {
+		if rest, ok := strings.CutPrefix(l, key+" "); ok {
+			v, n = rest, n+1
+		}
+	}
+	return v, n == 1
 }
 
 // xferDstPrepare claims the new destination directory and adds the job's
