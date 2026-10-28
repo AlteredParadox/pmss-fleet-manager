@@ -1377,7 +1377,7 @@ function transferCard(v) {
   const name = (n, id) => esc(n || `box ${id} (removed)`);
   const prog = v.phase === 'running' && p ? `${esc(fmtBytes(p.bytes))} · ${esc(p.rate)} · ${esc(p.time)} left · ~${p.pct}% (rsync's estimate)${p.total ? ` · ${p.total - p.to_check}/${p.total} checked` : ''}` : '';
   const btn = [];
-  if (!S.monitorOnly && src && (v.phase === 'running' || v.phase === 'unconfirmed')) btn.push(`<button class="small danger" ${boxRef(src)} data-act="xfer:cancel" data-id="${v.id}" data-confirm="Stop this copy? What was copied so far stays on the destination.">cancel</button>`);
+  if (!S.monitorOnly && src && (v.phase === 'running' || v.phase === 'unconfirmed')) btn.push(`<button class="small danger" ${boxRef(src)} data-act="xfer:cancel" data-id="${v.id}" data-confirm="Stop this copy? Files that arrived complete stay on the destination; the one in flight is discarded.">cancel</button>`);
   if (!S.monitorOnly && src && st.over && v.cleanup?.length) btn.push(`<button class="small" ${boxRef(src)} data-act="xfer:cleanup" data-id="${v.id}">retry cleanup</button>`);
   if (st.over) btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" ${v.cleanup?.length ? `data-force="1" data-confirm="Cleanup is still owed: ${esc(v.cleanup.join('; '))}. Forget this copy anyway? Those items would have to be removed by hand."` : ''}>dismiss</button>`);
   return `<div class="panel">

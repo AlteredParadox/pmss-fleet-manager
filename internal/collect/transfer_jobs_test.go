@@ -88,7 +88,7 @@ func TestXferResult(t *testing.T) {
 		{xferFinished, xferLive{rc: "11", errors: "rsync: write failed on \"/h/d/big\": No space left on device (28)"}, "destination out of space or quota — rsync: write failed on \"/h/d/big\": No space left on device (28)"},
 		{xferFinished, xferLive{rc: "12", errors: "rsync: write failed: Disk quota exceeded (122)"}, "destination out of space or quota — rsync: write failed: Disk quota exceeded (122)"},
 		{xferFinished, xferLive{rc: "255", errors: "Host key verification failed."}, "rsync exited with code 255 — Host key verification failed."},
-		{xferFinished, xferLive{rc: "cancelled"}, "cancelled"},
+		{xferFinished, xferLive{rc: "cancelled", errors: "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(716) [sender=3.2.7]"}, "cancelled"},
 		{xferInterrupted, xferLive{started: true, pidFile: true}, "interrupted: the runner ended without a result (box rebooted or the process was killed?)"},
 		{xferInterrupted, xferLive{}, "not started: the runner never started on the source"},
 	} {

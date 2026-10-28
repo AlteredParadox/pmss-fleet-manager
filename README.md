@@ -720,7 +720,8 @@ one copy at a time per source box. Free space is shown as a hint, not
 checked: a copy that does not fit ends with "destination out of space or
 quota". Files that change during the copy may arrive inconsistent, and
 files that vanish give "completed with warnings". A partial copy is never
-deleted. Cancel stops the copy (what arrived stays). A job binds to the
+deleted. Cancel stops the copy: the files that arrived complete stay, the
+one in flight is discarded by rsync. A job binds to the
 account and machine it started on: after an edit that points a box record
 elsewhere, or forgets its pinned key, the job refuses to touch that box and
 lists what may need removing by hand. Cleanup that could not be confirmed

@@ -214,7 +214,7 @@ func xferResult(phase string, l xferLive) string {
 	case l.rc == "24":
 		return "completed with warnings: some source files vanished during the copy;" + copied + skipped
 	case l.rc == "cancelled":
-		s = "cancelled"
+		return "cancelled" // rsync's own "received SIGTERM" line adds nothing
 	case l.rc == "23":
 		s = "partial: some files could not be transferred"
 	case (l.rc == "11" || l.rc == "12") && noSpaceRe.MatchString(l.errors):
