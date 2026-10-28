@@ -478,6 +478,37 @@ func TestXferRunnerNeedsPid(t *testing.T) {
 	}
 }
 
+// Neither the pid nor the rc can be written (a full disk): the runner
+// takes its started marker back, so the launch stays unconfirmed instead
+// of the job reading as running forever with nothing to cancel; cancel
+// then ends it, and it cannot be launched again (daybreak review).
+func TestXferRunnerNoPidNoRc(t *testing.T) {
+	j := startLocalJob(t, true, func(dir string) {
+		os.Mkdir(filepath.Join(dir, "pid.tmp"), 0o700)
+		os.Mkdir(filepath.Join(dir, "rc.tmp"), 0o700)
+	})
+	if !strings.Contains(j.launch, "UNCONFIRMED") {
+		t.Errorf("launch: %s", j.launch)
+	}
+	l := j.waitStatus(t, func(l xferLive) bool { return !l.started && !l.alive })
+	if l.rc != "" || xferDecide(xferUnconfirmed, l, false) != xferUnconfirmed || xferDecide(xferUnconfirmed, l, true) != xferInterrupted {
+		t.Errorf("status %+v", l)
+	}
+	if !j.keyGone(t) {
+		t.Error("key left")
+	}
+	run := xferVars("SRC", "x", "DEST", "u@h:", "PORT", "22", "HKALG", "ecdsa-sha2-nistp256", "SSH", filepath.Join(j.bin, "ssh"))
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(xferVars("TOKEN", j.tok, "KNOWN", "x", "RUNVARS", run) + xferPrelude + xferLaunchScript)
+	cmd.Env = append(append(os.Environ(), "HOME="+j.home), j.env...)
+	if out, _ := cmd.CombinedOutput(); !strings.Contains(string(out), "ERR job key missing") {
+		t.Errorf("relaunch: %s", out)
+	}
+	if pid := readFileOr(filepath.Join(j.bin, "ssh.pid")); pid != "" {
+		t.Errorf("rsync connected (ssh stand-in pid %s)", pid)
+	}
+}
+
 // fakeSSH stands in for ssh in the local runner test: it drops the
 // options, then runs the remote command the way sshd runs a forced
 // command, through rrsync confined to $FAKE_DST.
@@ -494,6 +525,7 @@ SSH_ORIGINAL_COMMAND="$*" exec rrsync ` + xferRrsyncOpts + ` "$FAKE_DST"
 type localJob struct {
 	home, bin, tok, blob, dst string
 	env                       []string
+	launch                    string // the launch script's answer
 }
 
 // startLocalJob runs prepare, claim and launch locally, with real rsync
@@ -527,12 +559,12 @@ func startLocalJob(t *testing.T, slow bool, beforeLaunch ...func(jobDir string))
 	for _, f := range beforeLaunch {
 		f(filepath.Join(home, xferJobDir, tok))
 	}
-	run := xferVars("SRC", src, "DEST", "u@example.invalid:", "PORT", "22", "HKALG", "ecdsa-sha2-nistp256")
+	run := xferVars("SRC", src, "DEST", "u@example.invalid:", "PORT", "22", "HKALG", "ecdsa-sha2-nistp256", "SSH", filepath.Join(bin, "ssh"))
 	out = runJobScript(t, home, xferVars("TOKEN", tok, "KNOWN", "example.invalid ecdsa-sha2-nistp256 AAAA", "RUNVARS", run), xferLaunchScript, env...)
-	if !strings.Contains(out, "LAUNCHED") {
+	if !strings.Contains(out, "LAUNCHED") && len(beforeLaunch) == 0 {
 		t.Fatalf("launch: %s", out)
 	}
-	j := localJob{home: home, bin: bin, tok: tok, blob: blob, dst: dst, env: env}
+	j := localJob{home: home, bin: bin, tok: tok, blob: blob, dst: dst, env: env, launch: out}
 	t.Cleanup(func() { // never leave a runner behind
 		if pid := strings.TrimSpace(readFileOr(filepath.Join(home, xferJobDir, tok, "pid"))); pid != "" {
 			exec.Command("kill", "-KILL", "--", "-"+pid).Run()

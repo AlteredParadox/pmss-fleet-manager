@@ -114,6 +114,9 @@ func validXferPath(p string, dest bool) error {
 // xferPrelude starts every job script: strict, byte-wise, private files,
 // and the helpers the scripts share. ERR lines are what the Go side shows.
 const xferPrelude = `set -u
+# System tools only: an ambient PATH could put a folder of the account's
+# (perhaps filled by an earlier copy) ahead of them (daybreak review).
+PATH=/usr/bin:/bin; export PATH
 LC_ALL=C; export LC_ALL
 umask 077
 # Fields go out with printf '%s': dash's echo turns a backslash sequence in
@@ -313,6 +316,7 @@ seg_end(); out();
 // it run at most once per job, whoever launches it how often. The key
 // files go when it ends, however it ends; rc is written last, atomically.
 const xferRunScript = `set -u
+PATH=/usr/bin:/bin; export PATH
 J=$(cd "$(dirname -- "$0")" && pwd -P) || exit 1
 LC_ALL=C; export LC_ALL
 umask 077
@@ -321,14 +325,16 @@ rpid=""
 finish() { rm -f "$J/key" "$J/key.pub" "$J/out" "$J/err"; printf '%s\n' "$1" >"$J/rc.tmp" && mv -f "$J/rc.tmp" "$J/rc"; }
 trap 'rm -f "$J/key" "$J/key.pub"' EXIT
 trap '[ -n "$rpid" ] && kill "$rpid" 2>/dev/null; finish cancelled; exit 143' TERM INT HUP
-# Without a pid the copy could not be cancelled: no pid, no copy.
-{ echo $$ >"$J/pid.tmp" && mv -f "$J/pid.tmp" "$J/pid"; } 2>/dev/null || { finish "error: cannot write the pid file"; exit 1; }
+# Without a pid the copy could not be cancelled: no pid, no copy. The
+# marker goes too, so a job whose rc cannot be written either is not left
+# looking started (the launch then stays unconfirmed, and cancel ends it).
+{ echo $$ >"$J/pid.tmp" && mv -f "$J/pid.tmp" "$J/pid"; } 2>/dev/null || { finish "error: cannot write the pid file"; rmdir "$J/started"; exit 1; }
 date +%s >"$J/started_at"
 mkfifo "$J/out" "$J/err" || { finish "error: mkfifo failed"; exit 1; }
 perl "$J/cap.pl" progress "$J" <"$J/out" &
 perl "$J/cap.pl" errors "$J" <"$J/err" &
 rsync -rt --no-inc-recursive --info=progress2 \
-  -e "ssh -F /dev/null -p $PORT -i $J/key -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$J/known_hosts -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=$HKALG -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=30 -o ServerAliveInterval=60" \
+  -e "$SSH -F /dev/null -p $PORT -i $J/key -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$J/known_hosts -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=$HKALG -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=30 -o ServerAliveInterval=60" \
   -- "$SRC/" "$DEST" >"$J/out" 2>"$J/err" &
 rpid=$!
 wait "$rpid"; rc=$?
@@ -339,7 +345,9 @@ finish "$rc"
 // xferLaunchScript writes the runner, the helper and the pinned
 // known_hosts into the job directory and starts the runner in its own
 // session, detached from this SSH session. It waits up to 3 s for the
-// "started" marker; without it the launch is unconfirmed, not failed.
+// runner's pid file (or its result); without either the launch is
+// unconfirmed, not failed (daybreak review: the "started" marker alone
+// comes before the pid that cancel needs).
 const xferLaunchScript = `[ -d "$J" ] || die "job directory missing"
 [ -e "$J/started" ] && { echo "LAUNCHED already"; exit 0; }
 [ -f "$J/key" ] || die "job key missing"
@@ -350,8 +358,8 @@ cat >"$J/cap.pl" <<'PFM_CAP_EOF'
 ` + xferRunScript + `PFM_RUN_EOF
 } >"$J/run.sh" || die "cannot write run.sh"
 setsid nohup sh "$J/run.sh" </dev/null >/dev/null 2>&1 &
-i=0; while [ $i -lt 30 ] && [ ! -d "$J/started" ]; do sleep 0.1; i=$((i+1)); done
-if [ -d "$J/started" ]; then echo "LAUNCHED"; else echo "UNCONFIRMED"; fi
+i=0; while [ $i -lt 30 ] && [ ! -f "$J/pid" ] && [ ! -f "$J/rc" ]; do sleep 0.1; i=$((i+1)); done
+if [ -f "$J/pid" ] || [ -f "$J/rc" ]; then echo "LAUNCHED"; else echo "UNCONFIRMED"; fi
 `
 
 // xferStatusScript reads a job's bounded files. Liveness is read before rc:
@@ -417,7 +425,7 @@ func (e *xferRefusal) Error() string { return e.msg }
 func xferRun(ctx context.Context, cli *sshx.Client, vars, script string) ([]string, error) {
 	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	out, stderr, err := cli.Run(rctx, "sh", strings.NewReader(vars+xferPrelude+script))
+	out, stderr, err := cli.Run(rctx, "/bin/sh", strings.NewReader(vars+xferPrelude+script))
 	if len(out) > xferOutCap {
 		return nil, fmt.Errorf("the box sent %d bytes, more than a job script writes", len(out))
 	}
@@ -532,7 +540,7 @@ func xferLaunchVars(token, src string, d xferDest) (string, error) {
 	if d.Port != 22 {
 		name = "[" + host + "]:" + strconv.Itoa(d.Port)
 	}
-	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", xferHostKeyAlgs(kf[0]))
+	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", xferHostKeyAlgs(kf[0]), "SSH", "/usr/bin/ssh")
 	return xferVars("TOKEN", token, "KNOWN", name+" "+kf[0]+" "+kf[1], "RUNVARS", run), nil
 }
 
