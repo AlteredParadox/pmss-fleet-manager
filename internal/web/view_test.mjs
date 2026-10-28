@@ -249,3 +249,38 @@ test('a box control sends the revision it was drawn from, not a later one (fred 
   assert.equal(V.boxPath({}, 'qbt/stop'), '/api/boxes//qbt/stop?rev=');
   assert.equal(V.boxRef({ id: '<x>', box_rev: '"' }), 'data-box="0" data-rev="0"', 'numbers only in the markup');
 });
+
+test('a transfer is over, and succeeded, by its exit code alone', () => {
+  const done99 = { phase: 'finished', rc: '0', progress: { pct: 99 } };
+  assert.deepEqual(V.transferState(done99), { label: 'copied', kind: 'ok', over: true });
+  assert.equal(V.transferMeter(done99), 100, 'a complete copy shows full although rsync said 99%');
+  const at100 = { phase: 'running', rc: '', progress: { pct: 100 } };
+  assert.equal(V.transferState(at100).over, false, '100% without an exit code is not done');
+  assert.equal(V.transferMeter(at100), 99, 'and the bar does not claim it');
+  assert.equal(V.transferState({ phase: 'finished', rc: '23', progress: { pct: 100 } }).kind, 'bad');
+  assert.equal(V.transferMeter({ phase: 'finished', rc: '23', progress: { pct: 100 } }), 99);
+  assert.equal(V.transferState({ phase: 'finished', rc: '24' }).label, 'copied with warnings');
+  assert.equal(V.transferState({ phase: 'finished', rc: 'cancelled' }).label, 'cancelled');
+  assert.equal(V.transferState({ phase: 'interrupted' }).over, true);
+  assert.equal(V.transferState({ phase: 'running', scanning: true }).label, 'scanning');
+  assert.equal(V.transferState({ phase: 'unconfirmed' }).over, false);
+  assert.equal(V.transferMeter({ phase: 'running' }), 0);
+});
+
+test('the start-copy body keeps the destination revision chosen in the form (fred on PR 142)', () => {
+  const draft = { src: ' downloads/x ', dst_box: '7', dst_rev: 3, dst: 'copy ' };
+  // The destination was edited (rev 4) after it was chosen: the body still
+  // names rev 3, so the server refuses with 409 instead of copying to the
+  // record's new target.
+  const boxes = [{ id: 7, box_rev: 4 }];
+  assert.ok(boxes[0].box_rev !== 3);
+  assert.deepEqual(V.transferRequest(draft), { dst_box: 7, dst_rev: 3, src_path: 'downloads/x', dst_path: 'copy' });
+  assert.equal(V.transferRequest({ dst_box: '7' }).dst_rev, 0, 'never chosen: no revision, which the server refuses');
+});
+
+test('a reconnect reloads the transfers list on the transfers tab (fred on PR 142)', () => {
+  assert.deepEqual(V.resyncLoads('box', 'transfers', 2), ['detail', 'transfers']);
+  assert.deepEqual(V.resyncLoads('box', 'overview', 2), ['detail']);
+  assert.deepEqual(V.resyncLoads('alerts', '', null), ['alerts']);
+  assert.deepEqual(V.resyncLoads('fleet', '', null), []);
+});

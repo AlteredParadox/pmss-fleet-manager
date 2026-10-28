@@ -253,7 +253,7 @@ func changesNoBox(route string) bool {
 		"POST " + boxRoute + "/probe", "POST " + boxRoute + "/refresh", "POST " + boxRoute + "/du",
 		"POST " + boxRoute + "/rtorrent/remove-failure/dismiss", "POST " + boxRoute + "/apps/watch",
 		"POST " + boxRoute + "/logs/read", "POST " + boxRoute + "/containers/{cid}/logs",
-		"POST /api/detect",
+		"POST /api/detect", "POST /api/transfers/{tid}/dismiss",
 		"POST /api/alerts/ack-all", "POST /api/alerts/{id}/ack", "DELETE /api/alerts/{id}", "POST /api/alerts/clear-resolved",
 		"PUT /api/settings", "POST /api/services/sync", "POST /api/pmdb/sync":
 		return true
@@ -262,7 +262,7 @@ func changesNoBox(route string) bool {
 }
 
 // errMonitorOnly is the answer to a box-changing request in monitor-only mode.
-var errMonitorOnly = errors.New("this dashboard runs in monitor-only mode: torrent, client, discovery and container actions are refused")
+var errMonitorOnly = errors.New("this dashboard runs in monitor-only mode: torrent, client, discovery, container and transfer actions are refused")
 
 // boxWrite refuses h in monitor-only mode, before it reads the request or
 // reaches a box, and otherwise requires ?rev=, the box record revision the
@@ -337,6 +337,10 @@ func (s *Server) routes() {
 	handle("POST "+bp+boxRoute+"/apps/watch", s.handleAppWatch)
 	handle("POST "+bp+boxRoute+"/logs/read", s.handleReadLog)                   // runs tail over SSH: POST so the CSRF check applies
 	handle("POST "+bp+boxRoute+"/containers/{cid}/logs", s.handleContainerLogs) // literal segment wins over {action}
+	handle("GET "+bp+"/api/transfers", s.handleTransfers)
+	handle("POST "+bp+boxRoute+"/transfers", s.handleStartTransfer)
+	handle("POST "+bp+boxRoute+"/transfers/{tid}/{action}", s.handleTransferAction)
+	handle("POST "+bp+"/api/transfers/{tid}/dismiss", s.handleDismissTransfer) // forgets a finished job: changes no box
 	handle("POST "+bp+"/api/detect", s.handleDetect)
 	handle("GET "+bp+"/api/alerts", s.handleAlerts)
 	handle("POST "+bp+"/api/alerts/ack-all", s.handleAckAll)
@@ -1019,8 +1023,11 @@ func actionCode(err error) int {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return 404
-	case errors.Is(err, collect.ErrDisabled), errors.Is(err, collect.ErrNotReady), errors.Is(err, collect.ErrStaleNotice), errors.Is(err, collect.ErrStaleBox):
+	case errors.Is(err, collect.ErrDisabled), errors.Is(err, collect.ErrNotReady), errors.Is(err, collect.ErrStaleNotice), errors.Is(err, collect.ErrStaleBox),
+		errors.Is(err, collect.ErrTransferBusy), errors.Is(err, collect.ErrTransferIdentity):
 		return 409
+	case errors.Is(err, collect.ErrTransferInput):
+		return 400
 	}
 	return 502
 }
@@ -1236,6 +1243,77 @@ func (s *Server) handleSetDiscovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) handleTransfers(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"transfers": s.m.Transfers()})
+}
+
+// handleStartTransfer starts a copy from the route's box (?rev= checked by
+// boxWrite) to {dst_box, dst_rev}: setup runs over SSH on both boxes, so
+// it can take a minute.
+func (s *Server) handleStartTransfer(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	var req collect.TransferRequest
+	if err := decodeStrict(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	v, err := s.m.StartTransfer(r.Context(), id, req)
+	if err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, v)
+}
+
+func (s *Server) handleTransferAction(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	tid, err := strconv.ParseInt(r.PathValue("tid"), 10, 64)
+	if err != nil || tid <= 0 {
+		writeErr(w, 400, errors.New("bad transfer id"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	switch r.PathValue("action") {
+	case "cancel":
+		err = s.m.CancelTransfer(ctx, id, tid)
+	case "cleanup":
+		err = s.m.RetryTransferCleanup(ctx, id, tid)
+	default:
+		writeErr(w, 400, fmt.Errorf("unknown action %q", r.PathValue("action")))
+		return
+	}
+	if err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// handleDismissTransfer forgets a finished job; ?force=1 also forgets one
+// whose cleanup is still owed, and the answer lists what may be left.
+func (s *Server) handleDismissTransfer(w http.ResponseWriter, r *http.Request) {
+	tid, err := strconv.ParseInt(r.PathValue("tid"), 10, 64)
+	if err != nil || tid <= 0 {
+		writeErr(w, 400, errors.New("bad transfer id"))
+		return
+	}
+	left, err := s.m.DismissTransfer(r.Context(), tid, r.URL.Query().Get("force") == "1")
+	if err != nil {
+		writeJSON(w, actionCode(err), map[string]any{"error": clipStr(err.Error(), 600), "left": left})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "left": left})
 }
 
 // handleSetRtDiscovery takes {"dht":bool,"pex":bool} (any subset): written

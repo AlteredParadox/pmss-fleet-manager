@@ -1202,6 +1202,8 @@ func TestMonitorOnly(t *testing.T) {
 		"POST " + boxRoute + "/rtorrent/torrents",
 		"POST " + boxRoute + "/rtorrent/discovery",
 		"POST " + boxRoute + "/containers/{cid}/{action}",
+		"POST " + boxRoute + "/transfers",
+		"POST " + boxRoute + "/transfers/{tid}/{action}",
 	}
 	if !slices.Equal(srv.boxWrites, want) {
 		t.Fatalf("guarded routes:\n%s\nwant:\n%s", strings.Join(srv.boxWrites, "\n"), strings.Join(want, "\n"))
@@ -1220,6 +1222,7 @@ func TestMonitorOnly(t *testing.T) {
 		box + "/qbt/torrents/" + h + "/remove-data?rev=0", box + "/qbt/torrents", box + "/qbt/discovery",
 		box + "/rtorrent/torrents/" + h + "/stop?rev=0", box + "/rtorrent/torrents", box + "/rtorrent/discovery",
 		box + "/containers/c1/restart",
+		box + "/transfers?rev=0", box + "/transfers/1/cancel?rev=0",
 	}
 	// Off: these reach their handlers (which then fail on the unprobed box,
 	// never with the monitor-only refusal).

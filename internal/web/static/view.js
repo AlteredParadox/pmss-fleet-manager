@@ -292,5 +292,51 @@ function rtDiscoveryOn(r) {
   return { labels, title: why.length ? `${why.join('; ')} — private trackers usually forbid these` : '' };
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath };
+// transferState: how a box-to-box copy reads in the list. Whether it is
+// over and how it went come from the phase and the runner's exit code
+// (rc), never from rsync's percentage: its last line can say 99% after a
+// complete copy, or 100% before the copy has recorded a result.
+function transferState(v) {
+  const rc = v?.rc || '';
+  switch (v?.phase) {
+    case 'preparing': return { label: 'setting up', kind: '', over: false };
+    case 'running': return { label: v.scanning ? 'scanning' : 'copying', kind: '', over: false };
+    case 'unconfirmed': return { label: 'launch unconfirmed', kind: 'warn', over: false };
+    case 'finished':
+      if (rc === '0') return { label: 'copied', kind: 'ok', over: true };
+      if (rc === '24') return { label: 'copied with warnings', kind: 'warn', over: true };
+      if (rc === 'cancelled') return { label: 'cancelled', kind: 'dim', over: true };
+      return { label: 'failed', kind: 'bad', over: true };
+    case 'interrupted': return { label: 'interrupted', kind: 'bad', over: true };
+    case 'setup_failed': return { label: 'setup failed', kind: 'bad', over: true };
+  }
+  return { label: v?.phase || 'unknown', kind: '', over: false };
+}
+// transferMeter: the progress bar's width, rsync's own estimate; full only
+// once the exit code says the copy succeeded.
+function transferMeter(v) {
+  if (v?.phase === 'finished' && (v.rc === '0' || v.rc === '24')) return 100;
+  const p = Number(v?.progress?.pct);
+  return Number.isFinite(p) ? Math.max(0, Math.min(p, 99)) : 0;
+}
+
+// transferRequest: the start-copy body. The destination's revision is the
+// one captured when the box was chosen in the form, never the box's state
+// at submit time: if the destination was edited since (perhaps to another
+// machine), the server refuses (409) instead of copying to whatever the
+// record names now (fred on PR 142).
+function transferRequest(draft) {
+  return { dst_box: Number(draft.dst_box), dst_rev: Number(draft.dst_rev) || 0, src_path: String(draft.src || '').trim(), dst_path: String(draft.dst || '').trim() };
+}
+// resyncLoads: what a reconnect reloads besides the box states. Events
+// missed while the stream was down are not repeated, and a finished copy
+// is no longer polled, so its card would stay stale (fred on PR 142).
+function resyncLoads(view, tab, selId) {
+  if (view === 'box' && selId) return tab === 'transfers' ? ['detail', 'transfers'] : ['detail'];
+  if (view === 'alerts') return ['alerts'];
+  if (view === 'torrents') return ['torrents'];
+  return [];
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferMeter, transferRequest, resyncLoads };
 })();

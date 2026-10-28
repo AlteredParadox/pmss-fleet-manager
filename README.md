@@ -51,6 +51,9 @@ default order); the choice is remembered per table in the browser.
   start all; and start / stop / restart of the client.
 - Containers: rootless Docker containers with CPU and memory, start / stop /
   restart.
+- Transfers: copy a directory to a new directory on another of your boxes,
+  straight from box to box with rsync over SSH (see *Copying between boxes*),
+  with bytes, rate, rsync's estimate of progress, and the result.
 - Services: every process the account runs on the shared host (PMSS hides
   the other tenants'), grouped into the applications the PMSS stack ships or
   that customers commonly install: qBittorrent, rTorrent, Deluge, Radarr /
@@ -184,7 +187,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-auth` | none | HTTP basic auth as `user:password`; set it if you bind to a non-loopback address |
 | `-auth-file` | none | file holding that login as `user:password` (a container secret, say); one trailing line ending is ignored and nothing else, so a password may end in a space. A configured file that is missing, empty or not `user:password` stops the start. Set this or `-auth` / `PMSS_AUTH`, not both |
 | `-ssh-key` | none | private key file tried for every box without a key path of its own, before `~/.ssh/id_*`; a box's own key path always wins |
-| `-monitor-only` | off | refuse the web UI's actions on the boxes (`PMSS_MONITOR_ONLY=1`): torrent, client, discovery and container actions answer 403 and their controls are hidden; monitoring runs as usual. Adding, editing and removing boxes, alerts, settings, refresh, du and log reads still work. It limits this interface, not the SSH keys it holds: see *Security and hardening* |
+| `-monitor-only` | off | refuse the web UI's actions on the boxes (`PMSS_MONITOR_ONLY=1`): torrent, client, discovery, container and transfer actions answer 403 and their controls are hidden; monitoring runs as usual. Adding, editing and removing boxes, alerts, settings, refresh, du and log reads still work. It limits this interface, not the SSH keys it holds: see *Security and hardening* |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
 | `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
@@ -535,7 +538,7 @@ removes the saved SSH password; a checkbox removes the saved WebUI password.
 Over the API, an edit (`PUT /api/boxes/{id}`) must carry the record's
 `revision` as `GET` returned it; a stale one is refused with 409 and the
 current record, which the edit form reloads into itself. Every request
-that acts on a box (torrent, client, discovery and container actions,
+that acts on a box (torrent, client, discovery, container and transfer actions,
 adding torrents) must carry `?rev=` with the box's `box_rev` from
 `GET /api/state`: 400 without it, 409 when the box was edited since.
 An edit that moves the box to another host, port or account, or forgets
@@ -663,6 +666,67 @@ actions; enabling it again starts from a clean slate. An alert whose source
 could not be read on an otherwise good poll (quota command hung, traffic
 file missing, docker daemon down) is kept rather than resolved and re-raised;
 switching a source off for the box resolves its alerts.
+
+### Copying between boxes
+
+The transfers tab copies one directory from this box into a **new**
+directory on another box. The data goes straight from box to box (Pulsed
+Media does not charge for internal traffic); the dashboard only sets the
+copy up, starts it and reads its status. This is copy only: no move, no
+sync, no `--delete`, no queue, no retries.
+
+How it is authenticated, per copy:
+
+1. The source box generates a fresh ed25519 key in
+   `~/.config/pmss-fleet-manager/transfers/<job>/`. The private half never
+   leaves that directory and is deleted when the copy ends.
+2. The dashboard adds the public half to the destination's
+   `~/.ssh/authorized_keys` as one line,
+   `restrict,expiry-time="<setup + 30 min>",command="/usr/bin/rrsync -wo -no-del -munge '<new dir>'"`:
+   no shell, no forwarding, no PTY; it can only write into the new
+   directory, cannot read anything and cannot delete; symlinks it sends are
+   munged on arrival, so even a source that turned hostile (it holds the
+   key) cannot use one to write outside the directory; no new login with
+   it after 30 minutes (rsync connects once, so a long copy is not cut off).
+   The file is edited under a lock by copy-and-rename; no other line is
+   touched, and removal puts it back byte for byte (including `~/.ssh` and
+   the file themselves if the copy created them).
+3. The source connects to the destination's host name with the host key
+   the dashboard has pinned for it, written into the job's own
+   `known_hosts` (an RSA pin is negotiated with SHA-2 signatures): no trust
+   on first use on the box, no agent, no forwarding of the dashboard's
+   credentials.
+
+Prerequisites: `rsync`, `rrsync` (Debian's rsync 3.2.4 or later ships it as
+`/usr/bin/rrsync`) and OpenSSH 7.7 or later on the destination, and sshd
+accepting public keys for your account. A destination without `rrsync` is
+refused; there is no fallback to an unrestricted key. Both boxes need a
+pinned host key (any box that has been polled once has one).
+
+The copy runs as a detached process on the source, so it does not depend
+on the dashboard or on an SSH session staying open; the dashboard reads its
+status every 5 seconds. After a dashboard restart it goes on reading and
+never starts a copy again (a launch can only ever run once). A copy is over
+when rsync's exit code says so, not when its percentage reaches the end;
+losing contact with the source shows "last seen", never a result. Its
+output is kept bounded on the box (a few KiB per job, however long it runs).
+
+Rules: both paths must resolve inside the account's home directory; the
+destination must not exist yet (it is created atomically, so collisions
+and two copies to one place are refused); the source may not overlap the
+dashboard's control directory `~/.config/pmss-fleet-manager`; symlinks and
+special files are skipped and counted, hard links arrive as separate files;
+one copy at a time per source box. Free space is shown as a hint, not
+checked: a copy that does not fit ends with "destination out of space or
+quota". Files that change during the copy may arrive inconsistent, and
+files that vanish give "completed with warnings". A partial copy is never
+deleted. Cancel stops the copy: the files that arrived complete stay, the
+one in flight is discarded by rsync. A job binds to the
+account and machine it started on: after an edit that points a box record
+elsewhere, or forgets its pinned key, the job refuses to touch that box and
+lists what may need removing by hand. Cleanup that could not be confirmed
+(a box unreachable when the copy ended) is shown as "credential cleanup
+needed" with a retry button, never as a failed copy.
 
 ## Security and hardening
 
@@ -916,6 +980,18 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**Unreleased**
+
+- Box-to-box copy (transfers tab): one directory to a new directory on
+  another box, rsync straight between the boxes with a per-copy key
+  restricted to rrsync write-only (symlinks munged) into that directory
+  and expiring after 30 minutes; status, cancel, cleanup retry; see *Copying between boxes*.
+  New routes `GET /api/transfers`, `POST /api/boxes/{id}/transfers`,
+  `POST /api/boxes/{id}/transfers/{tid}/{cancel|cleanup}` (both with
+  `?rev=`; refused in monitor-only mode) and
+  `POST /api/transfers/{tid}/dismiss`; new `transfers` table and
+  `transfers` event.
 
 **1.12.0**
 

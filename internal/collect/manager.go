@@ -142,6 +142,10 @@ type Manager struct {
 	pmdbSettled map[string]string // under pmdbMu
 	pmdbWakeCh  chan struct{}
 
+	// Box-to-box copies (transfer_jobs.go), by row id.
+	xferMu sync.Mutex
+	xfers  map[int64]*xferJob
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -154,6 +158,7 @@ func New(st *store.Store, log *slog.Logger) *Manager {
 		pmdb:         &pmdb.Client{URL: os.Getenv("PMSS_PMDB_URL")},
 		pmdbWakeCh:   make(chan struct{}, 1),
 		rtLeases:     map[int64]chan struct{}{},
+		xfers:        map[int64]*xferJob{},
 		noticeGuards: map[int64]*sync.Mutex{}}
 	m.jobCtx, m.jobCancel = context.WithCancel(context.Background())
 	def := store.DefaultSettings()
@@ -271,7 +276,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	for _, b := range boxes {
 		m.startPoller(b, nil)
 	}
-	m.wg.Add(3)
+	if err := m.loadTransfers(ctx); err != nil {
+		return err
+	}
+	m.wg.Add(4)
+	go m.xferLoop()
 	go m.housekeeping()
 	go m.servicesLoop()
 	go m.pmdbLoop()

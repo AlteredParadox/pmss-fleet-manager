@@ -60,6 +60,12 @@ jobs:
       - name: make build
         run: make build
 
+      # The box-to-box copy tests run the real job scripts locally against
+      # rsync and rrsync (Ubuntu's rsync package ships /usr/bin/rrsync);
+      # with CI set they fail rather than skip when a tool is missing.
+      - name: Install rsync
+        run: sudo apt-get install -y --no-install-recommends rsync
+
       - name: make test
         run: make test
 
