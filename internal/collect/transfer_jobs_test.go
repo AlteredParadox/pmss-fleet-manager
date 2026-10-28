@@ -63,6 +63,8 @@ func TestXferDecide(t *testing.T) {
 		{"100% but alive, no rc", xferRunning, xferLive{started: true, pidFile: true, alive: true, progress: full}, false, xferRunning},
 		{"100% and gone, no rc", xferRunning, xferLive{started: true, pidFile: true, progress: full}, false, xferInterrupted},
 		{"between marker and pid", xferRunning, xferLive{started: true}, false, xferRunning},
+		{"unconfirmed, marker only", xferUnconfirmed, xferLive{started: true}, false, xferUnconfirmed},
+		{"unconfirmed, marker only, cancel", xferUnconfirmed, xferLive{started: true}, true, xferUnconfirmed},
 		{"unconfirmed, now started", xferUnconfirmed, xferLive{started: true, pidFile: true, alive: true}, false, xferRunning},
 		{"unconfirmed, nothing yet", xferUnconfirmed, xferLive{}, false, xferUnconfirmed},
 		{"unconfirmed, cancel, never started", xferUnconfirmed, xferLive{}, true, xferInterrupted},
@@ -355,5 +357,42 @@ func TestTransferFinalNotStoredKeepsEvidence(t *testing.T) {
 	j.op.Unlock()
 	if v := m.xferView(tr.ID); v.Phase != xferRunning || v.Pending != tr.Pending || v.StatusErr == "" {
 		t.Errorf("unsaved final phase adopted: phase %s pending %d err %q", v.Phase, v.Pending, v.StatusErr)
+	}
+}
+
+// A pid write that stalls past the launch's wait: the job is unconfirmed,
+// a read that sees the marker alone keeps it so, and once the runner gives
+// up (pid and rc unwritable, marker taken back) cancel closes it. Promoted
+// to running at the marker, it could never be closed (fred on PR 146).
+func TestTransferMarkerOnlyStaysCancellable(t *testing.T) {
+	ctx := context.Background()
+	m, st, b := genTestManager(t)
+	tr := &store.Transfer{Token: newTok(t), SrcBoxID: b.ID, SrcEndp: AuthEndpoint(b), SrcHostKey: m.poller(b.ID).hostKey(),
+		DstBoxID: b.ID, DstEndp: AuthEndpoint(b), Phase: xferUnconfirmed, PubKey: testBlob,
+		Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey}
+	if err := st.CreateTransfer(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	j := &xferJob{t: *tr}
+	m.xferMu.Lock()
+	m.xfers[tr.ID] = j
+	m.xferMu.Unlock()
+	j.op.Lock()
+	defer j.op.Unlock()
+	m.xferApplyLocked(ctx, j, xferLive{started: true}, false) // marker, pid write still stalled
+	if p := m.xferSnapshot(j).Phase; p != xferUnconfirmed {
+		t.Fatalf("marker only: %s", p)
+	}
+	m.xferApplyLocked(ctx, j, xferLive{started: true}, true) // cancel in that window: nothing to signal yet
+	if p := m.xferSnapshot(j).Phase; p != xferUnconfirmed {
+		t.Fatalf("cancel during the window ended it: %s", p)
+	}
+	m.xferApplyLocked(ctx, j, xferLive{}, true) // runner gave up and took the marker back
+	if p := m.xferSnapshot(j).Phase; p != xferInterrupted {
+		t.Fatalf("cancel after the runner gave up: %s", p)
+	}
+	ts, _ := st.ListTransfers(ctx)
+	if len(ts) != 1 || ts[0].Phase != xferInterrupted {
+		t.Errorf("stored: %+v", ts)
 	}
 }

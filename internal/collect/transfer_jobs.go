@@ -176,8 +176,14 @@ func xferDecide(phase string, l xferLive, cancelAsked bool) string {
 		return xferFinished
 	case l.noJob:
 		return xferInterrupted // the job directory itself is gone
-	case l.alive, l.started && !l.pidFile: // running, or between its marker and its pid file
+	case l.alive:
 		return xferRunning
+	case l.started && !l.pidFile:
+		// Between the runner's marker and its pid: neither promoted (a
+		// runner whose pid write then fails takes the marker back, and an
+		// unconfirmed job can still be cancelled; a running one could not)
+		// nor ended, even on cancel (fred on PR 146).
+		return phase
 	case l.started:
 		return xferInterrupted // pid recorded, process gone, no exit code
 	case cancelAsked && phase == xferUnconfirmed:
