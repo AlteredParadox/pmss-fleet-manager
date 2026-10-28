@@ -1032,6 +1032,12 @@ Newest first; each release's full notes are on the
   listed; folder paths are no longer trimmed, and a new folder name with
   surrounding spaces is refused; the start toast says "started" only for
   a confirmed launch; cancel is hidden when the source box is gone.
+- Transfers, after the third daybreak review: a launch is confirmed by
+  the runner's pid file (or its result), not just its start marker, and a
+  runner that cannot write its pid takes the marker back, so a full disk
+  leaves a cancellable "launch unconfirmed" instead of a copy that reads
+  as running forever; transfer scripts run under `/bin/sh` with
+  `PATH=/usr/bin:/bin` and an absolute ssh.
 
 **1.12.0**
 

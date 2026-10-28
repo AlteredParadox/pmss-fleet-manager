@@ -46,6 +46,9 @@ const xferDirsOutCap = 2*4096 + (xferDirsMax+1)*256 + 64
 // subdirectories, NUL-separated and capped. find -type d without -L skips
 // symlinks, which a copy would not follow either.
 const xferDirsScript = `set -u
+# System tools only: an ambient PATH could put a folder of the account's
+# (perhaps filled by an earlier copy) ahead of them (daybreak review).
+PATH=/usr/bin:/bin; export PATH
 LC_ALL=C; export LC_ALL
 die() { printf 'ERR %s\n' "$*"; exit 3; }
 # canon sets CANON to realpath's answer byte for byte: $(...) alone drops
@@ -111,7 +114,7 @@ func xferDirsHeaders(out []byte) (path, home string, rest []byte, err error) {
 			home = v
 		}
 	}
-	if path == "" || home == "" || !utf8.ValidString(path+home) {
+	if path == "" || home == "" || !utf8.ValidString(path) || !utf8.ValidString(home) {
 		return "", "", nil, fmt.Errorf("unexpected listing output")
 	}
 	return path, home, out, nil
@@ -201,7 +204,7 @@ func (m *Manager) ListTransferDirs(ctx context.Context, id int64, path string) (
 	}
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, stderr, err := cli.Run(rctx, "sh", strings.NewReader("P="+shellQuote(path)+"\n"+xferDirsScript))
+	out, stderr, err := cli.Run(rctx, "/bin/sh", strings.NewReader("P="+shellQuote(path)+"\n"+xferDirsScript))
 	l, err := xferDirsResult(out, stderr, err)
 	if err != nil {
 		return DirListing{}, err
