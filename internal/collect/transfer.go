@@ -297,8 +297,8 @@ finish "$rc"
 // session, detached from this SSH session. It waits up to 3 s for the
 // "started" marker; without it the launch is unconfirmed, not failed.
 const xferLaunchScript = `[ -d "$J" ] || die "job directory missing"
-[ -f "$J/key" ] || die "job key missing"
 [ -e "$J/started" ] && { echo "LAUNCHED already"; exit 0; }
+[ -f "$J/key" ] || die "job key missing"
 printf '%s\n' "$KNOWN" >"$J/known_hosts" || die "cannot write known_hosts"
 cat >"$J/cap.pl" <<'PFM_CAP_EOF'
 ` + xferCapScript + `PFM_CAP_EOF

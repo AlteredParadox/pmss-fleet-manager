@@ -373,11 +373,13 @@ func (j localJob) keyGone(t *testing.T) bool {
 // no-op, symlinks are skipped, and cleanup leaves nothing.
 func TestXferRunnerLocal(t *testing.T) {
 	j := startLocalJob(t, false)
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	// Launching again, after the runner ended and deleted its key, is
+	// still a no-op: the started marker is checked first.
 	run := xferVars("SRC", "x", "DEST", "u@h:", "PORT", "22", "HKALG", "ecdsa-sha2-nistp256")
 	if out := runJobScript(t, j.home, xferVars("TOKEN", j.tok, "KNOWN", "x", "RUNVARS", run), xferLaunchScript, j.env...); !strings.Contains(out, "LAUNCHED already") {
 		t.Errorf("relaunch: %s", out)
 	}
-	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
 	if l.rc != "0" || l.skipped != 1 || xferDecide(xferRunning, l, false) != xferFinished {
 		t.Fatalf("status: %+v", l)
 	}
