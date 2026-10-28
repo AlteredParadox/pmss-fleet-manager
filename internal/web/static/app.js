@@ -2083,7 +2083,11 @@ document.addEventListener('change', (e) => {
 });
 document.addEventListener('input', (e) => {
   const xf = e.target.closest('[data-xf]');
-  if (xf) { S.xferDraft[xf.dataset.xf] = xf.value; if (xf.tagName === 'SELECT') render(); return; }
+  if (xf) {
+    S.xferDraft[xf.dataset.xf] = xf.value;
+    if (xf.tagName === 'SELECT') render(); // the free-space hint follows the chosen box
+    return;
+  }
   const ta = e.target.closest('[data-ta]');
   if (ta && S.torAdd) { S.torAdd[ta.dataset.ta] = ta.type === 'checkbox' ? ta.checked : ta.value; return; }
   const f = e.target.closest('[data-f]');

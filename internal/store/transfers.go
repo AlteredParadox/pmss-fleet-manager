@@ -69,6 +69,9 @@ const createTransfersSQL = `CREATE TABLE IF NOT EXISTS transfers (
 const transferCols = `id, token, src_box_id, src_endpoint, src_host_key, dst_box_id, dst_endpoint, dst_host_key,
 	src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at`
 
+// listTransfersSQL is a constant: nothing from a request is spliced in.
+const listTransfersSQL = "SELECT " + transferCols + " FROM transfers ORDER BY id"
+
 // CreateTransfer inserts t and sets its ID and CreatedAt.
 func (s *Store) CreateTransfer(ctx context.Context, t *Transfer) error {
 	t.CreatedAt = time.Now().UTC().Truncate(time.Second)
@@ -98,7 +101,7 @@ func (s *Store) SaveTransfer(ctx context.Context, t *Transfer) error {
 
 // ListTransfers returns every transfer, oldest first.
 func (s *Store) ListTransfers(ctx context.Context) ([]*Transfer, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+transferCols+` FROM transfers ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, listTransfersSQL)
 	if err != nil {
 		return nil, err
 	}

@@ -460,9 +460,10 @@ func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 		err = errors.New("cleanup not confirmed: " + strings.Join(errs, "; "))
 	}
 	if t.Phase == xferSetupFailed && t.Pending == 0 {
-		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Not cut by an expired setup deadline: the row must go now.
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if derr := m.st.DeleteTransfer(dctx, t.ID); derr == nil {
+		if m.st.DeleteTransfer(dctx, t.ID) == nil {
 			m.xferMu.Lock()
 			delete(m.xfers, t.ID)
 			m.xferMu.Unlock()
@@ -544,7 +545,7 @@ func (m *Manager) StartTransfer(ctx context.Context, srcID int64, req TransferRe
 		return m.xferSetupLocked(c, j, sp, dp)
 	})
 	if !admitted { // shutting down: nothing touched a box
-		_ = m.st.DeleteTransfer(context.Background(), t.ID)
+		_ = m.st.DeleteTransfer(context.WithoutCancel(ctx), t.ID)
 		m.xferMu.Lock()
 		delete(m.xfers, t.ID)
 		m.xferMu.Unlock()
@@ -597,7 +598,7 @@ func (m *Manager) xferSetupLocked(ctx context.Context, j *xferJob, sp, dp *polle
 	if cli, err = sp.conn(ctx); err != nil {
 		return fail(err)
 	}
-	confirmed, err := xferLaunch(ctx, cli, t.Token, resolved, dp.box.User, dp.box.Host, dp.box.Port, t.DstHostKey)
+	confirmed, err := xferLaunch(ctx, cli, t.Token, resolved, xferDest{dp.box.User, dp.box.Host, dp.box.Port, t.DstHostKey})
 	var refused *xferRefusal
 	if errors.As(err, &refused) {
 		return fail(err) // the launch script refused before starting anything

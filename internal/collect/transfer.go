@@ -428,20 +428,27 @@ func xferDstPrepare(ctx context.Context, cli *sshx.Client, token, dst, blob stri
 	return xferField(lines, "DST"), xferField(lines, "KEYLINE"), xferField(lines, "HOME_MODE"), err
 }
 
-// xferLaunch starts the runner on the source. dstHostKey is the
-// destination's pinned key ("type base64"), written as the only entry of
-// the job's known_hosts.
-func xferLaunch(ctx context.Context, cli *sshx.Client, token, src, dstUser, dstHost string, dstPort int, dstHostKey string) (confirmed bool, err error) {
-	kf := strings.Fields(dstHostKey)
+// xferDest is where a runner copies to: the destination's account, its
+// address, and its pinned host key ("type base64"), written as the only
+// entry of the job's known_hosts.
+type xferDest struct {
+	User, Host string
+	Port       int
+	HostKey    string
+}
+
+// xferLaunch starts the runner on the source.
+func xferLaunch(ctx context.Context, cli *sshx.Client, token, src string, d xferDest) (confirmed bool, err error) {
+	kf := strings.Fields(d.HostKey)
 	if len(kf) < 2 || !xferAlgRe.MatchString(kf[0]) {
 		return false, errors.New("destination has no pinned host key")
 	}
-	host := strings.ToLower(dstHost)
+	host := strings.ToLower(d.Host)
 	name := host
-	if dstPort != 22 {
-		name = "[" + host + "]:" + strconv.Itoa(dstPort)
+	if d.Port != 22 {
+		name = "[" + host + "]:" + strconv.Itoa(d.Port)
 	}
-	run := xferVars("SRC", src, "DEST", dstUser+"@"+host+":", "PORT", strconv.Itoa(dstPort), "HKALG", kf[0])
+	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", kf[0])
 	lines, err := xferRun(ctx, cli, xferVars("TOKEN", token, "KNOWN", name+" "+kf[0]+" "+kf[1], "RUNVARS", run), xferLaunchScript)
 	if err != nil {
 		return false, err
