@@ -60,6 +60,9 @@ func needTools(t *testing.T, tools ...string) {
 	t.Helper()
 	for _, x := range tools {
 		if _, err := exec.LookPath(x); err != nil {
+			if os.Getenv("CI") != "" {
+				t.Fatalf("%s not available (CI installs it)", x)
+			}
 			t.Skipf("%s not available", x)
 		}
 	}
