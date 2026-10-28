@@ -92,6 +92,7 @@ type TransferView struct {
 	DstName   string            `json:"dst_name"`
 	Cleanup   []string          `json:"cleanup,omitempty"` // owed, in words
 	Blocked   string            `json:"blocked,omitempty"` // why the job will not act on a box
+	SrcLost   bool              `json:"source_lost"`       // unfinished, and its source can no longer be reached as saved
 	LastSeen  time.Time         `json:"last_seen"`
 	StatusErr string            `json:"status_error,omitempty"`
 	Scanning  bool              `json:"scanning"`
@@ -392,16 +393,32 @@ func (m *Manager) xferRefreshLocked(ctx context.Context, j *xferJob, cancelAsked
 	}
 	l := parseXferStatus(raw)
 	m.xferNote(j, &l, nil)
+	m.xferApplyLocked(ctx, j, l, cancelAsked)
+}
+
+// xferApplyLocked applies what a status read proves (under op): the next
+// phase, stored before the cleanup a final phase starts.
+func (m *Manager) xferApplyLocked(ctx context.Context, j *xferJob, l xferLive, cancelAsked bool) {
+	t := m.xferSnapshot(j)
 	next := xferDecide(t.Phase, l, cancelAsked)
 	if next == t.Phase {
 		return
 	}
+	prev := t
 	t.Phase = next
 	if xferFinal(next) {
 		t.RC, t.Result, t.FinishedAt = l.rc, xferResult(next, l), time.Now().UTC()
 	}
 	if err := m.xferSave(j, t); err != nil {
+		// Not stored: keep the old phase, and above all the source's rc,
+		// which cleanup would delete. The next poll reads it again
+		// (daybreak review S1).
 		m.log.Warn("save transfer", "id", t.ID, "err", err)
+		m.xferMu.Lock()
+		j.t = prev
+		m.xferMu.Unlock()
+		m.xferNote(j, nil, err)
+		return
 	}
 	if xferFinal(next) {
 		m.xferCleanupLocked(ctx, j)
@@ -613,7 +630,7 @@ func (m *Manager) xferSetupLocked(ctx context.Context, j *xferJob, sp, dp *polle
 	if err != nil {
 		return fail(err)
 	}
-	dir, _, _, err := xferDstPrepare(ctx, dcli, t.Token, t.DstPath, blob)
+	dir, err := xferDstPrepare(ctx, dcli, t.Token, t.DstPath, blob)
 	if dir != "" {
 		// The claim answered: this job created the directory. Only then
 		// may a failed setup remove it (if still empty); a refused or
@@ -691,6 +708,12 @@ func (m *Manager) CancelTransfer(ctx context.Context, srcID, id int64) error {
 		time.Sleep(time.Second) // let the trap record it
 	}
 	m.xferRefreshLocked(ctx, j, true)
+	if out != "SIGNALLED" && xferActive(m.xferSnapshot(j).Phase) {
+		// Nothing was signalled and the job still reads as active: a
+		// runner that has started but not yet written its pid. Say so
+		// rather than answer as if it were stopped (daybreak review S2).
+		return fmt.Errorf("%w: the runner could not be signalled yet; try again", ErrTransferBusy)
+	}
 	return nil
 }
 
@@ -710,7 +733,10 @@ func (m *Manager) RetryTransferCleanup(ctx context.Context, srcID, id int64) err
 }
 
 // DismissTransfer forgets a finished job. While cleanup is still owed it
-// takes force, and the answer lists what may be left on the boxes.
+// takes force, and the answer lists what may be left on the boxes. A job
+// that is not finished but whose source box was removed or now names
+// another machine can never be read, cancelled or cleaned up again; force
+// forgets it too, touching neither box (daybreak review B2).
 func (m *Manager) DismissTransfer(ctx context.Context, id int64, force bool) ([]string, error) {
 	j, err := m.xferJobFor(id, 0)
 	if err != nil {
@@ -722,20 +748,31 @@ func (m *Manager) DismissTransfer(ctx context.Context, id int64, force bool) ([]
 	defer j.op.Unlock()
 	t := m.xferSnapshot(j)
 	if !xferFinal(t.Phase) {
-		return nil, fmt.Errorf("%w: the transfer is %s; cancel it first", ErrTransferBusy, t.Phase)
+		if _, err := m.xferPoller(t.SrcBoxID, t.SrcEndp, t.SrcHostKey); !errors.Is(err, ErrTransferIdentity) {
+			return nil, fmt.Errorf("%w: the transfer is %s; cancel it first", ErrTransferBusy, t.Phase)
+		}
+		left := append([]string{"the copy may still be running on the source"}, cleanupWords(t.Pending)...)
+		if !force {
+			return left, fmt.Errorf("%w: the source box is gone or points elsewhere, so this copy cannot be checked or stopped from here (%s); dismiss anyway", ErrTransferBusy, strings.Join(left, "; "))
+		}
+		return left, m.xferForget(ctx, id)
 	}
 	left := cleanupWords(t.Pending)
 	if len(left) > 0 && !force {
 		return left, fmt.Errorf("%w: cleanup is still owed (%s); retry it, or dismiss anyway", ErrTransferBusy, strings.Join(left, "; "))
 	}
+	return left, m.xferForget(ctx, id)
+}
+
+func (m *Manager) xferForget(ctx context.Context, id int64) error {
 	if err := m.st.DeleteTransfer(ctx, id); err != nil {
-		return left, err
+		return err
 	}
 	m.xferMu.Lock()
 	delete(m.xfers, id)
 	m.xferMu.Unlock()
 	m.Publish(Event{Type: "transfers"})
-	return left, nil
+	return nil
 }
 
 // Transfers lists every job, newest first.
@@ -780,6 +817,7 @@ func (m *Manager) xferView(id int64) TransferView {
 		var why []string
 		if _, err := m.xferPoller(t.SrcBoxID, t.SrcEndp, t.SrcHostKey); errors.Is(err, ErrTransferIdentity) {
 			why = append(why, "source: "+err.Error())
+			v.SrcLost = xferActive(t.Phase)
 		}
 		if t.Pending&(store.TransferPendingDstKey|store.TransferPendingDstEmpty) != 0 {
 			if _, err := m.xferPoller(t.DstBoxID, t.DstEndp, t.DstHostKey); errors.Is(err, ErrTransferIdentity) {

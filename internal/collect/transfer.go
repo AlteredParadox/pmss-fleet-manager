@@ -50,12 +50,14 @@ const xferJobDir = ".config/pmss-fleet-manager/transfers"
 // 142, reproduced against rrsync 3.2.7).
 const xferRrsyncOpts = "-wo -no-del -munge"
 
-// xferStatusCap bounds what a status read returns (the job files themselves
-// are bounded by cap.pl).
-const xferStatusCap = 32768
+// xferOutCap bounds what any job script may send back; the largest, a
+// status read, stays under 18 KiB (the job files are bounded by cap.pl and
+// read with head -c). More is not a job script's answer, and is refused
+// before it is split: a box sending megabytes of bare newlines must not
+// cost the dashboard millions of strings (daybreak review B3).
+const xferOutCap = 32768
 
 var (
-	xferTokenRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	// A key line's base64 blob, as ssh-keygen prints an ed25519 key.
 	xferBlobRe = regexp.MustCompile(`^AAAAC3NzaC1lZDI1NTE5[A-Za-z0-9+/]{48,80}={0,2}$`)
 	// A host key algorithm name, as it goes unquoted into the ssh options.
@@ -131,7 +133,10 @@ c=$(realpath -m -- "$ctl")
 if inside "$src" "$c" || inside "$c" "$src" || [ "$src" = "$c" ]; then die "source overlaps the dashboard's control directory $c"; fi
 for t in rsync ssh ssh-keygen perl setsid mkfifo; do command -v "$t" >/dev/null 2>&1 || die "$t not found on the source"; done
 mkdir -p -- "$ctl/transfers" || die "cannot create $ctl/transfers"
-chmod 700 -- "$ctl/transfers"
+# A symlinked transfers directory could point into the source: the chmod
+# and the key would land there, and the copy would carry the key.
+[ "$(realpath -e -- "$ctl/transfers")" = "$c/transfers" ] || die "$ctl/transfers is a symlink; not using it"
+chmod 700 -- "$ctl/transfers" || die "cannot chmod $ctl/transfers"
 mkdir -- "$J" || die "job directory already exists"
 ssh-keygen -q -t ed25519 -N '' -C "pfm-xfer-$TOKEN" -f "$J/key" </dev/null >/dev/null || die "ssh-keygen failed"
 echo "SRC $src"
@@ -150,9 +155,11 @@ d="$parent/$(basename -- "$p")"
 inside "$d" "$home" || die "destination is not inside your home directory"
 inside "$d" "$home/.ssh" && die "destination is inside ~/.ssh"
 inside "$d" "$(realpath -m -- "$ctl")" && die "destination is inside the dashboard's control directory"
+# Both go into command="..." in authorized_keys: the typed path was
+# checked, but a symlinked parent can resolve to anything.
+case "$d$rr" in *[\"\\,\']*|*[[:cntrl:]]*) die "the resolved destination or rrsync path has characters authorized_keys cannot carry";; esac
 mkdir -- "$d" || die "could not create the destination directory"
 echo "DST $d"
-echo "HOME_MODE $(stat -c %a -- "$home")"
 `
 
 // xferKeyAddScript appends the job's key line to authorized_keys under a
@@ -382,6 +389,9 @@ func xferRun(ctx context.Context, cli *sshx.Client, vars, script string) ([]stri
 	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	out, stderr, err := cli.Run(rctx, "sh", strings.NewReader(vars+xferPrelude+script))
+	if len(out) > xferOutCap {
+		return nil, fmt.Errorf("the box sent %d bytes, more than a job script writes", len(out))
+	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	for _, l := range lines {
 		if msg, ok := strings.CutPrefix(l, "ERR "); ok {
@@ -424,16 +434,16 @@ func xferSrcPrepare(ctx context.Context, cli *sshx.Client, token, src string) (r
 // xferDstPrepare claims the new destination directory and adds the job's
 // restricted key line. The resolved directory comes back even on an
 // error after the claim, so the caller can try to remove it.
-func xferDstPrepare(ctx context.Context, cli *sshx.Client, token, dst, blob string) (dir, keyLine, homeMode string, err error) {
+func xferDstPrepare(ctx context.Context, cli *sshx.Client, token, dst, blob string) (dir string, err error) {
 	if !xferBlobRe.MatchString(blob) {
-		return "", "", "", errors.New("bad key")
+		return "", errors.New("bad key")
 	}
 	dst = strings.TrimPrefix(dst, "~/")
 	if err := validXferPath(dst, true); err != nil {
-		return "", "", "", fmt.Errorf("destination: %w", err)
+		return "", fmt.Errorf("destination: %w", err)
 	}
 	lines, err := xferRun(ctx, cli, xferVars("TOKEN", token, "DST", dst, "BLOB", blob), xferDstClaimScript+xferKeyAddScript)
-	return xferField(lines, "DST"), xferField(lines, "KEYLINE"), xferField(lines, "HOME_MODE"), err
+	return xferField(lines, "DST"), err
 }
 
 // xferDest is where a runner copies to: the destination's account, its
@@ -488,7 +498,7 @@ func xferLaunch(ctx context.Context, cli *sshx.Client, token, src string, d xfer
 // xferStatus returns the job's status lines, capped.
 func xferStatus(ctx context.Context, cli *sshx.Client, token string) (string, error) {
 	lines, err := xferRun(ctx, cli, xferVars("TOKEN", token), xferStatusScript)
-	return clip(strings.Join(lines, "\n"), xferStatusCap), err
+	return strings.Join(lines, "\n"), err
 }
 
 func xferDstRemoveKey(ctx context.Context, cli *sshx.Client, token, blob string) (string, error) {

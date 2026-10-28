@@ -289,3 +289,71 @@ func newTok(t *testing.T) string {
 	}
 	return tok
 }
+
+// A running job whose source box now names another machine can never be
+// read, stopped or cleaned up from here; force forgets it, touching no
+// box, and says it may still be running. A job whose source is still
+// reachable as saved is never forgotten while it runs (daybreak review B2).
+func TestTransferForgetLostSource(t *testing.T) {
+	ctx := context.Background()
+	m, st, b := genTestManager(t)
+	add := func(endp string) int64 {
+		tr := &store.Transfer{Token: newTok(t), SrcBoxID: b.ID, SrcEndp: endp, SrcHostKey: m.poller(b.ID).hostKey(),
+			DstBoxID: b.ID, DstEndp: endp, Phase: xferRunning, PubKey: testBlob,
+			Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey}
+		if err := st.CreateTransfer(ctx, tr); err != nil {
+			t.Fatal(err)
+		}
+		m.xferMu.Lock()
+		m.xfers[tr.ID] = &xferJob{t: *tr}
+		m.xferMu.Unlock()
+		return tr.ID
+	}
+	kept := add(AuthEndpoint(b))
+	if v := m.xferView(kept); v.SrcLost {
+		t.Errorf("reachable source reads as lost")
+	}
+	if _, err := m.DismissTransfer(ctx, kept, true); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "cancel it first") {
+		t.Errorf("running job with its source in place forgotten: %v", err)
+	}
+	lost := add("elsewhere:22/u")
+	if v := m.xferView(lost); !v.SrcLost {
+		t.Errorf("lost source not flagged: %+v", v)
+	}
+	left, err := m.DismissTransfer(ctx, lost, false)
+	if !errors.Is(err, ErrTransferBusy) || len(left) != 3 || !strings.Contains(left[0], "may still be running") {
+		t.Errorf("without force: %v %v", left, err)
+	}
+	if _, err := m.DismissTransfer(ctx, lost, true); err != nil {
+		t.Fatalf("forced: %v", err)
+	}
+	ts, _ := st.ListTransfers(ctx)
+	if len(ts) != 1 || ts[0].ID != kept {
+		t.Errorf("stored after forget: %+v", ts)
+	}
+}
+
+// A final phase that cannot be stored is not adopted, and no cleanup
+// runs: cleanup would delete the source's rc, the only evidence of how
+// the copy ended (daybreak review S1).
+func TestTransferFinalNotStoredKeepsEvidence(t *testing.T) {
+	ctx := context.Background()
+	m, st, b := genTestManager(t)
+	tr := &store.Transfer{Token: newTok(t), SrcBoxID: b.ID, SrcEndp: AuthEndpoint(b), SrcHostKey: m.poller(b.ID).hostKey(),
+		DstBoxID: b.ID, DstEndp: AuthEndpoint(b), Phase: xferRunning, PubKey: testBlob,
+		Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey}
+	if err := st.CreateTransfer(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	j := &xferJob{t: *tr}
+	m.xferMu.Lock()
+	m.xfers[tr.ID] = j
+	m.xferMu.Unlock()
+	st.Close() // every save fails from here
+	j.op.Lock()
+	m.xferApplyLocked(ctx, j, xferLive{started: true, pidFile: true, rc: "0"}, false)
+	j.op.Unlock()
+	if v := m.xferView(tr.ID); v.Phase != xferRunning || v.Pending != tr.Pending || v.StatusErr == "" {
+		t.Errorf("unsaved final phase adopted: phase %s pending %d err %q", v.Phase, v.Pending, v.StatusErr)
+	}
+}

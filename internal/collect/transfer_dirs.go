@@ -35,6 +35,12 @@ import (
 // xferDirsMax bounds how many subdirectories one listing returns.
 const xferDirsMax = 1000
 
+// xferDirsOutCap bounds a listing's output: two header lines (paths up to
+// PATH_MAX) and at most xferDirsMax+1 names of at most NAME_MAX bytes,
+// which the script caps with head. More is refused before it is parsed
+// (daybreak review B3).
+const xferDirsOutCap = 2*4096 + (xferDirsMax+1)*256 + 64
+
 // xferDirsScript resolves $P (relative to HOME, absolute, or empty for
 // HOME) and prints the directory, HOME, then the names of its immediate
 // subdirectories, NUL-separated and capped. find -type d without -L skips
@@ -105,17 +111,26 @@ func xferDirsHeaders(out []byte) (path, home string, rest []byte, err error) {
 	return path, home, out, nil
 }
 
-// xferDirNames keeps up to xferDirsMax usable names, sorted.
+// xferDirNames keeps the usable names among the first xferDirsMax entries,
+// sorted. Entries are counted as the box sent them, usable or not, so
+// truncated means the folder had more than xferDirsMax subdirectories.
 func xferDirNames(raw []byte) (dirs []string, truncated bool, skipped int) {
 	dirs = []string{}
-	for _, n := range bytes.Split(raw, []byte{0}) {
+	for seen := 0; len(raw) > 0; {
+		n := raw
+		if i := bytes.IndexByte(raw, 0); i >= 0 {
+			n, raw = raw[:i], raw[i+1:]
+		} else {
+			raw = nil
+		}
 		if len(n) == 0 {
 			continue
 		}
-		if len(dirs) == xferDirsMax {
+		if seen == xferDirsMax {
 			truncated = true
 			break
 		}
+		seen++
 		s := string(n)
 		if !utf8.ValidString(s) || strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 			skipped++
@@ -139,6 +154,9 @@ func xferDirNames(raw []byte) (dirs []string, truncated bool, skipped int) {
 // a run cut off by a lost connection or the deadline must not pass for a
 // complete (or empty) folder (fred on PR 143).
 func xferDirsResult(out, stderr []byte, runErr error) (DirListing, error) {
+	if len(out) > xferDirsOutCap {
+		return DirListing{}, fmt.Errorf("the box sent %d bytes, more than a listing holds", len(out))
+	}
 	l, perr := parseXferDirs(out)
 	var refused *xferRefusal
 	if errors.As(perr, &refused) {

@@ -727,10 +727,15 @@ checked: a copy that does not fit ends with "destination out of space or
 quota". Files that change during the copy may arrive inconsistent, and
 files that vanish give "completed with warnings". A partial copy is never
 deleted. Cancel stops the copy: the files that arrived complete stay, the
-one in flight is discarded by rsync. A job binds to the
+one in flight is discarded by rsync. Cancel stops the copy the dashboard
+started; it does not end other sessions opened with the job key while it
+was valid (only a compromised source could open one, and it could still
+only write into the new directory). A job binds to the
 account and machine it started on: after an edit that points a box record
 elsewhere, or forgets its pinned key, the job refuses to touch that box and
-lists what may need removing by hand. Cleanup that could not be confirmed
+lists what may need removing by hand. An unfinished copy whose source box
+was removed or now points elsewhere can be forgotten; the dashboard then
+says it may still be running and does nothing on either box. Cleanup that could not be confirmed
 (a box unreachable when the copy ended) is shown as "credential cleanup
 needed" with a retry button, never as a failed copy.
 
@@ -1004,6 +1009,16 @@ Newest first; each release's full notes are on the
   to the new transfer's card. New read-only route
   `POST /api/boxes/{id}/transfers/dirs?rev=` (`{"path": ...}`: one
   folder's subfolders, inside the home, at most 1000).
+- Transfers, after the daybreak review: a symlinked
+  `~/.config/pmss-fleet-manager/transfers` is refused before anything is
+  changed through it; transfer and picker output past what the scripts can
+  print is refused before it is parsed; a finished state that cannot be
+  stored leaves the source's result in place for the next read; cancel
+  says "requested", and a runner not yet signallable is reported; an
+  unfinished copy whose source box is gone can be forgotten (forget
+  button, `dismiss?force=1`); "copy completed" only after rc 0 or 24; the
+  resolved destination and rrsync paths are checked before they go into
+  authorized_keys.
 
 **1.12.0**
 

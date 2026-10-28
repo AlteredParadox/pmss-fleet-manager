@@ -267,6 +267,14 @@ test('a transfer is over, and succeeded, by its exit code alone', () => {
   assert.equal(V.transferMeter({ phase: 'running' }), 0);
 });
 
+test('"copy completed" heads owed cleanup only after a copy that completed (daybreak review)', () => {
+  assert.match(V.transferCleanupLabel({ phase: 'finished', rc: '0' }), /^copy completed/);
+  assert.match(V.transferCleanupLabel({ phase: 'finished', rc: '24' }), /^copy completed/);
+  for (const v of [{ phase: 'finished', rc: 'cancelled' }, { phase: 'finished', rc: '23' }, { phase: 'interrupted' }, { phase: 'setup_failed' }]) {
+    assert.equal(V.transferCleanupLabel(v), 'cleanup owed: ', JSON.stringify(v));
+  }
+});
+
 test('the start-copy body uses the confirmed paths and the revisions they were listed under (fred on PR 142)', () => {
   const src = { id: 2, name: 'pm1', box_rev: 5 }, dst = { id: 7, name: 'pmstor01', box_rev: 3 };
   const c = V.transferConfirmation(src, { box_rev: 5, path: '/home/u/dl/x', rel: 'dl/x' }, dst, { box_rev: 3, path: '/home/v/in', rel: 'in', dirs: [] }, 'x copy');
