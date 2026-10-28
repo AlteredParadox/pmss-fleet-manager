@@ -70,55 +70,67 @@ type DirListing struct {
 	Skipped   int      `json:"skipped"`   // names a path cannot carry (control characters, invalid UTF-8)
 }
 
-// parseXferDirs reads the script's output.
+// parseXferDirs reads the script's output: two header lines, then names.
 func parseXferDirs(out []byte) (DirListing, error) {
-	var l DirListing
-	var home string
+	path, home, rest, err := xferDirsHeaders(out)
+	if err != nil {
+		return DirListing{}, err
+	}
+	l := DirListing{Path: path, Rel: strings.TrimPrefix(strings.TrimPrefix(path, home), "/")}
+	l.Dirs, l.Truncated, l.Skipped = xferDirNames(rest)
+	return l, nil
+}
+
+// xferDirsHeaders reads the DIR and HOME lines (or the box's ERR line).
+func xferDirsHeaders(out []byte) (path, home string, rest []byte, err error) {
 	for i := 0; i < 2; i++ {
 		nl := bytes.IndexByte(out, '\n')
 		if nl < 0 {
-			return l, fmt.Errorf("unexpected listing output")
+			return "", "", nil, fmt.Errorf("unexpected listing output")
 		}
 		line := string(out[:nl])
 		out = out[nl+1:]
 		if msg, ok := strings.CutPrefix(line, "ERR "); ok {
-			return l, &xferRefusal{msg}
+			return "", "", nil, &xferRefusal{msg}
 		}
-		switch {
-		case strings.HasPrefix(line, "DIR "):
-			l.Path = line[4:]
-		case strings.HasPrefix(line, "HOME "):
-			home = line[5:]
+		if v, ok := strings.CutPrefix(line, "DIR "); ok {
+			path = v
+		} else if v, ok := strings.CutPrefix(line, "HOME "); ok {
+			home = v
 		}
 	}
-	if l.Path == "" || home == "" {
-		return l, fmt.Errorf("unexpected listing output")
+	if path == "" || home == "" {
+		return "", "", nil, fmt.Errorf("unexpected listing output")
 	}
-	l.Rel = strings.TrimPrefix(strings.TrimPrefix(l.Path, home), "/")
-	l.Dirs = []string{}
-	for _, n := range bytes.Split(out, []byte{0}) {
+	return path, home, out, nil
+}
+
+// xferDirNames keeps up to xferDirsMax usable names, sorted.
+func xferDirNames(raw []byte) (dirs []string, truncated bool, skipped int) {
+	dirs = []string{}
+	for _, n := range bytes.Split(raw, []byte{0}) {
 		if len(n) == 0 {
 			continue
 		}
-		if len(l.Dirs) == xferDirsMax {
-			l.Truncated = true
+		if len(dirs) == xferDirsMax {
+			truncated = true
 			break
 		}
 		s := string(n)
 		if !utf8.ValidString(s) || strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-			l.Skipped++
+			skipped++
 			continue
 		}
-		l.Dirs = append(l.Dirs, s)
+		dirs = append(dirs, s)
 	}
-	sort.Slice(l.Dirs, func(a, b int) bool {
-		x, y := strings.ToLower(l.Dirs[a]), strings.ToLower(l.Dirs[b])
+	sort.Slice(dirs, func(a, b int) bool {
+		x, y := strings.ToLower(dirs[a]), strings.ToLower(dirs[b])
 		if x != y {
 			return x < y
 		}
-		return l.Dirs[a] < l.Dirs[b]
+		return dirs[a] < dirs[b]
 	})
-	return l, nil
+	return dirs, truncated, skipped
 }
 
 // xferDirsResult turns one listing run into its answer. The box's own

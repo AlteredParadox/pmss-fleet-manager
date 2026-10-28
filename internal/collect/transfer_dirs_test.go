@@ -49,8 +49,8 @@ func TestXferDirsListsOneFolder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	real, _ := filepath.EvalSymlinks(home)
-	if l.Path != real || l.Rel != "" || l.Skipped != 1 || l.Truncated {
+	resolved, _ := filepath.EvalSymlinks(home)
+	if l.Path != resolved || l.Rel != "" || l.Skipped != 1 || l.Truncated {
 		t.Errorf("home: %+v", l)
 	}
 	if want := []string{".hidden", "a", "B", "it's \"q\""}; !slices.Equal(l.Dirs, want) {
@@ -59,7 +59,7 @@ func TestXferDirsListsOneFolder(t *testing.T) {
 	if l, err := listLocal(t, home, "a"); err != nil || l.Rel != "a" || !slices.Equal(l.Dirs, []string{"deep"}) {
 		t.Errorf("a: %+v %v", l, err)
 	}
-	if l, err := listLocal(t, home, real+"/a/deep"); err != nil || l.Rel != "a/deep" || len(l.Dirs) != 0 {
+	if l, err := listLocal(t, home, resolved+"/a/deep"); err != nil || l.Rel != "a/deep" || len(l.Dirs) != 0 {
 		t.Errorf("absolute: %+v %v", l, err)
 	}
 }

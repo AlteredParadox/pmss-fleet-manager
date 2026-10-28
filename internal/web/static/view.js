@@ -325,7 +325,8 @@ function transferMeter(v) {
 // come back resolved from the box.
 function homeLabel(rel) { return rel ? `~/${rel}` : '~'; }
 function joinPath(parent, name) {
-  const p = String(parent || '').replace(/\/+$/, '');
+  let p = String(parent || '');
+  while (p.endsWith('/')) p = p.slice(0, -1);
   return p ? `${p}/${name}` : String(name);
 }
 function parentRel(rel) {
@@ -343,7 +344,7 @@ function newFolderError(name) {
   if (n === '.' || n === '..') return 'choose a real folder name';
   if (n.includes('/')) return 'a folder name, not a path (pick the parent folder above)';
   if (/[\u0000-\u001f\u007f]/.test(n)) return 'the name contains a control character';
-  if (/["'\\,]/.test(n)) return 'the name must not contain " \' \\ or ,';
+  if (/["'\\,]/.test(n)) return String.raw`the name must not contain " ' \ or ,`;
   if (n.startsWith('-')) return 'the name must not start with -';
   if (new globalThis.TextEncoder().encode(n).length > 255) return 'the name is too long';
   return '';
