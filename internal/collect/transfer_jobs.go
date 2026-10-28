@@ -34,7 +34,6 @@ import (
 	"sync"
 	"time"
 
-	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 )
 
@@ -435,22 +434,11 @@ func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 	// not to clean up after).
 	running := false
 	if t.Pending&store.TransferPendingSrcJob != 0 {
-		p, err := m.xferPoller(t.SrcBoxID, t.SrcEndp, t.SrcHostKey)
-		if err == nil {
-			var cli *sshx.Client
-			if cli, err = p.conn(ctx); err == nil {
-				_, err = xferSrcCleanup(ctx, cli, t.Token)
-			}
-		}
-		var refused *xferRefusal
-		switch {
-		case err == nil:
-			t.Pending &^= store.TransferPendingSrcJob
-		case errors.As(err, &refused) && strings.Contains(refused.msg, "still running"):
-			running = true
-			errs = append(errs, "the copy is still running on the source; nothing was cleaned up")
-		default:
+		var err error
+		if running, err = m.xferCleanSource(ctx, t); err != nil {
 			errs = append(errs, err.Error())
+		} else {
+			t.Pending &^= store.TransferPendingSrcJob
 		}
 	}
 	if !running {
@@ -490,6 +478,25 @@ func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 	}
 	m.xferNote(j, nil, err)
 	return err
+}
+
+// xferCleanSource removes the job directory on the source; running
+// reports that it refused because the runner is still alive.
+func (m *Manager) xferCleanSource(ctx context.Context, t store.Transfer) (running bool, err error) {
+	p, err := m.xferPoller(t.SrcBoxID, t.SrcEndp, t.SrcHostKey)
+	if err != nil {
+		return false, err
+	}
+	cli, err := p.conn(ctx)
+	if err != nil {
+		return false, err
+	}
+	_, err = xferSrcCleanup(ctx, cli, t.Token)
+	var refused *xferRefusal
+	if errors.As(err, &refused) && strings.Contains(refused.msg, "still running") {
+		return true, errors.New("the copy is still running on the source; nothing was cleaned up")
+	}
+	return false, err
 }
 
 // StartTransfer sets up and launches a copy from box srcID (its revision
