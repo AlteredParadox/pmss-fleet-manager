@@ -212,7 +212,7 @@ func TestXferKeyAddRemoveRestoresFile(t *testing.T) {
 			}
 			out := runJobScript(t, home, xferVars("TOKEN", tok, "DST", "copy dest", "BLOB", testBlob), xferDstClaimScript+xferKeyAddScript)
 			line := xferField(strings.Split(out, "\n"), "KEYLINE")
-			if !strings.HasPrefix(line, `restrict,expiry-time="`) || !strings.Contains(line, `-wo -no-del '`+home+`/copy dest'" ssh-ed25519 `+testBlob+" pfm-xfer-"+tok) {
+			if !strings.HasPrefix(line, `restrict,expiry-time="`) || !strings.Contains(line, xferRrsyncOpts+` '`+home+`/copy dest'" ssh-ed25519 `+testBlob+" pfm-xfer-"+tok) {
 				t.Fatalf("key line %q", line)
 			}
 			mid := readFile(t, ak)
@@ -266,6 +266,11 @@ func TestXferDstClaimRefusesExisting(t *testing.T) {
 	if !strings.Contains(string(out), "ERR destination already exists") {
 		t.Errorf("got %s", out)
 	}
+	// No DST line: the Go side marks the directory as this job's (and so
+	// removable while empty) only on that answer (Codex on PR 142).
+	if xferField(strings.Split(string(out), "\n"), "DST") != "" {
+		t.Errorf("a refused claim named a directory: %s", out)
+	}
 }
 
 func TestXferSrcRefusesControlDirOverlap(t *testing.T) {
@@ -293,7 +298,7 @@ done
 shift
 [ -n "${FAKE_PIDFILE:-}" ] && echo $$ >"$FAKE_PIDFILE"
 [ -n "${FAKE_SLEEP:-}" ] && sleep "$FAKE_SLEEP"
-SSH_ORIGINAL_COMMAND="$*" exec rrsync -wo -no-del "$FAKE_DST"
+SSH_ORIGINAL_COMMAND="$*" exec rrsync ` + xferRrsyncOpts + ` "$FAKE_DST"
 `
 
 type localJob struct {
@@ -411,6 +416,13 @@ func TestXferRunnerLocal(t *testing.T) {
 func TestXferRunnerCancel(t *testing.T) {
 	j := startLocalJob(t, true)
 	j.waitStatus(t, func(l xferLive) bool { return l.alive })
+	// Cleanup refuses while the runner lives (so nothing else is cleaned).
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(xferVars("TOKEN", j.tok) + xferPrelude + xferSrcCleanupScript)
+	cmd.Env = append(os.Environ(), "HOME="+j.home)
+	if out, _ := cmd.CombinedOutput(); !strings.Contains(string(out), "ERR the runner is still running") {
+		t.Errorf("cleanup of a live job: %s", out)
+	}
 	sshPid := ""
 	for i := 0; i < 50 && sshPid == ""; i++ {
 		sshPid = strings.TrimSpace(readFileOr(filepath.Join(j.bin, "ssh.pid")))
@@ -502,6 +514,73 @@ func TestXferRrsyncRefuses(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dst, "secret")); err != nil {
 		t.Error("destination file touched")
+	}
+}
+
+// TestXferRrsyncHostile: a source that turned hostile holds the job key
+// and can run any rsync client. A planted symlink used as --backup-dir
+// must not let it write outside the directory (here: over
+// ~/.ssh/authorized_keys); rrsync's -munge is what stops it (Codex
+// security review on PR 142). Absolute and ".." paths in options are
+// refused by rrsync itself.
+func TestXferRrsyncHostile(t *testing.T) {
+	needTools(t, "rrsync", "rsync")
+	home, bin, seed, link := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	dst := filepath.Join(home, "copy")
+	os.Mkdir(dst, 0o700)
+	os.Mkdir(filepath.Join(home, ".ssh"), 0o700)
+	ak := filepath.Join(home, ".ssh", "authorized_keys")
+	os.WriteFile(ak, []byte("ORIGINAL\n"), 0o600)
+	os.WriteFile(filepath.Join(bin, "ssh"), []byte(fakeSSH), 0o700)
+	env := append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_DST="+dst)
+	rsync := func(args ...string) {
+		cmd := exec.Command("rsync", args...)
+		cmd.Env = env
+		cmd.CombinedOutput() // refusals are the point; the files tell
+	}
+	os.WriteFile(filepath.Join(seed, "authorized_keys"), []byte("ATTACKER\n"), 0o600)
+	rsync("-rt", "-e", "ssh", "--", seed+"/", "u@h:")
+	os.Symlink("../.ssh", filepath.Join(link, ".backup"))
+	os.WriteFile(filepath.Join(link, "authorized_keys"), []byte("new\n"), 0o600)
+	rsync("-rlt", "-b", "--backup-dir=.backup", "-e", "ssh", "--", link+"/", "u@h:")
+	rsync("-rt", "--backup-dir=../.ssh", "-b", "-e", "ssh", "--", link+"/", "u@h:")
+	rsync("-rt", "--temp-dir=/tmp", "-e", "ssh", "--", seed+"/", "u@h:")
+	if got := readFile(t, ak); got != "ORIGINAL\n" {
+		t.Fatalf("authorized_keys outside the directory was replaced: %q", got)
+	}
+	if fi, err := os.Lstat(filepath.Join(dst, ".backup")); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if target, _ := os.Readlink(filepath.Join(dst, ".backup")); !strings.HasPrefix(target, "/rsyncd-munged/") {
+			t.Errorf("symlink arrived unmunged: %s", target)
+		}
+	}
+}
+
+func TestXferLaunchVars(t *testing.T) {
+	for _, c := range []struct {
+		key, host string
+		port      int
+		known     string
+		alg       string
+	}{
+		{"ecdsa-sha2-nistp256 AAAAE2", "Box.Example.com", 22, "box.example.com ecdsa-sha2-nistp256 AAAAE2", "ecdsa-sha2-nistp256"},
+		{"ssh-ed25519 AAAAC3", "h", 2222, "[h]:2222 ssh-ed25519 AAAAC3", "ssh-ed25519"},
+		// An RSA pin stays exactly as pinned in known_hosts, and is
+		// negotiated with SHA-2 signatures, never SHA-1 (fred on PR 142).
+		{"ssh-rsa AAAAB3", "h", 22, "h ssh-rsa AAAAB3", "rsa-sha2-512,rsa-sha2-256"},
+	} {
+		v, err := xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: c.host, Port: c.port, HostKey: c.key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(v, "KNOWN="+shellQuote(c.known)+"\n") || !strings.Contains(v, "HKALG="+strings.ReplaceAll(shellQuote(c.alg), "'", `'\''`)) {
+			t.Errorf("%s: %s", c.key, v)
+		}
+	}
+	if _, err := xferLaunchVars("t", "s", xferDest{HostKey: ""}); err == nil {
+		t.Error("no pinned key accepted")
+	}
+	if _, err := xferLaunchVars("t", "s", xferDest{HostKey: "BAD;TYPE AAAA"}); err == nil {
+		t.Error("odd key type accepted")
 	}
 }
 

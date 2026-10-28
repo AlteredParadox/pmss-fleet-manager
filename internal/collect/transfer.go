@@ -42,6 +42,14 @@ import (
 // refused, so the key and the live job files are never copied.
 const xferJobDir = ".config/pmss-fleet-manager/transfers"
 
+// xferRrsyncOpts restrict the job key on the destination: write only, no
+// --delete/--remove, and symlinks munged on the receiving side. Without
+// -munge a source that turned hostile (it holds the key) could plant a
+// symlink and use it as a --backup-dir to write outside the directory,
+// for instance over ~/.ssh/authorized_keys (Codex security review on PR
+// 142, reproduced against rrsync 3.2.7).
+const xferRrsyncOpts = "-wo -no-del -munge"
+
 // xferStatusCap bounds what a status read returns (the job files themselves
 // are bounded by cap.pl).
 const xferStatusCap = 32768
@@ -169,7 +177,7 @@ else
   flags="$flags+new"
 fi
 exp=$(date -d '+30 minutes' +%Y%m%d%H%M) || die "date failed"
-line="restrict,expiry-time=\"$exp\",command=\"$rr -wo -no-del '$d'\" ssh-ed25519 $BLOB pfm-xfer-$TOKEN$flags"
+line="restrict,expiry-time=\"$exp\",command=\"$rr ` + xferRrsyncOpts + ` '$d'\" ssh-ed25519 $BLOB pfm-xfer-$TOKEN$flags"
 printf '%s\n' "$line" >>"$tmp" && mv -f -- "$tmp" "$ak" || { rm -f -- "$tmp"; die "cannot write authorized_keys"; }
 echo "KEYLINE $line"
 `
@@ -437,19 +445,40 @@ type xferDest struct {
 	HostKey    string
 }
 
-// xferLaunch starts the runner on the source.
-func xferLaunch(ctx context.Context, cli *sshx.Client, token, src string, d xferDest) (confirmed bool, err error) {
+// xferHostKeyAlgs is the HostKeyAlgorithms value that makes ssh negotiate
+// the pinned key's type. An RSA key's type name, ssh-rsa, would select
+// its SHA-1 signatures, which current servers refuse: RSA pins negotiate
+// rsa-sha2-512 or rsa-sha2-256 with the same key (fred on PR 142).
+func xferHostKeyAlgs(keyType string) string {
+	if keyType == "ssh-rsa" {
+		return "rsa-sha2-512,rsa-sha2-256"
+	}
+	return keyType
+}
+
+// xferLaunchVars renders the launch script's input: the job's known_hosts
+// line (the pinned key, exactly) and the runner's assignments.
+func xferLaunchVars(token, src string, d xferDest) (string, error) {
 	kf := strings.Fields(d.HostKey)
 	if len(kf) < 2 || !xferAlgRe.MatchString(kf[0]) {
-		return false, errors.New("destination has no pinned host key")
+		return "", errors.New("destination has no pinned host key")
 	}
 	host := strings.ToLower(d.Host)
 	name := host
 	if d.Port != 22 {
 		name = "[" + host + "]:" + strconv.Itoa(d.Port)
 	}
-	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", kf[0])
-	lines, err := xferRun(ctx, cli, xferVars("TOKEN", token, "KNOWN", name+" "+kf[0]+" "+kf[1], "RUNVARS", run), xferLaunchScript)
+	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", xferHostKeyAlgs(kf[0]))
+	return xferVars("TOKEN", token, "KNOWN", name+" "+kf[0]+" "+kf[1], "RUNVARS", run), nil
+}
+
+// xferLaunch starts the runner on the source.
+func xferLaunch(ctx context.Context, cli *sshx.Client, token, src string, d xferDest) (confirmed bool, err error) {
+	vars, err := xferLaunchVars(token, src, d)
+	if err != nil {
+		return false, err
+	}
+	lines, err := xferRun(ctx, cli, vars, xferLaunchScript)
 	if err != nil {
 		return false, err
 	}

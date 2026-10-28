@@ -266,3 +266,21 @@ test('a transfer is over, and succeeded, by its exit code alone', () => {
   assert.equal(V.transferState({ phase: 'unconfirmed' }).over, false);
   assert.equal(V.transferMeter({ phase: 'running' }), 0);
 });
+
+test('the start-copy body keeps the destination revision chosen in the form (fred on PR 142)', () => {
+  const draft = { src: ' downloads/x ', dst_box: '7', dst_rev: 3, dst: 'copy ' };
+  // The destination was edited (rev 4) after it was chosen: the body still
+  // names rev 3, so the server refuses with 409 instead of copying to the
+  // record's new target.
+  const boxes = [{ id: 7, box_rev: 4 }];
+  assert.ok(boxes[0].box_rev !== 3);
+  assert.deepEqual(V.transferRequest(draft), { dst_box: 7, dst_rev: 3, src_path: 'downloads/x', dst_path: 'copy' });
+  assert.equal(V.transferRequest({ dst_box: '7' }).dst_rev, 0, 'never chosen: no revision, which the server refuses');
+});
+
+test('a reconnect reloads the transfers list on the transfers tab (fred on PR 142)', () => {
+  assert.deepEqual(V.resyncLoads('box', 'transfers', 2), ['detail', 'transfers']);
+  assert.deepEqual(V.resyncLoads('box', 'overview', 2), ['detail']);
+  assert.deepEqual(V.resyncLoads('alerts', '', null), ['alerts']);
+  assert.deepEqual(V.resyncLoads('fleet', '', null), []);
+});

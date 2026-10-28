@@ -320,5 +320,23 @@ function transferMeter(v) {
   return Number.isFinite(p) ? Math.max(0, Math.min(p, 99)) : 0;
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferMeter };
+// transferRequest: the start-copy body. The destination's revision is the
+// one captured when the box was chosen in the form, never the box's state
+// at submit time: if the destination was edited since (perhaps to another
+// machine), the server refuses (409) instead of copying to whatever the
+// record names now (fred on PR 142).
+function transferRequest(draft) {
+  return { dst_box: Number(draft.dst_box), dst_rev: Number(draft.dst_rev) || 0, src_path: String(draft.src || '').trim(), dst_path: String(draft.dst || '').trim() };
+}
+// resyncLoads: what a reconnect reloads besides the box states. Events
+// missed while the stream was down are not repeated, and a finished copy
+// is no longer polled, so its card would stay stale (fred on PR 142).
+function resyncLoads(view, tab, selId) {
+  if (view === 'box' && selId) return tab === 'transfers' ? ['detail', 'transfers'] : ['detail'];
+  if (view === 'alerts') return ['alerts'];
+  if (view === 'torrents') return ['torrents'];
+  return [];
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferMeter, transferRequest, resyncLoads };
 })();

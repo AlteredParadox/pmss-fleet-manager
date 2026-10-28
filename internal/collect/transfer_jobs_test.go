@@ -130,6 +130,9 @@ func TestTransfersRestart(t *testing.T) {
 		{Token: strings.Repeat("a", 32), SrcBoxID: 1, DstBoxID: 2, Phase: xferPreparing, Pending: store.TransferPendingSrcJob},
 		{Token: strings.Repeat("b", 32), SrcBoxID: 1, DstBoxID: 2, Phase: xferPreparing, PubKey: testBlob, Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey},
 		{Token: strings.Repeat("c", 32), SrcBoxID: 1, DstBoxID: 2, Phase: xferRunning, PubKey: testBlob, Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey},
+		// Stopped between recording the launch and its answer: a runner
+		// may exist, so the job is read, not taken for a failed setup.
+		{Token: strings.Repeat("d", 32), SrcBoxID: 1, DstBoxID: 2, Phase: xferUnconfirmed, PubKey: testBlob, Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey},
 	}
 	for _, r := range rows {
 		if err := st.CreateTransfer(ctx, r); err != nil {
@@ -145,9 +148,13 @@ func TestTransfersRestart(t *testing.T) {
 	if v := got[rows[0].Token]; v.Phase != xferSetupFailed || v.Pending != store.TransferPendingSrcJob {
 		t.Errorf("preparing without a key: %s %d", v.Phase, v.Pending)
 	}
-	all := store.TransferPendingSrcJob | store.TransferPendingDstKey | store.TransferPendingDstEmpty
-	if v := got[rows[1].Token]; v.Phase != xferSetupFailed || v.Pending != all || len(v.Cleanup) != 3 {
+	// The key may have been added; the directory is never assumed to be
+	// this job's (it may have existed before), so it is not owed.
+	if v := got[rows[1].Token]; v.Phase != xferSetupFailed || v.Pending != store.TransferPendingSrcJob|store.TransferPendingDstKey || len(v.Cleanup) != 2 {
 		t.Errorf("preparing with a key: %s %d %v", v.Phase, v.Pending, v.Cleanup)
+	}
+	if v := got[rows[3].Token]; v.Phase != xferUnconfirmed || v.RC != "" {
+		t.Errorf("unconfirmed: %s", v.Phase)
 	}
 	v := got[rows[2].Token]
 	if v.Phase != xferRunning || v.RC != "" || !strings.Contains(v.StatusErr, "was removed") || !strings.Contains(v.Blocked, "removed") || v.Scanning {

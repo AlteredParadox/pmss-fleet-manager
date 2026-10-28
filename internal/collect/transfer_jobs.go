@@ -280,7 +280,10 @@ func (m *Manager) loadTransfers(ctx context.Context) error {
 			t.Result = "the dashboard stopped during setup; the cleanup below may be needed"
 			t.Pending |= store.TransferPendingSrcJob
 			if t.PubKey != "" {
-				t.Pending |= store.TransferPendingDstKey | store.TransferPendingDstEmpty
+				// The key may have been added. The directory may have been
+				// claimed too, but nothing proves this job created it, so
+				// it is never removed on that guess (Codex on PR 142).
+				t.Pending |= store.TransferPendingDstKey
 			}
 			t.FinishedAt = time.Now().UTC()
 			if err := m.st.SaveTransfer(ctx, t); err != nil {
@@ -427,20 +430,10 @@ func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 		}
 		t.Pending &^= bit
 	}
-	dst(store.TransferPendingDstKey, func(c context.Context, p *poller) (string, error) {
-		cli, err := p.conn(c)
-		if err != nil {
-			return "", err
-		}
-		return xferDstRemoveKey(c, cli, t.Token, t.PubKey)
-	})
-	dst(store.TransferPendingDstEmpty, func(c context.Context, p *poller) (string, error) {
-		cli, err := p.conn(c)
-		if err != nil {
-			return "", err
-		}
-		return xferDstRmdirEmpty(c, cli, t.Token, t.DstPath)
-	})
+	// The source first: its cleanup refuses while the runner is alive, and
+	// then nothing else is touched (a live copy is a job to read or cancel,
+	// not to clean up after).
+	running := false
 	if t.Pending&store.TransferPendingSrcJob != 0 {
 		p, err := m.xferPoller(t.SrcBoxID, t.SrcEndp, t.SrcHostKey)
 		if err == nil {
@@ -449,11 +442,32 @@ func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 				_, err = xferSrcCleanup(ctx, cli, t.Token)
 			}
 		}
-		if err != nil {
-			errs = append(errs, err.Error())
-		} else {
+		var refused *xferRefusal
+		switch {
+		case err == nil:
 			t.Pending &^= store.TransferPendingSrcJob
+		case errors.As(err, &refused) && strings.Contains(refused.msg, "still running"):
+			running = true
+			errs = append(errs, "the copy is still running on the source; nothing was cleaned up")
+		default:
+			errs = append(errs, err.Error())
 		}
+	}
+	if !running {
+		dst(store.TransferPendingDstKey, func(c context.Context, p *poller) (string, error) {
+			cli, err := p.conn(c)
+			if err != nil {
+				return "", err
+			}
+			return xferDstRemoveKey(c, cli, t.Token, t.PubKey)
+		})
+		dst(store.TransferPendingDstEmpty, func(c context.Context, p *poller) (string, error) {
+			cli, err := p.conn(c)
+			if err != nil {
+				return "", err
+			}
+			return xferDstRmdirEmpty(c, cli, t.Token, t.DstPath)
+		})
 	}
 	var err error
 	if len(errs) > 0 {
@@ -584,7 +598,7 @@ func (m *Manager) xferSetupLocked(ctx context.Context, j *xferJob, sp, dp *polle
 	}
 	// Saved before the destination is touched: removal matches this key.
 	t.PubKey = blob
-	t.Pending |= store.TransferPendingDstKey | store.TransferPendingDstEmpty
+	t.Pending |= store.TransferPendingDstKey
 	if err := m.xferSave(j, t); err != nil {
 		return fail(err)
 	}
@@ -592,10 +606,27 @@ func (m *Manager) xferSetupLocked(ctx context.Context, j *xferJob, sp, dp *polle
 	if err != nil {
 		return fail(err)
 	}
-	if _, _, _, err := xferDstPrepare(ctx, dcli, t.Token, t.DstPath, blob); err != nil {
+	dir, _, _, err := xferDstPrepare(ctx, dcli, t.Token, t.DstPath, blob)
+	if dir != "" {
+		// The claim answered: this job created the directory. Only then
+		// may a failed setup remove it (if still empty); a refused or
+		// unanswered claim proves nothing, and a directory that already
+		// existed is never touched (Codex on PR 142).
+		t.Pending |= store.TransferPendingDstEmpty
+	}
+	if err != nil {
 		return fail(err)
 	}
 	if cli, err = sp.conn(ctx); err != nil {
+		return fail(err)
+	}
+	// Recorded before the launch: from here a runner may exist, and a
+	// dashboard that stops before the answer must find the job again and
+	// go on reading it, not take it for a failed setup (Codex on PR 142).
+	// The destination directory may hold data from now on: never removed.
+	t.Phase = xferUnconfirmed
+	t.Pending &^= store.TransferPendingDstEmpty
+	if err := m.xferSave(j, t); err != nil {
 		return fail(err)
 	}
 	confirmed, err := xferLaunch(ctx, cli, t.Token, resolved, xferDest{dp.box.User, dp.box.Host, dp.box.Port, t.DstHostKey})
@@ -603,11 +634,8 @@ func (m *Manager) xferSetupLocked(ctx context.Context, j *xferJob, sp, dp *polle
 	if errors.As(err, &refused) {
 		return fail(err) // the launch script refused before starting anything
 	}
-	// From here the destination directory may hold data: never removed.
-	t.Pending &^= store.TransferPendingDstEmpty
-	t.Phase = xferRunning
-	if err != nil || !confirmed {
-		t.Phase = xferUnconfirmed
+	if err == nil && confirmed {
+		t.Phase = xferRunning
 	}
 	if serr := m.xferSave(j, t); serr != nil {
 		m.log.Warn("save transfer", "id", t.ID, "err", serr)

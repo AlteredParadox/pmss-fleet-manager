@@ -43,7 +43,7 @@ const S = {
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
   transfers: null, // box-to-box copies from /api/transfers, loaded on a box's transfers tab
-  xferDraft: { src: '', dst_box: '', dst: '', busy: false }, // the "copy to another box" form
+  xferDraft: { src: '', dst_box: '', dst_rev: 0, dst: '', busy: false }, // the "copy to another box" form; dst_rev is captured when the box is chosen
   torSort: loadTorSort(), // column sort per torrent table ('qbt', 'rtorrent', 'all'): { key, dir } or null for the default order
 };
 // The torrent tables' sort is a per-browser convenience: kept in
@@ -334,7 +334,8 @@ function connectEvents() {
     while (S.live && gen === resyncGen) { // one attempt at a time, by design: each retry waits for the last
       if (await loadState()) {
         if (gen !== resyncGen) return;
-        if (S.view === 'box' && S.selId) void loadDetail(S.selId); else if (S.view === 'alerts') void loadAlerts(); else if (S.view === 'torrents') void loadTorrents();
+        const loads = { detail: () => loadDetail(S.selId), transfers: loadTransfers, alerts: loadAlerts, torrents: loadTorrents };
+        for (const k of pfmView.resyncLoads(S.view, S.tab, S.selId)) void loads[k]();
         render();
         return;
       }
@@ -1398,13 +1399,13 @@ function transferCard(v) {
 }
 async function transferAction(a, act) {
   if (a === 'xfer:start') {
-    const d = S.xferDraft, dst = boxById(Number(d.dst_box));
-    if (!d.src.trim() || !dst || !d.dst.trim()) { toast('fill in the source directory, the destination box and the new directory', 'warn'); return; }
+    const d = S.xferDraft, body = pfmView.transferRequest(d);
+    if (!body.src_path || !body.dst_box || !body.dst_path) { toast('fill in the source directory, the destination box and the new directory', 'warn'); return; }
     d.busy = true; render();
     try {
-      await api('POST', boxURL(act.dataset, 'transfers'), { dst_box: dst.id, dst_rev: dst.box_rev, src_path: d.src.trim(), dst_path: d.dst.trim() });
+      await api('POST', boxURL(act.dataset, 'transfers'), body);
       toast('copy started', 'ok');
-      S.xferDraft = { src: '', dst_box: '', dst: '', busy: false };
+      S.xferDraft = { src: '', dst_box: '', dst_rev: 0, dst: '', busy: false };
     } finally { S.xferDraft.busy = false; void loadTransfers(); }
     return;
   }
@@ -2085,6 +2086,7 @@ document.addEventListener('input', (e) => {
   const xf = e.target.closest('[data-xf]');
   if (xf) {
     S.xferDraft[xf.dataset.xf] = xf.value;
+    if (xf.dataset.xf === 'dst_box') S.xferDraft.dst_rev = boxById(Number(xf.value))?.box_rev || 0; // the record the operator chose
     if (xf.tagName === 'SELECT') render(); // the free-space hint follows the chosen box
     return;
   }

@@ -682,17 +682,20 @@ How it is authenticated, per copy:
    leaves that directory and is deleted when the copy ends.
 2. The dashboard adds the public half to the destination's
    `~/.ssh/authorized_keys` as one line,
-   `restrict,expiry-time="<setup + 30 min>",command="/usr/bin/rrsync -wo -no-del '<new dir>'"`:
+   `restrict,expiry-time="<setup + 30 min>",command="/usr/bin/rrsync -wo -no-del -munge '<new dir>'"`:
    no shell, no forwarding, no PTY; it can only write into the new
-   directory, cannot read anything and cannot delete; no new login with it
-   after 30 minutes (rsync connects once, so a long copy is not cut off).
+   directory, cannot read anything and cannot delete; symlinks it sends are
+   munged on arrival, so even a source that turned hostile (it holds the
+   key) cannot use one to write outside the directory; no new login with
+   it after 30 minutes (rsync connects once, so a long copy is not cut off).
    The file is edited under a lock by copy-and-rename; no other line is
    touched, and removal puts it back byte for byte (including `~/.ssh` and
    the file themselves if the copy created them).
 3. The source connects to the destination's host name with the host key
    the dashboard has pinned for it, written into the job's own
-   `known_hosts`: no trust on first use on the box, no agent, no forwarding
-   of the dashboard's credentials.
+   `known_hosts` (an RSA pin is negotiated with SHA-2 signatures): no trust
+   on first use on the box, no agent, no forwarding of the dashboard's
+   credentials.
 
 Prerequisites: `rsync`, `rrsync` (Debian's rsync 3.2.4 or later ships it as
 `/usr/bin/rrsync`) and OpenSSH 7.7 or later on the destination, and sshd
@@ -981,8 +984,8 @@ Newest first; each release's full notes are on the
 
 - Box-to-box copy (transfers tab): one directory to a new directory on
   another box, rsync straight between the boxes with a per-copy key
-  restricted to rrsync write-only into that directory and expiring after
-  30 minutes; status, cancel, cleanup retry; see *Copying between boxes*.
+  restricted to rrsync write-only (symlinks munged) into that directory
+  and expiring after 30 minutes; status, cancel, cleanup retry; see *Copying between boxes*.
   New routes `GET /api/transfers`, `POST /api/boxes/{id}/transfers`,
   `POST /api/boxes/{id}/transfers/{tid}/{cancel|cleanup}` (both with
   `?rev=`; refused in monitor-only mode) and
