@@ -983,7 +983,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.12.0 is the current release. The code was written against five real Pulsed
+1.13.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -995,13 +995,17 @@ checksums, and a matching container image on GHCR.
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
-**Unreleased**
+**1.13.0**
 
 - Box-to-box copy (transfers tab): one directory to a new directory on
-  another box, rsync straight between the boxes with a per-copy key
-  restricted to rrsync write-only (symlinks munged) into that directory
-  and expiring after 30 minutes; status, cancel, cleanup retry; see *Copying between boxes*.
-  New routes `GET /api/transfers`, `POST /api/boxes/{id}/transfers`,
+  another box, rsync straight between the boxes (internal traffic) with a
+  per-copy key restricted to `/usr/bin/rrsync` write-only (symlinks
+  munged) into that directory and expiring after 30 minutes; detached on
+  the source, so it survives dashboard restarts; progress, cancel, cleanup
+  retry, and a forget button for a copy whose source box is gone. See
+  *Copying between boxes* for the prerequisites (rsync and rrsync on both
+  boxes; all current PMSS boxes have them). New routes
+  `GET /api/transfers`, `POST /api/boxes/{id}/transfers`,
   `POST /api/boxes/{id}/transfers/{tid}/{cancel|cleanup}` (both with
   `?rev=`; refused in monitor-only mode) and
   `POST /api/transfers/{tid}/dismiss`; new `transfers` table and
@@ -1012,32 +1016,15 @@ Newest first; each release's full notes are on the
   to the new transfer's card. New read-only route
   `POST /api/boxes/{id}/transfers/dirs?rev=` (`{"path": ...}`: one
   folder's subfolders, inside the home, at most 1000).
-- Transfers, after the daybreak review: a symlinked
-  `~/.config/pmss-fleet-manager/transfers` is refused before anything is
-  changed through it; transfer and picker output past what the scripts can
-  print is refused before it is parsed; a finished state that cannot be
-  stored leaves the source's result in place for the next read; cancel
-  says "requested", and a runner not yet signallable is reported; an
-  unfinished copy whose source box is gone can be forgotten (forget
-  button, `dismiss?force=1`); "copy completed" only after rc 0 or 24; the
-  resolved destination path is checked before it goes into
-  authorized_keys.
-- Transfers, after the second daybreak review: the job key is forced into
-  `/usr/bin/rrsync` only (root's, root-only writable), not whatever
-  `rrsync` the PATH finds; a source whose resolved path holds a control
-  character is refused, and the source's answer must carry exactly one
-  path and one key; a runner that cannot write its pid records an error
-  and never starts rsync; the picker ignores a listing overtaken by a
-  newer one and shows its skipped/truncated notes even with no folders
-  listed; folder paths are no longer trimmed, and a new folder name with
-  surrounding spaces is refused; the start toast says "started" only for
-  a confirmed launch; cancel is hidden when the source box is gone.
-- Transfers, after the third daybreak review: a launch is confirmed by
-  the runner's pid file (or its result), not just its start marker, and a
-  runner that cannot write its pid takes the marker back, so a full disk
-  leaves a cancellable "launch unconfirmed" instead of a copy that reads
-  as running forever; transfer scripts run under `/bin/sh` with
-  `PATH=/usr/bin:/bin` and an absolute ssh.
+- Three daybreak review rounds before release (PRs #144 to #146): the
+  control directory, resolved source and destination paths are checked
+  byte for byte (symlinks, control characters, trailing newlines) before
+  a key exists; the source's answer must carry exactly one path and one
+  key; rrsync is pinned and must be root's; box output is size-capped
+  before it is parsed; a result is stored before the cleanup that deletes
+  its evidence; a runner that cannot write its pid never starts rsync and
+  stays cancellable; launch, cancel and completion wording only claim
+  what was proved; scripts run under `/bin/sh` with a system-only PATH.
 
 **1.12.0**
 
