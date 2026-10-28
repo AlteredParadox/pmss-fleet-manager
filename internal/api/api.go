@@ -253,7 +253,7 @@ func changesNoBox(route string) bool {
 		"POST " + boxRoute + "/probe", "POST " + boxRoute + "/refresh", "POST " + boxRoute + "/du",
 		"POST " + boxRoute + "/rtorrent/remove-failure/dismiss", "POST " + boxRoute + "/apps/watch",
 		"POST " + boxRoute + "/logs/read", "POST " + boxRoute + "/containers/{cid}/logs",
-		"POST /api/detect", "POST /api/transfers/{tid}/dismiss",
+		"POST /api/detect", "POST /api/transfers/{tid}/dismiss", "POST " + boxRoute + "/transfers/dirs",
 		"POST /api/alerts/ack-all", "POST /api/alerts/{id}/ack", "DELETE /api/alerts/{id}", "POST /api/alerts/clear-resolved",
 		"PUT /api/settings", "POST /api/services/sync", "POST /api/pmdb/sync":
 		return true
@@ -339,6 +339,7 @@ func (s *Server) routes() {
 	handle("POST "+bp+boxRoute+"/containers/{cid}/logs", s.handleContainerLogs) // literal segment wins over {action}
 	handle("GET "+bp+"/api/transfers", s.handleTransfers)
 	handle("POST "+bp+boxRoute+"/transfers", s.handleStartTransfer)
+	handle("POST "+bp+boxRoute+"/transfers/dirs", s.handleTransferDirs) // lists one folder over SSH (reads only): POST so the CSRF check applies; literal segment wins over {tid}
 	handle("POST "+bp+boxRoute+"/transfers/{tid}/{action}", s.handleTransferAction)
 	handle("POST "+bp+"/api/transfers/{tid}/dismiss", s.handleDismissTransfer) // forgets a finished job: changes no box
 	handle("POST "+bp+"/api/detect", s.handleDetect)
@@ -1269,6 +1270,38 @@ func (s *Server) handleStartTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, v)
+}
+
+// handleTransferDirs lists one folder's subdirectories for the transfer
+// form's picker. It reads only (so monitor-only does not refuse it), but
+// it still takes ?rev=: the listing comes from the record revision the
+// form was drawn from, or not at all.
+func (s *Server) handleTransferDirs(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	rev, err := boxRevParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	var in struct {
+		Path string `json:"path"`
+	}
+	if err := decodeStrict(r, &in); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(collect.WithBoxRevision(r.Context(), rev), 60*time.Second)
+	defer cancel()
+	l, err := s.m.ListTransferDirs(ctx, id, in.Path)
+	if err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, l)
 }
 
 func (s *Server) handleTransferAction(w http.ResponseWriter, r *http.Request) {

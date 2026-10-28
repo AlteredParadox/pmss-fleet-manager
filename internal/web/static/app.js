@@ -43,7 +43,8 @@ const S = {
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
   transfers: null, // box-to-box copies from /api/transfers, loaded on a box's transfers tab
-  xferDraft: { src: '', dst_box: '', dst_rev: 0, dst: '', busy: false }, // the "copy to another box" form; dst_rev is captured when the box is chosen
+  xferDraft: null, // the "copy to another box" form of the open box (see blankXferDraft)
+  xferFocus: null, // a transfer just started: its card is scrolled to and highlighted once
   torSort: loadTorSort(), // column sort per torrent table ('qbt', 'rtorrent', 'all'): { key, dir } or null for the default order
 };
 // The torrent tables' sort is a per-browser convenience: kept in
@@ -286,7 +287,18 @@ async function loadTransfers() {
     if (seq !== xferSeq) return;
     S.transfers = d.transfers || [];
     render();
+    focusTransfer();
   } catch (e) { if (seq === xferSeq) toast(`transfers: ${e.message}`, 'bad'); }
+}
+// After a start, bring that transfer's progress card into view, once.
+function focusTransfer() {
+  const id = S.xferFocus;
+  const el = id && document.getElementById(`xfer-${id}`);
+  if (!el) return;
+  S.xferFocus = null;
+  el.classList.add('focus');
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  setTimeout(() => el.classList.remove('focus'), 4000);
 }
 async function loadPMDB() {
   const seq = ++pmdbSeq;
@@ -1357,20 +1369,87 @@ function tabTransfers(b) {
     : mine.length ? mine.map((v) => transferCard(v)).join('') : '<div class="empty">no copies from or to this box</div>';
   return `${S.monitorOnly ? '' : transferForm(b)}<div style="display:grid;gap:12px;margin-top:16px">${list}</div>`;
 }
+// The copy form's state: per source box, reset when another box's page
+// opens. dst_rev is the destination record the operator chose; picker is
+// the open folder list, confirm the reviewed copy waiting for its start.
+function blankXferDraft(boxId) {
+  return { box: boxId, src: '', dst_box: '', dst_rev: 0, dst_parent: '', dst_name: '', busy: false, picker: null, confirm: null, err: '' };
+}
 function transferForm(b) {
+  if (S.xferDraft?.box !== b.id) S.xferDraft = blankXferDraft(b.id);
   const d = S.xferDraft, others = S.boxes.filter((x) => x.id !== b.id && x.status !== 'disabled');
   const dst = others.find((x) => String(x.id) === String(d.dst_box));
   const free = dst?.disk?.ok && dst.disk.quota_bytes ? Math.max(0, dst.disk.quota_bytes - dst.disk.used_bytes) : null;
-  return `<div class="panel"><div class="tile-label">copy a directory to another box</div>
-    <div class="muted" style="margin:6px 0 12px">The data goes straight from ${esc(b.name)} to the other box with rsync over SSH, never through this dashboard. Each copy uses its own key, allowed on the destination only to write into the new directory and only for 30 minutes from setup; it is removed when the copy ends. Symlinks and special files are skipped. Stop anything still writing to the source (a downloading torrent) first: files that change during the copy may arrive inconsistent.</div>
+  const ready = b.ready ? '' : 'disabled title="waiting for the first poll of this box"';
+  if (d.confirm) return transferConfirmPanel(b, d);
+  return `<div class="panel"><div class="tile-label">copy a folder to another box</div>
+    <div class="muted" style="margin:6px 0 12px">The data goes straight from ${esc(b.name)} to the other box with rsync over SSH, never through this dashboard. Each copy uses its own key, allowed on the destination only to write into the new folder and only for 30 minutes from setup; it is removed when the copy ends. Symlinks and special files are skipped. Stop anything still writing to the source (a downloading torrent) first: files that change during the copy may arrive inconsistent.</div>
     <div style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
-      <label class="f">source directory on ${esc(b.name)} <span class="muted">(relative to home, or absolute)</span><input data-xf="src" value="${esc(d.src)}" placeholder="downloads/finished" spellcheck="false"></label>
+      <label class="f">folder to copy, on ${esc(b.name)} <span class="muted">(relative to home, or absolute)</span>
+        <span style="display:flex;gap:6px"><input data-xf="src" value="${esc(d.src)}" placeholder="downloads/finished" spellcheck="false"><button type="button" class="small" ${boxRef(b)} data-act="xfer:browse" data-side="src" ${ready}>browse</button></span></label>
       <label class="f">destination box<select data-xf="dst_box"><option value="">choose…</option>${others.map((x) => `<option value="${x.id}" ${String(x.id) === String(d.dst_box) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
         ${free !== null ? `<span class="hint">about ${esc(fmtBytes(free))} free in its quota (last poll; a copy that does not fit fails with “out of space”)</span>` : ''}</label>
-      <label class="f">new directory there <span class="muted">(must not exist yet)</span><input data-xf="dst" value="${esc(d.dst)}" placeholder="from-${esc(b.name.split(' ')[0])}" spellcheck="false"></label>
+      <label class="f">in this existing folder there <span class="muted">(blank: its home)</span>
+        <span style="display:flex;gap:6px"><input data-xf="dst_parent" value="${esc(d.dst_parent)}" placeholder="~" spellcheck="false"><button type="button" class="small" data-act="xfer:browse" data-side="dst" ${dst?.ready ? '' : 'disabled title="choose a destination box first"'}>browse</button></span></label>
+      <label class="f">new folder name <span class="muted">(must not exist yet)</span><input data-xf="dst_name" value="${esc(d.dst_name)}" placeholder="from-${esc(b.name.split(' ')[0])}" spellcheck="false"></label>
     </div>
-    <div class="actions" style="margin-top:12px"><button ${boxRef(b)} data-act="xfer:start" ${d.busy || !b.ready ? 'disabled' : ''} title="${b.ready ? '' : 'waiting for the first poll of this box'}">${d.busy ? 'setting up…' : 'start copy'}</button></div>
+    ${d.picker ? folderPicker(d.picker) : ''}
+    ${d.err ? `<div class="meta"><span class="bad">${esc(d.err)}</span></div>` : ''}
+    <div class="actions" style="margin-top:12px"><button ${boxRef(b)} data-act="xfer:review" ${d.busy ? 'disabled' : ready}>${d.busy ? 'checking…' : 'review copy'}</button></div>
   </div>`;
+}
+// One folder at a time: its subfolders (bounded by the server), up, and
+// the choice. The source picks the folder to copy; the destination picks
+// the existing parent of the new folder.
+function folderPicker(P) {
+  const L = P.listing, src = P.side === 'src';
+  const head = `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+      <span><span class="muted">${esc(P.boxName)}:</span> <b>${esc(L ? homeLabelOf(L) : '…')}</b></span>
+      <span class="actions">${L && pfmView.parentRel(L.rel) !== null ? `<button type="button" class="small ghost" data-act="xfer:open" data-rel="${esc(pfmView.parentRel(L.rel))}">↑ up</button>` : ''}
+        ${L ? `<button type="button" class="small" data-act="xfer:pick" data-rel="${esc(L.rel)}" ${src && !L.rel ? 'disabled title="choose a folder inside the home, not the whole home"' : ''}>${src ? 'copy this folder' : 'put the new folder here'}</button>` : ''}
+        <button type="button" class="small ghost" data-act="xfer:close">close</button></span></div>`;
+  let body;
+  if (P.busy) body = '<div class="muted">reading…</div>';
+  else if (P.err) body = `<div class="bad">${esc(P.err)}</div>`;
+  else if (!L.dirs.length) body = '<div class="muted">no subfolders</div>';
+  else {
+    body = `<div class="picker">${L.dirs.map((n) => `<div class="prow"><button type="button" class="link" data-act="xfer:open" data-rel="${esc(pfmView.joinPath(L.rel, n))}">${esc(n)}/</button>${src ? `<button type="button" class="small ghost" data-act="xfer:pick" data-rel="${esc(pfmView.joinPath(L.rel, n))}">copy this</button>` : ''}</div>`).join('')}</div>`;
+    if (L.truncated) body += `<div class="hint">showing the first ${L.dirs.length} folders; type a path above to reach others</div>`;
+    if (L.skipped) body += `<div class="hint">${L.skipped} folders with names a path cannot carry are not shown</div>`;
+  }
+  return `<div class="panel" style="margin-top:12px;background:var(--bg)">${head}<div style="margin-top:8px">${body}</div></div>`;
+}
+function homeLabelOf(L) { return `${pfmView.homeLabel(L.rel)}  (${L.path})`; }
+function transferConfirmPanel(b, d) {
+  const c = d.confirm;
+  return `<div class="panel"><div class="tile-label">confirm the copy</div>
+    <div style="display:grid;gap:6px;margin:10px 0">${c.lines.map((l, i) => `<div class="${i === 2 ? 'ok' : ''}">${esc(l)}</div>`).join('')}</div>
+    ${c.exists ? `<div class="meta"><span class="bad">${esc(c.name)} already exists in that folder: the copy will be refused. Go back and choose another name.</span></div>` : ''}
+    <div class="muted">Symlinks and special files are skipped. Progress shows below once it starts; cancel keeps what arrived complete.</div>
+    <div class="actions" style="margin-top:12px">
+      <button data-act="xfer:start" ${d.busy || c.exists ? 'disabled' : ''}>${d.busy ? 'setting up…' : 'start copy'}</button>
+      <button class="ghost" data-act="xfer:back" ${d.busy ? 'disabled' : ''}>back</button>
+    </div>
+  </div>`;
+}
+// listDirs reads one folder of box (id, rev): the listing is refused (409)
+// if the box record is no longer the revision the form holds.
+async function listDirs(id, rev, path) {
+  return api('POST', `${BASE}/api/boxes/${encodeURIComponent(id)}/transfers/dirs?rev=${encodeURIComponent(rev)}`, { path });
+}
+async function pickerOpen(rel) {
+  const d = S.xferDraft, P = d?.picker;
+  if (!P) return;
+  P.busy = true; P.err = ''; render();
+  try {
+    const L = await listDirs(P.box, P.rev, rel);
+    if (d.picker !== P) return; // closed or replaced meanwhile
+    P.listing = L;
+  } catch (e) {
+    if (d.picker !== P) return;
+    P.err = e.message;
+  }
+  P.busy = false; render();
 }
 function transferCard(v) {
   const st = pfmView.transferState(v), p = v.progress, src = boxById(v.src_box);
@@ -1380,7 +1459,7 @@ function transferCard(v) {
   if (!S.monitorOnly && src && (v.phase === 'running' || v.phase === 'unconfirmed')) btn.push(`<button class="small danger" ${boxRef(src)} data-act="xfer:cancel" data-id="${v.id}" data-confirm="Stop this copy? Files that arrived complete stay on the destination; the one in flight is discarded.">cancel</button>`);
   if (!S.monitorOnly && src && st.over && v.cleanup?.length) btn.push(`<button class="small" ${boxRef(src)} data-act="xfer:cleanup" data-id="${v.id}">retry cleanup</button>`);
   if (st.over) btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" ${v.cleanup?.length ? `data-force="1" data-confirm="Cleanup is still owed: ${esc(v.cleanup.join('; '))}. Forget this copy anyway? Those items would have to be removed by hand."` : ''}>dismiss</button>`);
-  return `<div class="panel">
+  return `<div class="panel xfer" id="xfer-${Number(v.id)}">
     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
       <div><span class="${st.kind}">${esc(st.label)}</span> <span class="muted">${name(v.src_name, v.src_box)}:</span>${esc(v.src_path)} <span class="muted">→ ${name(v.dst_name, v.dst_box)}:</span>${esc(v.dst_path)}</div>
       <div class="actions">${btn.join('')}</div>
@@ -1398,15 +1477,52 @@ function transferCard(v) {
   </div>`;
 }
 async function transferAction(a, act) {
+  const d = S.xferDraft;
+  if (a === 'xfer:browse') {
+    const side = act.dataset.side, b = boxById(side === 'src' ? d.box : Number(d.dst_box));
+    if (!b) return;
+    d.picker = { side, box: b.id, boxName: b.name, rev: side === 'src' ? Number(act.dataset.rev) : d.dst_rev, listing: null, busy: false, err: '' };
+    await pickerOpen(side === 'src' ? d.src : d.dst_parent);
+    return;
+  }
+  if (a === 'xfer:open') { await pickerOpen(act.dataset.rel); return; }
+  if (a === 'xfer:close') { d.picker = null; render(); return; }
+  if (a === 'xfer:pick') {
+    if (d.picker?.side === 'src') d.src = act.dataset.rel; else d.dst_parent = act.dataset.rel;
+    d.picker = null; d.err = ''; render(); return;
+  }
+  if (a === 'xfer:back') { d.confirm = null; render(); return; }
+  if (a === 'xfer:review') {
+    // Resolve both folders on their boxes (the revisions the form holds)
+    // so the confirmation shows the exact paths the copy will use.
+    const src = boxById(d.box), dst = boxById(Number(d.dst_box)), name = d.dst_name.trim();
+    d.err = !d.src.trim() ? 'choose the folder to copy' : !dst ? 'choose the destination box' : pfmView.newFolderError(name);
+    if (d.err) { render(); return; }
+    d.busy = true; d.picker = null; render();
+    try {
+      const [sl, dl] = await Promise.all([listDirs(src.id, Number(act.dataset.rev), d.src.trim()), listDirs(dst.id, d.dst_rev, d.dst_parent.trim())]);
+      if (S.xferDraft !== d) return;
+      if (!sl.rel) throw new Error('choose a folder inside the home, not the whole home');
+      d.confirm = pfmView.transferConfirmation(src, sl, dst, dl, name);
+    } catch (e) { d.err = e.message; }
+    finally { d.busy = false; render(); }
+    return;
+  }
   if (a === 'xfer:start') {
-    const d = S.xferDraft, body = pfmView.transferRequest(d);
-    if (!body.src_path || !body.dst_box || !body.dst_path) { toast('fill in the source directory, the destination box and the new directory', 'warn'); return; }
+    const c = d?.confirm;
+    if (!c || d.busy) return;
     d.busy = true; render();
     try {
-      await api('POST', boxURL(act.dataset, 'transfers'), body);
+      const v = await api('POST', boxURL({ box: c.srcBox, rev: c.srcRev }, 'transfers'), pfmView.transferRequest(c));
       toast('copy started', 'ok');
-      S.xferDraft = { src: '', dst_box: '', dst_rev: 0, dst: '', busy: false };
-    } finally { S.xferDraft.busy = false; void loadTransfers(); }
+      S.xferFocus = v?.id || null;
+      S.xferDraft = pfmView.draftAfterStart(S.xferDraft, d, blankXferDraft(d.box));
+    } catch (e) {
+      d.busy = false; d.confirm = null; d.err = e.message; // on the draft that started, wherever it is now
+      if (S.xferDraft === d) render(); else toast(`copy not started: ${e.message}`, 'bad');
+      return;
+    }
+    void loadTransfers();
     return;
   }
   act.disabled = true;
@@ -2084,10 +2200,15 @@ document.addEventListener('change', (e) => {
 });
 document.addEventListener('input', (e) => {
   const xf = e.target.closest('[data-xf]');
-  if (xf) {
-    S.xferDraft[xf.dataset.xf] = xf.value;
-    if (xf.dataset.xf === 'dst_box') S.xferDraft.dst_rev = boxById(Number(xf.value))?.box_rev || 0; // the record the operator chose
-    if (xf.tagName === 'SELECT') render(); // the free-space hint follows the chosen box
+  if (xf && S.xferDraft) {
+    const d = S.xferDraft;
+    d[xf.dataset.xf] = xf.value; d.err = '';
+    if (xf.dataset.xf === 'dst_box') {
+      // The record the operator chose; a folder from another box means nothing here.
+      d.dst_rev = boxById(Number(xf.value))?.box_rev || 0; d.dst_parent = '';
+      if (d.picker?.side === 'dst') d.picker = null;
+      render(); // the free-space hint and the browse button follow the chosen box
+    }
     return;
   }
   const ta = e.target.closest('[data-ta]');
