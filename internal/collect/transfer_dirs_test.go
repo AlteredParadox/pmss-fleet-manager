@@ -133,3 +133,22 @@ func TestXferDirsResultNeedsACompleteRun(t *testing.T) {
 		t.Errorf("clean run: %+v %v", l, err)
 	}
 }
+
+// Output past what the script can print is refused before it is parsed,
+// and a dense run of names is walked only up to the bound, counting
+// entries as sent: skipped names still count toward "truncated"
+// (daybreak review B3).
+func TestXferDirsDenseOutput(t *testing.T) {
+	head := "DIR /home/u\nHOME /home/u\n"
+	if _, err := xferDirsResult([]byte(head+strings.Repeat("\x00", xferDirsOutCap)), nil, nil); err == nil {
+		t.Error("oversized listing accepted")
+	}
+	raw := []byte(strings.Repeat("bad\x01name\x00", 10) + strings.Repeat("ok\x00", xferDirsMax))
+	dirs, truncated, skipped := xferDirNames(raw)
+	if len(dirs) != xferDirsMax-10 || skipped != 10 || !truncated {
+		t.Errorf("%d dirs, %d skipped, truncated %v", len(dirs), skipped, truncated)
+	}
+	if dirs, truncated, _ := xferDirNames([]byte("a\x00b")); len(dirs) != 2 || truncated {
+		t.Errorf("unterminated last name: %v %v", dirs, truncated)
+	}
+}

@@ -312,6 +312,13 @@ function transferState(v) {
   }
   return { label: v?.phase || 'unknown', kind: '', over: false };
 }
+// transferCleanupLabel introduces the cleanup a copy still owes. "Copy
+// completed" only when the exit code says so, not after a cancel or a
+// failure.
+function transferCleanupLabel(v) {
+  const done = v?.phase === 'finished' && (v.rc === '0' || v.rc === '24');
+  return done ? 'copy completed; credential cleanup needed: ' : 'cleanup owed: ';
+}
 // transferMeter: the progress bar's width, rsync's own estimate; full only
 // once the exit code says the copy succeeded.
 function transferMeter(v) {
@@ -389,5 +396,5 @@ function resyncLoads(view, tab, selId) {
   return [];
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart };
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart };
 })();

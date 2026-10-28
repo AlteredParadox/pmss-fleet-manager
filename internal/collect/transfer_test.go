@@ -288,6 +288,50 @@ func TestXferSrcRefusesControlDirOverlap(t *testing.T) {
 	}
 }
 
+// A transfers directory that is a symlink into the source is refused
+// before anything is changed through it: no chmod on the source, no job
+// directory or key inside it (daybreak review B1).
+func TestXferSrcRefusesSymlinkedTransfersDir(t *testing.T) {
+	needTools(t, "ssh-keygen", "rsync", "perl", "setsid")
+	home := t.TempDir()
+	src := filepath.Join(home, "data")
+	os.Mkdir(src, 0o755)
+	os.MkdirAll(filepath.Join(home, ".config", "pmss-fleet-manager"), 0o700)
+	os.Symlink(src, filepath.Join(home, ".config", "pmss-fleet-manager", "transfers"))
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "SRC", "data") + xferPrelude + xferSrcPrepareScript)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "ERR") || !strings.Contains(string(out), "is a symlink") {
+		t.Errorf("got %s", out)
+	}
+	if fi, _ := os.Stat(src); fi.Mode().Perm() != 0o755 {
+		t.Errorf("source mode changed to %v", fi.Mode().Perm())
+	}
+	if ents, _ := os.ReadDir(src); len(ents) != 0 {
+		t.Errorf("source gained %v", ents)
+	}
+}
+
+// The destination goes into command="..." resolved: a parent reached
+// through a symlink must not bring in a quote or a comma (daybreak review).
+func TestXferDstClaimRefusesUnsafeResolvedPath(t *testing.T) {
+	needTools(t, "rrsync")
+	home := t.TempDir()
+	os.Mkdir(filepath.Join(home, `a,"b`), 0o700)
+	os.Symlink(filepath.Join(home, `a,"b`), filepath.Join(home, "ln"))
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "DST", "ln/new") + xferPrelude + xferDstClaimScript)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "ERR the resolved destination") {
+		t.Errorf("got %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(home, `a,"b`, "new")); !os.IsNotExist(err) {
+		t.Errorf("directory created: %v", err)
+	}
+}
+
 // fakeSSH stands in for ssh in the local runner test: it drops the
 // options, then runs the remote command the way sshd runs a forced
 // command, through rrsync confined to $FAKE_DST.
@@ -432,8 +476,9 @@ func TestXferRunnerCancel(t *testing.T) {
 	if !strings.Contains(out, "SIGNALLED") {
 		t.Fatalf("cancel: %s", out)
 	}
-	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
-	if l.rc != "cancelled" || l.alive || xferDecide(xferRunning, l, true) != xferFinished || xferResult(xferFinished, l) != "cancelled" {
+	// The trap writes rc just before the runner exits: wait for both.
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" && !l.alive })
+	if l.rc != "cancelled" || xferDecide(xferRunning, l, true) != xferFinished || xferResult(xferFinished, l) != "cancelled" {
 		t.Fatalf("after cancel: %+v %q", l, xferResult(xferFinished, l))
 	}
 	if !j.keyGone(t) {

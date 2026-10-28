@@ -1458,6 +1458,7 @@ function transferCard(v) {
   const btn = [];
   if (!S.monitorOnly && src && (v.phase === 'running' || v.phase === 'unconfirmed')) btn.push(`<button class="small danger" ${boxRef(src)} data-act="xfer:cancel" data-id="${v.id}" data-confirm="Stop this copy? Files that arrived complete stay on the destination; the one in flight is discarded.">cancel</button>`);
   if (!S.monitorOnly && src && st.over && v.cleanup?.length) btn.push(`<button class="small" ${boxRef(src)} data-act="xfer:cleanup" data-id="${v.id}">retry cleanup</button>`);
+  if (v.source_lost && v.phase !== 'preparing') btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" data-force="1" data-confirm="The source box is gone or points elsewhere, so this copy can no longer be checked, stopped or cleaned up from here. It may still be running. Forget it anyway? Its job directory on the source and its key line on the destination would have to be removed by hand.">forget</button>`);
   if (st.over) btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" ${v.cleanup?.length ? `data-force="1" data-confirm="Cleanup is still owed: ${esc(v.cleanup.join('; '))}. Forget this copy anyway? Those items would have to be removed by hand."` : ''}>dismiss</button>`);
   return `<div class="panel xfer" id="xfer-${Number(v.id)}">
     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
@@ -1468,7 +1469,7 @@ function transferCard(v) {
     ${prog ? `<div class="meta"><span>${prog}</span></div>` : ''}
     ${v.result ? `<div class="meta"><span class="${st.kind}">${esc(v.result)}</span></div>` : ''}
     ${v.phase === 'unconfirmed' ? '<div class="meta"><span class="warn">the launch did not confirm; the next status read shows whether the copy started (it is never started twice)</span></div>' : ''}
-    ${v.cleanup?.length ? `<div class="meta"><span class="warn">${st.over && v.phase === 'finished' ? 'copy completed; credential cleanup needed: ' : 'cleanup owed: '}${esc(v.cleanup.join('; '))}</span></div>` : ''}
+    ${v.cleanup?.length ? `<div class="meta"><span class="warn">${esc(pfmView.transferCleanupLabel(v))}${esc(v.cleanup.join('; '))}</span></div>` : ''}
     ${v.blocked ? `<div class="meta"><span class="bad">${esc(v.blocked)}</span></div>` : ''}
     ${v.status_error && !st.over ? `<div class="meta"><span class="warn">${v.last_seen && !String(v.last_seen).startsWith('0001') ? 'last seen ' + esc(fmtAgo(v.last_seen)) + ' — ' : ''}${esc(v.status_error)}</span></div>` : ''}
     ${v.skipped && !st.over ? `<div class="meta"><span class="muted">${v.skipped} symlinks or special files skipped so far</span></div>` : ''}
@@ -1527,7 +1528,7 @@ async function transferAction(a, act) {
   }
   act.disabled = true;
   const id = encodeURIComponent(act.dataset.id);
-  if (a === 'xfer:cancel') { await api('POST', boxURL(act.dataset, `transfers/${id}/cancel`)); toast('copy cancelled', 'ok'); }
+  if (a === 'xfer:cancel') { await api('POST', boxURL(act.dataset, `transfers/${id}/cancel`)); toast('cancel requested; the card shows when it stops', 'ok'); }
   else if (a === 'xfer:cleanup') { await api('POST', boxURL(act.dataset, `transfers/${id}/cleanup`)); toast('cleanup done', 'ok'); }
   else if (a === 'xfer:dismiss') { await api('POST', `${BASE}/api/transfers/${id}/dismiss${act.dataset.force ? '?force=1' : ''}`); }
   void loadTransfers();
