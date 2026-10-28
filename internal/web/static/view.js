@@ -357,6 +357,12 @@ function newFolderError(name) {
 function transferRequest(c) {
   return { dst_box: Number(c.dstBox), dst_rev: Number(c.dstRev) || 0, src_path: String(c.srcPath), dst_path: joinPath(c.dstParent, c.name) };
 }
+// draftAfterStart: the form to keep once a start answers. Only the draft
+// that started is reset; one the operator opened meanwhile (another box's
+// page, a new copy) is theirs and stays (fred on PR 143).
+function draftAfterStart(current, started, blank) {
+  return current === started ? blank : current;
+}
 // transferConfirmation: what the confirmation step shows, from the two
 // resolved listings (source folder, destination parent) and the name.
 function transferConfirmation(srcBox, srcList, dstBox, dstList, name) {
@@ -382,5 +388,5 @@ function resyncLoads(view, tab, selId) {
   return [];
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation };
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart };
 })();

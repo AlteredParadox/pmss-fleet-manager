@@ -1516,9 +1516,10 @@ async function transferAction(a, act) {
       const v = await api('POST', boxURL({ box: c.srcBox, rev: c.srcRev }, 'transfers'), pfmView.transferRequest(c));
       toast('copy started', 'ok');
       S.xferFocus = v?.id || null;
-      S.xferDraft = blankXferDraft(d.box);
+      S.xferDraft = pfmView.draftAfterStart(S.xferDraft, d, blankXferDraft(d.box));
     } catch (e) {
-      d.busy = false; d.confirm = null; d.err = e.message; render();
+      d.busy = false; d.confirm = null; d.err = e.message; // on the draft that started, wherever it is now
+      if (S.xferDraft === d) render(); else toast(`copy not started: ${e.message}`, 'bad');
       return;
     }
     void loadTransfers();

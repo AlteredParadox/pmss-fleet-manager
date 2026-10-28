@@ -24,6 +24,7 @@ package collect
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -120,6 +121,23 @@ func parseXferDirs(out []byte) (DirListing, error) {
 	return l, nil
 }
 
+// xferDirsResult turns one listing run into its answer. The box's own
+// refusal is an input error; any other failure of the run is an error even
+// when the headers arrived, since the script prints them before the names:
+// a run cut off by a lost connection or the deadline must not pass for a
+// complete (or empty) folder (fred on PR 143).
+func xferDirsResult(out, stderr []byte, runErr error) (DirListing, error) {
+	l, perr := parseXferDirs(out)
+	var refused *xferRefusal
+	if errors.As(perr, &refused) {
+		return DirListing{}, xferInputError(refused.msg) // the box answered: nothing to retry
+	}
+	if runErr != nil {
+		return DirListing{}, fmt.Errorf("listing not completed: %v %s", runErr, clip(strings.TrimSpace(string(stderr)), 300))
+	}
+	return l, perr
+}
+
 // ListTransferDirs lists one folder on box id for the transfer picker,
 // on the poller of the revision ctx names (WithBoxRevision), so a listing
 // never comes from a record the form was not drawn from.
@@ -148,15 +166,9 @@ func (m *Manager) ListTransferDirs(ctx context.Context, id int64, path string) (
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, stderr, err := cli.Run(rctx, "sh", strings.NewReader("P="+shellQuote(path)+"\n"+xferDirsScript))
-	l, perr := parseXferDirs(out)
-	if perr != nil {
-		if refused, ok := perr.(*xferRefusal); ok {
-			return DirListing{}, xferInputError(refused.msg) // the box answered: nothing to retry
-		}
-		if err != nil {
-			return DirListing{}, fmt.Errorf("%v %s", err, clip(strings.TrimSpace(string(stderr)), 300))
-		}
-		return DirListing{}, perr
+	l, err := xferDirsResult(out, stderr, err)
+	if err != nil {
+		return DirListing{}, err
 	}
 	l.BoxRev = p.box.Revision
 	return l, nil

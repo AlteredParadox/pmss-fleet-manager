@@ -114,3 +114,22 @@ func TestXferInputErrorIsInput(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 }
+
+// A run that fails after the headers (a lost connection, the deadline) is
+// an error, never a complete or empty folder; the box's own refusal stays
+// an input error; a clean run is the listing (fred on PR 143).
+func TestXferDirsResultNeedsACompleteRun(t *testing.T) {
+	partial := []byte("DIR /home/u\nHOME /home/u\na\x00b\x00")
+	if l, err := xferDirsResult(partial, nil, errors.New("context deadline exceeded")); err == nil {
+		t.Errorf("interrupted run accepted: %+v", l)
+	}
+	if l, err := xferDirsResult([]byte("DIR /home/u\nHOME /home/u\n"), nil, errors.New("connection lost")); err == nil {
+		t.Errorf("interrupted empty run accepted: %+v", l)
+	}
+	if _, err := xferDirsResult([]byte("ERR no such directory\n"), nil, errors.New("exit status 3")); !errors.Is(err, ErrTransferInput) || err.Error() != "no such directory" {
+		t.Errorf("refusal: %v", err)
+	}
+	if l, err := xferDirsResult(partial, nil, nil); err != nil || len(l.Dirs) != 2 {
+		t.Errorf("clean run: %+v %v", l, err)
+	}
+}

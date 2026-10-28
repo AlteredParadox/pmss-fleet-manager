@@ -309,3 +309,11 @@ test('a reconnect reloads the transfers list on the transfers tab (fred on PR 14
   assert.deepEqual(V.resyncLoads('alerts', '', null), ['alerts']);
   assert.deepEqual(V.resyncLoads('fleet', '', null), []);
 });
+
+test('a start that answers late resets only its own draft (fred on PR 143)', () => {
+  const a = { box: 2, confirm: {} }, blankA = { box: 2 };
+  assert.equal(V.draftAfterStart(a, a, blankA), blankA, 'the draft that started is cleared');
+  const b = { box: 1, src: 'typed meanwhile' };
+  assert.equal(V.draftAfterStart(b, a, blankA), b, 'another box\'s draft opened while the start ran survives');
+  assert.equal(V.draftAfterStart(null, a, blankA), null);
+});
