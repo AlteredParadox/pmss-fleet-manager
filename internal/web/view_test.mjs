@@ -267,6 +267,19 @@ test('a transfer is over, and succeeded, by its exit code alone', () => {
   assert.equal(V.transferMeter({ phase: 'running' }), 0);
 });
 
+test('only a confirmed launch toasts "copy started" (daybreak review)', () => {
+  assert.deepEqual(V.startToast({ phase: 'running' }), ['copy started', 'ok']);
+  assert.equal(V.startToast({ phase: 'unconfirmed' })[1], 'warn');
+  assert.equal(V.startToast({ phase: 'preparing' })[1], 'warn');
+  assert.equal(V.startToast(undefined)[1], 'warn');
+});
+
+test('a new folder name with surrounding spaces is refused, not trimmed (daybreak review)', () => {
+  assert.match(V.newFolderError(' copy'), /space/);
+  assert.match(V.newFolderError('copy '), /space/);
+  assert.equal(V.newFolderError('my copy'), '');
+});
+
 test('"copy completed" heads owed cleanup only after a copy that completed (daybreak review)', () => {
   assert.match(V.transferCleanupLabel({ phase: 'finished', rc: '0' }), /^copy completed/);
   assert.match(V.transferCleanupLabel({ phase: 'finished', rc: '24' }), /^copy completed/);

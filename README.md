@@ -705,8 +705,11 @@ How it is authenticated, per copy:
 
 Prerequisites: `rsync`, `rrsync` (Debian's rsync 3.2.4 or later ships it as
 `/usr/bin/rrsync`) and OpenSSH 7.7 or later on the destination, and sshd
-accepting public keys for your account. A destination without `rrsync` is
-refused; there is no fallback to an unrestricted key. Both boxes need a
+accepting public keys for your account. The key is forced into
+`/usr/bin/rrsync` itself, never an `rrsync` found elsewhere on the PATH, and
+only if it and its folder are root's and writable only by root. A
+destination without it is refused; there is no fallback to an unrestricted
+key. Both boxes need a
 pinned host key (any box that has been polled once has one).
 
 The copy runs as a detached process on the source, so it does not depend
@@ -1017,8 +1020,18 @@ Newest first; each release's full notes are on the
   says "requested", and a runner not yet signallable is reported; an
   unfinished copy whose source box is gone can be forgotten (forget
   button, `dismiss?force=1`); "copy completed" only after rc 0 or 24; the
-  resolved destination and rrsync paths are checked before they go into
+  resolved destination path is checked before it goes into
   authorized_keys.
+- Transfers, after the second daybreak review: the job key is forced into
+  `/usr/bin/rrsync` only (root's, root-only writable), not whatever
+  `rrsync` the PATH finds; a source whose resolved path holds a control
+  character is refused, and the source's answer must carry exactly one
+  path and one key; a runner that cannot write its pid records an error
+  and never starts rsync; the picker ignores a listing overtaken by a
+  newer one and shows its skipped/truncated notes even with no folders
+  listed; folder paths are no longer trimmed, and a new folder name with
+  surrounding spaces is refused; the start toast says "started" only for
+  a confirmed launch; cancel is hidden when the source box is gone.
 
 **1.12.0**
 

@@ -319,6 +319,14 @@ function transferCleanupLabel(v) {
   const done = v?.phase === 'finished' && (v.rc === '0' || v.rc === '24');
   return done ? 'copy completed; credential cleanup needed: ' : 'cleanup owed: ';
 }
+// startToast: what the page says once a start answered. Only a launch the
+// source confirmed is "started"; setup may still be going, or the launch
+// answer may have been lost (the card shows how it ends).
+function startToast(v) {
+  if (v?.phase === 'running') return ['copy started', 'ok'];
+  if (v?.phase === 'unconfirmed') return ['launch not confirmed yet; watch the copy\'s card', 'warn'];
+  return ['copy submitted; setup is still going, watch the copy\'s card', 'warn'];
+}
 // transferMeter: the progress bar's width, rsync's own estimate; full only
 // once the exit code says the copy succeeded.
 function transferMeter(v) {
@@ -348,6 +356,7 @@ function parentRel(rel) {
 function newFolderError(name) {
   const n = String(name ?? '');
   if (!n.trim()) return 'enter a name for the new folder';
+  if (n.trim() !== n) return 'the name must not start or end with a space';
   if (n === '.' || n === '..') return 'choose a real folder name';
   if (n.includes('/')) return 'a folder name, not a path (pick the parent folder above)';
   if (/[\u0000-\u001f\u007f]/.test(n)) return 'the name contains a control character';
@@ -396,5 +405,5 @@ function resyncLoads(view, tab, selId) {
   return [];
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart };
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart };
 })();

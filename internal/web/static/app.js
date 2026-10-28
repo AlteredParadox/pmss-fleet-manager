@@ -1411,10 +1411,10 @@ function folderPicker(P) {
   let body;
   if (P.busy) body = '<div class="muted">reading…</div>';
   else if (P.err) body = `<div class="bad">${esc(P.err)}</div>`;
-  else if (!L.dirs.length) body = '<div class="muted">no subfolders</div>';
   else {
-    body = `<div class="picker">${L.dirs.map((n) => `<div class="prow"><button type="button" class="link" data-act="xfer:open" data-rel="${esc(pfmView.joinPath(L.rel, n))}">${esc(n)}/</button>${src ? `<button type="button" class="small ghost" data-act="xfer:pick" data-rel="${esc(pfmView.joinPath(L.rel, n))}">copy this</button>` : ''}</div>`).join('')}</div>`;
-    if (L.truncated) body += `<div class="hint">showing the first ${L.dirs.length} folders; type a path above to reach others</div>`;
+    body = !L.dirs.length ? '<div class="muted">no subfolders shown</div>'
+      : `<div class="picker">${L.dirs.map((n) => `<div class="prow"><button type="button" class="link" data-act="xfer:open" data-rel="${esc(pfmView.joinPath(L.rel, n))}">${esc(n)}/</button>${src ? `<button type="button" class="small ghost" data-act="xfer:pick" data-rel="${esc(pfmView.joinPath(L.rel, n))}">copy this</button>` : ''}</div>`).join('')}</div>`;
+    if (L.truncated) body += `<div class="hint">showing ${L.dirs.length} of the first 1000 folders; type a path above to reach others</div>`;
     if (L.skipped) body += `<div class="hint">${L.skipped} folders with names a path cannot carry are not shown</div>`;
   }
   return `<div class="panel" style="margin-top:12px;background:var(--bg)">${head}<div style="margin-top:8px">${body}</div></div>`;
@@ -1440,13 +1440,14 @@ async function listDirs(id, rev, path) {
 async function pickerOpen(rel) {
   const d = S.xferDraft, P = d?.picker;
   if (!P) return;
+  const seq = P.seq = (P.seq || 0) + 1; // only the newest read may land
   P.busy = true; P.err = ''; render();
   try {
     const L = await listDirs(P.box, P.rev, rel);
-    if (d.picker !== P) return; // closed or replaced meanwhile
+    if (d.picker !== P || P.seq !== seq) return; // closed, replaced or overtaken meanwhile
     P.listing = L;
   } catch (e) {
-    if (d.picker !== P) return;
+    if (d.picker !== P || P.seq !== seq) return;
     P.err = e.message;
   }
   P.busy = false; render();
@@ -1456,7 +1457,7 @@ function transferCard(v) {
   const name = (n, id) => esc(n || `box ${id} (removed)`);
   const prog = v.phase === 'running' && p ? `${esc(fmtBytes(p.bytes))} · ${esc(p.rate)} · ${esc(p.time)} left · ~${p.pct}% (rsync's estimate)${p.total ? ` · ${p.total - p.to_check}/${p.total} checked` : ''}` : '';
   const btn = [];
-  if (!S.monitorOnly && src && (v.phase === 'running' || v.phase === 'unconfirmed')) btn.push(`<button class="small danger" ${boxRef(src)} data-act="xfer:cancel" data-id="${v.id}" data-confirm="Stop this copy? Files that arrived complete stay on the destination; the one in flight is discarded.">cancel</button>`);
+  if (!S.monitorOnly && src && !v.source_lost && (v.phase === 'running' || v.phase === 'unconfirmed')) btn.push(`<button class="small danger" ${boxRef(src)} data-act="xfer:cancel" data-id="${v.id}" data-confirm="Stop this copy? Files that arrived complete stay on the destination; the one in flight is discarded.">cancel</button>`);
   if (!S.monitorOnly && src && st.over && v.cleanup?.length) btn.push(`<button class="small" ${boxRef(src)} data-act="xfer:cleanup" data-id="${v.id}">retry cleanup</button>`);
   if (v.source_lost && v.phase !== 'preparing') btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" data-force="1" data-confirm="The source box is gone or points elsewhere, so this copy can no longer be checked, stopped or cleaned up from here. It may still be running. Forget it anyway? Its job directory on the source and its key line on the destination would have to be removed by hand.">forget</button>`);
   if (st.over) btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" ${v.cleanup?.length ? `data-force="1" data-confirm="Cleanup is still owed: ${esc(v.cleanup.join('; '))}. Forget this copy anyway? Those items would have to be removed by hand."` : ''}>dismiss</button>`);
@@ -1496,12 +1497,14 @@ async function transferAction(a, act) {
   if (a === 'xfer:review') {
     // Resolve both folders on their boxes (the revisions the form holds)
     // so the confirmation shows the exact paths the copy will use.
-    const src = boxById(d.box), dst = boxById(Number(d.dst_box)), name = d.dst_name.trim();
+    // Paths as picked or typed, never trimmed: a folder whose name starts
+    // or ends with a space is a different folder without it.
+    const src = boxById(d.box), dst = boxById(Number(d.dst_box)), name = d.dst_name;
     d.err = !d.src.trim() ? 'choose the folder to copy' : !dst ? 'choose the destination box' : pfmView.newFolderError(name);
     if (d.err) { render(); return; }
     d.busy = true; d.picker = null; render();
     try {
-      const [sl, dl] = await Promise.all([listDirs(src.id, Number(act.dataset.rev), d.src.trim()), listDirs(dst.id, d.dst_rev, d.dst_parent.trim())]);
+      const [sl, dl] = await Promise.all([listDirs(src.id, Number(act.dataset.rev), d.src), listDirs(dst.id, d.dst_rev, d.dst_parent)]);
       if (S.xferDraft !== d) return;
       if (!sl.rel) throw new Error('choose a folder inside the home, not the whole home');
       d.confirm = pfmView.transferConfirmation(src, sl, dst, dl, name);
@@ -1515,7 +1518,8 @@ async function transferAction(a, act) {
     d.busy = true; render();
     try {
       const v = await api('POST', boxURL({ box: c.srcBox, rev: c.srcRev }, 'transfers'), pfmView.transferRequest(c));
-      toast('copy started', 'ok');
+      const [msg, kind] = pfmView.startToast(v);
+      toast(msg, kind);
       S.xferFocus = v?.id || null;
       S.xferDraft = pfmView.draftAfterStart(S.xferDraft, d, blankXferDraft(d.box));
     } catch (e) {

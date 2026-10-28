@@ -54,6 +54,7 @@ d=$(realpath -e -- "$p" 2>/dev/null) || die "no such directory"
 case "$d/" in "$home"/*) ;; *) die "that folder is outside your home directory";; esac
 [ -d "$d" ] || die "not a directory"
 [ -r "$d" ] && [ -x "$d" ] || die "cannot read that directory"
+case "$d$home" in *[[:cntrl:]]*) die "that folder's path contains a control character";; esac
 printf 'DIR %s\nHOME %s\n' "$d" "$home"
 find "$d" -mindepth 1 -maxdepth 1 -type d -printf '%f\0' 2>/dev/null | head -z -n ` + "1001" + `
 exit 0
@@ -105,7 +106,7 @@ func xferDirsHeaders(out []byte) (path, home string, rest []byte, err error) {
 			home = v
 		}
 	}
-	if path == "" || home == "" {
+	if path == "" || home == "" || !utf8.ValidString(path+home) {
 		return "", "", nil, fmt.Errorf("unexpected listing output")
 	}
 	return path, home, out, nil

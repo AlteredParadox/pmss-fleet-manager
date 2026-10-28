@@ -332,6 +332,94 @@ func TestXferDstClaimRefusesUnsafeResolvedPath(t *testing.T) {
 	}
 }
 
+// A symlink on the way can resolve a clean typed path to one with a
+// newline, which would split the SRC line: refused on the box before the
+// control directory or a key exists, and an answer with a second SRC or
+// PUB line is refused on the dashboard (daybreak review B1).
+func TestXferSrcRefusesControlCharInResolvedPath(t *testing.T) {
+	needTools(t, "ssh-keygen", "rsync", "perl", "setsid")
+	home := t.TempDir()
+	odd := filepath.Join(home, "a\nb")
+	os.MkdirAll(filepath.Join(odd, "child"), 0o700)
+	os.Symlink(odd, filepath.Join(home, "safe"))
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "SRC", "safe/child") + xferPrelude + xferSrcPrepareScript)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "ERR the resolved source path contains a control character") {
+		t.Errorf("got %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config")); !os.IsNotExist(err) {
+		t.Errorf("control directory created: %v", err)
+	}
+	pub := "PUB ssh-ed25519 " + testBlob + " pfm-xfer-0123456789abcdef0123456789abcdef"
+	for name, lines := range map[string][]string{
+		"second SRC":  {"SRC /home/u/x", "SRC /home/u", pub},
+		"second PUB":  {"SRC /home/u/x", pub, pub},
+		"relative":    {"SRC home/u/x", pub},
+		"no PUB":      {"SRC /home/u/x"},
+		"bad PUB":     {"SRC /home/u/x", "PUB ssh-rsa AAAA x"},
+		"invalid utf": {"SRC /home/u/\xff", pub},
+	} {
+		if r, _, err := parseSrcPrepare(lines); err == nil {
+			t.Errorf("%s: accepted %q", name, r)
+		}
+	}
+	if r, b, err := parseSrcPrepare([]string{"SRC /home/u/x y", pub}); err != nil || r != "/home/u/x y" || b != testBlob {
+		t.Errorf("clean answer: %q %q %v", r, b, err)
+	}
+}
+
+// The job key is forced into the system's rrsync, whatever PATH finds
+// first, and only one that is root's and root-only writable (daybreak
+// review B2).
+func TestXferDstClaimPinsRrsync(t *testing.T) {
+	needTools(t, "perl", "flock", "rrsync")
+	if _, err := os.Stat(xferRrsync); err != nil {
+		t.Skipf("%s not present", xferRrsync)
+	}
+	home, bin := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(bin, "rrsync"), []byte("#!/bin/sh\nexec sh\n"), 0o755)
+	env := []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH")}
+	out := runJobScript(t, home, xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "DST", "copy", "BLOB", testBlob), xferDstClaimScript+xferKeyAddScript, env...)
+	line := xferField(strings.Split(out, "\n"), "KEYLINE")
+	if !strings.Contains(line, `command="`+xferRrsync+` `+xferRrsyncOpts+` '`) || strings.Contains(line, bin) {
+		t.Errorf("key line %q", line)
+	}
+	// One the account could replace is refused before anything changes.
+	home = t.TempDir()
+	script := strings.Replace(xferDstClaimScript, "rr="+xferRrsync+"\n", "rr="+filepath.Join(bin, "rrsync")+"\n", 1)
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "DST", "copy", "BLOB", testBlob) + xferPrelude + script + xferKeyAddScript)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	b, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(b), "not trusting it as rrsync") {
+		t.Errorf("user-owned rrsync: %s", b)
+	}
+	if _, err := os.Stat(filepath.Join(home, "copy")); !os.IsNotExist(err) {
+		t.Errorf("destination created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".ssh")); !os.IsNotExist(err) {
+		t.Errorf("~/.ssh touched: %v", err)
+	}
+}
+
+// A runner that cannot publish its pid could not be cancelled: it records
+// an error and never starts rsync; the key goes (daybreak review S1).
+func TestXferRunnerNeedsPid(t *testing.T) {
+	j := startLocalJob(t, true, func(dir string) { os.Mkdir(filepath.Join(dir, "pid.tmp"), 0o700) })
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" && !l.alive })
+	if l.rc != "error: cannot write the pid file" || xferDecide(xferRunning, l, false) != xferFinished {
+		t.Fatalf("status %+v", l)
+	}
+	if !j.keyGone(t) {
+		t.Error("key left")
+	}
+	if pid := readFileOr(filepath.Join(j.bin, "ssh.pid")); pid != "" {
+		t.Errorf("rsync connected (ssh stand-in pid %s)", pid)
+	}
+}
+
 // fakeSSH stands in for ssh in the local runner test: it drops the
 // options, then runs the remote command the way sshd runs a forced
 // command, through rrsync confined to $FAKE_DST.
@@ -353,7 +441,7 @@ type localJob struct {
 // startLocalJob runs prepare, claim and launch locally, with real rsync
 // and rrsync and a stand-in for ssh; with slow, the stand-in waits before
 // connecting, so the runner is still running when the test acts on it.
-func startLocalJob(t *testing.T, slow bool) localJob {
+func startLocalJob(t *testing.T, slow bool, beforeLaunch ...func(jobDir string)) localJob {
 	t.Helper()
 	needTools(t, "perl", "flock", "rrsync", "rsync", "ssh-keygen", "setsid", "mkfifo")
 	home := t.TempDir()
@@ -378,6 +466,9 @@ func startLocalJob(t *testing.T, slow bool) localJob {
 	out = runJobScript(t, home, xferVars("TOKEN", tok, "DST", "copy", "BLOB", blob), xferDstClaimScript+xferKeyAddScript, env...)
 	dst := xferField(strings.Split(out, "\n"), "DST")
 	env = append(env, "FAKE_DST="+dst)
+	for _, f := range beforeLaunch {
+		f(filepath.Join(home, xferJobDir, tok))
+	}
 	run := xferVars("SRC", src, "DEST", "u@example.invalid:", "PORT", "22", "HKALG", "ecdsa-sha2-nistp256")
 	out = runJobScript(t, home, xferVars("TOKEN", tok, "KNOWN", "example.invalid ecdsa-sha2-nistp256 AAAA", "RUNVARS", run), xferLaunchScript, env...)
 	if !strings.Contains(out, "LAUNCHED") {
