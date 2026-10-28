@@ -249,3 +249,20 @@ test('a box control sends the revision it was drawn from, not a later one (fred 
   assert.equal(V.boxPath({}, 'qbt/stop'), '/api/boxes//qbt/stop?rev=');
   assert.equal(V.boxRef({ id: '<x>', box_rev: '"' }), 'data-box="0" data-rev="0"', 'numbers only in the markup');
 });
+
+test('a transfer is over, and succeeded, by its exit code alone', () => {
+  const done99 = { phase: 'finished', rc: '0', progress: { pct: 99 } };
+  assert.deepEqual(V.transferState(done99), { label: 'copied', kind: 'ok', over: true });
+  assert.equal(V.transferMeter(done99), 100, 'a complete copy shows full although rsync said 99%');
+  const at100 = { phase: 'running', rc: '', progress: { pct: 100 } };
+  assert.equal(V.transferState(at100).over, false, '100% without an exit code is not done');
+  assert.equal(V.transferMeter(at100), 99, 'and the bar does not claim it');
+  assert.equal(V.transferState({ phase: 'finished', rc: '23', progress: { pct: 100 } }).kind, 'bad');
+  assert.equal(V.transferMeter({ phase: 'finished', rc: '23', progress: { pct: 100 } }), 99);
+  assert.equal(V.transferState({ phase: 'finished', rc: '24' }).label, 'copied with warnings');
+  assert.equal(V.transferState({ phase: 'finished', rc: 'cancelled' }).label, 'cancelled');
+  assert.equal(V.transferState({ phase: 'interrupted' }).over, true);
+  assert.equal(V.transferState({ phase: 'running', scanning: true }).label, 'scanning');
+  assert.equal(V.transferState({ phase: 'unconfirmed' }).over, false);
+  assert.equal(V.transferMeter({ phase: 'running' }), 0);
+});

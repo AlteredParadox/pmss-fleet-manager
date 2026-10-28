@@ -330,6 +330,9 @@ func (s *Store) migrate() error {
 			box_id INTEGER NOT NULL REFERENCES boxes(id) ON DELETE CASCADE,
 			kind TEXT NOT NULL, json TEXT NOT NULL, at TEXT NOT NULL,
 			PRIMARY KEY (box_id, kind))`,
+		// Box-to-box copies (see transfers.go). No foreign keys: a job and
+		// its cleanup obligations outlive the removal of either box.
+		createTransfersSQL,
 	}
 	for _, q := range stmts {
 		if _, err := s.db.Exec(q); err != nil {

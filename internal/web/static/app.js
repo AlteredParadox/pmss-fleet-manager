@@ -42,6 +42,8 @@ const S = {
   logOpen: new Set(), // directories whose "older / rotated" group the user expanded on the logs tab
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
+  transfers: null, // box-to-box copies from /api/transfers, loaded on a box's transfers tab
+  xferDraft: { src: '', dst_box: '', dst: '', busy: false }, // the "copy to another box" form
   torSort: loadTorSort(), // column sort per torrent table ('qbt', 'rtorrent', 'all'): { key, dir } or null for the default order
 };
 // The torrent tables' sort is a per-browser convenience: kept in
@@ -171,6 +173,7 @@ function route() {
     if (S.detail && S.detail.id !== S.selId) S.detail = null; // never show one box's page under another's URL
     void loadDetail(S.selId);
     if (S.tab === 'logs') rescanLogsIfStale(); // a direct or reloaded #/box/<id>/logs never passes the tab click
+    if (S.tab === 'transfers') void loadTransfers();
   } else if (S.view === 'edit') {
     S.selId = Number(parts[1]) || null;
     void startEdit(S.selId);
@@ -274,6 +277,16 @@ async function loadTorrents() {
 const SECRET_SETTINGS = new Set(['pm_api_key', 'pmdb_upload_key']);
 function settingsDraftOf(settings) {
   return { ...settings, pm_api_key: '', clear_pm_api_key: false, pmdb_upload_key: '', clear_pmdb_upload_key: false };
+}
+let xferSeq = 0;
+async function loadTransfers() {
+  const seq = ++xferSeq;
+  try {
+    const d = await api('GET', BASE + '/api/transfers');
+    if (seq !== xferSeq) return;
+    S.transfers = d.transfers || [];
+    render();
+  } catch (e) { if (seq === xferSeq) toast(`transfers: ${e.message}`, 'bad'); }
 }
 async function loadPMDB() {
   const seq = ++pmdbSeq;
@@ -383,6 +396,9 @@ function connectEvents() {
     pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
     if (S.view === 'settings') void loadPMDB();
   });
+  es.addEventListener('transfers', () => {
+    if (S.view === 'box' && S.tab === 'transfers') void loadTransfers();
+  });
   es.addEventListener('alerts', (ev) => {
     const e = JSON.parse(ev.data);
     pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
@@ -432,7 +448,7 @@ function renderSide() {
       <div><span>storage</span><b>${fmtBytes(t.disk_quota || 0, 1)}</b></div>
       <div><span>last poll</span><b>${fmtAgo(t.last_poll)}</b></div>
       <div class="conn ${S.live ? 'live' : ''}"><span class="dot"></span>${S.live ? 'live updates' : 'reconnecting…'}</div>
-      ${S.monitorOnly ? '<div class="muted" title="started with -monitor-only: torrent, client, discovery and container actions are refused; monitoring runs as usual">monitor-only</div>' : ''}
+      ${S.monitorOnly ? '<div class="muted" title="started with -monitor-only: torrent, client, discovery, container and transfer actions are refused; monitoring runs as usual">monitor-only</div>' : ''}
     </div>`;
 }
 
@@ -585,7 +601,7 @@ function viewBox() {
   const tabs = [['overview', 'overview'], ['traffic', 'traffic']];
   if (pfmView.torrentsTab(b)) tabs.push(['torrents', 'torrents']); // the stopped-on-purpose note and a removal notice live there too
   if (b.docker.enabled || b.docker.socket_up) tabs.push(['containers', 'containers']);
-  tabs.push(['services', 'services'], ['logs', 'logs'], ['storage', 'storage'], ['host', 'host']);
+  tabs.push(['services', 'services'], ['logs', 'logs'], ['storage', 'storage'], ['transfers', 'transfers'], ['host', 'host']);
   if (!tabs.some(([k]) => k === S.tab)) S.tab = 'overview';
   const renewDays = daysUntil(renewalOf(b));
   let body = '';
@@ -596,6 +612,7 @@ function viewBox() {
     case 'services': body = tabServices(b); break;
     case 'logs': body = tabLogs(b); break;
     case 'storage': body = tabStorage(b); break;
+    case 'transfers': body = tabTransfers(b); break;
     case 'host': body = tabHost(b); break;
     default: body = tabOverview(b, renewDays);
   }
@@ -1332,6 +1349,72 @@ function tabStorage(b) {
 // One row of the access panel: a per-user link on the box's own web server.
 // Every tenant path hangs off https://<host>/user-<name>/, so only the tail
 // differs ('' for the panel, 'data/', 'qbittorrent').
+/* ----- transfers: box-to-box copies (rsync from this box straight to another) ----- */
+function tabTransfers(b) {
+  const mine = (S.transfers || []).filter((v) => v.src_box === b.id || v.dst_box === b.id);
+  const list = S.transfers === null ? '<div class="muted">loading…</div>'
+    : mine.length ? mine.map((v) => transferCard(v)).join('') : '<div class="empty">no copies from or to this box</div>';
+  return `${S.monitorOnly ? '' : transferForm(b)}<div style="display:grid;gap:12px;margin-top:16px">${list}</div>`;
+}
+function transferForm(b) {
+  const d = S.xferDraft, others = S.boxes.filter((x) => x.id !== b.id && x.status !== 'disabled');
+  const dst = others.find((x) => String(x.id) === String(d.dst_box));
+  const free = dst?.disk?.ok && dst.disk.quota_bytes ? Math.max(0, dst.disk.quota_bytes - dst.disk.used_bytes) : null;
+  return `<div class="panel"><div class="tile-label">copy a directory to another box</div>
+    <div class="muted" style="margin:6px 0 12px">The data goes straight from ${esc(b.name)} to the other box with rsync over SSH, never through this dashboard. Each copy uses its own key, allowed on the destination only to write into the new directory and only for 30 minutes from setup; it is removed when the copy ends. Symlinks and special files are skipped. Stop anything still writing to the source (a downloading torrent) first: files that change during the copy may arrive inconsistent.</div>
+    <div style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+      <label class="f">source directory on ${esc(b.name)} <span class="muted">(relative to home, or absolute)</span><input data-xf="src" value="${esc(d.src)}" placeholder="downloads/finished" spellcheck="false"></label>
+      <label class="f">destination box<select data-xf="dst_box"><option value="">choose…</option>${others.map((x) => `<option value="${x.id}" ${String(x.id) === String(d.dst_box) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+        ${free !== null ? `<span class="hint">about ${esc(fmtBytes(free))} free in its quota (last poll; a copy that does not fit fails with “out of space”)</span>` : ''}</label>
+      <label class="f">new directory there <span class="muted">(must not exist yet)</span><input data-xf="dst" value="${esc(d.dst)}" placeholder="from-${esc(b.name.split(' ')[0])}" spellcheck="false"></label>
+    </div>
+    <div class="actions" style="margin-top:12px"><button ${boxRef(b)} data-act="xfer:start" ${d.busy || !b.ready ? 'disabled' : ''} title="${b.ready ? '' : 'waiting for the first poll of this box'}">${d.busy ? 'setting up…' : 'start copy'}</button></div>
+  </div>`;
+}
+function transferCard(v) {
+  const st = pfmView.transferState(v), p = v.progress, src = boxById(v.src_box);
+  const name = (n, id) => esc(n || `box ${id} (removed)`);
+  const prog = v.phase === 'running' && p ? `${esc(fmtBytes(p.bytes))} · ${esc(p.rate)} · ${esc(p.time)} left · ~${p.pct}% (rsync's estimate)${p.total ? ` · ${p.total - p.to_check}/${p.total} checked` : ''}` : '';
+  const btn = [];
+  if (!S.monitorOnly && src && (v.phase === 'running' || v.phase === 'unconfirmed')) btn.push(`<button class="small danger" ${boxRef(src)} data-act="xfer:cancel" data-id="${v.id}" data-confirm="Stop this copy? What was copied so far stays on the destination.">cancel</button>`);
+  if (!S.monitorOnly && src && st.over && v.cleanup?.length) btn.push(`<button class="small" ${boxRef(src)} data-act="xfer:cleanup" data-id="${v.id}">retry cleanup</button>`);
+  if (st.over) btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" ${v.cleanup?.length ? `data-force="1" data-confirm="Cleanup is still owed: ${esc(v.cleanup.join('; '))}. Forget this copy anyway? Those items would have to be removed by hand."` : ''}>dismiss</button>`);
+  return `<div class="panel">
+    <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
+      <div><span class="${st.kind}">${esc(st.label)}</span> <span class="muted">${name(v.src_name, v.src_box)}:</span>${esc(v.src_path)} <span class="muted">→ ${name(v.dst_name, v.dst_box)}:</span>${esc(v.dst_path)}</div>
+      <div class="actions">${btn.join('')}</div>
+    </div>
+    ${st.over ? '' : `<div class="meter thick" style="margin:10px 0 6px"><i style="width:${pfmView.transferMeter(v)}%"></i></div>`}
+    ${prog ? `<div class="meta"><span>${prog}</span></div>` : ''}
+    ${v.result ? `<div class="meta"><span class="${st.kind}">${esc(v.result)}</span></div>` : ''}
+    ${v.phase === 'unconfirmed' ? '<div class="meta"><span class="warn">the launch did not confirm; the next status read shows whether the copy started (it is never started twice)</span></div>' : ''}
+    ${v.cleanup?.length ? `<div class="meta"><span class="warn">${st.over && v.phase === 'finished' ? 'copy completed; credential cleanup needed: ' : 'cleanup owed: '}${esc(v.cleanup.join('; '))}</span></div>` : ''}
+    ${v.blocked ? `<div class="meta"><span class="bad">${esc(v.blocked)}</span></div>` : ''}
+    ${v.status_error && !st.over ? `<div class="meta"><span class="warn">${v.last_seen && !String(v.last_seen).startsWith('0001') ? 'last seen ' + esc(fmtAgo(v.last_seen)) + ' — ' : ''}${esc(v.status_error)}</span></div>` : ''}
+    ${v.skipped && !st.over ? `<div class="meta"><span class="muted">${v.skipped} symlinks or special files skipped so far</span></div>` : ''}
+    ${v.errors && !st.over ? `<pre class="logview" style="max-height:160px;margin-top:8px">${esc(v.errors)}</pre>` : ''}
+    <div class="meta"><span class="muted">started ${esc(fmtAgo(v.created_at))}</span>${v.finished_at && !String(v.finished_at).startsWith('0001') ? `<span class="muted">ended ${esc(fmtAgo(v.finished_at))}</span>` : ''}</div>
+  </div>`;
+}
+async function transferAction(a, act) {
+  if (a === 'xfer:start') {
+    const d = S.xferDraft, dst = boxById(Number(d.dst_box));
+    if (!d.src.trim() || !dst || !d.dst.trim()) { toast('fill in the source directory, the destination box and the new directory', 'warn'); return; }
+    d.busy = true; render();
+    try {
+      await api('POST', boxURL(act.dataset, 'transfers'), { dst_box: dst.id, dst_rev: dst.box_rev, src_path: d.src.trim(), dst_path: d.dst.trim() });
+      toast('copy started', 'ok');
+      S.xferDraft = { src: '', dst_box: '', dst: '', busy: false };
+    } finally { S.xferDraft.busy = false; void loadTransfers(); }
+    return;
+  }
+  act.disabled = true;
+  const id = encodeURIComponent(act.dataset.id);
+  if (a === 'xfer:cancel') { await api('POST', boxURL(act.dataset, `transfers/${id}/cancel`)); toast('copy cancelled', 'ok'); }
+  else if (a === 'xfer:cleanup') { await api('POST', boxURL(act.dataset, `transfers/${id}/cleanup`)); toast('cleanup done', 'ok'); }
+  else if (a === 'xfer:dismiss') { await api('POST', `${BASE}/api/transfers/${id}/dismiss${act.dataset.force ? '?force=1' : ''}`); }
+  void loadTransfers();
+}
 function userUrl(b, tail) { return `https://${b.hostname || b.host}/user-${b.user}/${tail}`; }
 function userLinkRow(b, label, tail) {
   const u = esc(userUrl(b, tail));
@@ -1711,7 +1794,7 @@ function viewSettings() {
     </div>
     <div class="form-foot" style="justify-content:flex-start"><button class="primary" data-act="settings:save">save settings</button></div>
     <div class="panel"><div class="tile-label">about &amp; licensing</div>
-      <div class="row"><span>version</span><span>${esc(S.version || 'dev')}${S.monitorOnly ? ' · <span class="muted" title="started with -monitor-only: torrent, client, discovery and container actions are refused; monitoring runs as usual">monitor-only</span>' : ''}</span></div>
+      <div class="row"><span>version</span><span>${esc(S.version || 'dev')}${S.monitorOnly ? ' · <span class="muted" title="started with -monitor-only: torrent, client, discovery, container and transfer actions are refused; monitoring runs as usual">monitor-only</span>' : ''}</span></div>
       <div class="hint">pmss-fleet-manager is free software under the GNU Affero General Public License v3 or later. Because you are using it over a network, you are entitled to its source code.</div>
       <div class="row" style="justify-content:flex-start;gap:16px"><a href="${esc(BASE)}/license" target="_blank" rel="noopener">license ↗</a><a href="${esc(BASE)}/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || BASE + '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
     </div>
@@ -1788,6 +1871,7 @@ document.addEventListener('click', async (e) => {
     S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; S.logView = null; S.logOpen = new Set();
     history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`);
     if (S.tab === 'logs') rescanLogsIfStale();
+    if (S.tab === 'transfers') void loadTransfers();
     render();
     return;
   }
@@ -1980,6 +2064,7 @@ async function runAction(a, act) {
   else if (a.startsWith('ctr:')) await containerAction(a, act);
   else if (a === 'app:watch') await appWatchAction(act);
   else if (a.startsWith('log:')) await logAction(a, act);
+  else if (a.startsWith('xfer:')) await transferAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
   else if (a.startsWith('settings:')) await settingsAction(a);
   else if (a.startsWith('svc:')) await servicesAction(a, act);
@@ -1997,6 +2082,8 @@ document.addEventListener('change', (e) => {
   if (fi && S.torAdd) { S.torAdd.files = [...fi.files]; render(); }
 });
 document.addEventListener('input', (e) => {
+  const xf = e.target.closest('[data-xf]');
+  if (xf) { S.xferDraft[xf.dataset.xf] = xf.value; if (xf.tagName === 'SELECT') render(); return; }
   const ta = e.target.closest('[data-ta]');
   if (ta && S.torAdd) { S.torAdd[ta.dataset.ta] = ta.type === 'checkbox' ? ta.checked : ta.value; return; }
   const f = e.target.closest('[data-f]');

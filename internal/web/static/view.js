@@ -292,5 +292,33 @@ function rtDiscoveryOn(r) {
   return { labels, title: why.length ? `${why.join('; ')} — private trackers usually forbid these` : '' };
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath };
+// transferState: how a box-to-box copy reads in the list. Whether it is
+// over and how it went come from the phase and the runner's exit code
+// (rc), never from rsync's percentage: its last line can say 99% after a
+// complete copy, or 100% before the copy has recorded a result.
+function transferState(v) {
+  const rc = v?.rc || '';
+  switch (v?.phase) {
+    case 'preparing': return { label: 'setting up', kind: '', over: false };
+    case 'running': return { label: v.scanning ? 'scanning' : 'copying', kind: '', over: false };
+    case 'unconfirmed': return { label: 'launch unconfirmed', kind: 'warn', over: false };
+    case 'finished':
+      if (rc === '0') return { label: 'copied', kind: 'ok', over: true };
+      if (rc === '24') return { label: 'copied with warnings', kind: 'warn', over: true };
+      if (rc === 'cancelled') return { label: 'cancelled', kind: 'dim', over: true };
+      return { label: 'failed', kind: 'bad', over: true };
+    case 'interrupted': return { label: 'interrupted', kind: 'bad', over: true };
+    case 'setup_failed': return { label: 'setup failed', kind: 'bad', over: true };
+  }
+  return { label: v?.phase || 'unknown', kind: '', over: false };
+}
+// transferMeter: the progress bar's width, rsync's own estimate; full only
+// once the exit code says the copy succeeded.
+function transferMeter(v) {
+  if (v?.phase === 'finished' && (v.rc === '0' || v.rc === '24')) return 100;
+  const p = Number(v?.progress?.pct);
+  return Number.isFinite(p) ? Math.max(0, Math.min(p, 99)) : 0;
+}
+
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferMeter };
 })();
