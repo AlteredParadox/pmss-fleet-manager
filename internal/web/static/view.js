@@ -320,13 +320,57 @@ function transferMeter(v) {
   return Number.isFinite(p) ? Math.max(0, Math.min(p, 99)) : 0;
 }
 
-// transferRequest: the start-copy body. The destination's revision is the
-// one captured when the box was chosen in the form, never the box's state
-// at submit time: if the destination was edited since (perhaps to another
-// machine), the server refuses (409) instead of copying to whatever the
-// record names now (fred on PR 142).
-function transferRequest(draft) {
-  return { dst_box: Number(draft.dst_box), dst_rev: Number(draft.dst_rev) || 0, src_path: String(draft.src || '').trim(), dst_path: String(draft.dst || '').trim() };
+// The transfer form's paths. Folder paths are relative to the account's
+// home ("" is the home itself), as the picker lists them; absolute ones
+// come back resolved from the box.
+function homeLabel(rel) { return rel ? `~/${rel}` : '~'; }
+function joinPath(parent, name) {
+  const p = String(parent || '').replace(/\/+$/, '');
+  return p ? `${p}/${name}` : String(name);
+}
+function parentRel(rel) {
+  if (!rel) return null; // the home: nothing above it in the picker
+  const i = rel.lastIndexOf('/');
+  return i < 0 ? '' : rel.slice(0, i);
+}
+// newFolderError: why name cannot be the new destination folder ('' when
+// it can). The server checks again; this saves a round trip. The quote,
+// backslash and comma rules are the server's (the path sits inside the
+// destination's authorized_keys command).
+function newFolderError(name) {
+  const n = String(name ?? '');
+  if (!n.trim()) return 'enter a name for the new folder';
+  if (n === '.' || n === '..') return 'choose a real folder name';
+  if (n.includes('/')) return 'a folder name, not a path (pick the parent folder above)';
+  if (/[\u0000-\u001f\u007f]/.test(n)) return 'the name contains a control character';
+  if (/["'\\,]/.test(n)) return 'the name must not contain " \' \\ or ,';
+  if (n.startsWith('-')) return 'the name must not start with -';
+  if (new globalThis.TextEncoder().encode(n).length > 255) return 'the name is too long';
+  return '';
+}
+// transferRequest: the start-copy body, from a confirmation (see
+// transferConfirmation). Paths are the ones the boxes resolved and the
+// operator confirmed; the revisions are the ones those listings were read
+// under, never the boxes' state at submit time: a box edited since
+// (perhaps to another machine) is refused with 409 instead of being
+// copied from or to (fred on PR 142).
+function transferRequest(c) {
+  return { dst_box: Number(c.dstBox), dst_rev: Number(c.dstRev) || 0, src_path: String(c.srcPath), dst_path: joinPath(c.dstParent, c.name) };
+}
+// transferConfirmation: what the confirmation step shows, from the two
+// resolved listings (source folder, destination parent) and the name.
+function transferConfirmation(srcBox, srcList, dstBox, dstList, name) {
+  const dstPath = joinPath(dstList.path, name);
+  return {
+    srcBox: srcBox.id, srcRev: srcList.box_rev, srcPath: srcList.path,
+    dstBox: dstBox.id, dstRev: dstList.box_rev, dstParent: dstList.path, name,
+    exists: (dstList.dirs || []).includes(name),
+    lines: [
+      `from ${srcBox.name}: ${srcList.path}/ (its contents)`,
+      `to ${dstBox.name}: ${dstPath}/ (a new folder, created for this copy)`,
+      `The source stays untouched: nothing in ${srcList.path} on ${srcBox.name} is moved, changed or deleted.`,
+    ],
+  };
 }
 // resyncLoads: what a reconnect reloads besides the box states. Events
 // missed while the stream was down are not repeated, and a finished copy
@@ -338,5 +382,5 @@ function resyncLoads(view, tab, selId) {
   return [];
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferMeter, transferRequest, resyncLoads };
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation };
 })();

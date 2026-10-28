@@ -292,3 +292,8 @@ details.adv>div{display:grid;gap:16px;margin-top:14px}
   .conn{display:none}
   main{padding:20px 16px 40px}
 }
+.picker{max-height:320px;overflow:auto;border:1px solid var(--line);border-radius:3px}
+.picker .prow{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 10px;border-bottom:1px solid var(--line)}
+.picker .prow:last-child{border-bottom:0}
+button.link{background:none;border:0;padding:2px 0;color:var(--accent);cursor:pointer;text-align:left;overflow-wrap:anywhere}
+.panel.xfer.focus{outline:1px solid var(--accent);outline-offset:2px}

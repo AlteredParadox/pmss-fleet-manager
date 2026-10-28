@@ -1,0 +1,163 @@
+// pmss-fleet-manager — a single-pane dashboard for Pulsed Media seedboxes.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+package collect
+
+// The transfer form's folder picker: one directory's subdirectories at a
+// time, inside the account's home, bounded. It reads; it never changes
+// anything, and it is no file manager (no files, previews, renames or
+// recursive listings).
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+	"unicode/utf8"
+)
+
+// xferDirsMax bounds how many subdirectories one listing returns.
+const xferDirsMax = 1000
+
+// xferDirsScript resolves $P (relative to HOME, absolute, or empty for
+// HOME) and prints the directory, HOME, then the names of its immediate
+// subdirectories, NUL-separated and capped. find -type d without -L skips
+// symlinks, which a copy would not follow either.
+const xferDirsScript = `set -u
+LC_ALL=C; export LC_ALL
+die() { echo "ERR $*"; exit 3; }
+home=$(realpath -e -- "$HOME") || die "cannot resolve HOME"
+case "$P" in "") p=$home;; /*) p=$P;; *) p="$home/$P";; esac
+d=$(realpath -e -- "$p" 2>/dev/null) || die "no such directory"
+case "$d/" in "$home"/*) ;; *) die "that folder is outside your home directory";; esac
+[ -d "$d" ] || die "not a directory"
+[ -r "$d" ] && [ -x "$d" ] || die "cannot read that directory"
+printf 'DIR %s\nHOME %s\n' "$d" "$home"
+find "$d" -mindepth 1 -maxdepth 1 -type d -printf '%f\0' 2>/dev/null | head -z -n ` + "1001" + `
+exit 0
+`
+
+// xferInputError is the box's own refusal of a path (outside the home, no
+// such folder): shown as it is, answered like any refused input (400).
+type xferInputError string
+
+func (e xferInputError) Error() string        { return string(e) }
+func (e xferInputError) Is(target error) bool { return target == ErrTransferInput }
+
+// DirListing is one folder of the picker.
+type DirListing struct {
+	BoxRev    int64    `json:"box_rev"` // the record revision the listing was read under
+	Path      string   `json:"path"`    // absolute, resolved
+	Rel       string   `json:"rel"`     // relative to home; "" is home itself
+	Dirs      []string `json:"dirs"`
+	Truncated bool     `json:"truncated"` // more than xferDirsMax subdirectories
+	Skipped   int      `json:"skipped"`   // names a path cannot carry (control characters, invalid UTF-8)
+}
+
+// parseXferDirs reads the script's output.
+func parseXferDirs(out []byte) (DirListing, error) {
+	var l DirListing
+	var home string
+	for i := 0; i < 2; i++ {
+		nl := bytes.IndexByte(out, '\n')
+		if nl < 0 {
+			return l, fmt.Errorf("unexpected listing output")
+		}
+		line := string(out[:nl])
+		out = out[nl+1:]
+		if msg, ok := strings.CutPrefix(line, "ERR "); ok {
+			return l, &xferRefusal{msg}
+		}
+		switch {
+		case strings.HasPrefix(line, "DIR "):
+			l.Path = line[4:]
+		case strings.HasPrefix(line, "HOME "):
+			home = line[5:]
+		}
+	}
+	if l.Path == "" || home == "" {
+		return l, fmt.Errorf("unexpected listing output")
+	}
+	l.Rel = strings.TrimPrefix(strings.TrimPrefix(l.Path, home), "/")
+	l.Dirs = []string{}
+	for _, n := range bytes.Split(out, []byte{0}) {
+		if len(n) == 0 {
+			continue
+		}
+		if len(l.Dirs) == xferDirsMax {
+			l.Truncated = true
+			break
+		}
+		s := string(n)
+		if !utf8.ValidString(s) || strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			l.Skipped++
+			continue
+		}
+		l.Dirs = append(l.Dirs, s)
+	}
+	sort.Slice(l.Dirs, func(a, b int) bool {
+		x, y := strings.ToLower(l.Dirs[a]), strings.ToLower(l.Dirs[b])
+		if x != y {
+			return x < y
+		}
+		return l.Dirs[a] < l.Dirs[b]
+	})
+	return l, nil
+}
+
+// ListTransferDirs lists one folder on box id for the transfer picker,
+// on the poller of the revision ctx names (WithBoxRevision), so a listing
+// never comes from a record the form was not drawn from.
+func (m *Manager) ListTransferDirs(ctx context.Context, id int64, path string) (DirListing, error) {
+	p, err := m.actionPoller(ctx, id)
+	if err != nil {
+		return DirListing{}, err
+	}
+	if _, err := p.readyState(); err != nil {
+		return DirListing{}, err
+	}
+	// "" and "~" are home; "~/x" is x, relative to home; absolute stays.
+	if path == "~" {
+		path = ""
+	}
+	path = strings.TrimPrefix(path, "~/")
+	if path != "" {
+		if err := validXferPath(path, false); err != nil {
+			return DirListing{}, fmt.Errorf("%w: %v", ErrTransferInput, err)
+		}
+	}
+	cli, err := p.conn(ctx)
+	if err != nil {
+		return DirListing{}, err
+	}
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, stderr, err := cli.Run(rctx, "sh", strings.NewReader("P="+shellQuote(path)+"\n"+xferDirsScript))
+	l, perr := parseXferDirs(out)
+	if perr != nil {
+		if refused, ok := perr.(*xferRefusal); ok {
+			return DirListing{}, xferInputError(refused.msg) // the box answered: nothing to retry
+		}
+		if err != nil {
+			return DirListing{}, fmt.Errorf("%v %s", err, clip(strings.TrimSpace(string(stderr)), 300))
+		}
+		return DirListing{}, perr
+	}
+	l.BoxRev = p.box.Revision
+	return l, nil
+}

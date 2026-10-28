@@ -1320,3 +1320,26 @@ func TestBoxRevisionRecheckedAfterBody(t *testing.T) {
 		t.Fatalf("%d %s", rr.Code, rr.Body.String())
 	}
 }
+
+// The transfer picker's folder listing reads only, so monitor-only does
+// not refuse it, but it still names the revision the form was drawn from:
+// none is 400, another is 409 (before any SSH).
+func TestTransferDirsNeedRevision(t *testing.T) {
+	srv, _ := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080"}
+	b := &store.Box{Name: "x", Host: "x.invalid", User: "u", Port: 22, Enabled: true}
+	if err := srv.m.AddBox(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	p := fmt.Sprintf("/api/boxes/%d/transfers/dirs", b.ID)
+	srv.SetMonitorOnly(true)
+	if code, body := do(t, srv, "POST", p, `{"path":""}`, hdr); code != 400 || !strings.Contains(body, "rev") {
+		t.Errorf("without rev: %d %s", code, body)
+	}
+	if code, body := do(t, srv, "POST", p+"?rev=99", `{"path":""}`, hdr); code != 409 {
+		t.Errorf("stale rev: %d %s", code, body)
+	}
+	if code, body := do(t, srv, "POST", p+"?rev=0", `{"path":"a/../b"}`, hdr); code == 403 || code == 200 {
+		t.Errorf("current rev: %d %s", code, body)
+	}
+}

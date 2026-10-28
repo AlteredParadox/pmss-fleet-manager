@@ -670,7 +670,13 @@ switching a source off for the box resolves its alerts.
 ### Copying between boxes
 
 The transfers tab copies one directory from this box into a **new**
-directory on another box. The data goes straight from box to box (Pulsed
+directory on another box. Pick the folder to copy with *browse* (or type
+its path), choose the destination box, browse to an existing folder there
+(or type it) and name the new folder. *Review copy* resolves both paths on
+their boxes and shows them exactly, with the reminder that the source is
+left untouched; *start copy* then sets it up and scrolls to its progress
+card. The picker lists one folder's subfolders at a time (at most 1000,
+symlinks not followed), never leaves the account's home, and shows no files. The data goes straight from box to box (Pulsed
 Media does not charge for internal traffic); the dashboard only sets the
 copy up, starts it and reads its status. This is copy only: no move, no
 sync, no `--delete`, no queue, no retries.
@@ -992,6 +998,12 @@ Newest first; each release's full notes are on the
   `?rev=`; refused in monitor-only mode) and
   `POST /api/transfers/{tid}/dismiss`; new `transfers` table and
   `transfers` event.
+- Transfers: folder picker for the source folder and the destination's
+  parent folder, and a confirmation step that shows both resolved paths
+  and that the source stays untouched; after the start the page scrolls
+  to the new transfer's card. New read-only route
+  `POST /api/boxes/{id}/transfers/dirs?rev=` (`{"path": ...}`: one
+  folder's subfolders, inside the home, at most 1000).
 
 **1.12.0**
 

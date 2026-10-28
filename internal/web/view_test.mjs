@@ -267,15 +267,40 @@ test('a transfer is over, and succeeded, by its exit code alone', () => {
   assert.equal(V.transferMeter({ phase: 'running' }), 0);
 });
 
-test('the start-copy body keeps the destination revision chosen in the form (fred on PR 142)', () => {
-  const draft = { src: ' downloads/x ', dst_box: '7', dst_rev: 3, dst: 'copy ' };
-  // The destination was edited (rev 4) after it was chosen: the body still
+test('the start-copy body uses the confirmed paths and the revisions they were listed under (fred on PR 142)', () => {
+  const src = { id: 2, name: 'pm1', box_rev: 5 }, dst = { id: 7, name: 'pmstor01', box_rev: 3 };
+  const c = V.transferConfirmation(src, { box_rev: 5, path: '/home/u/dl/x', rel: 'dl/x' }, dst, { box_rev: 3, path: '/home/v/in', rel: 'in', dirs: [] }, 'x copy');
+  // The destination was edited (rev 4) after it was listed: the body still
   // names rev 3, so the server refuses with 409 instead of copying to the
   // record's new target.
-  const boxes = [{ id: 7, box_rev: 4 }];
-  assert.ok(boxes[0].box_rev !== 3);
-  assert.deepEqual(V.transferRequest(draft), { dst_box: 7, dst_rev: 3, src_path: 'downloads/x', dst_path: 'copy' });
-  assert.equal(V.transferRequest({ dst_box: '7' }).dst_rev, 0, 'never chosen: no revision, which the server refuses');
+  dst.box_rev = 4;
+  assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/dl/x', dst_path: '/home/v/in/x copy' });
+  assert.equal(c.srcRev, 5);
+});
+
+test('the confirmation names both exact paths and says the source stays untouched', () => {
+  const c = V.transferConfirmation({ id: 2, name: 'pm1' }, { box_rev: 1, path: '/home/u/dl/x' }, { id: 7, name: 'pmstor01' }, { box_rev: 1, path: '/home/v', dirs: ['taken'] }, 'taken');
+  assert.match(c.lines.join('\n'), /from pm1: \/home\/u\/dl\/x\//);
+  assert.match(c.lines.join('\n'), /to pmstor01: \/home\/v\/taken\/ \(a new folder/);
+  assert.match(c.lines.join('\n'), /source stays untouched: nothing in \/home\/u\/dl\/x on pm1 is moved, changed or deleted/);
+  assert.equal(c.exists, true, 'a name already listed in the parent is flagged before the server refuses it');
+});
+
+test('picker paths stay relative to the home and climb no higher', () => {
+  assert.equal(V.homeLabel(''), '~');
+  assert.equal(V.homeLabel('a/b'), '~/a/b');
+  assert.equal(V.joinPath('', 'x'), 'x');
+  assert.equal(V.joinPath('a/b/', 'x'), 'a/b/x');
+  assert.equal(V.parentRel('a/b'), 'a');
+  assert.equal(V.parentRel('a'), '');
+  assert.equal(V.parentRel(''), null);
+});
+
+test('a new folder name is one plain name', () => {
+  assert.equal(V.newFolderError('from pm1'), '');
+  for (const bad of ['', ' ', '.', '..', 'a/b', "it's", 'a"b', 'a\\b', 'a,b', '-x', 'a\nb', 'x'.repeat(256)]) {
+    assert.notEqual(V.newFolderError(bad), '', JSON.stringify(bad));
+  }
 });
 
 test('a reconnect reloads the transfers list on the transfers tab (fred on PR 142)', () => {
