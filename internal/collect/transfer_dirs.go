@@ -47,10 +47,15 @@ const xferDirsOutCap = 2*4096 + (xferDirsMax+1)*256 + 64
 // symlinks, which a copy would not follow either.
 const xferDirsScript = `set -u
 LC_ALL=C; export LC_ALL
-die() { echo "ERR $*"; exit 3; }
-home=$(realpath -e -- "$HOME") || die "cannot resolve HOME"
+die() { printf 'ERR %s\n' "$*"; exit 3; }
+# canon sets CANON to realpath's answer byte for byte: $(...) alone drops
+# trailing newlines, which can belong to a name (fred on PR 145).
+canon() { CANON=$(realpath "$@" && printf .) || return 1; CANON=${CANON%?.}; }
+canon -e -- "$HOME" || die "cannot resolve HOME"
+home=$CANON
 case "$P" in "") p=$home;; /*) p=$P;; *) p="$home/$P";; esac
-d=$(realpath -e -- "$p" 2>/dev/null) || die "no such directory"
+canon -e -- "$p" 2>/dev/null || die "no such directory"
+d=$CANON
 case "$d/" in "$home"/*) ;; *) die "that folder is outside your home directory";; esac
 [ -d "$d" ] || die "not a directory"
 [ -r "$d" ] && [ -x "$d" ] || die "cannot read that directory"

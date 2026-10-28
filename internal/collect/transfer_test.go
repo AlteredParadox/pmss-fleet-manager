@@ -370,6 +370,58 @@ func TestXferSrcRefusesControlCharInResolvedPath(t *testing.T) {
 	}
 }
 
+// Two ways a name could still lose bytes on the box (fred on PR 145): a
+// literal backslash-n, which dash's echo would turn into a newline, must
+// round-trip exactly; a name that is only a newline, reached as "safe/.",
+// must not be dropped by $(...) and leave $HOME as the source.
+func TestXferSrcPathBytesSurvive(t *testing.T) {
+	needTools(t, "ssh-keygen", "rsync", "perl", "setsid")
+	prepare := func(home, src string) (string, string) {
+		cmd := exec.Command("sh")
+		cmd.Stdin = strings.NewReader(xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "SRC", src) + xferPrelude + xferSrcPrepareScript)
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		out, _ := cmd.CombinedOutput()
+		return string(out), home
+	}
+	home := t.TempDir()
+	os.Mkdir(filepath.Join(home, `\nchild`), 0o700)
+	out, _ := prepare(home, `\nchild`)
+	if r, _, err := parseSrcPrepare(strings.Split(strings.TrimRight(out, "\n"), "\n")); err != nil || r != home+`/\nchild` {
+		t.Errorf("backslash-n source came back as %q (%v):\n%s", r, err, out)
+	}
+	home = t.TempDir()
+	os.Mkdir(filepath.Join(home, "\n"), 0o700)
+	os.Symlink(filepath.Join(home, "\n"), filepath.Join(home, "safe"))
+	out, _ = prepare(home, "safe/.")
+	if !strings.Contains(out, "ERR the resolved source path contains a control character") {
+		t.Errorf("newline-named source: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config")); !os.IsNotExist(err) {
+		t.Errorf("control directory created: %v", err)
+	}
+}
+
+// The destination's parent is resolved byte for byte too: a parent whose
+// name ends in a newline is refused, not taken for its newline-less
+// neighbour (fred on PR 145).
+func TestXferDstParentBytesSurvive(t *testing.T) {
+	needTools(t, "rrsync")
+	home := t.TempDir()
+	os.Mkdir(filepath.Join(home, "x"), 0o700)
+	os.Mkdir(filepath.Join(home, "x\n"), 0o700)
+	os.Symlink(filepath.Join(home, "x\n"), filepath.Join(home, "ln"))
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "DST", "ln/new") + xferPrelude + xferDstClaimScript)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "ERR the resolved destination path") {
+		t.Errorf("got %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(home, "x", "new")); !os.IsNotExist(err) {
+		t.Errorf("created in the neighbour: %v", err)
+	}
+}
+
 // The job key is forced into the system's rrsync, whatever PATH finds
 // first, and only one that is root's and root-only writable (daybreak
 // review B2).

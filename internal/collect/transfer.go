@@ -116,9 +116,15 @@ func validXferPath(p string, dest bool) error {
 const xferPrelude = `set -u
 LC_ALL=C; export LC_ALL
 umask 077
-die() { echo "ERR $*"; exit 3; }
+# Fields go out with printf '%s': dash's echo turns a backslash sequence in
+# a name (\n) into the byte it names (fred on PR 145).
+die() { printf 'ERR %s\n' "$*"; exit 3; }
+# canon sets CANON to realpath's answer byte for byte: $(...) alone drops
+# trailing newlines, which can belong to a name (fred on PR 145).
+canon() { CANON=$(realpath "$@" && printf .) || return 1; CANON=${CANON%?.}; }
 case "$TOKEN" in *[!0-9a-f]*|"") die "bad token";; esac
-home=$(realpath -e -- "$HOME") || die "cannot resolve HOME"
+canon -e -- "$HOME" || die "cannot resolve HOME"
+home=$CANON
 ctl="$home/.config/pmss-fleet-manager"
 J="$ctl/transfers/$TOKEN"
 case "$J" in *[!A-Za-z0-9/._-]*) die "home path has characters this feature does not handle";; esac
@@ -133,25 +139,27 @@ alive() { pid=$(head -c 20 "$J/pid" 2>/dev/null | tr -cd 0-9); [ -n "$pid" ] && 
 // directory is created with mkdir (not -p), so a token is used once.
 const xferSrcPrepareScript = `p=$(abspath "$SRC")
 [ -L "$p" ] && die "source is a symlink"
-src=$(realpath -e -- "$p") || die "source does not exist"
+canon -e -- "$p" || die "source does not exist"
+src=$CANON
 # The typed path has no control characters, but a symlink on the way can
 # resolve to one; a newline would break the SRC line below (daybreak).
 case "$src" in *[[:cntrl:]]*) die "the resolved source path contains a control character";; esac
 [ -d "$src" ] || die "source is not a directory"
 inside "$src" "$home" || die "source is not inside your home directory"
 [ "$src" = "$home" ] && die "source is your whole home directory (it holds the transfer control directory)"
-c=$(realpath -m -- "$ctl")
+canon -m -- "$ctl"
+c=$CANON
 if inside "$src" "$c" || inside "$c" "$src" || [ "$src" = "$c" ]; then die "source overlaps the dashboard's control directory $c"; fi
 for t in rsync ssh ssh-keygen perl setsid mkfifo; do command -v "$t" >/dev/null 2>&1 || die "$t not found on the source"; done
 mkdir -p -- "$ctl/transfers" || die "cannot create $ctl/transfers"
 # A symlinked transfers directory could point into the source: the chmod
 # and the key would land there, and the copy would carry the key.
-[ "$(realpath -e -- "$ctl/transfers")" = "$c/transfers" ] || die "$ctl/transfers is a symlink; not using it"
+canon -e -- "$ctl/transfers" && [ "$CANON" = "$c/transfers" ] || die "$ctl/transfers is a symlink; not using it"
 chmod 700 -- "$ctl/transfers" || die "cannot chmod $ctl/transfers"
 mkdir -- "$J" || die "job directory already exists"
 ssh-keygen -q -t ed25519 -N '' -C "pfm-xfer-$TOKEN" -f "$J/key" </dev/null >/dev/null || die "ssh-keygen failed"
-echo "SRC $src"
-echo "PUB $(cat "$J/key.pub")"
+printf 'SRC %s\n' "$src"
+printf 'PUB %s\n' "$(cat "$J/key.pub")"
 `
 
 // xferDstClaimScript checks the destination and claims it: mkdir (not -p)
@@ -167,17 +175,19 @@ done
 [ -f "$rt" ] && [ -x "$rt" ] || die "$rr is not an executable file"
 p=$(abspath "$DST")
 p=${p%/}
+case "$p" in */) die "destination must name a new directory";; esac
 [ -e "$p" ] || [ -L "$p" ] && die "destination already exists"
-parent=$(realpath -e -- "$(dirname -- "$p")") || die "destination's parent directory does not exist"
-d="$parent/$(basename -- "$p")"
+canon -e -- "${p%/*}/" || die "destination's parent directory does not exist"
+d="${CANON%/}/${p##*/}"
 inside "$d" "$home" || die "destination is not inside your home directory"
 inside "$d" "$home/.ssh" && die "destination is inside ~/.ssh"
-inside "$d" "$(realpath -m -- "$ctl")" && die "destination is inside the dashboard's control directory"
+canon -m -- "$ctl"
+inside "$d" "$CANON" && die "destination is inside the dashboard's control directory"
 # It goes into command="..." in authorized_keys: the typed path was
 # checked, but a symlinked parent can resolve to anything.
 case "$d" in *[\"\\,\']*|*[[:cntrl:]]*) die "the resolved destination path has characters authorized_keys cannot carry";; esac
 mkdir -- "$d" || die "could not create the destination directory"
-echo "DST $d"
+printf 'DST %s\n' "$d"
 `
 
 // xferKeyAddScript appends the job's key line to authorized_keys under a
@@ -204,7 +214,7 @@ fi
 exp=$(date -d '+30 minutes' +%Y%m%d%H%M) || die "date failed"
 line="restrict,expiry-time=\"$exp\",command=\"$rr ` + xferRrsyncOpts + ` '$d'\" ssh-ed25519 $BLOB pfm-xfer-$TOKEN$flags"
 printf '%s\n' "$line" >>"$tmp" && mv -f -- "$tmp" "$ak" || { rm -f -- "$tmp"; die "cannot write authorized_keys"; }
-echo "KEYLINE $line"
+printf 'KEYLINE %s\n' "$line"
 `
 
 // xferKeyRemoveScript removes the one line carrying this job's blob and
@@ -372,8 +382,8 @@ exit 0
 // failed after the claim. Never a non-empty one.
 const xferDstRmdirScript = `p=$(abspath "$DST")
 p=${p%/}
-parent=$(realpath -e -- "$(dirname -- "$p")" 2>/dev/null) || { echo "GONE"; exit 0; }
-d="$parent/$(basename -- "$p")"
+canon -e -- "${p%/*}/" 2>/dev/null || { echo "GONE"; exit 0; }
+d="${CANON%/}/${p##*/}"
 inside "$d" "$home" || die "not inside home"
 [ -d "$d" ] && [ ! -L "$d" ] || { echo "GONE"; exit 0; }
 if rmdir -- "$d" 2>/dev/null; then echo "REMOVED"; else echo "KEPT not empty"; fi
