@@ -376,10 +376,16 @@ func TestXferSrcRefusesControlCharInResolvedPath(t *testing.T) {
 func TestXferDstClaimPinsRrsync(t *testing.T) {
 	needTools(t, "perl", "flock", "rrsync")
 	if _, err := os.Stat(xferRrsync); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("%s not present (CI installs rsync)", xferRrsync)
+		}
 		t.Skipf("%s not present", xferRrsync)
 	}
 	home, bin := t.TempDir(), t.TempDir()
 	os.WriteFile(filepath.Join(bin, "rrsync"), []byte("#!/bin/sh\nexec sh\n"), 0o755)
+	// Group-writable: untrusted whoever runs the test, root included
+	// (Codex on PR 145).
+	os.Chmod(filepath.Join(bin, "rrsync"), 0o775)
 	env := []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH")}
 	out := runJobScript(t, home, xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "DST", "copy", "BLOB", testBlob), xferDstClaimScript+xferKeyAddScript, env...)
 	line := xferField(strings.Split(out, "\n"), "KEYLINE")
