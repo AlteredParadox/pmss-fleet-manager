@@ -263,7 +263,12 @@ func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
 // loopback port to have an accepting socket owned by this uid, in any
 // TCP state (a half-closed acceptor still reads); connections other
 // accounts hold to the same port, or ours to other addresses, are not
-// this connection and do not count either way.
+// this connection and do not count either way. One exception: a
+// connection of ours that the peer has already closed (CLOSE-WAIT or
+// LAST-ACK) and whose accepting socket is gone has no reader left, so it
+// is not judged; such a leftover appears when qBittorrent restarts while
+// a tunnel connection is open, and must not refuse every new one. At
+// least one connection must still pair with an acceptor of ours.
 func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	if strings.TrimSpace(lines[len(lines)-1]) != "end" {
@@ -271,7 +276,7 @@ func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 	}
 	uid, base := -1, 0
 	acceptors := map[string]int{} // our ephemeral port (as printed) -> uid of the accepting socket
-	var clients []string          // our ephemeral ports, for connections to the loopback port
+	var clients [][2]string       // our ephemeral port and TCP state, for connections to the loopback port
 	for _, l := range lines {
 		f := strings.Fields(l)
 		if len(f) == 0 {
@@ -304,7 +309,7 @@ func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 			if f[0] == "c" {
 				// Our tunnel: this account's socket whose peer is the loopback port.
 				if owner == uid && loopbackReachable(f[4]) {
-					clients = append(clients, f[1])
+					clients = append(clients, [2]string{f[1], f[3]})
 				}
 				continue
 			}
@@ -324,16 +329,33 @@ func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 	if len(clients) == 0 {
 		return false, true, fmt.Sprintf("the connection to port %d is not in the box's socket table", port)
 	}
-	for _, eph := range clients {
-		owner, found := acceptors[eph]
+	paired := 0
+	for _, c := range clients {
+		owner, found := acceptors[c[0]]
 		switch {
+		case !found && peerClosed(c[1]):
+			continue // a leftover with no reader on the other side
 		case !found:
 			return false, true, fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
 		case owner != uid:
 			return false, true, fmt.Sprintf("the connection to port %d was accepted by another account (uid %d); refusing to use it", port, owner)
 		}
+		paired++
+	}
+	if paired == 0 {
+		return false, true, fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
 	}
 	return true, true, ""
+}
+
+// peerClosed reports whether a TCP state, as /proc/net/tcp (hex) or ss
+// prints it, means the peer has closed its side: CLOSE-WAIT or LAST-ACK.
+func peerClosed(state string) bool {
+	switch state {
+	case "08", "09", "CLOSE-WAIT", "LAST-ACK":
+		return true
+	}
+	return false
 }
 
 // parseListeners reads the probe's listen section: one listening socket per
