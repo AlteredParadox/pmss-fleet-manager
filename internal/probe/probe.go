@@ -266,8 +266,10 @@ func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
 // this connection and do not count either way. One exception: a
 // connection of ours that the peer has already closed (CLOSE-WAIT or
 // LAST-ACK) and whose accepting socket is gone has no reader left, so it
-// is not judged; such a leftover appears when qBittorrent restarts while
-// a tunnel connection is open, and must not refuse every new one. At
+// is not judged. Such a leftover appears when the dashboard loses an SSH
+// session: the box's sshd keeps the session's forwarded sockets until it
+// notices the client is gone, and qBittorrent closing its side meanwhile
+// leaves ours in CLOSE-WAIT. It must not refuse every new connection. At
 // least one connection must still pair with an acceptor of ours.
 func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")

@@ -1103,8 +1103,8 @@ func TestEstablishedOwner(t *testing.T) {
 		t.Fatalf("missing acceptor: %v %s", ok, reason)
 	}
 	// A leftover of ours the peer already closed (CLOSE-WAIT, LAST-ACK),
-	// its acceptor gone (qBittorrent restarted under an open tunnel
-	// connection): no reader left, so it does not refuse the live one.
+	// its acceptor gone (an SSH session the box has not yet noticed is
+	// lost): no reader left, so it does not refuse the live one.
 	for _, state := range []string{"08", "09"} {
 		stale := fmt.Sprintf("c 05D2 %d %s 0100007F\n", uid, state)
 		if ok, _, reason := EstablishedOwner(mk(own+stale), port); !ok {
