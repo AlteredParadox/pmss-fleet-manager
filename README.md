@@ -983,7 +983,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.13.0 is the current release. The code was written against five real Pulsed
+1.13.1 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -994,6 +994,18 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.13.1**
+
+- The qBittorrent panel no longer fails for several minutes after the
+  dashboard loses its SSH connection to a box (a network or DNS blip).
+  The box's sshd keeps the lost session's connection to qBittorrent until
+  it notices the session is gone, and that half-closed leftover (CLOSE-WAIT,
+  its accepting socket already closed) made the accepted-socket check
+  refuse every new connection ("the socket that accepted the connection
+  ... is not visible"). Such a leftover has no reader on the other side and
+  is now skipped; at least one connection must still be accepted by this
+  account, and any other unpaired connection still refuses.
 
 **1.13.0**
 
