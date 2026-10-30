@@ -1102,6 +1102,25 @@ func TestEstablishedOwner(t *testing.T) {
 	if ok, _, reason := EstablishedOwner(mk(fmt.Sprintf("c BEEF %d 01 0100007F\n", uid)), port); ok || !strings.Contains(reason, "not visible") {
 		t.Fatalf("missing acceptor: %v %s", ok, reason)
 	}
+	// A leftover of ours the peer already closed (CLOSE-WAIT, LAST-ACK),
+	// its acceptor gone (an SSH session the box has not yet noticed is
+	// lost): no reader left, so it does not refuse the live one.
+	for _, state := range []string{"08", "09"} {
+		stale := fmt.Sprintf("c 05D2 %d %s 0100007F\n", uid, state)
+		if ok, _, reason := EstablishedOwner(mk(own+stale), port); !ok {
+			t.Fatalf("closed leftover in state %s refused: %s", state, reason)
+		}
+		// ...but it is no connection to vouch for on its own.
+		if ok, _, reason := EstablishedOwner(mk(stale), port); ok || !strings.Contains(reason, "not visible") {
+			t.Fatalf("closed leftover alone in state %s: %v %s", state, ok, reason)
+		}
+	}
+	// A connection we still send on (ESTABLISHED, FIN-WAIT) needs its acceptor.
+	for _, state := range []string{"01", "04", "05"} {
+		if ok, _, _ := EstablishedOwner(mk(own+fmt.Sprintf("c 05D2 %d %s 0100007F\n", uid, state)), port); ok {
+			t.Fatalf("unpaired connection in state %s passed", state)
+		}
+	}
 	// Another tenant's own connection to the same port, and our own
 	// connection to the port on another address, are not this connection.
 	noise := fmt.Sprintf("c CAFE %d 01 0100007F\ns CAFE %d 01 0100007F\nc F00D %d 01 0A0B0C0D\ns F00D %d 01 0A0B0C0D\n", uid+1, uid+1, uid, uid+2)
