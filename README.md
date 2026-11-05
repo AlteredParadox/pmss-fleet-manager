@@ -1025,7 +1025,7 @@ Newest first; each release's full notes are on the
   turn a value the catalogue holds into unknown first reads that value back
   and repeats it, or skips the host. At most 25 submissions in ten minutes.
   `GET /api/pmdb` hosts carry `listed`, `plan` and `submitted_at`, and the
-  settings page links each host to its catalogue page. (#153, #154)
+  settings page links each host to its catalogue page. (#153, #155)
 
 **1.13.1**
 
