@@ -1411,6 +1411,18 @@ func TestCatalogueFactsGated(t *testing.T) {
 	if !fast.PMDBFacts || fast.Host.DiskYABS != 1 {
 		t.Fatalf("carry over a fast poll: %+v", fast.Host)
 	}
+	// A full inventory that did not ask (the integration off at the time)
+	// keeps the last facts too, and what it caches for later polls has
+	// them: switching the integration off and on across an inventory does
+	// not lose them.
+	off := run(false)
+	off.CarryInventory(prev)
+	if !off.PMDBFacts || off.Host.DiskYABS != 1 || !off.Inventory {
+		t.Fatalf("carry over an inventory without the facts: %+v", off.Host)
+	}
+	if kept := off.InventoryOnly(); !kept.PMDBFacts || kept.Host.DiskYABS != 1 {
+		t.Fatalf("cached inventory lost the facts: %+v", kept.Host)
+	}
 }
 
 func TestNominalMHz(t *testing.T) {

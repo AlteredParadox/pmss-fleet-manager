@@ -590,10 +590,13 @@ func (p *poller) poll(ctx context.Context) {
 		p.fail(ctx, &st, err, start)
 		return
 	}
+	// Carry first, then cache: an inventory that did not ask for the
+	// catalogue facts (the integration off, or an identifier not yet set)
+	// keeps the last ones, so re-enabling does not post the fleet from
+	// the fallback figures and again after the next inventory.
+	snap.CarryInventory(p.inv)
 	if snap.Inventory {
 		p.inv, p.invAt = snap.InventoryOnly(), start
-	} else {
-		snap.CarryInventory(p.inv)
 	}
 	p.qbtBinStat, p.qbtBinVersion, snap.Qbt.BinaryVersion = resolveQbtVersion(p.qbtBinStat, p.qbtBinVersion, snap.Qbt)
 	p.apply(&st, snap)
