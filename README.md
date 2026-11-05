@@ -1026,8 +1026,11 @@ Newest first; each release's full notes are on the
   uses them when present. The clock, a live reading, is left out of the
   change detection so a host with frequency scaling is not posted every
   quarter hour; it rides along with the next submission, as on a YABS
-  upload. Each host is posted once more after the upgrade, the storage
-  figure having changed.
+  upload. One deliberate difference: the storage total is printed as a
+  float, since the mawk of Debian 11 and 12 wraps yabs.sh's own `%d`
+  at 2 TiB, so a YABS upload from such a host can show less than the
+  dashboard does above that size. Each host is posted once more after
+  the upgrade, the storage figure having changed.
 
 **1.14.0**
 

@@ -1684,3 +1684,44 @@ func Sections(raw []byte) map[string]string { return SectionsTagged(raw, "") }
 // Parse turns untagged probe output into a Snapshot; production runs use
 // ParseTagged.
 func Parse(raw []byte, now time.Time) (*Snapshot, error) { return ParseTagged(raw, "", now) }
+
+// The storage total is printed as a float: the mawk of Debian 11 and 12
+// (before its 20200731 release) keeps printf "%d" within 32 bits, which
+// wraps any total above 2 TiB, as yabs.sh's own "%d" does there. Every awk
+// on this machine must print a 5 TiB total exactly.
+func TestYABSDiskTotalAboveTwoTiB(t *testing.T) {
+	start := strings.Index(Script, "awk 'NF == 3")
+	if start < 0 {
+		t.Fatal("yabs disk awk program not found in the script")
+	}
+	prog := Script[start+len("awk '"):]
+	prog = prog[:strings.Index(prog, "'")]
+	// A 4 TiB device listed twice, a 1 TiB device, and a mount stat could
+	// not describe.
+	in := "/dev/sda1 1073741824 4096\n/dev/sda1 1073741824 4096\n/dev/sdb1 2097152 524288\ntmpfs\n"
+	ran := 0
+	for _, awk := range []string{"awk", "mawk", "gawk", "busybox"} {
+		path, err := exec.LookPath(awk)
+		if err != nil {
+			continue
+		}
+		args := []string{prog}
+		if awk == "busybox" {
+			args = []string{"awk", prog}
+		}
+		cmd := exec.Command(path, args...)
+		cmd.Stdin = strings.NewReader(in)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s: %v", awk, err)
+		}
+		got := strings.TrimSpace(string(out))
+		if got != "5368709120" || parseYABSKB(got) != 5368709120*1024 {
+			t.Errorf("%s printed %q for a 5 TiB total", awk, got)
+		}
+		ran++
+	}
+	if ran == 0 {
+		t.Skip("no awk")
+	}
+}

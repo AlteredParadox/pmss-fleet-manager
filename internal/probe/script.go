@@ -103,6 +103,9 @@ sec pmss_version; cat /etc/seedbox/config/version 2>/dev/null
 # live reading, not a nominal one. The storage is every local filesystem
 # in /proc/mounts of the types YABS counts, each source device once, in
 # 1024-byte units, and df over the same types when that yields nothing.
+# The total is printed as a float, not with yabs.sh's "%d": the mawk of
+# Debian 11 and 12 (before its 20200731 release) keeps "%d" within 32
+# bits, so a total above 2 TiB would wrap there.
 if [ "${PMSS_PMDB:-0}" = 1 ]; then
 sec pmdb_facts; echo 1
 sec cpu_mhz_yabs; case "$(uname -m)" in aarch64*|arm*|riscv64*) lscpu 2>/dev/null | sed -n 's/^CPU max MHz: *//p' ;; *) awk -F: '/cpu MHz/ {freq=$2} END {print freq}' /proc/cpuinfo 2>/dev/null ;; esac
@@ -111,7 +114,7 @@ while read -r src mnt type _; do
   case " simfs ext2 ext3 ext4 btrfs xfs vfat exfat ntfs swap " in
     *" $type "*) echo "$src $(stat -f -c '%b %S' "$(printf '%b' "$mnt")" 2>/dev/null)" ;;
   esac
-done </proc/mounts 2>/dev/null | awk 'NF == 3 && !seen[$1]++ { total += $2 * $3 / 1024 } END { if (total > 0) printf "%d\n", total }'
+done </proc/mounts 2>/dev/null | awk 'NF == 3 && !seen[$1]++ { total += $2 * $3 / 1024 } END { if (total > 0) printf "%.0f\n", total }'
 YABSDISK
 )
 sec disk_yabs; bounded 10 sh -c "$yabs_disk"
