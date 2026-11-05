@@ -215,6 +215,8 @@ type HostState struct {
 	Arch         string  `json:"arch,omitempty"`   // uname -m
 	Users        int     `json:"users"`            // user accounts on the host (UIDs above 1000 except nobody)
 	UsersKnown   bool    `json:"users_known"`
+	CPUMHzYABS   float64 `json:"cpu_mhz_yabs,omitempty"` // the live clock as yabs.sh reads it; for the catalogue only
+	DiskYABS     int64   `json:"disk_yabs,omitempty"`    // every local filesystem, bytes, as yabs.sh counts it; for the catalogue only
 	HomeFSType   string  `json:"home_fs_type,omitempty"`
 	HomeSize     int64   `json:"home_size"`
 	HomeUsed     int64   `json:"home_used"`

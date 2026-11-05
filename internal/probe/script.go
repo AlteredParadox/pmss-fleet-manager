@@ -94,6 +94,29 @@ sec arch; uname -m 2>/dev/null
 sec users; awk -F: '$3 > 1000 && $3 != 65534 {n++} END {print n+0}' /etc/passwd 2>/dev/null
 sec debian; cat /etc/debian_version 2>/dev/null
 sec pmss_version; cat /etc/seedbox/config/version 2>/dev/null
+# For the hardware catalogue (pmdb) only, and only while that integration
+# is on (PMSS_PMDB=1; the parser reports whether these ran, and the
+# poller carries the last answer over a probe that skipped them): the
+# clock and the storage measured the way yabs.sh measures them, so the
+# figures agree with YABS uploads of the same host. The clock is the last
+# "cpu MHz" line of /proc/cpuinfo (lscpu's maximum on ARM and RISC-V), a
+# live reading, not a nominal one. The storage is every local filesystem
+# in /proc/mounts of the types YABS counts, each source device once, in
+# 1024-byte units, and df over the same types when that yields nothing.
+if [ "${PMSS_PMDB:-0}" = 1 ]; then
+sec pmdb_facts; echo 1
+sec cpu_mhz_yabs; case "$(uname -m)" in aarch64*|arm*|riscv64*) lscpu 2>/dev/null | sed -n 's/^CPU max MHz: *//p' ;; *) awk -F: '/cpu MHz/ {freq=$2} END {print freq}' /proc/cpuinfo 2>/dev/null ;; esac
+yabs_disk=$(cat <<'YABSDISK'
+while read -r src mnt type _; do
+  case " simfs ext2 ext3 ext4 btrfs xfs vfat exfat ntfs swap " in
+    *" $type "*) echo "$src $(stat -f -c '%b %S' "$(printf '%b' "$mnt")" 2>/dev/null)" ;;
+  esac
+done </proc/mounts 2>/dev/null | awk 'NF == 3 && !seen[$1]++ { total += $2 * $3 / 1024 } END { if (total > 0) printf "%d\n", total }'
+YABSDISK
+)
+sec disk_yabs; bounded 10 sh -c "$yabs_disk"
+sec disk_yabs_df; bounded 10 df -t simfs -t ext2 -t ext3 -t ext4 -t btrfs -t xfs -t vfat -t exfat -t ntfs -t swap --total 2>/dev/null | awk '/^total/ {print $2}'
+fi
 fi
 sec df_home; bounded 10 df -B1 --output=size,used,avail,fstype "$home" | tail -n 1
 sec quota; bounded 10 quota -v -w
@@ -435,26 +458,32 @@ fi
 
 // ScriptWithTag returns Script with the section tag set on its first line.
 // The tag must be [A-Za-z0-9]+ (NewTag guarantees that); it is quoted anyway.
-// The version call runs unconditionally (no PMSS_QBT_SEEN).
-func ScriptWithTag(tag string) string { return ScriptWith(tag, "", true) }
+// The version call runs unconditionally (no PMSS_QBT_SEEN), and the
+// catalogue facts are not asked for (the poller carries them).
+func ScriptWithTag(tag string) string { return ScriptWith(tag, "", true, false) }
 
 // ScriptWith is ScriptWithTag with the binary stat ("size mtime ctime
 // inode", as the qbt_bin_stat section printed it) the caller already holds
 // a version for, so the probe skips the --version call while the binary is
 // unchanged, and with the inventory sections (see Script) switched on or
 // off: off, the probe measures only, and Snapshot.Inventory is false.
-func ScriptWith(tag, qbtSeen string, inventory bool) string {
+// catalogue asks for the two facts the hardware catalogue takes measured
+// YABS's way (PMSS_PMDB=1); they are only read while that integration is on.
+func ScriptWith(tag, qbtSeen string, inventory, catalogue bool) string {
 	seen := strings.Map(func(r rune) rune {
 		if (r >= '0' && r <= '9') || r == ' ' {
 			return r
 		}
 		return -1
 	}, qbtSeen)
-	inv := "0"
+	inv, cat := "0", "0"
 	if inventory {
 		inv = "1"
 	}
-	return "PMSS_TAG='" + strings.ReplaceAll(tag, "'", "") + "'\nPMSS_QBT_SEEN='" + seen + "'\nPMSS_INVENTORY=" + inv + "\n" + Script
+	if catalogue {
+		cat = "1"
+	}
+	return "PMSS_TAG='" + strings.ReplaceAll(tag, "'", "") + "'\nPMSS_QBT_SEEN='" + seen + "'\nPMSS_INVENTORY=" + inv + "\nPMSS_PMDB=" + cat + "\n" + Script
 }
 
 // NewTag returns a random hex section tag for one probe run.

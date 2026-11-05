@@ -86,6 +86,9 @@ type Snapshot struct {
 	// Script): the poller asks for them every quarter hour and carries the
 	// last answer over the polls in between (CarryInventory).
 	Inventory bool
+	// PMDBFacts: the catalogue sections ran (PMSS_PMDB=1); a snapshot
+	// without them carries the last ones (CarryInventory).
+	PMDBFacts bool
 	// ListenPIDs maps a listening TCP port to the pids of our processes
 	// that hold it, from ss -tlnp. Display only: PortOwner stays the gate.
 	ListenPIDs map[int][]int
@@ -446,11 +449,17 @@ type HostInfo struct {
 	Arch        string // uname -m
 	Users       int    // user accounts on the host: UIDs above 1000 except nobody (pmdb's count)
 	UsersKnown  bool
-	CPUModel    string   // raw "model name"
-	CPUShort    string   // trimmed for tags, e.g. "N100", "Xeon E5-2680 v4"
-	CPUFlags    []string // subset: avx2, avx512f, sse4_2, aes
-	GPU         GPUInfo
-	CPUTicks    CPUTicks
+	// The catalogue's two figures measured YABS's way (see the script), read
+	// only while the integration is on and carried like the inventory:
+	// the live clock in MHz as /proc/cpuinfo prints it, and every local
+	// filesystem in bytes. 0 when the box did not say.
+	CPUMHzYABS float64
+	DiskYABS   int64
+	CPUModel   string   // raw "model name"
+	CPUShort   string   // trimmed for tags, e.g. "N100", "Xeon E5-2680 v4"
+	CPUFlags   []string // subset: avx2, avx512f, sse4_2, aes
+	GPU        GPUInfo
+	CPUTicks   CPUTicks
 }
 
 // CPUTicks is the summary line of /proc/stat, every CPU of the host added
@@ -873,6 +882,7 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 	snap.Logs = parseLogs(s["logs"])
 	snap.Live, snap.LiveKnown = parseLiveRings(s["live_node"], s["live_user"], now)
 	_, snap.Inventory = s["inventory"]
+	_, snap.PMDBFacts = s["pmdb_facts"]
 	return snap, nil
 }
 
@@ -880,7 +890,17 @@ func ParseTagged(raw []byte, tag string, now time.Time) (*Snapshot, error) {
 // skipped those sections from prev, the last snapshot that ran them. A
 // snapshot that ran them itself, or no previous one, leaves s as it is.
 func (s *Snapshot) CarryInventory(prev *Snapshot) {
-	if s.Inventory || prev == nil {
+	if prev == nil {
+		return
+	}
+	if !s.PMDBFacts {
+		// The catalogue facts are asked for only while the integration is
+		// on, and not by an on-demand probe: a snapshot without them
+		// keeps the last, or the catalogue row would change back and
+		// forth with every such probe.
+		s.Host.CPUMHzYABS, s.Host.DiskYABS, s.PMDBFacts = prev.Host.CPUMHzYABS, prev.Host.DiskYABS, prev.PMDBFacts
+	}
+	if s.Inventory {
 		return
 	}
 	h, ph := &s.Host, &prev.Host
@@ -927,6 +947,26 @@ func parseOSRelease(raw string) string {
 	return strings.TrimSpace(v)
 }
 
+// parseYABSMHz reads the clock as YABS prints it ("1996.249"): a positive
+// number of MHz a processor can have, else 0.
+func parseYABSMHz(raw string) float64 {
+	f, err := strconv.ParseFloat(firstLine(raw), 64)
+	if err != nil || f <= 0 || f >= 100000 {
+		return 0
+	}
+	return f
+}
+
+// parseYABSKB reads a storage figure in 1024-byte units, YABS's "KB", into
+// bytes; 0 when the box did not say or the figure is not a size.
+func parseYABSKB(raw string) int64 {
+	kb, err := strconv.ParseInt(firstLine(raw), 10, 64)
+	if err != nil || kb <= 0 || kb > (1<<53) {
+		return 0
+	}
+	return kb * 1024
+}
+
 // parseUsers reads the account-count section: known only when the box
 // printed one non-negative integer.
 func parseUsers(raw string) (int, bool) {
@@ -947,6 +987,10 @@ func parseHost(s map[string]string) HostInfo {
 		Arch:        firstLine(s["arch"]),
 	}
 	h.Users, h.UsersKnown = parseUsers(s["users"])
+	h.CPUMHzYABS = parseYABSMHz(s["cpu_mhz_yabs"])
+	if h.DiskYABS = parseYABSKB(s["disk_yabs"]); h.DiskYABS == 0 {
+		h.DiskYABS = parseYABSKB(s["disk_yabs_df"]) // YABS's own fallback, in the same order
+	}
 	parseLoad(&h, s)
 	parseMeminfo(&h, s["meminfo"])
 	parseCPUInfo(&h, s)
