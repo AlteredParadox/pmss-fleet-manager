@@ -494,7 +494,7 @@ func parseNode(body []byte) (NodeRow, error) {
 	n.KVM = boolField(doc.Server["kvm"])
 	for key, max := range systemKeys {
 		raw, has := doc.System[key]
-		if !has || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		if !has || isNull(raw) {
 			n.System[key] = Text{State: TextAbsent}
 			continue
 		}
@@ -528,9 +528,16 @@ func objectBody(body []byte) bool {
 	return errors.Is(err, io.EOF)
 }
 
+// isNull reports a JSON null (which Unmarshal into a number or boolean
+// accepts silently, leaving the zero value: a null must stay unknown, not
+// become 0 or false and travel back to the catalogue as a fact).
+func isNull(raw json.RawMessage) bool {
+	return len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
 // numberField decodes a finite JSON number, or nil for anything else.
 func numberField(raw json.RawMessage) *float64 {
-	if len(raw) == 0 {
+	if isNull(raw) {
 		return nil
 	}
 	var f float64
@@ -542,7 +549,7 @@ func numberField(raw json.RawMessage) *float64 {
 
 // boolField decodes a JSON boolean, or nil for anything else.
 func boolField(raw json.RawMessage) *bool {
-	if len(raw) == 0 {
+	if isNull(raw) {
 		return nil
 	}
 	var b bool

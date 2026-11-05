@@ -273,6 +273,16 @@ func TestNode(t *testing.T) {
 	if n, err = c.Node(ctx, "odin.pulsedmedia.com"); err != nil || n.ProcessorMHz != nil || n.SwapBytes == nil || *n.SwapBytes != 0 || n.KVM == nil || !*n.KVM {
 		t.Fatalf("bounds: %+v %v", n, err)
 	}
+	// null is unknown, never 0 or false: a decoder that let it through
+	// would post "no swap, not KVM" for a host whose row says neither.
+	body = `{"server":{"processorMhz":null,"swapBytes":null,"kvm":null},"system":{}}`
+	if n, err = c.Node(ctx, "odin.pulsedmedia.com"); err != nil || n.ProcessorMHz != nil || n.SwapBytes != nil || n.KVM != nil {
+		t.Fatalf("nulls: %+v %v", n, err)
+	}
+	body = `{"uploadsEnabled":null,"plans":["A"]}`
+	if cfg, err := c.GetConfig(ctx); err != nil || !cfg.UploadsEnabled {
+		t.Fatalf("null uploadsEnabled: %+v %v", cfg, err)
+	}
 	for _, b := range []string{`[]`, `null`, `{"system":{}}`, `{"server":1}`, `{"server":{}}x`} {
 		body = b
 		if _, err := c.Node(ctx, "odin.pulsedmedia.com"); !errors.Is(err, ErrMalformed) {

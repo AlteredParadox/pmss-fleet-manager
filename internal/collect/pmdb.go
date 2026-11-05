@@ -158,6 +158,7 @@ const (
 	pmdbWaitPlans    = "the catalogue's plan list could not be read; trying later"
 	pmdbPlanUnknown  = "plan not in the catalogue's list"
 	pmdbReadFailed   = "could not read the catalogue's row for this host; not replacing it"
+	pmdbChanged      = "the boxes changed during the check; trying later"
 	pmdbCannotRepeat = "the catalogue holds a value for this host this dashboard cannot repeat; not replacing it"
 )
 
@@ -475,6 +476,21 @@ hosts:
 				if m.pmdbReadFailed(run, name, err) {
 					break hosts
 				}
+				continue
+			}
+			// The lookup took time, and a box removal or edit does not
+			// cancel this run: the boxes may not make this row any more.
+			// The row goes only if they still make the same one; else the
+			// next run decides the host afresh.
+			switch again, still := m.pmdbRowFor(name, cands[name].ids); {
+			case !still:
+				m.pmdbDrop(run, name)
+				continue
+			case again.skip != "":
+				m.pmdbMark(run, name, "skipped", again.skip, false)
+				continue
+			case again.hash != cand.hash:
+				m.pmdbMark(run, name, "pending", pmdbChanged, false)
 				continue
 			}
 		}

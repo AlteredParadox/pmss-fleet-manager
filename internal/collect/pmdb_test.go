@@ -418,7 +418,16 @@ func TestSyncPMDBStopsOnOptOut(t *testing.T) {
 			posts++
 			mu.Unlock()
 			if onPost != nil {
+				// The opt-out lands as this submission is in flight, and
+				// no answer ever reaches the client (the connection is
+				// dropped), so the outcome is the same every time: no
+				// acceptance, no receipt. An acceptance that does arrive
+				// as a reset lands is 3. below.
 				onPost()
+				if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+					conn.Close()
+				}
+				return
 			}
 			w.WriteHeader(http.StatusCreated)
 		default:
@@ -426,7 +435,7 @@ func TestSyncPMDBStopsOnOptOut(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	m, _ := newPMDBManager(t, srv.URL)
+	m, st := newPMDBManager(t, srv.URL)
 	pmdbAddHost(t, m, "a", "odin.pulsedmedia.com", pmdbFullHW)
 	pmdbAddHost(t, m, "b", "thor.pulsedmedia.com", pmdbFullHW)
 	pmdbEnable(m, "someone")
@@ -468,13 +477,15 @@ func TestSyncPMDBStopsOnOptOut(t *testing.T) {
 	if v := m.PMDB(); v.Enabled || len(v.Hosts) != 0 {
 		t.Fatalf("the stale run's outcome became state: %+v", v)
 	}
+	if recs, _ := st.PMDBSubmissions(ctx); len(recs) != 0 {
+		t.Fatalf("an unanswered submission left a receipt: %+v", recs)
+	}
 
 	// 3. An answer that arrives just as a reset lands (display state gone,
 	// generation moved on) is still a receipt. The window cannot be hit
 	// on purpose from outside, so the outcome is recorded under a stale
 	// generation directly; re-enabling then posts only the other host
-	// (the one posted in 2., whose answer the cancelled run never read:
-	// no answer, no receipt, so it goes again).
+	// (the one from 2., which got no answer and so has no receipt).
 	onPost = nil
 	m.SetSettings(s)
 	thor := m.pmdbCandidates()["thor.pulsedmedia.com"]
@@ -755,6 +766,97 @@ func TestSyncPMDBRevalidatesAfterFetch(t *testing.T) {
 	mu.Unlock()
 	if n != 0 || len(m.PMDB().Hosts) != 0 {
 		t.Fatalf("removed box submitted: posts=%d hosts=%+v", n, m.PMDB().Hosts)
+	}
+}
+
+// A box removed or moved to another host while its catalogue row was
+// being read is not submitted from the old facts: the row is checked
+// against the boxes again after the lookup, and a host that changed
+// meanwhile waits for the next run.
+func TestSyncPMDBRevalidatesAfterNodeLookup(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var posts int
+	nodeArrived, release := make(chan struct{}, 1), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/servers":
+			_, _ = io.WriteString(w, `[]`)
+		case strings.HasPrefix(r.URL.Path, "/api/nodes/"):
+			select {
+			case nodeArrived <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = io.WriteString(w, `{"server":{"kvm":false},"system":{"arch":"x86_64"}}`)
+		case r.URL.Path == "/api/servers/raw":
+			mu.Lock()
+			posts++
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	m, st := newPMDBManager(t, srv.URL)
+	hw := pmdbFullHW
+	hw.Arch = "" // unknown: the catalogue's row is read, which is where the box change lands
+	id := pmdbAddHost(t, m, "a", "odin.pulsedmedia.com", hw)
+	pmdbEnable(m, "someone")
+	// 1. The box is removed while the row is being read.
+	done := make(chan struct{})
+	go func() { m.SyncPMDB(ctx); close(done) }()
+	<-nodeArrived
+	if err := m.RemoveBox(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	release <- struct{}{}
+	<-done
+	mu.Lock()
+	n := posts
+	mu.Unlock()
+	recs, _ := st.PMDBSubmissions(ctx)
+	if n != 0 || len(recs) != 0 || len(m.PMDB().Hosts) != 0 {
+		t.Fatalf("removed box submitted: posts=%d receipts=%v hosts=%+v", n, recs, m.PMDB().Hosts)
+	}
+	// 2. The box turns out to be on another host meanwhile: the old
+	// host's row is not posted, and the new host waits for the next run.
+	id = pmdbAddHost(t, m, "b", "thor.pulsedmedia.com", hw)
+	done = make(chan struct{})
+	go func() { m.SyncPMDB(ctx); close(done) }()
+	<-nodeArrived
+	m.mutateState(id, func(s *BoxState) { s.Hostname = "loki.pulsedmedia.com" })
+	release <- struct{}{}
+	<-done
+	mu.Lock()
+	n = posts
+	mu.Unlock()
+	recs, _ = st.PMDBSubmissions(ctx)
+	if n != 0 || len(recs) != 0 {
+		t.Fatalf("moved box submitted under the old host: posts=%d receipts=%v", n, recs)
+	}
+	// 3. A fact changes while the row is being read: the host waits, and
+	// the next run posts the new facts.
+	done = make(chan struct{})
+	go func() { m.SyncPMDB(ctx); close(done) }()
+	<-nodeArrived
+	m.mutateState(id, func(s *BoxState) { s.HostSys.Users++ })
+	release <- struct{}{}
+	<-done
+	mu.Lock()
+	n = posts
+	mu.Unlock()
+	if h := pmdbHosts(m)["loki.pulsedmedia.com"]; n != 0 || h.Status != "pending" || h.Detail != pmdbChanged {
+		t.Fatalf("changed facts posted: posts=%d %+v", n, h)
+	}
+	go func() { <-nodeArrived; release <- struct{}{} }()
+	m.SyncPMDB(ctx)
+	mu.Lock()
+	n = posts
+	mu.Unlock()
+	if recs, _ = st.PMDBSubmissions(ctx); n != 1 || len(recs) != 1 || pmdbHosts(m)["loki.pulsedmedia.com"].Status != "submitted" {
+		t.Fatalf("next run: posts=%d receipts=%v", n, recs)
 	}
 }
 
