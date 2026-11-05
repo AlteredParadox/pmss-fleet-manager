@@ -105,14 +105,12 @@ type Settings struct {
 	ClearPMAPIKey bool   `json:"clear_pm_api_key,omitempty"`
 
 	// PMDBEnabled switches on the pmdb.fyi hardware catalogue integration:
-	// the dashboard checks the public catalogue for each box's host and
-	// submits the host's hardware when it is missing. The upload key is
-	// handled like PMAPIKey: never sent to the browser, kept on an empty
-	// PUT, removed by ClearPMDBUploadKey.
-	PMDBEnabled        bool   `json:"pmdb_enabled"`
-	PMDBUploadKey      string `json:"pmdb_upload_key,omitempty"`
-	HasPMDBUploadKey   bool   `json:"has_pmdb_upload_key"`
-	ClearPMDBUploadKey bool   `json:"clear_pmdb_upload_key,omitempty"`
+	// the dashboard submits each box's host to the public catalogue under
+	// PMDBUsername, the contributor identifier the catalogue requires (a
+	// nickname of the user's choosing, not a credential: it is kept in the
+	// clear and shown to the browser) and keeps the row current.
+	PMDBEnabled  bool   `json:"pmdb_enabled"`
+	PMDBUsername string `json:"pmdb_username"`
 }
 
 // Public returns a copy safe to serialise to the browser.
@@ -120,9 +118,6 @@ func (s Settings) Public() Settings {
 	s.HasPMAPIKey = s.PMAPIKey != ""
 	s.PMAPIKey = ""
 	s.ClearPMAPIKey = false
-	s.HasPMDBUploadKey = s.PMDBUploadKey != ""
-	s.PMDBUploadKey = ""
-	s.ClearPMDBUploadKey = false
 	return s
 }
 
@@ -183,10 +178,9 @@ type Store struct {
 // The additional data each secret column is sealed under: a ciphertext
 // copied from one column to another does not open.
 const (
-	labelPassword      = "boxes.password"
-	labelQbtPass       = "boxes.qbt_pass"
-	labelPMAPIKey      = "settings.pm_api_key"
-	labelPMDBUploadKey = "settings.pmdb_upload_key"
+	labelPassword = "boxes.password"
+	labelQbtPass  = "boxes.qbt_pass"
+	labelPMAPIKey = "settings.pm_api_key"
 	// Not passwords, but either may carry a token (a private build's
 	// download link, a start command with a key in it).
 	labelQbtStartCmd    = "boxes.qbt_start_cmd"
@@ -312,6 +306,15 @@ func (s *Store) migrate() error {
 			enabled INTEGER NOT NULL DEFAULT 1,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		// The pmdb.fyi catalogue stopped taking an upload key (1.14); the
+		// stored one goes before resealSecrets looks for the secret cells
+		// (it is no longer one of them; the inventory bump scrubs its bytes).
+		`DELETE FROM settings WHERE key='pmdb_upload_key'`,
+		// The receipt of each host's last accepted catalogue submission
+		// (pmdb.go): what was posted, by which identifier, when.
+		`CREATE TABLE IF NOT EXISTS pmdb_submissions (
+			hostname TEXT PRIMARY KEY, username TEXT NOT NULL,
+			row_hash TEXT NOT NULL, submitted_at TEXT NOT NULL)`,
 		// Poll samples were recorded from the first version but nothing ever read them.
 		`DROP TABLE IF EXISTS samples`,
 		`CREATE TABLE IF NOT EXISTS alerts (
@@ -689,7 +692,7 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 	gets("client_area_url", &out.ClientAreaURL)
 	gets("qbt_download_url", &out.QbtDownloadURL)
 	gets("pm_api_key", &out.PMAPIKey)
-	gets("pmdb_upload_key", &out.PMDBUploadKey)
+	gets("pmdb_username", &out.PMDBUsername)
 	out.PMDBEnabled = kv["pmdb_enabled"] == "1"
 	if err := rows.Err(); err != nil {
 		return out, err
@@ -702,9 +705,6 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 	}
 	if out.PMAPIKey, err = s.openSecret(labelPMAPIKey, out.PMAPIKey); err != nil {
 		return out, fmt.Errorf("Pulsed Media API key: %w", err)
-	}
-	if out.PMDBUploadKey, err = s.openSecret(labelPMDBUploadKey, out.PMDBUploadKey); err != nil {
-		return out, fmt.Errorf("pmdb upload key: %w", err)
 	}
 	return out, nil
 }
@@ -723,7 +723,7 @@ func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
 		"qbt_download_url":      s.sealer.Seal(labelQbtDownloadURL, st.QbtDownloadURL),
 		"card_min_px":           strconv.Itoa(st.CardMinPx),
 		"pm_api_key":            s.sealer.Seal(labelPMAPIKey, st.PMAPIKey),
-		"pmdb_upload_key":       s.sealer.Seal(labelPMDBUploadKey, st.PMDBUploadKey),
+		"pmdb_username":         st.PMDBUsername,
 		"pmdb_enabled":          boolKV(st.PMDBEnabled),
 	}
 	tx, err := s.db.BeginTx(ctx, nil)

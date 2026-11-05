@@ -1040,30 +1040,37 @@ func TestSettingsDownloadURL(t *testing.T) {
 func TestSettingsPMDB(t *testing.T) {
 	srv, _ := newTestServer(t)
 	code, body := do(t, srv, "PUT", "/api/settings", `{"pmdb_enabled":true}`, nil)
-	if code != 400 || !strings.Contains(body, "upload key") {
-		t.Fatalf("enable without a key: %d %s", code, body)
+	if code != 400 || !strings.Contains(body, "identifier") {
+		t.Fatalf("enable without an identifier: %d %s", code, body)
 	}
-	code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_enabled":true,"pmdb_upload_key":" some words that make a passphrase "}`, nil)
-	if code != 200 || strings.Contains(body, "passphrase") || !strings.Contains(body, `"has_pmdb_upload_key":true`) || !strings.Contains(body, `"pmdb_enabled":true`) {
+	code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_enabled":true,"pmdb_username":" alice "}`, nil)
+	if code != 200 || !strings.Contains(body, `"pmdb_username":"alice"`) || !strings.Contains(body, `"pmdb_enabled":true`) {
 		t.Fatalf("enable: %d %s", code, body)
 	}
-	if code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_upload_key":"bad\nkey but long enough to pass"}`, nil); code != 400 {
-		t.Fatalf("key with a line break: %d %s", code, body)
+	// The catalogue's own rule for the identifier: no control characters,
+	// at most 64 UTF-16 units (an emoji counts as two).
+	for _, bad := range []string{`"a\tb"`, `"` + strings.Repeat("a", 65) + `"`, `"` + strings.Repeat("\U0001F600", 33) + `"`, `"   "`} {
+		if code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_username":`+bad+`}`, nil); code != 400 {
+			t.Fatalf("identifier %s: %d %s", bad, code, body)
+		}
 	}
-	if code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_upload_key":"short"}`, nil); code != 400 || !strings.Contains(body, "too short") {
-		t.Fatalf("short key: %d %s", code, body)
-	}
-	if got := srv.m.Settings(); got.PMDBUploadKey != "some words that make a passphrase" || !got.PMDBEnabled {
+	if got := srv.m.Settings(); got.PMDBUsername != "alice" || !got.PMDBEnabled {
 		t.Fatalf("stored: %+v", got)
 	}
-	if code, _ = do(t, srv, "PUT", "/api/settings", `{"theme":"light"}`, nil); code != 200 || srv.m.Settings().PMDBUploadKey != "some words that make a passphrase" {
-		t.Fatalf("key not kept: %d", code)
+	if code, _ = do(t, srv, "PUT", "/api/settings", `{"theme":"light"}`, nil); code != 200 || srv.m.Settings().PMDBUsername != "alice" {
+		t.Fatalf("identifier not kept: %d", code)
 	}
-	// An empty key on a later save keeps the stored one; the flag removes
-	// it, which switches the integration off with it.
-	code, body = do(t, srv, "PUT", "/api/settings", `{"clear_pmdb_upload_key":true}`, nil)
-	if code != 200 || srv.m.Settings().PMDBUploadKey != "" || srv.m.Settings().PMDBEnabled || !strings.Contains(body, `"has_pmdb_upload_key":false`) || !strings.Contains(body, `"pmdb_enabled":false`) {
-		t.Fatalf("clear: %d %s", code, body)
+	if code, body = do(t, srv, "GET", "/api/settings", "", nil); code != 200 || !strings.Contains(body, `"pmdb_username":"alice"`) {
+		t.Fatalf("identifier is not a secret and comes back: %d %s", code, body)
+	}
+	// Unticking keeps the identifier for next time; clearing it while
+	// enabled is refused.
+	if code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_username":""}`, nil); code != 400 {
+		t.Fatalf("clear while enabled: %d %s", code, body)
+	}
+	code, body = do(t, srv, "PUT", "/api/settings", `{"pmdb_enabled":false}`, nil)
+	if code != 200 || srv.m.Settings().PMDBUsername != "alice" || srv.m.Settings().PMDBEnabled || !strings.Contains(body, `"pmdb_enabled":false`) {
+		t.Fatalf("untick: %d %s", code, body)
 	}
 	if code, body = do(t, srv, "GET", "/api/pmdb", "", nil); code != 200 || !strings.Contains(body, `"enabled":false`) {
 		t.Fatalf("view: %d %s", code, body)

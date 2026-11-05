@@ -16,27 +16,35 @@
 
 // Package pmdb talks to pmdb.fyi, a community catalogue of Pulsed Media
 // host hardware (https://github.com/schmintendo/pmdb). The catalogue is
-// public to read (GET /api/servers lists every row) and takes one row per
-// host hostname on POST /api/servers/raw with a shared upload key.
+// public to read (GET /api/servers lists every row, GET /api/config the
+// plan names it accepts, GET /api/nodes/<host> one host's row) and public
+// to write: POST /api/servers/raw takes one row per host hostname under a
+// contributor-chosen identifier, replacing the row that is there.
 //
 // Everything the catalogue sends back is untrusted: it is a third-party
-// service that could be compromised or replaced, and it knows the shared
-// upload key. So: a response is bounded in bytes, rows and header size,
-// and the bytes counted are the entity's as the transport delivers them
-// before any content decoding (no transparent decompression: a compressed
-// answer is refused, not decoded; HTTP/1.1 chunk framing is bounded by
-// Go's parser and the request deadline); the list is
-// read for the one fact needed (which DNS-shaped hostnames exist),
-// streamed row by row with a hard row cap; a submission's answer is its
-// status code and its body is never read at all; no text from any
-// response is ever kept, logged or shown (an error is a fixed message or a
-// status code); transport failures are fixed messages too, because Go's
-// own text carries the URL and any Location the server sent; redirects are
+// service that could be compromised or replaced. So: a response is
+// bounded in bytes, rows and header size, and the bytes counted are the
+// entity's as the transport delivers them before any content decoding (no
+// transparent decompression: a compressed answer is refused, not decoded;
+// HTTP/1.1 chunk framing is bounded by Go's parser and the request
+// deadline); the list is streamed row by row with a hard row cap; a
+// submission's answer is its status code and its body is never read at
+// all; transport failures are fixed messages, because Go's own text
+// carries the URL and any Location the server sent; redirects are
 // refused; every request has its own HTTP/1.1 connection, so bytes a
 // server sends after the answer it declared are never found on an idle
 // one (which net/http would quote into the standard logger) and no HTTP/2
-// frame traffic sits outside the byte caps and deadlines. The only thing
-// the catalogue's answer decides is whether a host is submitted, once.
+// frame traffic sits outside the byte caps and deadlines.
+//
+// What the catalogue says is used for two things and nothing else: which
+// hosts are listed, and what its row for a host holds, so a submission
+// of ours does not turn a value another contributor supplied into
+// unknown (the catalogue keeps one row per host and replaces it whole).
+// Numbers and booleans from it may travel back to it for that; a string
+// from it travels back only when it passes the catalogue's own text rule
+// (CleanText), and is otherwise reported as present but not repeatable.
+// No text from any response is ever kept in state, logged or shown: an
+// error is a fixed message or a status code.
 package pmdb
 
 import (
@@ -47,19 +55,49 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // BaseURL is the public catalogue.
 const BaseURL = "https://pmdb.fyi"
 
+// The catalogue's text limits, in UTF-16 code units (it counts with
+// JavaScript's String.length).
+const (
+	MaxUsername      = 64
+	MaxPlan          = 100
+	MaxProcessorName = 300
+	MaxDistro        = 200
+	MaxKernel        = 200
+	MaxArch          = 64
+	MaxVM            = 64
+)
+
+// System is the operating-system part of a row. An empty string is
+// omitted, which the catalogue stores as unknown.
+type System struct {
+	Distro string `json:"distro,omitempty"`
+	Kernel string `json:"kernel,omitempty"`
+	Arch   string `json:"arch,omitempty"`
+	VM     string `json:"vm,omitempty"` // as YABS reports it: "KVM", "NONE", ...
+}
+
 // Row is one host as the catalogue's raw submission takes it. Numbers are
-// JSON numbers in the unit the field name says; a nil optional is sent as
-// null, which the catalogue stores as unknown.
+// JSON numbers in the unit the field name says; a nil optional hardware
+// value is sent as null, which the catalogue stores as unknown, replacing
+// whatever it held. Plan and UserCount are different: omitted, the
+// catalogue keeps what it has for this identifier. The field set is
+// exactly what the catalogue accepts; an unknown key makes it refuse the
+// whole row.
 type Row struct {
+	Username      string   `json:"username"` // the contributor's identifier; never published by the catalogue's current API
 	ServerName    string   `json:"serverName"`
 	ProcessorName string   `json:"processorName"`
 	CoreCount     int      `json:"coreCount"`
@@ -67,26 +105,73 @@ type Row struct {
 	RAMGiB        float64  `json:"ramGiB"`
 	SwapGiB       *float64 `json:"swapGiB"`
 	StorageTiB    float64  `json:"storageTiB"`
-	QSV           bool     `json:"qsv"`
+	KVM           *bool    `json:"kvm"`                 // nil: unknown
+	Plan          *string  `json:"plan,omitempty"`      // one of Config.Plans, or omitted
+	UserCount     *int     `json:"userCount,omitempty"` // accounts on the host, or omitted
+	System        *System  `json:"system,omitempty"`
+}
+
+// Config is what GET /api/config says: whether submissions are open and
+// the plan names a row may carry. The names are compared with, never
+// shown or logged.
+type Config struct {
+	UploadsEnabled bool
+	Plans          []string
+}
+
+// TextState says what the catalogue holds for one string field of a row.
+type TextState int
+
+const (
+	// TextAbsent: null or missing; there is nothing to preserve.
+	TextAbsent TextState = iota
+	// TextOK: a value this dashboard can repeat (it passes CleanText).
+	TextOK
+	// TextRejected: a value is there but cannot be repeated. It is not the
+	// same as absent: a submission that sends nothing for it would erase
+	// it.
+	TextRejected
+)
+
+// Text is one string field of the catalogue's row.
+type Text struct {
+	State TextState
+	Value string // set when State is TextOK
+}
+
+// NodeRow is what the catalogue holds for one host, the fields a
+// submission of ours could turn into unknown: the optional hardware
+// numbers and the system strings. A number of the wrong type counts as
+// absent (nothing numeric to preserve); a string of the wrong type counts
+// as present but not repeatable.
+type NodeRow struct {
+	ProcessorMHz *float64
+	SwapBytes    *int64
+	KVM          *bool
+	System       map[string]Text // keyed distro, kernel, arch, vm
 }
 
 // listed is one catalogue row as GET /api/servers returns it; only the
-// name is needed to tell a host is already there, and a row whose name is
-// not a string is skipped rather than failing the list.
+// name is needed to tell a host is listed, and a row whose name is not a
+// string is skipped rather than failing the list.
 type listed struct {
 	ServerName json.RawMessage `json:"serverName"`
 }
 
 var (
-	// ErrExists is a 409: the host is in the catalogue already.
-	ErrExists = errors.New("host is already in the catalogue")
-	// ErrAuth is a 401: the upload key was refused.
-	ErrAuth = errors.New("upload key refused")
+	// ErrNameConflict is a 409: the catalogue holds this host under a
+	// legacy short name and refuses the full one until its maintainers
+	// rename the entry.
+	ErrNameConflict = errors.New("the catalogue holds this host under a legacy short name; its maintainers must rename it")
+	// ErrNotListed is a 404 for a host's row: the catalogue has none.
+	ErrNotListed = errors.New("the catalogue has no row for this host")
+	// ErrNoIdentifier: a submission was asked for without an identifier,
+	// which the catalogue requires. Nothing is sent.
+	ErrNoIdentifier = errors.New("no submission identifier")
 	// ErrRateLimited is a 429: too many requests from this address.
 	ErrRateLimited = errors.New("rate limit reached")
 	// ErrRedirect: the catalogue answered with a redirect, which is never
-	// followed (the key travels in an Authorization header, and the
-	// catalogue has one fixed URL).
+	// followed (the catalogue has one fixed URL).
 	ErrRedirect = errors.New("the catalogue redirected; refusing to follow")
 	// ErrTimeout: no complete answer within the deadline.
 	ErrTimeout = errors.New("the catalogue did not answer in time")
@@ -97,6 +182,9 @@ var (
 	ErrTooLarge = errors.New("the catalogue's response is larger than allowed; refusing to read it")
 	// ErrNotAList: the list body is not a JSON array.
 	ErrNotAList = errors.New("the catalogue list is not a JSON array")
+	// ErrMalformed: a config or node answer is not the JSON object it
+	// should be.
+	ErrMalformed = errors.New("the catalogue's answer is not the document it should be")
 	// ErrEncoded: the response is compressed or otherwise encoded, which
 	// is never asked for and never decoded (the byte caps count wire
 	// bytes; a gzip stream of any length can decode to two).
@@ -106,9 +194,8 @@ var (
 )
 
 // HTTPError is an unexpected status. It carries the code and nothing else:
-// the body of any response from the catalogue is untrusted text that could
-// hold the upload key the catalogue knows, in any encoding, so none of it
-// is kept (see the package comment).
+// the body of any response from the catalogue is untrusted text, in any
+// encoding, so none of it is kept (see the package comment).
 type HTTPError struct{ Code int }
 
 func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d from the catalogue", e.Code) }
@@ -126,9 +213,12 @@ type Client struct {
 // decoding; the request deadline is the bound on everything else (a slow
 // trickle, chunk framing overhead, which Go's parser also bounds).
 const (
-	maxListBytes      = 4 << 20  // the list body
-	maxListRows       = 10000    // elements of the list array, decoded one at a time
-	maxHeaderBytes    = 64 << 10 // response headers (Go's default allows ~10 MiB)
+	maxListBytes      = 4 << 20   // the list body
+	maxListRows       = 10000     // elements of the list array, decoded one at a time
+	maxConfigBytes    = 256 << 10 // the config body: the catalogue allows 1000 plan names of 100 characters
+	maxPlans          = 1000      // the catalogue's own cap on configured plans
+	maxNodeBytes      = 256 << 10 // one host's row with one benchmark run (the page size asked for)
+	maxHeaderBytes    = 64 << 10  // response headers (Go's default allows ~10 MiB)
 	requestTimeout    = 30 * time.Second
 	responseHeaderCap = requestTimeout
 )
@@ -251,9 +341,9 @@ func classify(ctx context.Context, err error) error {
 }
 
 // List returns the hostnames in the catalogue, normalised the way the
-// catalogue keys them (see Normalize). No key is needed. The array is
-// streamed element by element, at most maxListRows of them, so a body
-// made of millions of tiny elements costs the bytes it is and no more.
+// catalogue keys them (see Normalize). The array is streamed element by
+// element, at most maxListRows of them, so a body made of millions of
+// tiny elements costs the bytes it is and no more.
 func (c *Client) List(ctx context.Context) (map[string]bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base()+"/api/servers", nil)
 	if err != nil {
@@ -308,14 +398,167 @@ func parseList(body []byte) (map[string]bool, error) {
 	return out, nil
 }
 
-// Submit adds one host. A host already listed is ErrExists; the catalogue
-// is never asked to replace a row. The answer is its status code: the body
-// is never read, so an accepted submission is settled the moment the
+// GetConfig returns the catalogue's configuration: whether it takes
+// submissions and the plan names it accepts. A plan name that is not a
+// string, is empty or fails the catalogue's own text rule is left out; more
+// names than the catalogue itself allows is refused as oversized.
+func (c *Client) GetConfig(ctx context.Context) (Config, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base()+"/api/config", nil)
+	if err != nil {
+		return Config{}, err
+	}
+	code, body, err := c.do(ctx, req, maxConfigBytes)
+	if err != nil {
+		return Config{}, err
+	}
+	switch code {
+	case http.StatusOK:
+		return parseConfig(body)
+	case http.StatusTooManyRequests:
+		return Config{}, fmt.Errorf("%w (HTTP %d)", ErrRateLimited, code)
+	}
+	return Config{}, &HTTPError{Code: code}
+}
+
+func parseConfig(body []byte) (Config, error) {
+	var doc struct {
+		UploadsEnabled json.RawMessage   `json:"uploadsEnabled"`
+		Plans          []json.RawMessage `json:"plans"`
+	}
+	if !objectBody(body) || json.Unmarshal(body, &doc) != nil {
+		return Config{}, ErrMalformed
+	}
+	if len(doc.Plans) > maxPlans {
+		return Config{}, ErrTooLarge
+	}
+	cfg := Config{UploadsEnabled: true} // the catalogue says so unless it says otherwise
+	if b := boolField(doc.UploadsEnabled); b != nil {
+		cfg.UploadsEnabled = *b
+	}
+	for _, raw := range doc.Plans {
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			continue
+		}
+		if p, ok := CleanText(s, MaxPlan); ok {
+			cfg.Plans = append(cfg.Plans, p)
+		}
+	}
+	return cfg, nil
+}
+
+// Node returns what the catalogue holds for one host (see NodeRow). The
+// page of benchmark history that comes with it is asked for at its
+// smallest, and the whole answer is bounded.
+func (c *Client) Node(ctx context.Context, host string) (NodeRow, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base()+"/api/nodes/"+url.PathEscape(host)+"?limit=1", nil)
+	if err != nil {
+		return NodeRow{}, err
+	}
+	code, body, err := c.do(ctx, req, maxNodeBytes)
+	if err != nil {
+		return NodeRow{}, err
+	}
+	switch code {
+	case http.StatusOK:
+		return parseNode(body)
+	case http.StatusNotFound:
+		return NodeRow{}, ErrNotListed
+	case http.StatusTooManyRequests:
+		return NodeRow{}, fmt.Errorf("%w (HTTP %d)", ErrRateLimited, code)
+	}
+	return NodeRow{}, &HTTPError{Code: code}
+}
+
+// systemKeys are the strings of a row and their limits.
+var systemKeys = map[string]int{"distro": MaxDistro, "kernel": MaxKernel, "arch": MaxArch, "vm": MaxVM}
+
+func parseNode(body []byte) (NodeRow, error) {
+	var doc struct {
+		Server map[string]json.RawMessage `json:"server"`
+		System map[string]json.RawMessage `json:"system"`
+	}
+	if !objectBody(body) || json.Unmarshal(body, &doc) != nil || doc.Server == nil {
+		return NodeRow{}, ErrMalformed
+	}
+	n := NodeRow{System: map[string]Text{}}
+	// The clock as the catalogue stores it: a positive MHz figure. The
+	// bounds are what a real processor can be, not what a hostile row says.
+	if f := numberField(doc.Server["processorMhz"]); f != nil && *f > 0 && *f < 100000 {
+		n.ProcessorMHz = f
+	}
+	if f := numberField(doc.Server["swapBytes"]); f != nil && *f >= 0 && *f == math.Trunc(*f) && *f <= math.MaxInt64 {
+		b := int64(*f)
+		n.SwapBytes = &b
+	}
+	n.KVM = boolField(doc.Server["kvm"])
+	for key, max := range systemKeys {
+		raw, has := doc.System[key]
+		if !has || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			n.System[key] = Text{State: TextAbsent}
+			continue
+		}
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			n.System[key] = Text{State: TextRejected}
+			continue
+		}
+		if v, ok := CleanText(s, max); ok {
+			n.System[key] = Text{State: TextOK, Value: v}
+		} else {
+			n.System[key] = Text{State: TextRejected}
+		}
+	}
+	return n, nil
+}
+
+// objectBody reports whether the body is a JSON object and nothing else:
+// a null, an array or trailing bytes are not the document it should be.
+func objectBody(body []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return false
+	}
+	var raw json.RawMessage
+	dec = json.NewDecoder(bytes.NewReader(body))
+	if dec.Decode(&raw) != nil {
+		return false
+	}
+	_, err := dec.Token()
+	return errors.Is(err, io.EOF)
+}
+
+// numberField decodes a finite JSON number, or nil for anything else.
+func numberField(raw json.RawMessage) *float64 {
+	if len(raw) == 0 {
+		return nil
+	}
+	var f float64
+	if json.Unmarshal(raw, &f) != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return nil
+	}
+	return &f
+}
+
+// boolField decodes a JSON boolean, or nil for anything else.
+func boolField(raw json.RawMessage) *bool {
+	if len(raw) == 0 {
+		return nil
+	}
+	var b bool
+	if json.Unmarshal(raw, &b) != nil {
+		return nil
+	}
+	return &b
+}
+
+// Submit posts one host's row, replacing the catalogue's row for that
+// hostname (a new host is created). The answer is its status code: the
+// body is never read, so an accepted submission is settled the moment the
 // headers arrive, whatever the server does with the body after them.
-func (c *Client) Submit(ctx context.Context, key string, row Row) error {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return errors.New("no upload key")
+func (c *Client) Submit(ctx context.Context, row Row) error {
+	if row.Username == "" {
+		return ErrNoIdentifier
 	}
 	body, err := json.Marshal(row)
 	if err != nil {
@@ -325,7 +568,6 @@ func (c *Client) Submit(ctx context.Context, key string, row Row) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
 	code, _, err := c.do(ctx, req, 0)
 	if err != nil {
@@ -335,20 +577,54 @@ func (c *Client) Submit(ctx context.Context, key string, row Row) error {
 	case http.StatusCreated, http.StatusOK:
 		return nil
 	case http.StatusConflict:
-		return ErrExists
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("%w (HTTP %d)", ErrAuth, code)
+		return ErrNameConflict
 	case http.StatusTooManyRequests:
 		return fmt.Errorf("%w (HTTP %d)", ErrRateLimited, code)
 	}
 	return &HTTPError{Code: code}
 }
 
+// CleanText applies the catalogue's text rule to one string: trimmed and
+// not empty, valid UTF-8, no control character, and at most maxUnits
+// UTF-16 code units (the catalogue counts with JavaScript's String.length,
+// so a character outside the basic plane costs two). A string is accepted
+// whole or refused; it is never cut, because a cut string with a mark on
+// it would be a different value, and a cut processor name a different
+// processor.
+func CleanText(s string, maxUnits int) (string, bool) {
+	if !utf8.ValidString(s) {
+		return "", false
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false
+	}
+	units := 0
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return "", false
+		}
+		n := utf16.RuneLen(r)
+		if n < 0 {
+			return "", false
+		}
+		units += n
+		if units > maxUnits {
+			return "", false
+		}
+	}
+	return s, true
+}
+
 // Normalize keys a hostname the way the catalogue does: lower-case, no
-// trailing dot, every label a letter or digit run with inner dashes. A name
-// that is not DNS-shaped is refused rather than sent to be rejected.
+// trailing dot, a bare name given the catalogue's domain, every label a
+// letter or digit run with inner dashes. A name that is not DNS-shaped is
+// refused rather than sent to be rejected.
 func Normalize(h string) (string, bool) {
 	h = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".")
+	if h != "" && !strings.Contains(h, ".") {
+		h += ".pulsedmedia.com"
+	}
 	if h == "" || len(h) > 253 {
 		return "", false
 	}
