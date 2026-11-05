@@ -210,6 +210,11 @@ type HostState struct {
 	Kernel       string  `json:"kernel,omitempty"`
 	Debian       string  `json:"debian,omitempty"`
 	PMSSVersion  string  `json:"pmss_version,omitempty"`
+	Virt         string  `json:"virt,omitempty"`   // systemd-detect-virt: "none", "kvm", ...
+	Distro       string  `json:"distro,omitempty"` // /etc/os-release PRETTY_NAME
+	Arch         string  `json:"arch,omitempty"`   // uname -m
+	Users        int     `json:"users"`            // user accounts on the host (UIDs above 1000 except nobody)
+	UsersKnown   bool    `json:"users_known"`
 	HomeFSType   string  `json:"home_fs_type,omitempty"`
 	HomeSize     int64   `json:"home_size"`
 	HomeUsed     int64   `json:"home_used"`

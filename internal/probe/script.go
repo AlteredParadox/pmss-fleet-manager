@@ -84,6 +84,14 @@ for d in /dev/dri/renderD*; do
   printf '%s %s %s %s\n' "$d" "$acc" "${ven:-?}" "${dev:-?}"
 done
 sec kernel; uname -r 2>/dev/null
+# For the hardware catalogue (pmdb): whether the host is a KVM guest, its
+# distribution and architecture, and the number of user accounts on it
+# (pmdb's own count: UIDs above 1000 except nobody). systemd-detect-virt
+# prints "none" and exits 1 on bare metal; stdout is what counts.
+sec virt; timeout 5 systemd-detect-virt 2>/dev/null
+sec os_release; grep -m1 '^PRETTY_NAME=' /etc/os-release 2>/dev/null
+sec arch; uname -m 2>/dev/null
+sec users; awk -F: '$3 > 1000 && $3 != 65534 {n++} END {print n+0}' /etc/passwd 2>/dev/null
 sec debian; cat /etc/debian_version 2>/dev/null
 sec pmss_version; cat /etc/seedbox/config/version 2>/dev/null
 fi
