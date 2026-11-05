@@ -132,10 +132,14 @@ choose a submission identifier (a nickname the catalogue uses to link your
 submissions; not a login, and left out of its current public API and pages;
 use the one you upload YABS results under, if you do), and the dashboard
 submits the host each of your boxes runs on, from facts the probe already
-reads: hostname, CPU model, core count, nominal clock, RAM, swap, home
-filesystem size, whether the host is a KVM guest, its distribution, kernel
-and architecture, the plan name of your box on it (when it matches a plan
-the catalogue knows) and the number of user accounts on the host. Nothing
+reads: hostname, CPU model, core count, clock, RAM, swap, storage, whether
+the host is a KVM guest, its distribution, kernel and architecture, the
+plan name of your box on it (when it matches a plan the catalogue knows)
+and the number of user accounts on the host. The clock and the storage are
+measured the way [yabs.sh](https://github.com/masonr/yet-another-bench-script)
+measures them (the live clock from `/proc/cpuinfo`; every local filesystem,
+counted once), so the figures agree with YABS uploads of the same host,
+and are read only while the integration is on. Nothing
 about your usage, torrents, client or SSH setup leaves the dashboard (as
 with any web request, the service sees your IP address and the client
 name). The catalogue keeps one row per host that every contributor's
@@ -1008,6 +1012,25 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.14.1 (unreleased)**
+
+- **The catalogue's clock and storage figures are measured YABS's way.**
+  Most pmdb.fyi rows come from yabs.sh uploads, which report the live
+  clock from `/proc/cpuinfo` and the total of every local filesystem,
+  while the dashboard sent the nominal clock and the home filesystem, so
+  the two kinds of contributor kept replacing each other's figures. The
+  probe now measures those two the way yabs.sh does, only while the
+  integration is on (`PMSS_PMDB=1` in the probe; `host_sys.cpu_mhz_yabs`
+  and `disk_yabs`, carried over probes that did not ask), and the row
+  uses them when present. The clock, a live reading, is left out of the
+  change detection so a host with frequency scaling is not posted every
+  quarter hour; it rides along with the next submission, as on a YABS
+  upload. One deliberate difference: the storage total is printed as a
+  float, since the mawk of Debian 11 and 12 wraps yabs.sh's own `%d`
+  at 2 TiB, so a YABS upload from such a host can show less than the
+  dashboard does above that size. Each host is posted once more after
+  the upgrade, the storage figure having changed.
 
 **1.14.0**
 

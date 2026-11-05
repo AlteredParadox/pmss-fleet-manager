@@ -194,7 +194,11 @@ func pmdbPlanOf(st *BoxState) string {
 // it (false when none has); every optional from the first box that knows
 // it. Strings go through the catalogue's own text rule and are unknown
 // when they fail it, never cut. Swap is sent to the byte: a small swap
-// rounded to two decimals would reach the catalogue as none.
+// rounded to two decimals would reach the catalogue as none. The clock
+// and the storage are the figures measured YABS's way when the probe has
+// them (every local filesystem, to the byte; the live clock), so they
+// agree with YABS uploads of the same host, else the home filesystem and
+// the nominal clock.
 func pmdbRow(name string, states []*BoxState) (pmdbCandidate, bool) {
 	c := pmdbCandidate{}
 	var hw *HostState
@@ -208,6 +212,9 @@ func pmdbRow(name string, states []*BoxState) (pmdbCandidate, bool) {
 		return c, false
 	}
 	row := pmdb.Row{ServerName: name, CoreCount: hw.NCPU, RAMGiB: round2(float64(hw.MemTotal) / (1 << 30)), StorageTiB: round2(float64(hw.HomeSize) / (1 << 40))}
+	if hw.DiskYABS > 0 {
+		row.StorageTiB = float64(hw.DiskYABS) / (1 << 40)
+	}
 	if !strings.HasSuffix(name, ".pulsedmedia.com") {
 		c.skip = pmdbSkipForeign // the catalogue is Pulsed Media's hosts; a box whose hostname is something else would make a stray row
 	}
@@ -219,8 +226,11 @@ func pmdbRow(name string, states []*BoxState) (pmdbCandidate, bool) {
 	var sys pmdb.System
 	for _, st := range states {
 		h := &st.HostSys
-		if row.ProcessorMHz == nil && h.CPUMHz > 0 {
+		if row.ProcessorMHz == nil && (h.CPUMHzYABS > 0 || h.CPUMHz > 0) {
 			mhz := float64(h.CPUMHz)
+			if h.CPUMHzYABS > 0 {
+				mhz = h.CPUMHzYABS
+			}
 			row.ProcessorMHz = &mhz
 		}
 		if row.SwapGiB == nil && h.SwapKnown {
@@ -265,8 +275,14 @@ func pmdbRow(name string, states []*BoxState) (pmdbCandidate, bool) {
 	// with the plan it claims (whether or not the catalogue takes it) and
 	// without the identifier (a receipt records that beside the hash).
 	// Nothing read from the catalogue is in it, so the catalogue cannot
-	// make a host due by changing its own numbers.
+	// make a host due by changing its own numbers. The clock is not in it
+	// either: measured YABS's way it is a live reading that differs from
+	// one inventory to the next on a host with frequency scaling, and a
+	// row posted for the clock alone would be posted every quarter hour;
+	// it rides along with whichever submission comes next, as it does on
+	// every YABS upload.
 	hashed := row
+	hashed.ProcessorMHz = nil
 	if c.plan != "" {
 		p := c.plan
 		hashed.Plan = &p

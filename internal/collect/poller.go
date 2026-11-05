@@ -567,8 +567,10 @@ func (p *poller) poll(ctx context.Context) {
 	st.HostKeyFP = fingerprintOrEmpty(p.hostKey()) // after the dial: the first connect pins it
 	tag := probe.NewTag()
 	inventory := p.inventoryDue(start) // consumes a pending request: one that lands from here on is for the next poll
+	settings := p.m.Settings()
+	catalogue := inventory && settings.PMDBEnabled && settings.PMDBUsername != "" // the catalogue's two figures: only while it is on
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWith(tag, p.qbtBinStat, inventory)))
+	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWith(tag, p.qbtBinStat, inventory, catalogue)))
 	cancel()
 	if err != nil && len(out) == 0 {
 		p.mu.Lock()
@@ -588,10 +590,13 @@ func (p *poller) poll(ctx context.Context) {
 		p.fail(ctx, &st, err, start)
 		return
 	}
+	// Carry first, then cache: an inventory that did not ask for the
+	// catalogue facts (the integration off, or an identifier not yet set)
+	// keeps the last ones, so re-enabling does not post the fleet from
+	// the fallback figures and again after the next inventory.
+	snap.CarryInventory(p.inv)
 	if snap.Inventory {
 		p.inv, p.invAt = snap.InventoryOnly(), start
-	} else {
-		snap.CarryInventory(p.inv)
 	}
 	p.qbtBinStat, p.qbtBinVersion, snap.Qbt.BinaryVersion = resolveQbtVersion(p.qbtBinStat, p.qbtBinVersion, snap.Qbt)
 	p.apply(&st, snap)
@@ -843,7 +848,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	h := snap.Host
 	st.HostSys = HostState{UptimeSec: h.UptimeSec, Load1: h.Load1, Load5: h.Load5, Load15: h.Load15,
 		MemTotal: h.MemTotal, MemAvail: h.MemAvail, SwapTotal: h.SwapTotal, SwapKnown: h.SwapKnown, NCPU: h.NCPU, CPUMHz: h.CPUMHz, Kernel: clip(h.Kernel, 128), Debian: clip(h.Debian, 64), PMSSVersion: clip(h.PMSSVersion, 64),
-		Virt: clip(h.Virt, 64), Distro: clip(h.Distro, 256), Arch: clip(h.Arch, 64), Users: h.Users, UsersKnown: h.UsersKnown,
+		Virt: clip(h.Virt, 64), Distro: clip(h.Distro, 256), Arch: clip(h.Arch, 64), Users: h.Users, UsersKnown: h.UsersKnown, CPUMHzYABS: h.CPUMHzYABS, DiskYABS: h.DiskYABS,
 		HomeFSType: clip(snap.HomeFS.Type, 32), HomeSize: snap.HomeFS.Size, HomeUsed: snap.HomeFS.Used, HomeAvail: snap.HomeFS.Avail,
 		CPUModel: clip(h.CPUModel, 128), CPUShort: clip(h.CPUShort, 64), CPUFlags: clip(strings.Join(h.CPUFlags, " "), 2048),
 		GPUPresent: h.GPU.Present, GPUDevice: clip(h.GPU.Device, 128), GPUVendor: h.GPU.Vendor, GPUAccess: h.GPU.Accessible, HWEncode: hwEncodeLabel(h.GPU)}

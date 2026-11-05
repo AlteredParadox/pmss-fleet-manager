@@ -250,6 +250,23 @@ func TestPMDBRow(t *testing.T) {
 	if c5, _ := pmdbRow(name, []*BoxState{&a5}); c5.row.System.Distro != "" || c5.row.System.Kernel != "" || c5.plan != "" || c5.skip != "" {
 		t.Fatalf("refused strings: %+v plan=%q skip=%q", c5.row.System, c5.plan, c5.skip)
 	}
+	// The figures measured YABS's way win over the home filesystem and the
+	// nominal clock, the storage to the byte; the clock is not in the hash.
+	a8 := *a
+	a8.HostSys.DiskYABS, a8.HostSys.CPUMHzYABS = 46689634936*1024, 1996.249
+	c8, _ := pmdbRow(name, []*BoxState{&a8})
+	if c8.row.StorageTiB != float64(46689634936*1024)/(1<<40) || *c8.row.ProcessorMHz != 1996.249 {
+		t.Fatalf("yabs figures: %+v", c8.row)
+	}
+	a9 := a8
+	a9.HostSys.CPUMHzYABS = 2412.5
+	if c9, _ := pmdbRow(name, []*BoxState{&a9}); c9.hash != c8.hash || *c9.row.ProcessorMHz != 2412.5 {
+		t.Fatal("the live clock must not change the hash")
+	}
+	a9.HostSys.DiskYABS++
+	if c9, _ := pmdbRow(name, []*BoxState{&a9}); c9.hash == c8.hash {
+		t.Fatal("a changed storage figure must change the hash")
+	}
 	a6 := *a
 	a6.HostSys.CPUModel = strings.Repeat("c", 301)
 	if c6, ok := pmdbRow(name, []*BoxState{&a6}); !ok || c6.skip != pmdbSkipCPU {

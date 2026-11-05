@@ -439,7 +439,7 @@ func TestQbtVersionSkippedWhileUnchanged(t *testing.T) {
 	if strings.Count(string(calls), "run") != 4 {
 		t.Fatalf("calls: %q", calls)
 	}
-	if s := ScriptWith("abc", "12 34'; rm -rf /", true); !strings.HasPrefix(s, "PMSS_TAG='abc'\nPMSS_QBT_SEEN='12 34   '\nPMSS_INVENTORY=1\n") {
+	if s := ScriptWith("abc", "12 34'; rm -rf /", true, true); !strings.HasPrefix(s, "PMSS_TAG='abc'\nPMSS_QBT_SEEN='12 34   '\nPMSS_INVENTORY=1\nPMSS_PMDB=1\n") {
 		t.Fatalf("seen must be digits and spaces only: %q", s[:60])
 	}
 }
@@ -508,7 +508,7 @@ func TestScriptWithTag(t *testing.T) {
 		t.Fatalf("bad tag %q", tag)
 	}
 	src := ScriptWithTag(tag)
-	if !strings.HasPrefix(src, "PMSS_TAG='"+tag+"'\nPMSS_QBT_SEEN=''\nPMSS_INVENTORY=1\n#!/bin/sh") {
+	if !strings.HasPrefix(src, "PMSS_TAG='"+tag+"'\nPMSS_QBT_SEEN=''\nPMSS_INVENTORY=1\nPMSS_PMDB=0\n#!/bin/sh") {
 		t.Fatalf("tag line missing: %q", src[:60])
 	}
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -909,7 +909,7 @@ func TestInventoryGated(t *testing.T) {
 	}
 	run := func(inventory bool) *Snapshot {
 		cmd := exec.Command("sh")
-		cmd.Stdin = strings.NewReader(ScriptWith("t1", "", inventory))
+		cmd.Stdin = strings.NewReader(ScriptWith("t1", "", inventory, false))
 		out, err := cmd.Output()
 		if err != nil {
 			t.Fatal(err)
@@ -1349,6 +1349,80 @@ func TestParseHostFacts(t *testing.T) {
 	if _, known := parseUsers("-1"); known {
 		t.Fatal("a negative count is not a count")
 	}
+	// The catalogue's figures as YABS prints them: the clock as a decimal
+	// number of MHz, the storage in 1024-byte units, df's total when the
+	// mount walk yielded nothing; absent or absurd is 0.
+	h = parseHost(Sections([]byte("@@pmdb_facts\n1\n@@cpu_mhz_yabs\n1996.249\n@@disk_yabs\n46689634936\n@@disk_yabs_df\n99\n@@end\n")))
+	if h.CPUMHzYABS != 1996.249 || h.DiskYABS != 46689634936*1024 {
+		t.Fatalf("yabs facts: %+v", h)
+	}
+	h = parseHost(Sections([]byte("@@cpu_mhz_yabs\n\n@@disk_yabs\n\n@@disk_yabs_df\n99\n@@end\n")))
+	if h.CPUMHzYABS != 0 || h.DiskYABS != 99*1024 {
+		t.Fatalf("df fallback: %+v", h)
+	}
+	for _, raw := range []string{"junk", "-5", "0", "1e9", "123456"} {
+		if parseYABSMHz(raw) != 0 || parseYABSKB(raw) != 0 && raw != "123456" {
+			t.Errorf("%q parsed as a figure", raw)
+		}
+	}
+}
+
+// With PMSS_PMDB=1 the probe measures the catalogue's two figures YABS's
+// way and says so; without, it does not, and a snapshot without them
+// carries the last ones (an on-demand probe never asks for them).
+func TestCatalogueFactsGated(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	run := func(catalogue bool) *Snapshot {
+		cmd := exec.Command("sh")
+		cmd.Stdin = strings.NewReader(ScriptWith("t1", "", true, catalogue))
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap, err := ParseTagged(out, "t1", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snap
+	}
+	with := run(true)
+	if !with.PMDBFacts || with.Host.DiskYABS <= 0 {
+		t.Fatalf("catalogue facts: ran=%v disk=%d mhz=%v", with.PMDBFacts, with.Host.DiskYABS, with.Host.CPUMHzYABS)
+	}
+	without := run(false)
+	if without.PMDBFacts || without.Host.DiskYABS != 0 || without.Host.CPUMHzYABS != 0 {
+		t.Fatalf("facts measured while off: %+v", without.Host)
+	}
+	without.CarryInventory(with.InventoryOnly())
+	if !without.PMDBFacts || without.Host.DiskYABS != with.Host.DiskYABS || without.Host.CPUMHzYABS != with.Host.CPUMHzYABS {
+		t.Fatalf("carry: %+v", without.Host)
+	}
+	// A snapshot that measured them keeps its own.
+	prev := &Snapshot{Inventory: true, PMDBFacts: true, Host: HostInfo{DiskYABS: 1}}
+	with.CarryInventory(prev)
+	if with.Host.DiskYABS == 1 {
+		t.Fatal("carry overwrote fresh catalogue facts")
+	}
+	fast := run(false)
+	fast.Inventory = false
+	fast.CarryInventory(prev)
+	if !fast.PMDBFacts || fast.Host.DiskYABS != 1 {
+		t.Fatalf("carry over a fast poll: %+v", fast.Host)
+	}
+	// A full inventory that did not ask (the integration off at the time)
+	// keeps the last facts too, and what it caches for later polls has
+	// them: switching the integration off and on across an inventory does
+	// not lose them.
+	off := run(false)
+	off.CarryInventory(prev)
+	if !off.PMDBFacts || off.Host.DiskYABS != 1 || !off.Inventory {
+		t.Fatalf("carry over an inventory without the facts: %+v", off.Host)
+	}
+	if kept := off.InventoryOnly(); !kept.PMDBFacts || kept.Host.DiskYABS != 1 {
+		t.Fatalf("cached inventory lost the facts: %+v", kept.Host)
+	}
 }
 
 func TestNominalMHz(t *testing.T) {
@@ -1610,3 +1684,44 @@ func Sections(raw []byte) map[string]string { return SectionsTagged(raw, "") }
 // Parse turns untagged probe output into a Snapshot; production runs use
 // ParseTagged.
 func Parse(raw []byte, now time.Time) (*Snapshot, error) { return ParseTagged(raw, "", now) }
+
+// The storage total is printed as a float: the mawk of Debian 11 and 12
+// (before its 20200731 release) keeps printf "%d" within 32 bits, which
+// wraps any total above 2 TiB, as yabs.sh's own "%d" does there. Every awk
+// on this machine must print a 5 TiB total exactly.
+func TestYABSDiskTotalAboveTwoTiB(t *testing.T) {
+	start := strings.Index(Script, "awk 'NF == 3")
+	if start < 0 {
+		t.Fatal("yabs disk awk program not found in the script")
+	}
+	prog := Script[start+len("awk '"):]
+	prog = prog[:strings.Index(prog, "'")]
+	// A 4 TiB device listed twice, a 1 TiB device, and a mount stat could
+	// not describe.
+	in := "/dev/sda1 1073741824 4096\n/dev/sda1 1073741824 4096\n/dev/sdb1 2097152 524288\ntmpfs\n"
+	ran := 0
+	for _, awk := range []string{"awk", "mawk", "gawk", "busybox"} {
+		path, err := exec.LookPath(awk)
+		if err != nil {
+			continue
+		}
+		args := []string{prog}
+		if awk == "busybox" {
+			args = []string{"awk", prog}
+		}
+		cmd := exec.Command(path, args...)
+		cmd.Stdin = strings.NewReader(in)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s: %v", awk, err)
+		}
+		got := strings.TrimSpace(string(out))
+		if got != "5368709120" || parseYABSKB(got) != 5368709120*1024 {
+			t.Errorf("%s printed %q for a 5 TiB total", awk, got)
+		}
+		ran++
+	}
+	if ran == 0 {
+		t.Skip("no awk")
+	}
+}
