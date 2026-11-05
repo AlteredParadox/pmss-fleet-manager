@@ -921,8 +921,8 @@ func TestInventoryGated(t *testing.T) {
 		return snap
 	}
 	full := run(true)
-	if !full.Inventory || full.Host.Kernel == "" || full.Host.NCPU == 0 || !full.LogsKnown {
-		t.Fatalf("full probe: inventory=%v kernel=%q ncpu=%d logs=%v", full.Inventory, full.Host.Kernel, full.Host.NCPU, full.LogsKnown)
+	if !full.Inventory || full.Host.Kernel == "" || full.Host.NCPU == 0 || !full.LogsKnown || full.Host.Arch == "" || !full.Host.UsersKnown {
+		t.Fatalf("full probe: inventory=%v kernel=%q ncpu=%d logs=%v arch=%q users=%v", full.Inventory, full.Host.Kernel, full.Host.NCPU, full.LogsKnown, full.Host.Arch, full.Host.UsersKnown)
 	}
 	// The PMSS-managed marker is a safety check for install/autostart: it
 	// is read every poll, inventory or not.
@@ -949,7 +949,8 @@ func TestInventoryGated(t *testing.T) {
 		t.Fatalf("InventoryOnly: %+v", kept.Host)
 	}
 	fast.CarryInventory(kept)
-	if fast.Inventory || fast.Host.Kernel != full.Host.Kernel || fast.Host.NCPU != full.Host.NCPU || fast.LogsKnown != full.LogsKnown || len(fast.Logs) != len(full.Logs) {
+	if fast.Inventory || fast.Host.Kernel != full.Host.Kernel || fast.Host.NCPU != full.Host.NCPU || fast.LogsKnown != full.LogsKnown || len(fast.Logs) != len(full.Logs) ||
+		fast.Host.Arch != full.Host.Arch || fast.Host.Distro != full.Host.Distro || fast.Host.Virt != full.Host.Virt || fast.Host.UsersKnown != full.Host.UsersKnown || fast.Host.Users != full.Host.Users {
 		t.Fatalf("carry: kernel=%q ncpu=%d logs=%v", fast.Host.Kernel, fast.Host.NCPU, fast.LogsKnown)
 	}
 	// A probe that ran the sections itself is never overwritten by a carry.
@@ -1327,6 +1328,26 @@ func TestParseHostClock(t *testing.T) {
 	}
 	if h = parseHost(Sections([]byte("@@cpu_model\n Intel(R) N100\n@@end\n"))); h.CPUMHz != 0 {
 		t.Fatalf("unknown clock: %+v", h)
+	}
+}
+
+// The catalogue facts: virtualisation, distribution, architecture and the
+// account count, each unknown when the box did not say.
+func TestParseHostFacts(t *testing.T) {
+	h := parseHost(Sections([]byte("@@virt\nKVM\n@@os_release\nPRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n@@arch\nx86_64\n@@users\n17\n@@end\n")))
+	if h.Virt != "kvm" || h.Distro != "Debian GNU/Linux 12 (bookworm)" || h.Arch != "x86_64" || h.Users != 17 || !h.UsersKnown {
+		t.Fatalf("%+v", h)
+	}
+	h = parseHost(Sections([]byte("@@virt\nnone\nextra line\n@@os_release\nPRETTY_NAME='Ubuntu 24.04'\n@@arch\n\n@@users\n0\n@@end\n")))
+	if h.Virt != "none" || h.Distro != "Ubuntu 24.04" || h.Arch != "" || h.Users != 0 || !h.UsersKnown {
+		t.Fatalf("%+v", h)
+	}
+	h = parseHost(Sections([]byte("@@os_release\nNAME=Debian\n@@users\nlots\n@@end\n")))
+	if h.Virt != "" || h.Distro != "" || h.UsersKnown || h.Users != 0 {
+		t.Fatalf("unknown facts must stay unknown: %+v", h)
+	}
+	if _, known := parseUsers("-1"); known {
+		t.Fatal("a negative count is not a count")
 	}
 }
 

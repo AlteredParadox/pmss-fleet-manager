@@ -843,6 +843,7 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 	h := snap.Host
 	st.HostSys = HostState{UptimeSec: h.UptimeSec, Load1: h.Load1, Load5: h.Load5, Load15: h.Load15,
 		MemTotal: h.MemTotal, MemAvail: h.MemAvail, SwapTotal: h.SwapTotal, SwapKnown: h.SwapKnown, NCPU: h.NCPU, CPUMHz: h.CPUMHz, Kernel: clip(h.Kernel, 128), Debian: clip(h.Debian, 64), PMSSVersion: clip(h.PMSSVersion, 64),
+		Virt: clip(h.Virt, 64), Distro: clip(h.Distro, 256), Arch: clip(h.Arch, 64), Users: h.Users, UsersKnown: h.UsersKnown,
 		HomeFSType: clip(snap.HomeFS.Type, 32), HomeSize: snap.HomeFS.Size, HomeUsed: snap.HomeFS.Used, HomeAvail: snap.HomeFS.Avail,
 		CPUModel: clip(h.CPUModel, 128), CPUShort: clip(h.CPUShort, 64), CPUFlags: clip(strings.Join(h.CPUFlags, " "), 2048),
 		GPUPresent: h.GPU.Present, GPUDevice: clip(h.GPU.Device, 128), GPUVendor: h.GPU.Vendor, GPUAccess: h.GPU.Accessible, HWEncode: hwEncodeLabel(h.GPU)}

@@ -441,6 +441,11 @@ type HostInfo struct {
 	Kernel      string
 	Debian      string
 	PMSSVersion string
+	Virt        string // systemd-detect-virt, lower-cased ("none", "kvm", ...); "" when the box did not say
+	Distro      string // /etc/os-release PRETTY_NAME
+	Arch        string // uname -m
+	Users       int    // user accounts on the host: UIDs above 1000 except nobody (pmdb's count)
+	UsersKnown  bool
 	CPUModel    string   // raw "model name"
 	CPUShort    string   // trimmed for tags, e.g. "N100", "Xeon E5-2680 v4"
 	CPUFlags    []string // subset: avx2, avx512f, sse4_2, aes
@@ -880,6 +885,7 @@ func (s *Snapshot) CarryInventory(prev *Snapshot) {
 	}
 	h, ph := &s.Host, &prev.Host
 	h.NCPU, h.CPUMHz, h.Kernel, h.Debian, h.PMSSVersion = ph.NCPU, ph.CPUMHz, ph.Kernel, ph.Debian, ph.PMSSVersion
+	h.Virt, h.Distro, h.Arch, h.Users, h.UsersKnown = ph.Virt, ph.Distro, ph.Arch, ph.Users, ph.UsersKnown
 	h.CPUModel, h.CPUShort, h.CPUFlags, h.GPU = ph.CPUModel, ph.CPUShort, append([]string(nil), ph.CPUFlags...), ph.GPU
 	q, pq := &s.Qbt, &prev.Qbt
 	q.BinaryPresent, q.BinaryVersion, q.BinaryStat = pq.BinaryPresent, pq.BinaryVersion, pq.BinaryStat
@@ -899,12 +905,48 @@ func (s *Snapshot) InventoryOnly() *Snapshot {
 	return out
 }
 
+// firstLine is the first line of a section, trimmed: the one-word answers
+// (uname -m, systemd-detect-virt) are one line, and a box that prints more
+// does not get to say more.
+func firstLine(raw string) string {
+	line, _, _ := strings.Cut(raw, "\n")
+	return strings.TrimSpace(line)
+}
+
+// parseOSRelease returns the value of the PRETTY_NAME line the probe read
+// from /etc/os-release, without its quotes; "" when there was none.
+func parseOSRelease(raw string) string {
+	v, ok := strings.CutPrefix(firstLine(raw), "PRETTY_NAME=")
+	if !ok {
+		return ""
+	}
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		v = v[1 : len(v)-1]
+	}
+	return strings.TrimSpace(v)
+}
+
+// parseUsers reads the account-count section: known only when the box
+// printed one non-negative integer.
+func parseUsers(raw string) (int, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 func parseHost(s map[string]string) HostInfo {
 	h := HostInfo{
 		Kernel:      strings.TrimSpace(s["kernel"]),
 		Debian:      strings.TrimSpace(s["debian"]),
 		PMSSVersion: strings.TrimSpace(s["pmss_version"]),
+		Virt:        strings.ToLower(firstLine(s["virt"])),
+		Distro:      parseOSRelease(s["os_release"]),
+		Arch:        firstLine(s["arch"]),
 	}
+	h.Users, h.UsersKnown = parseUsers(s["users"])
 	parseLoad(&h, s)
 	parseMeminfo(&h, s["meminfo"])
 	parseCPUInfo(&h, s)
