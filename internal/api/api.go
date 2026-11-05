@@ -35,6 +35,7 @@ import (
 	"unicode/utf8"
 
 	"pmss-fleet-manager/internal/collect"
+	"pmss-fleet-manager/internal/pmdb"
 	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/rtorrent"
@@ -1771,16 +1772,10 @@ func (s *Server) handleAckAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
-// pmdbMinKeyLen is the shortest upload key accepted: the catalogue refuses
-// to start with one under 24 characters, so a shorter one is a paste gone
-// wrong.
-const pmdbMinKeyLen = 24
-
 // mergeSecret applies a settings PUT to a stored secret: a typed value
 // replaces it, an empty one keeps it, the clear flag removes it. A secret
 // holding one of the forbidden characters is a paste gone wrong, not a
-// key (quotes and line breaks for either; spaces too for the PM API key,
-// while a pmdb upload key is a passphrase that may have them).
+// key (quotes, line breaks and spaces for the PM API key).
 func mergeSecret(typed, stored string, remove bool, what, forbidden string) (string, error) {
 	typed = strings.TrimSpace(typed)
 	switch {
@@ -1816,7 +1811,7 @@ func (s *Server) handlePMDB(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePMDBSync(w http.ResponseWriter, r *http.Request) {
 	if v := s.m.PMDB(); !v.Configured {
-		writeErr(w, 400, errors.New("pmdb.fyi submission is not enabled, or no upload key is set"))
+		writeErr(w, 400, errors.New("pmdb.fyi submission is not enabled, or no submission identifier is set"))
 		return
 	}
 	s.m.SyncPMDB(r.Context())
@@ -1834,8 +1829,8 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	s.settingsMu.Lock()
 	defer s.settingsMu.Unlock()
 	in := s.m.Settings()
-	prevKey, prevPMDBKey := in.PMAPIKey, in.PMDBUploadKey
-	in.PMAPIKey, in.PMDBUploadKey = "", ""
+	prevKey := in.PMAPIKey
+	in.PMAPIKey = ""
 	if err := json.Unmarshal(body, &in); err != nil {
 		writeErr(w, 400, err)
 		return
@@ -1848,21 +1843,17 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.ClearPMAPIKey = false
-	in.PMDBUploadKey, err400 = mergeSecret(in.PMDBUploadKey, prevPMDBKey, in.ClearPMDBUploadKey, "pmdb upload key", "\t\r\n\"'")
-	if err400 != nil {
-		writeErr(w, 400, err400)
-		return
+	// The catalogue's text rule for the identifier, applied here so a save
+	// fails in the browser rather than every submission failing later.
+	in.PMDBUsername = strings.TrimSpace(in.PMDBUsername)
+	if in.PMDBUsername != "" {
+		if _, ok := pmdb.CleanText(in.PMDBUsername, pmdb.MaxUsername); !ok {
+			writeErr(w, 400, fmt.Errorf("the pmdb.fyi submission identifier must be 1 to %d characters with no line breaks or control characters", pmdb.MaxUsername))
+			return
+		}
 	}
-	if in.ClearPMDBUploadKey {
-		in.PMDBEnabled = false // "remove key" is the way out of the integration too; a key is what it runs on
-	}
-	in.ClearPMDBUploadKey = false
-	if n := len(in.PMDBUploadKey); n > 0 && n < pmdbMinKeyLen {
-		writeErr(w, 400, fmt.Errorf("pmdb upload key is too short (%d characters, the catalogue's keys have at least %d)", n, pmdbMinKeyLen))
-		return
-	}
-	if in.PMDBEnabled && in.PMDBUploadKey == "" {
-		writeErr(w, 400, errors.New("pmdb.fyi submission needs an upload key; enter one or untick the box"))
+	if in.PMDBEnabled && in.PMDBUsername == "" {
+		writeErr(w, 400, errors.New("pmdb.fyi submission needs a submission identifier; enter one or untick the box"))
 		return
 	}
 	if in.PollIntervalSec < 5 || in.PollIntervalSec > 3600 {

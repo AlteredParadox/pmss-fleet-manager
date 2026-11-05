@@ -55,8 +55,10 @@ const (
 	// the upgrade has no value to rewrite), so a sealed store owes one
 	// scrub when the inventory advances. Bump it when a column is added.
 	// 2: the qBittorrent start command and download URL (1.12).
+	// 3: the pmdb upload key left the set (1.14): its row is deleted at
+	// migrate, and the deleted row's bytes may sit in free pages.
 	inventoryKey     = "secrets_inventory"
-	inventoryVersion = "2"
+	inventoryVersion = "3"
 )
 
 // vacuumSQL is what the cleanup runs; a test swaps it for a failing
@@ -381,7 +383,6 @@ func (s *Store) secretCells(ctx context.Context) ([]secretCell, error) {
 	rows.Close() // one connection: the settings reads below need it
 	for _, kv := range []struct{ key, where, label string }{
 		{"pm_api_key", "Pulsed Media API key", labelPMAPIKey},
-		{"pmdb_upload_key", "pmdb upload key", labelPMDBUploadKey},
 		{"qbt_download_url", "qBittorrent download URL", labelQbtDownloadURL},
 	} {
 		v, err := s.GetValue(ctx, kv.key)

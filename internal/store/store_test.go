@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"pmss-fleet-manager/internal/secrets"
 )
@@ -74,16 +75,16 @@ func TestRoundTrip(t *testing.T) {
 	}
 	st.PollIntervalSec = 60
 	st.Theme = "light"
-	st.PMDBEnabled, st.PMDBUploadKey = true, "words-that-make-a-passphrase"
+	st.PMDBEnabled, st.PMDBUsername = true, "someone"
 	if err := s.SaveSettings(ctx, st); err != nil {
 		t.Fatal(err)
 	}
 	st, _ = s.GetSettings(ctx)
-	if st.PollIntervalSec != 60 || st.Theme != "light" || st.DiskThresholdPct != 90 || !st.PMDBEnabled || st.PMDBUploadKey != "words-that-make-a-passphrase" {
+	if st.PollIntervalSec != 60 || st.Theme != "light" || st.DiskThresholdPct != 90 || !st.PMDBEnabled || st.PMDBUsername != "someone" {
 		t.Fatalf("settings: %+v", st)
 	}
-	if pub := st.Public(); pub.PMDBUploadKey != "" || !pub.HasPMDBUploadKey || pub.PMAPIKey != "" {
-		t.Fatalf("public settings leak a key: %+v", pub)
+	if pub := st.Public(); pub.PMDBUsername != "someone" || pub.PMAPIKey != "" {
+		t.Fatalf("public settings: %+v", pub)
 	}
 
 	created, err := s.RaiseAlert(ctx, b.ID, "disk", "warn", "disk at 95%")
@@ -929,7 +930,7 @@ func TestReadPathRefusesForeignCiphertext(t *testing.T) {
 	if _, err := s.ListBoxes(ctx); !errors.Is(err, secrets.ErrWrongKey) || !strings.Contains(err.Error(), "WebUI password") {
 		t.Fatalf("foreign WebUI password: %v", err)
 	}
-	for _, kv := range []struct{ key, what string }{{"pm_api_key", "API key"}, {"pmdb_upload_key", "pmdb upload key"}} {
+	for _, kv := range []struct{ key, what string }{{"pm_api_key", "API key"}} {
 		if err := s.SetValue(ctx, kv.key, b.Seal("settings."+kv.key, "x")); err != nil {
 			t.Fatal(err)
 		}
@@ -1552,5 +1553,97 @@ func TestNewSecretColumnsScrubClearedPlaintext(t *testing.T) {
 	}
 	if v, _ := s.GetValue(context.Background(), inventoryKey); v != inventoryVersion {
 		t.Fatalf("inventory %q", v)
+	}
+}
+
+// Receipts of catalogue submissions: stored, replaced per host, times
+// round-tripped, and absent when never written.
+func TestPMDBSubmissions(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if recs, err := s.PMDBSubmissions(ctx); err != nil || len(recs) != 0 {
+		t.Fatalf("empty: %v %v", recs, err)
+	}
+	at := time.Date(2026, 11, 5, 12, 0, 0, 500, time.UTC)
+	if err := s.PutPMDBSubmission(ctx, PMDBSubmission{Hostname: "odin.pulsedmedia.com", Username: "someone", RowHash: "h1", SubmittedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutPMDBSubmission(ctx, PMDBSubmission{Hostname: "thor.pulsedmedia.com", Username: "someone", RowHash: "h2", SubmittedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutPMDBSubmission(ctx, PMDBSubmission{Hostname: "odin.pulsedmedia.com", Username: "else", RowHash: "h3", SubmittedAt: at.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := s.PMDBSubmissions(ctx)
+	if err != nil || len(recs) != 2 {
+		t.Fatalf("receipts: %v %v", recs, err)
+	}
+	if r := recs["odin.pulsedmedia.com"]; r.Username != "else" || r.RowHash != "h3" || !r.SubmittedAt.Equal(at.Add(time.Hour)) {
+		t.Fatalf("replaced receipt: %+v", r)
+	}
+	if r := recs["thor.pulsedmedia.com"]; r.RowHash != "h2" || !r.SubmittedAt.Equal(at) {
+		t.Fatalf("receipt: %+v", r)
+	}
+	// A receipt whose time cannot be read is no receipt.
+	if _, err := s.db.Exec(`UPDATE pmdb_submissions SET submitted_at='yesterday' WHERE hostname='thor.pulsedmedia.com'`); err != nil {
+		t.Fatal(err)
+	}
+	if recs, err := s.PMDBSubmissions(ctx); err != nil || len(recs) != 1 {
+		t.Fatalf("unreadable time: %v %v", recs, err)
+	}
+}
+
+// The catalogue's upload key was retired: a stored one is removed at the
+// first open, plain or sealed, and a sealed store owes one scrub for its
+// bytes (the secrets inventory moves on).
+func TestMigrateDropsPMDBUploadKey(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetValue(ctx, "pmdb_upload_key", "a-passphrase-of-words"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := s.GetValue(ctx, "pmdb_upload_key"); err != nil || v != "" {
+		t.Fatalf("key row after the open: %q %v", v, err)
+	}
+	s.Close()
+
+	// Sealed by a build that still had the key among the secret cells
+	// (inventory 2): the open neither needs to read it nor fails on it.
+	sealed := filepath.Join(t.TempDir(), "s.db")
+	sl := mustSealer(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	s, err = Open(sealed, WithSealer(sl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetValue(ctx, "pmdb_upload_key", sl.Seal("settings.pmdb_upload_key", "a-passphrase-of-words")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetValue(ctx, inventoryKey, "2"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(sealed, WithSealer(sl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if v, _ := s.GetValue(ctx, "pmdb_upload_key"); v != "" {
+		t.Fatalf("sealed key row survived: %q", v)
+	}
+	if v, _ := s.GetValue(ctx, inventoryKey); v != inventoryVersion {
+		t.Fatalf("inventory after the open: %q", v)
 	}
 }

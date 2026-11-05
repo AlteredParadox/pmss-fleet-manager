@@ -133,14 +133,16 @@ type Manager struct {
 	pmdbMu     sync.Mutex
 	pmdbSyncMu sync.Mutex
 	pmdbSt     pmdbState
-	// pmdbSettled is the process-lifetime record of decided hosts (see
-	// pmdbStatus.decided), keyed by catalogue name with the standing to
-	// show ("listed" or "submitted"). Outside pmdbState on purpose: a reset
-	// (a new key, a re-enable) and a host dropping out of the candidates
-	// clear display, error and backoff state, never a decision, or a later
-	// stale or hostile list could have a host posted a second time.
-	pmdbSettled map[string]string // under pmdbMu
-	pmdbWakeCh  chan struct{}
+	// pmdbDone is the receipt of every host's last accepted submission
+	// (the pmdb_submissions table, loaded at Start), keyed by catalogue
+	// name, and pmdbAttempts when the last submissions were attempted, for
+	// the rolling window. Both outside pmdbState on purpose: a reset (a
+	// new identifier, a re-enable) clears display, error and backoff state,
+	// never a receipt and never the window, or a re-enable could post a
+	// host a second time or buy more submissions.
+	pmdbDone     map[string]store.PMDBSubmission // under pmdbMu
+	pmdbAttempts []time.Time                     // under pmdbMu
+	pmdbWakeCh   chan struct{}
 
 	// Box-to-box copies (transfer_jobs.go), by row id.
 	xferMu sync.Mutex
@@ -239,11 +241,11 @@ func (m *Manager) SetSettings(s store.Settings) {
 			}()
 		}
 	}
-	if prev.PMDBUploadKey != s.PMDBUploadKey || prev.PMDBEnabled != s.PMDBEnabled {
-		// A new key or a re-enable starts over from the public list: a
-		// "key refused" standing must not outlive the key it was for.
+	if prev.PMDBUsername != s.PMDBUsername || prev.PMDBEnabled != s.PMDBEnabled {
+		// A new identifier or a re-enable starts the display over (the
+		// receipts stay; a new identifier makes every host due by itself).
 		m.resetPMDB()
-		if s.PMDBEnabled && s.PMDBUploadKey != "" {
+		if s.PMDBEnabled && s.PMDBUsername != "" {
 			m.pmdbWake()
 		}
 	}
@@ -269,6 +271,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	m.settings.Store(&s)
 	m.loadServicesCache(ctx)
+	if recs, err := m.st.PMDBSubmissions(ctx); err != nil {
+		m.log.Warn("pmdb receipts", "err", err) // each host is posted once more than it needed to be
+	} else {
+		m.pmdbDone = recs
+	}
 	boxes, err := m.st.ListBoxes(ctx)
 	if err != nil {
 		return err

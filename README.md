@@ -128,23 +128,34 @@ neither.
 **pmdb.fyi hardware catalogue (opt-in).** [pmdb.fyi](https://pmdb.fyi) is a
 community-run public table of Pulsed Media host hardware
 ([source](https://github.com/schmintendo/pmdb)). Tick the box in settings and
-enter the catalogue's shared upload key, and the dashboard looks up the host
-each of your boxes runs on in the public list and submits the ones that are
-missing, from the facts the probe already reads: hostname, CPU model, core
-count, nominal clock, RAM, swap, home filesystem size and whether an Intel GPU
-is present. Nothing about your account, username, usage or torrents leaves
-the dashboard (as with any web request, the service sees your IP address and
-the client name), an existing row is never replaced, and the check runs after a
-box's quarter-hourly inventory (asking the catalogue only while a host still
-needs deciding), every six hours, and on demand. The settings
-page lists each host's standing (listed, submitted, pending, or the error).
-Off by default; untick the box or remove the key to stop it. What is
-submitted is what each box reports about itself: turning this on trusts
-your boxes' probe output with the shared key, so a compromised account on
-one box could get a made-up host row submitted in your name (at most 50
-per run and never over an existing row, but not a lifetime limit: a box
-that keeps reporting new hostnames gets each one tried at a later run).
-Leave it off if that matters to you.
+choose a submission identifier (a nickname the catalogue uses to link your
+submissions; not a login, and left out of its current public API and pages;
+use the one you upload YABS results under, if you do), and the dashboard
+submits the host each of your boxes runs on, from facts the probe already
+reads: hostname, CPU model, core count, nominal clock, RAM, swap, home
+filesystem size, whether the host is a KVM guest, its distribution, kernel
+and architecture, the plan name of your box on it (when it matches a plan
+the catalogue knows) and the number of user accounts on the host. Nothing
+about your usage, torrents, client or SSH setup leaves the dashboard (as
+with any web request, the service sees your IP address and the client
+name). The catalogue keeps one row per host that every contributor's
+submission replaces, so the dashboard sends the fullest row it can and,
+where it lacks a value, reads the catalogue's current row first and repeats
+that value, or skips the host when it cannot, so a known value is not
+erased (best effort: another contributor can post between its read and its
+write). A host is submitted once, then again when these facts change, after
+30 days, or when you change the identifier, at most 25 submissions every
+ten minutes; the receipts are kept in the database, so a restart posts
+nothing. The check runs after a box's quarter-hourly inventory (asking the
+catalogue only while a host is due), every six hours, and on demand. The
+settings page lists each host's standing (submitted and when, due, skipped,
+or the error) with a link to its catalogue page. Off by default; untick
+the box to stop it. What is submitted is what each box reports about
+itself: turning this on trusts your boxes' probe output under your
+identifier, so a compromised account on one box could get a made-up host
+row submitted in your name (a box that keeps reporting new hostnames gets
+each one tried, within the rate budget). Leave it off if that matters to
+you.
 
 ## Run
 
@@ -197,9 +208,8 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 
 ### Encrypting stored credentials
 
-Box SSH passwords, qBittorrent WebUI passwords, the Pulsed Media API key
-and the pmdb.fyi upload key live in the SQLite file, as do two settings that
-may carry a token: each box's qBittorrent start command and the qBittorrent
+Box SSH passwords, qBittorrent WebUI passwords and the Pulsed Media API key
+live in the SQLite file, as do two settings that may carry a token: each box's qBittorrent start command and the qBittorrent
 download URL. By default they are in plain text, protected by the file's
 mode (0600 in a 0700 directory). To encrypt them, give the dashboard a
 secret from outside the data directory:
@@ -788,7 +798,7 @@ These are the design decisions that came out of it.
   are reused only for the exact host, port and user they were saved for;
   moving a box means re-entering them.
 - **Secrets on disk.** Box credentials, the Pulsed Media API key, the
-  pmdb.fyi upload key, the qBittorrent start commands and download URL are
+  qBittorrent start commands and download URL are
   stored in the SQLite file, which is created mode 0600 before SQLite opens
   it so the -wal and -shm side files inherit the mode; the data directory
   is created 0700. They are plain text unless a secret is configured
@@ -801,43 +811,47 @@ These are the design decisions that came out of it.
   are never serialised.
 - **The hardware catalogue is untrusted input.** With the pmdb.fyi
   integration on, the dashboard reads a third-party service that could be
-  compromised or replaced. Its list is bounded in size and read for one
-  fact only (which DNS-shaped hostnames exist; odd rows are skipped), the
-  bytes counted are the entity's before any content decoding (compression
-  is never asked for and a compressed answer is refused rather than
-  decoded, since a gzip stream of any length can unpack to two bytes;
-  transfer framing is bounded by Go's parser and the request deadline), no
-  text from any
-  response is kept, logged or shown (the service knows the shared upload
-  key and could echo it in any encoding; an error is a fixed message or a
-  status code), every request has its own HTTP/1.1 connection that is
-  never reused, whatever the server answers (bytes a server sends after
-  the answer it declared would otherwise be found on an idle connection
-  and quoted into Go's standard logger, below anything the code can
-  intercept; over HTTP/2 the byte caps would count data after framing and
-  a stream's clean-up writes have no deadline of their own),
-  the list is streamed with a hard row cap so a
-  flood of tiny elements costs no more than its bytes, response headers
-  are capped small and a submission's answer is its status code alone
-  (the body is never read, so an acceptance cannot be turned into a
-  failure by what follows it), a transport failure or a redirect is
-  reported as a fixed message rather than Go's own text (which would
-  carry a Location the service controls), redirects are refused, one run
-  has a total time budget, a submission budget and stops at a rate limit
-  or a service failure, every list failure holds the next runs for an
-  hour, the automatic cost is bounded whatever the service sends (a check
-  after an inventory fetches the list only while a host still needs
-  deciding and at most every ten minutes; the six-hourly check and "check
-  now" always fetch unless a hold applies), and the only decision its
-  answer drives is whether
-  a host is submitted, once: a host seen listed, accepted or reported as
-  existing is settled for the life of the process, whatever a later list
-  says, and a list that arrived in full counts even when the run it was
-  fetched for was reset meanwhile. It cannot change what is collected or
-  shown about a box. What a
-  compromised catalogue can still do is inherent in talking to it: lie
-  about which hosts are listed (so a host is submitted, or not), refuse or
-  throttle, and see the request itself.
+  compromised or replaced. Its answers are bounded in size and read for a
+  few facts only (which DNS-shaped hostnames exist, with odd rows skipped;
+  the plan names it accepts; the numbers, booleans and four strings of one
+  host's row), the bytes counted are the entity's before any content
+  decoding (compression is never asked for and a compressed answer is
+  refused rather than decoded, since a gzip stream of any length can unpack
+  to two bytes; transfer framing is bounded by Go's parser and the request
+  deadline), no text from any response is kept in state, logged or shown
+  (an error is a fixed message or a status code), every request has its own
+  HTTP/1.1 connection that is never reused, whatever the server answers
+  (bytes a server sends after the answer it declared would otherwise be
+  found on an idle connection and quoted into Go's standard logger, below
+  anything the code can intercept; over HTTP/2 the byte caps would count
+  data after framing and a stream's clean-up writes have no deadline of
+  their own), the list is streamed with a hard row cap so a flood of tiny
+  elements costs no more than its bytes, response headers are capped small
+  and a submission's answer is its status code alone (the body is never
+  read, so an acceptance cannot be turned into a failure by what follows
+  it), a transport failure or a redirect is reported as a fixed message
+  rather than Go's own text (which would carry a Location the service
+  controls), redirects are refused, one run has a total time budget, stops
+  at a rate limit or a service failure, and never attempts more than 25
+  submissions in ten minutes, every list failure holds the next runs for an
+  hour, and the automatic cost is bounded whatever the service sends (a
+  check after an inventory fetches the list only while a host is due and at
+  most every ten minutes; the six-hourly check and "check now" always fetch
+  unless a hold applies). What the catalogue says decides two things: the
+  standing shown for a host (listed or not), and what travels back to it
+  when a submission of ours lacks a value its row has, because the
+  catalogue replaces a host's row whole and an omitted value becomes
+  unknown for everyone: a number or boolean from its row is repeated as it
+  is, a string only when it passes the catalogue's own text rule (otherwise
+  the host is skipped and shown as such, never posted with the value
+  missing). Whether a host is submitted is decided by the dashboard's own
+  receipts (the row it built, the identifier, the time), never by the
+  catalogue's list, so a list that lies cannot make the fleet post again. It
+  cannot change what is collected or shown about a box. What a compromised
+  catalogue can still do is inherent in talking to it: misreport which
+  hosts are listed, hand back made-up numbers for a host's unknown fields
+  (which are then posted for that host), refuse or throttle, and see the
+  request itself.
 - **Bounded everything.** SSH dials, handshakes (including the agent),
   sessions and remote commands are bounded by contexts; a hung `quota` is run
   through a detached helper so it cannot stall the probe; remote stdout is
@@ -994,6 +1008,24 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.14.0 (unreleased)**
+
+- **pmdb.fyi catalogue, second edition.** The catalogue dropped its upload
+  key and now takes a submission identifier, replaces a host's row on every
+  submission, and records KVM, operating system, account count and plan.
+  The dashboard follows: `pmdb_username` replaces `pmdb_upload_key` in the
+  settings (the stored key is deleted at the first start; a store with
+  encryption on vacuums once more, as the secrets inventory moves to 3),
+  every host is submitted once under the identifier and again only when
+  its facts change, after 30 days or under a new identifier (receipts in
+  the new `pmdb_submissions` table survive restarts), the row carries the
+  new fields from the probe's new inventory facts `host_sys.virt`,
+  `distro`, `arch`, `users` and `users_known`, and a submission that would
+  turn a value the catalogue holds into unknown first reads that value back
+  and repeats it, or skips the host. At most 25 submissions in ten minutes.
+  `GET /api/pmdb` hosts carry `listed`, `plan` and `submitted_at`, and the
+  settings page links each host to its catalogue page. (#153, #155)
 
 **1.13.1**
 

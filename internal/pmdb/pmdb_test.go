@@ -38,7 +38,10 @@ func TestNormalize(t *testing.T) {
 	for in, want := range map[string]string{
 		"Le4-0-105-238louhi.PulsedMedia.com.": "le4-0-105-238louhi.pulsedmedia.com",
 		" odin.pulsedmedia.com ":              "odin.pulsedmedia.com",
-		"odin":                                "odin",
+		"odin":                                "odin.pulsedmedia.com", // a bare name is a catalogue host
+		"Odin.":                               "odin.pulsedmedia.com",
+		"odin.example":                        "odin.example", // another domain is kept as it is
+		strings.Repeat("a", 240):              "",             // over the length cap once the domain is on
 		"":                                    "",
 		"-bad.example":                        "",
 		"bad-.example":                        "",
@@ -63,16 +66,17 @@ func TestListAndSubmit(t *testing.T) {
 			if r.Method != http.MethodGet {
 				t.Errorf("list method %s", r.Method)
 			}
-			_, _ = io.WriteString(w, `[{"serverName":"Odin.pulsedmedia.com","coreCount":16},{"serverName":"thor.pulsedmedia.com"}]`)
+			_, _ = io.WriteString(w, `[{"serverName":"Odin.pulsedmedia.com","coreCount":16},{"serverName":"thor"}]`)
 		case "/api/servers/raw":
 			gotAuth, gotCT = r.Header.Get("Authorization"), r.Header.Get("Content-Type")
 			body, _ := io.ReadAll(r.Body)
+			gotRow = nil // decoded afresh: Unmarshal into a map keeps earlier keys
 			if err := json.Unmarshal(body, &gotRow); err != nil {
 				t.Errorf("body: %v", err)
 			}
 			w.WriteHeader(status)
 			if status >= 400 {
-				_, _ = io.WriteString(w, `{"error":"This server already exists."}`)
+				_, _ = io.WriteString(w, `{"error":"This node already has data under the short hostname."}`)
 			}
 		default:
 			w.WriteHeader(404)
@@ -90,60 +94,261 @@ func TestListAndSubmit(t *testing.T) {
 		t.Fatalf("listed: %v", listed)
 	}
 
-	mhz := 2100.0
-	row := Row{ServerName: "loki.pulsedmedia.com", ProcessorName: "Intel(R) Core(TM) i7-12700", CoreCount: 20,
-		ProcessorMHz: &mhz, RAMGiB: 62.5, StorageTiB: 13.64, QSV: true}
-	if err := c.Submit(ctx, " key-words-that-pass ", row); err != nil {
+	mhz, kvm, plan, users := 2100.0, false, "M10G S", 17
+	row := Row{Username: "someone", ServerName: "loki.pulsedmedia.com", ProcessorName: "Intel(R) Core(TM) i7-12700", CoreCount: 20,
+		ProcessorMHz: &mhz, RAMGiB: 62.5, StorageTiB: 13.64, KVM: &kvm, Plan: &plan, UserCount: &users,
+		System: &System{Distro: "Debian GNU/Linux 12 (bookworm)", Kernel: "6.1.0-37-amd64", Arch: "x86_64", VM: "NONE"}}
+	if err := c.Submit(ctx, row); err != nil {
 		t.Fatal(err)
 	}
-	if gotAuth != "Bearer key-words-that-pass" || gotCT != "application/json" {
-		t.Fatalf("headers: %q %q", gotAuth, gotCT)
+	if gotAuth != "" || gotCT != "application/json" {
+		t.Fatalf("headers: %q %q (no credential travels; the catalogue has none)", gotAuth, gotCT)
 	}
 	// Every field the catalogue requires goes as a JSON number or bool;
-	// unknown optionals go as null, never as 0, and nothing extra goes.
-	want := map[string]any{"serverName": "loki.pulsedmedia.com", "processorName": "Intel(R) Core(TM) i7-12700", "coreCount": 20.0,
-		"processorMhz": 2100.0, "ramGiB": 62.5, "swapGiB": nil, "storageTiB": 13.64, "qsv": true}
+	// unknown optionals go as null, never as 0, and nothing extra goes:
+	// the catalogue refuses a row with a key it does not know, so the key
+	// set is checked exactly.
+	want := map[string]any{"username": "someone", "serverName": "loki.pulsedmedia.com", "processorName": "Intel(R) Core(TM) i7-12700", "coreCount": 20.0,
+		"processorMhz": 2100.0, "ramGiB": 62.5, "swapGiB": nil, "storageTiB": 13.64, "kvm": false, "plan": "M10G S", "userCount": 17.0,
+		"system": map[string]any{"distro": "Debian GNU/Linux 12 (bookworm)", "kernel": "6.1.0-37-amd64", "arch": "x86_64", "vm": "NONE"}}
 	if len(gotRow) != len(want) {
 		t.Fatalf("row keys: %v", gotRow)
 	}
 	for k, v := range want {
+		if k == "system" {
+			sys, _ := gotRow[k].(map[string]any)
+			for sk, sv := range v.(map[string]any) {
+				if sys[sk] != sv {
+					t.Errorf("system[%s] = %v, want %v", sk, sys[sk], sv)
+				}
+			}
+			if len(sys) != 4 {
+				t.Errorf("system keys: %v", sys)
+			}
+			continue
+		}
 		if gotRow[k] != v {
 			t.Errorf("row[%s] = %v, want %v", k, gotRow[k], v)
 		}
 	}
-	if _, has := gotRow["replace"]; has {
-		t.Error("replace must never be sent")
+	for _, k := range []string{"replace", "qsv", "benchmarks"} {
+		if _, has := gotRow[k]; has {
+			t.Errorf("%s must never be sent", k)
+		}
+	}
+	// The optional plan, count and system are left out, not sent as null:
+	// left out, the catalogue keeps what it has.
+	lean := Row{Username: "someone", ServerName: "loki.pulsedmedia.com", ProcessorName: "Intel(R) N100", CoreCount: 4, RAMGiB: 32, StorageTiB: 60}
+	if err := c.Submit(ctx, lean); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"plan", "userCount", "system"} {
+		if _, has := gotRow[k]; has {
+			t.Errorf("%s sent when unknown: %v", k, gotRow[k])
+		}
+	}
+	if gotRow["kvm"] != nil || gotRow["processorMhz"] != nil || gotRow["swapGiB"] != nil || len(gotRow) != 9 {
+		t.Errorf("unknown hardware must go as null: %v", gotRow)
 	}
 
+	status = http.StatusOK // the catalogue replaced its row: accepted all the same
+	if err := c.Submit(ctx, row); err != nil {
+		t.Fatalf("200: %v", err)
+	}
 	status = http.StatusConflict
-	if err := c.Submit(ctx, "a-passphrase-of-words", row); !errors.Is(err, ErrExists) {
+	if err := c.Submit(ctx, row); !errors.Is(err, ErrNameConflict) {
 		t.Fatalf("409: %v", err)
 	}
-	status = http.StatusUnauthorized
-	if err := c.Submit(ctx, "a-passphrase-of-words", row); !errors.Is(err, ErrAuth) {
+	status = http.StatusUnauthorized // not something the catalogue answers any more; an unexpected status like any other
+	err = c.Submit(ctx, row)
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Code != 401 {
 		t.Fatalf("401: %v", err)
 	}
 	status = http.StatusTooManyRequests
-	if err := c.Submit(ctx, "a-passphrase-of-words", row); !errors.Is(err, ErrRateLimited) {
+	if err := c.Submit(ctx, row); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("429: %v", err)
 	}
 	status = http.StatusBadRequest
-	err = c.Submit(ctx, "a-passphrase-of-words", row)
-	var he *HTTPError
+	err = c.Submit(ctx, row)
 	if !errors.As(err, &he) || he.Code != 400 || err.Error() != "HTTP 400 from the catalogue" {
 		t.Fatalf("400: %v %+v", err, he)
 	}
-	if err := c.Submit(ctx, "", row); err == nil {
-		t.Fatal("empty key must not be sent")
+	gotRow = nil
+	if err := c.Submit(ctx, Row{ServerName: "loki.pulsedmedia.com"}); !errors.Is(err, ErrNoIdentifier) || gotRow != nil {
+		t.Fatalf("a row without an identifier must not be sent: %v %v", err, gotRow)
+	}
+}
+
+func TestConfig(t *testing.T) {
+	var body string
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/config" || r.Method != http.MethodGet {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	c := &Client{URL: srv.URL}
+	ctx := context.Background()
+	body = `{"uploadsEnabled":true,"plans":["M10G S"," Dragon-R Mushu ","",42,null,"bad\u0007plan","` + strings.Repeat("p", 101) + `"]}`
+	cfg, err := c.GetConfig(ctx)
+	if err != nil || !cfg.UploadsEnabled || len(cfg.Plans) != 2 || cfg.Plans[0] != "M10G S" || cfg.Plans[1] != "Dragon-R Mushu" {
+		t.Fatalf("config: %+v %v", cfg, err)
+	}
+	body = `{"plans":["A"]}` // no word on uploads: open, as the catalogue's own config says
+	if cfg, err = c.GetConfig(ctx); err != nil || !cfg.UploadsEnabled {
+		t.Fatalf("default uploads: %+v %v", cfg, err)
+	}
+	body = `{"uploadsEnabled":false,"plans":[]}`
+	if cfg, err = c.GetConfig(ctx); err != nil || cfg.UploadsEnabled || len(cfg.Plans) != 0 {
+		t.Fatalf("closed: %+v %v", cfg, err)
+	}
+	for _, b := range []string{`[]`, `null`, `"x"`, `{"plans":1}`, `{}x`, ``} {
+		body = b
+		if _, err := c.GetConfig(ctx); !errors.Is(err, ErrMalformed) {
+			t.Errorf("config %q: %v", b, err)
+		}
+	}
+	body = `{"plans":[` + strings.Repeat(`"p",`, maxPlans) + `"p"]}`
+	if _, err := c.GetConfig(ctx); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("too many plans: %v", err)
+	}
+	body = `{"plans":["` + strings.Repeat("p", maxConfigBytes) + `"]}`
+	if _, err := c.GetConfig(ctx); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversized config: %v", err)
+	}
+	status, body = http.StatusTooManyRequests, `{"error":"slow down"}`
+	if _, err := c.GetConfig(ctx); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("429: %v", err)
+	}
+	status = http.StatusInternalServerError
+	var he *HTTPError
+	if _, err := c.GetConfig(ctx); !errors.As(err, &he) || he.Code != 500 {
+		t.Fatalf("500: %v", err)
+	}
+}
+
+// The catalogue's row for one host: typed numbers, and strings reported as
+// absent, repeatable or present-but-not. The history page is asked for at
+// its smallest and the answer is bounded whatever size the catalogue makes
+// it.
+func TestNode(t *testing.T) {
+	var body, gotQuery, gotPath string
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	c := &Client{URL: srv.URL}
+	ctx := context.Background()
+	body = `{"server":{"serverName":"odin.pulsedmedia.com","processorMhz":2100,"swapBytes":1048576,"kvm":false,"ramBytes":1},
+		"system":{"distro":" Debian GNU/Linux 12 (bookworm) ","kernel":null,"vm":"bad\u001bvalue"},"userCount":3,"history":{"speedTests":[]}}`
+	n, err := c.Node(ctx, "odin.pulsedmedia.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/api/nodes/odin.pulsedmedia.com" || gotQuery != "limit=1" {
+		t.Fatalf("request: %s?%s", gotPath, gotQuery)
+	}
+	if n.ProcessorMHz == nil || *n.ProcessorMHz != 2100 || n.SwapBytes == nil || *n.SwapBytes != 1048576 || n.KVM == nil || *n.KVM {
+		t.Fatalf("numbers: %+v", n)
+	}
+	if n.System["distro"] != (Text{State: TextOK, Value: "Debian GNU/Linux 12 (bookworm)"}) || n.System["kernel"].State != TextAbsent ||
+		n.System["arch"].State != TextAbsent || n.System["vm"].State != TextRejected {
+		t.Fatalf("strings: %+v", n.System)
+	}
+	// Wrong types: a number that is not one is absent (nothing numeric to
+	// keep), a string that is not one is present and not repeatable.
+	body = `{"server":{"processorMhz":"fast","swapBytes":1.5,"kvm":"yes"},"system":{"distro":7,"kernel":"` + strings.Repeat("k", 201) + `"}}`
+	if n, err = c.Node(ctx, "odin.pulsedmedia.com"); err != nil || n.ProcessorMHz != nil || n.SwapBytes != nil || n.KVM != nil ||
+		n.System["distro"].State != TextRejected || n.System["kernel"].State != TextRejected {
+		t.Fatalf("wrong types: %+v %v", n, err)
+	}
+	body = `{"server":{"processorMhz":-5,"swapBytes":0,"kvm":true},"system":{}}`
+	if n, err = c.Node(ctx, "odin.pulsedmedia.com"); err != nil || n.ProcessorMHz != nil || n.SwapBytes == nil || *n.SwapBytes != 0 || n.KVM == nil || !*n.KVM {
+		t.Fatalf("bounds: %+v %v", n, err)
+	}
+	// null is unknown, never 0 or false: a decoder that let it through
+	// would post "no swap, not KVM" for a host whose row says neither.
+	body = `{"server":{"processorMhz":null,"swapBytes":null,"kvm":null},"system":{}}`
+	if n, err = c.Node(ctx, "odin.pulsedmedia.com"); err != nil || n.ProcessorMHz != nil || n.SwapBytes != nil || n.KVM != nil {
+		t.Fatalf("nulls: %+v %v", n, err)
+	}
+	body = `{"uploadsEnabled":null,"plans":["A"]}`
+	if cfg, err := c.GetConfig(ctx); err != nil || !cfg.UploadsEnabled {
+		t.Fatalf("null uploadsEnabled: %+v %v", cfg, err)
+	}
+	for _, b := range []string{`[]`, `null`, `{"system":{}}`, `{"server":1}`, `{"server":{}}x`} {
+		body = b
+		if _, err := c.Node(ctx, "odin.pulsedmedia.com"); !errors.Is(err, ErrMalformed) {
+			t.Errorf("node %q: %v", b, err)
+		}
+	}
+	body = `{"server":{},"history":{"pad":"` + strings.Repeat("h", maxNodeBytes) + `"}}`
+	if _, err := c.Node(ctx, "odin.pulsedmedia.com"); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("oversized node: %v", err)
+	}
+	status, body = http.StatusNotFound, `{"error":"Node not found."}`
+	if _, err := c.Node(ctx, "odin.pulsedmedia.com"); !errors.Is(err, ErrNotListed) {
+		t.Fatalf("404: %v", err)
+	}
+	status = http.StatusTooManyRequests
+	if _, err := c.Node(ctx, "odin.pulsedmedia.com"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("429: %v", err)
+	}
+	status = http.StatusBadGateway
+	var he *HTTPError
+	if _, err := c.Node(ctx, "odin.pulsedmedia.com"); !errors.As(err, &he) || he.Code != 502 {
+		t.Fatalf("502: %v", err)
+	}
+	// The hostname travels escaped: a name with a slash in it cannot reach
+	// another route.
+	status, body = http.StatusOK, `{"server":{}}`
+	if _, err := c.Node(ctx, "a/../config"); err != nil || gotPath == "/api/config" || !strings.Contains(gotPath, "/api/nodes/") {
+		t.Fatalf("path: %s %v", gotPath, err)
+	}
+}
+
+// The catalogue's text rule, in its units: a string is taken whole or
+// refused, never cut.
+func TestCleanText(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		max  int
+		want string
+		ok   bool
+	}{
+		{" Intel(R) N100 ", 300, "Intel(R) N100", true},
+		{strings.Repeat("a", 64), 64, strings.Repeat("a", 64), true},
+		{strings.Repeat("a", 65), 64, "", false},
+		{"tab\there", 64, "", false},
+		{"ctrl\x7f", 64, "", false},
+		{"   ", 64, "", false},
+		{"", 64, "", false},
+		{"\xff\xfe", 64, "", false},
+		{"Väinämöinen", 11, "Väinämöinen", true},                                       // one unit per character
+		{strings.Repeat("\U0001F600", 32), 64, strings.Repeat("\U0001F600", 32), true}, // an emoji is two units
+		{strings.Repeat("\U0001F600", 32) + "x", 64, "", false},
+		{"ok\u200bzero width", 64, "ok\u200bzero width", true}, // not a control character to the catalogue either
+	} {
+		got, ok := CleanText(c.in, c.max)
+		if got != c.want || ok != c.ok {
+			t.Errorf("CleanText(%q, %d) = %q, %v; want %q, %v", c.in, c.max, got, ok, c.want, c.ok)
+		}
 	}
 }
 
 // A redirect is refused, and nothing the server put in it (a Location
-// echoing the key it just saw, well-formed or not) survives into the
-// error: the error is the fixed ErrRedirect. Likewise an error body echoing
-// the key is not kept in any form.
-func TestRedirectRefusedAndKeyNeverReflected(t *testing.T) {
-	const key = "sentinel-passphrase-of-words"
+// echoing something it saw, the identifier say, well-formed or not)
+// survives into the error: the error is the fixed ErrRedirect. Likewise an
+// error body echoing it is not kept in any form.
+func TestRedirectRefusedAndTextNeverReflected(t *testing.T) {
+	const key = "sentinel-identifier-of-words"
 	var location, body string
 	status := http.StatusFound
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +373,7 @@ func TestRedirectRefusedAndKeyNeverReflected(t *testing.T) {
 		if !errors.Is(err, ErrRedirect) || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), "example") {
 			t.Fatalf("list redirect %q: %v", loc, err)
 		}
-		err = c.Submit(ctx, key, Row{ServerName: "x.example"})
+		err = c.Submit(ctx, Row{Username: key, ServerName: "x.example"})
 		if !errors.Is(err, ErrRedirect) || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), "example") {
 			t.Fatalf("submit redirect %q: %v", loc, err)
 		}
@@ -177,7 +382,7 @@ func TestRedirectRefusedAndKeyNeverReflected(t *testing.T) {
 	// kept in any form, whichever request it answers.
 	location, status = "", http.StatusBadRequest
 	body = `{"error":"bad key ` + key + ` and encoded ` + strings.ReplaceAll(key, "-", "%2D") + `"}`
-	err := c.Submit(ctx, key, Row{ServerName: "x.example"})
+	err := c.Submit(ctx, Row{Username: key, ServerName: "x.example"})
 	var he *HTTPError
 	if !errors.As(err, &he) || he.Code != 400 || strings.Contains(err.Error(), key) {
 		t.Fatalf("submission: %v", err)
@@ -266,13 +471,13 @@ func TestHostileResponses(t *testing.T) {
 	if !errors.As(err, &he) || he.Code != 500 || err.Error() != "HTTP 500 from the catalogue" {
 		t.Fatalf("hostile list error: %v", err)
 	}
-	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || he.Code != 500 {
+	if err := c.Submit(ctx, Row{Username: "t", ServerName: "x.example"}); !errors.As(err, &he) || he.Code != 500 {
 		t.Fatalf("hostile submit error: %v", err)
 	}
 	// A submission's answer is never read at all: a huge error answer
 	// still yields its code and nothing else.
 	body = strings.Repeat("A", 1<<20)
-	if err := c.Submit(ctx, "a-passphrase-of-words", Row{ServerName: "x.example"}); !errors.As(err, &he) || he.Code != 500 {
+	if err := c.Submit(ctx, Row{Username: "t", ServerName: "x.example"}); !errors.As(err, &he) || he.Code != 500 {
 		t.Fatalf("oversized error answer: %v", err)
 	}
 	body = strings.Repeat("A", maxListBytes+1)
@@ -329,7 +534,7 @@ func TestAcceptedAnswerBodyIsNotRead(t *testing.T) {
 	for i, m := range []string{"huge", "endless", "gzip"} {
 		mode.Store(m)
 		start := time.Now()
-		if err := c.Submit(context.Background(), "a-passphrase-of-words", Row{ServerName: "x.example"}); err != nil {
+		if err := c.Submit(context.Background(), Row{Username: "t", ServerName: "x.example"}); err != nil {
 			t.Fatalf("%s accepted answer: %v", m, err)
 		}
 		if d := time.Since(start); d > 10*time.Second {
@@ -433,7 +638,7 @@ func TestStatusOnlyAnswerIsNotDrained(t *testing.T) {
 	c := &Client{URL: "http://" + ln.Addr().String()}
 	least := time.Hour
 	for i := 0; i < 5; i++ {
-		if err := c.Submit(context.Background(), "a-passphrase-of-words", Row{ServerName: "x.example"}); err != nil {
+		if err := c.Submit(context.Background(), Row{Username: "t", ServerName: "x.example"}); err != nil {
 			t.Fatalf("try %d: %v", i, err)
 		}
 		select {
@@ -494,7 +699,7 @@ func TestHTTP1Only(t *testing.T) {
 // says so (Connection: close). A raw listener is needed because an
 // http.Server never frames a response that way.
 func TestTrailingBytesNeverReachTheStandardLogger(t *testing.T) {
-	const sentinel = "sentinel-passphrase-of-words"
+	const sentinel = "sentinel-identifier-of-words"
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
