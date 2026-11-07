@@ -510,7 +510,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.15
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.16
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -1071,7 +1071,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.15.0 is the current release. The code was written against five real Pulsed
+1.16.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1082,6 +1082,35 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.16.0**
+
+- **Plan I/O and CPU priority.** Every Pulsed Media plan has an I/O
+  priority and a CPU priority, weights on systemd's scale (Archive below
+  100, Standard from 100, Performance from 500, High from 1000) that
+  decide the box's share of the disk or the processor when the host is
+  busy. The customer API does not report them; the public plan page
+  (`https://pulsedmedia.com/eternal-vainamoinen.php`) prints them for
+  every plan on sale, so the dashboard reads that page (`GET` /
+  `POST /api/plans[/sync]`; body bounded, HTTP/1.1 only, no redirects,
+  nothing about the account sent) and matches its listings to each box's
+  plan name word by word, the way the API dresses names up ("Eternal
+  Väinämöinen - Seedbox 1TB R5 10G", "Dragon-R Trophy 100 Years
+  GiveAway"). A card tag (`IO 100 · CPU 500`), two overview rows marked
+  with their source, and a settings panel with the listings. Read on
+  demand, or on its own while an API key is set when a matched product is
+  missing from the last read (once per product, at least an hour apart).
+  A name the page sells twice with different priorities shows nothing;
+  plans no longer sold are not listed: type the weights on the box's edit
+  form (`io_weight` / `cpu_weight` on the box API, 0 = from the page),
+  which also overrides the page.
+- **Host iowait on the fleet view.** The card's title line and a table
+  column show the host's iowait from the last poll and its mean over the
+  dashboard's polls of the last 15, 30 and 60 minutes (the windows restart
+  with the dashboard; a window with no poll yet shows as unknown).
+  `host_sys.iowait` on the state.
+- The page fixture under `testdata/` is excluded from the AGPL header
+  check and from Sonar as data, not code.
 
 **1.15.0**
 
