@@ -141,7 +141,7 @@ button.disc:hover{color:var(--text)}
 .trow:last-child{border-bottom:0}
 .trow.head{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;padding:10px 14px}
 .trow.click{cursor:pointer}.trow.click:hover{background:var(--panel2)}
-.fleet-table .trow{grid-template-columns:minmax(170px,1.5fr) 80px minmax(120px,1fr) minmax(130px,1fr) minmax(130px,1fr) 160px 100px 90px 150px 80px;min-width:1270px}
+.fleet-table .trow{grid-template-columns:minmax(170px,1.5fr) 80px minmax(120px,1fr) minmax(130px,1fr) minmax(130px,1fr) 160px 100px 90px 190px 80px;min-width:1310px}
 .fleet-table .trow>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tor-table .trow{grid-template-columns:minmax(240px,2fr) 85px 130px 95px 95px 85px 85px 60px 70px 70px 124px;min-width:1200px;padding:4px 16px} /* compact rows */
 .tor-table .swarm{font-size:10.5px}
