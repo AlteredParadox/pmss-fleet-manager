@@ -365,6 +365,20 @@ function newFolderError(name) {
   if (new globalThis.TextEncoder().encode(n).length > 255) return 'the name is too long';
   return '';
 }
+// Destination modes (the server's xferMode*): "new" is a folder the copy
+// creates inside the chosen one; "keep" and "replace" are the chosen
+// folder itself, with files already there kept or replaced when they
+// differ in size or time. A copy from before 1.15.0 carries '' (new).
+function transferMode(mode) { return mode === 'keep' || mode === 'replace' ? mode : 'new'; }
+// transferModeLabel: how a copy's destination reads on its card ('' for a
+// new folder, the usual case).
+function transferModeLabel(v) {
+  switch (transferMode(v?.dst_mode)) {
+    case 'keep': return 'existing folder; files already there kept';
+    case 'replace': return 'existing folder; files that differ replaced';
+    default: return '';
+  }
+}
 // transferRequest: the start-copy body, from a confirmation (see
 // transferConfirmation). Paths are the ones the boxes resolved and the
 // operator confirmed; the revisions are the ones those listings were read
@@ -372,7 +386,9 @@ function newFolderError(name) {
 // (perhaps to another machine) is refused with 409 instead of being
 // copied from or to (fred on PR 142).
 function transferRequest(c) {
-  return { dst_box: Number(c.dstBox), dst_rev: Number(c.dstRev) || 0, src_path: String(c.srcPath), dst_path: joinPath(c.dstParent, c.name) };
+  const mode = transferMode(c.mode);
+  return { dst_box: Number(c.dstBox), dst_rev: Number(c.dstRev) || 0, src_path: String(c.srcPath),
+    dst_path: mode === 'new' ? joinPath(c.dstParent, c.name) : String(c.dstParent), dst_mode: mode };
 }
 // draftAfterStart: the form to keep once a start answers. Only the draft
 // that started is reset; one the operator opened meanwhile (another box's
@@ -381,16 +397,23 @@ function draftAfterStart(current, started, blank) {
   return current === started ? blank : current;
 }
 // transferConfirmation: what the confirmation step shows, from the two
-// resolved listings (source folder, destination parent) and the name.
-function transferConfirmation(srcBox, srcList, dstBox, dstList, name) {
-  const dstPath = joinPath(dstList.path, name);
+// resolved listings (source folder, destination folder), the name of the
+// new folder (mode new) and the mode.
+function transferConfirmation(srcBox, srcList, dstBox, dstList, name, mode) {
+  mode = transferMode(mode);
+  const dstPath = mode === 'new' ? joinPath(dstList.path, name) : dstList.path;
+  const how = {
+    new: 'a new folder, created for this copy',
+    keep: 'an existing folder; files already there are kept, only what is missing is copied; nothing there is removed',
+    replace: 'an existing folder; files that differ in size or time are replaced and the previous version is lost; files only there are kept',
+  }[mode];
   return {
     srcBox: srcBox.id, srcRev: srcList.box_rev, srcPath: srcList.path,
-    dstBox: dstBox.id, dstRev: dstList.box_rev, dstParent: dstList.path, name,
-    exists: (dstList.dirs || []).includes(name),
+    dstBox: dstBox.id, dstRev: dstList.box_rev, dstParent: dstList.path, name, mode,
+    exists: mode === 'new' && (dstList.dirs || []).includes(name),
     lines: [
       `from ${srcBox.name}: ${srcList.path}/ (its contents)`,
-      `to ${dstBox.name}: ${dstPath}/ (a new folder, created for this copy)`,
+      `to ${dstBox.name}: ${dstPath}/ (${how})`,
       `The source stays untouched: nothing in ${srcList.path} on ${srcBox.name} is moved, changed or deleted.`,
     ],
   };
@@ -405,5 +428,5 @@ function resyncLoads(view, tab, selId) {
   return [];
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart };
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart, transferMode, transferModeLabel };
 })();

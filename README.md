@@ -51,9 +51,11 @@ default order); the choice is remembered per table in the browser.
   start all; and start / stop / restart of the client.
 - Containers: rootless Docker containers with CPU and memory, start / stop /
   restart.
-- Transfers: copy a directory to a new directory on another of your boxes,
-  straight from box to box with rsync over SSH (see *Copying between boxes*),
-  with bytes, rate, rsync's estimate of progress, and the result.
+- Transfers: copy a directory to another of your boxes, into a new
+  directory or an existing one (keeping the files already there, or
+  replacing those that differ), straight from box to box with rsync over
+  SSH (see *Copying between boxes*), with bytes, rate, rsync's estimate of
+  progress, and the result.
 - Services: every process the account runs on the shared host (PMSS hides
   the other tenants'), grouped into the applications the PMSS stack ships or
   that customers commonly install: qBittorrent, rTorrent, Deluge, Radarr /
@@ -683,17 +685,22 @@ switching a source off for the box resolves its alerts.
 
 ### Copying between boxes
 
-The transfers tab copies one directory from this box into a **new**
-directory on another box. Pick the folder to copy with *browse* (or type
-its path), choose the destination box, browse to an existing folder there
-(or type it) and name the new folder. *Review copy* resolves both paths on
-their boxes and shows them exactly, with the reminder that the source is
-left untouched; *start copy* then sets it up and scrolls to its progress
-card. The picker lists one folder's subfolders at a time (at most 1000,
-symlinks not followed), never leaves the account's home, and shows no files. The data goes straight from box to box (Pulsed
-Media does not charge for internal traffic); the dashboard only sets the
-copy up, starts it and reads its status. This is copy only: no move, no
-sync, no `--delete`, no queue, no retries.
+The transfers tab copies one directory from this box to another box. Pick
+the folder to copy with *browse* (or type its path), choose the
+destination box, browse to an existing folder there (or type it), and say
+where the copy goes: into a **new folder** inside it, which you name and
+which must not exist yet; or **straight into that folder**, either
+**keeping** the files already there (only what is missing is copied) or
+**replacing** those that differ in size or modification time (the previous
+version is lost; identical files are skipped). *Review copy* resolves both
+paths on their boxes and shows them exactly, with the chosen rule and the
+reminder that the source is left untouched; *start copy* then sets it up
+and scrolls to its progress card. The picker lists one folder's subfolders
+at a time (at most 1000, symlinks not followed), never leaves the
+account's home, and shows no files. The data goes straight from box to box
+(Pulsed Media does not charge for internal traffic); the dashboard only
+sets the copy up, starts it and reads its status. This is copy only: no
+move, no sync, no `--delete`, no queue, no retries.
 
 How it is authenticated, per copy:
 
@@ -702,12 +709,13 @@ How it is authenticated, per copy:
    leaves that directory and is deleted when the copy ends.
 2. The dashboard adds the public half to the destination's
    `~/.ssh/authorized_keys` as one line,
-   `restrict,expiry-time="<setup + 30 min>",command="/usr/bin/rrsync -wo -no-del -munge '<new dir>'"`:
-   no shell, no forwarding, no PTY; it can only write into the new
-   directory, cannot read anything and cannot delete; symlinks it sends are
-   munged on arrival, so even a source that turned hostile (it holds the
-   key) cannot use one to write outside the directory; no new login with
-   it after 30 minutes (rsync connects once, so a long copy is not cut off).
+   `restrict,expiry-time="<setup + 30 min>",command="/usr/bin/rrsync -wo -no-del -munge '<chosen dir>'"`:
+   no shell, no forwarding, no PTY; it can only write into the chosen
+   directory, cannot read anything and cannot use rsync's delete options;
+   symlinks it sends are munged on arrival, so even a source that turned
+   hostile (it holds the key) cannot use one to write outside the
+   directory; no new login with it after 30 minutes (rsync connects once,
+   so a long copy is not cut off).
    The file is edited under a lock by copy-and-rename; no other line is
    touched, and removal puts it back byte for byte (including `~/.ssh` and
    the file themselves if the copy created them).
@@ -734,20 +742,23 @@ when rsync's exit code says so, not when its percentage reaches the end;
 losing contact with the source shows "last seen", never a result. Its
 output is kept bounded on the box (a few KiB per job, however long it runs).
 
-Rules: both paths must resolve inside the account's home directory; the
-destination must not exist yet (it is created atomically, so collisions
-and two copies to one place are refused); the source may not overlap the
-dashboard's control directory `~/.config/pmss-fleet-manager`; symlinks and
-special files are skipped and counted, hard links arrive as separate files;
-one copy at a time per source box. Free space is shown as a hint, not
-checked: a copy that does not fit ends with "destination out of space or
-quota". Files that change during the copy may arrive inconsistent, and
+Rules: both paths must resolve inside the account's home directory; a new
+destination folder must not exist yet (it is created atomically, so a
+collision is refused); an existing destination folder must be writable
+and may not be the home itself, `~/.ssh`, `~/.config` or the dashboard's
+control directory `~/.config/pmss-fleet-manager`, nor contain or lie inside
+those, and may not contain any symlink (see below); the source may not
+overlap the control directory; symlinks and special files are skipped and
+counted, hard links arrive as separate files; one copy at a time per
+source box and per destination account. Free space is shown as a hint,
+not checked: a copy that does not fit ends with "destination out of space
+or quota". Files that change during the copy may arrive inconsistent, and
 files that vanish give "completed with warnings". A partial copy is never
 deleted. Cancel stops the copy: the files that arrived complete stay, the
 one in flight is discarded by rsync. Cancel stops the copy the dashboard
 started; it does not end other sessions opened with the job key while it
 was valid (only a compromised source could open one, and it could still
-only write into the new directory). A job binds to the
+only write into the chosen directory). A job binds to the
 account and machine it started on: after an edit that points a box record
 elsewhere, or forgets its pinned key, the job refuses to touch that box and
 lists what may need removing by hand. An unfinished copy whose source box
@@ -755,6 +766,41 @@ was removed or now points elsewhere can be forgotten; the dashboard then
 says it may still be running and does nothing on either box. Cleanup that could not be confirmed
 (a box unreachable when the copy ended) is shown as "credential cleanup
 needed" with a retry button, never as a failed copy.
+
+Copying into an existing folder, in detail. Nothing that is only on the
+destination is ever removed, in either rule. The copy does not set the
+folder's (or its subfolders') timestamps to the source's; a folder's own
+time still moves when a file lands in it, as with any write. *Replace*
+decides by size and modification time, rsync's quick check: a file that
+differs with the same size and time is left alone, so this is not content
+verification. A file and a folder of the same name, one on each side, is
+a name conflict: with *keep* both are left as they are and counted (a
+source folder meeting a destination file then has its own files fail, so
+that copy ends "partial"); with *replace* a destination file gives way to
+the source's folder, an empty destination folder to the source's file,
+and a non-empty one fails that item ("partial", the rest arrives). Stop
+anything using the destination folder too: a torrent client seeding a
+file that gets replaced fails its checks. After a hard kill (a reboot)
+rsync's temporary files (`.name.XXXXXX`) can be left in the folder.
+
+Why an existing folder may not contain symlinks: `-munge` neutralises the
+links the copy *writes*, not one already there. Through a link already in
+the folder, a source that turned hostile (it holds the job key) can name
+the link's parent as rsync's partial directory and cut the transfer,
+leaving a file of its choosing where the link points, for instance over
+`~/.ssh/authorized_keys` (reproduced; the test suite keeps the case). The
+claim therefore walks the folder (bounded to 60 s on the box, failing
+closed: an unfinished or failed walk refuses) and refuses one with any
+symlink. The walk is a setup-time check; the destination account's own
+processes are trusted, since they already own the data. What such a
+source can still do inside the chosen folder: overwrite or remove anything
+(rrsync blocks the delete options, not `--force` or `--inplace`), whatever
+the rule chosen (the keep/replace rule is the copy's own behaviour, not
+enforced by the destination; rrsync 3.3.0+ could enforce *keep* with
+`-no-overwrite`, which the boxes' 3.2.7 lacks). A file hard-linked to
+another name is that same file, so its other names show such a change;
+the dashboard's own copy replaces by rename and never writes through a
+link. Nothing outside the chosen folder is reachable.
 
 ## Security and hardening
 
@@ -1012,6 +1058,22 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**Unreleased**
+
+- **Copies into an existing folder.** The transfers tab can put a copy
+  straight into a folder that already exists on the other box (`~/data`
+  to `~/data`), keeping the files already there or replacing those that
+  differ in size or time; a new folder stays the default. Existing files
+  kept and name conflicts are counted on the card and in the result. An
+  existing destination may not be the home, `~/.ssh`, `~/.config` or the
+  dashboard's control directory, and may not contain symlinks (a link
+  already there would let a compromised source place a file outside the
+  folder through rsync's partial directory; reproduced and tested); one
+  active copy per destination account. `POST /api/boxes/{id}/transfers`
+  takes `dst_mode` (`new`, `keep`, `replace`), transfers carry `dst_mode`,
+  `kept` and `conflicts`; the `transfers` table gains `dst_mode`. See
+  *Copying between boxes*.
 
 **1.14.1**
 

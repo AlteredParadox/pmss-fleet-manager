@@ -85,6 +85,8 @@ func TestXferResult(t *testing.T) {
 		want  string
 	}{
 		{xferFinished, xferLive{rc: "0", progress: prog, skipped: 1}, "copied 3.0 MiB in 2 files; 1 symlinks or special files skipped"},
+		{xferFinished, xferLive{rc: "0", progress: prog, kept: 3, conflicts: 1}, "copied 3.0 MiB in 2 files; 3 existing files kept; 1 name conflicts (a file against a folder) skipped"},
+		{xferFinished, xferLive{rc: "cancelled", kept: 3}, "cancelled"},
 		{xferFinished, xferLive{rc: "24", progress: prog}, "completed with warnings: some source files vanished during the copy; 3.0 MiB in 2 files"},
 		{xferFinished, xferLive{rc: "23", errors: "rsync: open \"x\" failed: Permission denied (13)"}, "partial: some files could not be transferred — rsync: open \"x\" failed: Permission denied (13)"},
 		{xferFinished, xferLive{rc: "11", errors: "rsync: write failed on \"/h/d/big\": No space left on device (28)"}, "destination out of space or quota — rsync: write failed on \"/h/d/big\": No space left on device (28)"},
@@ -135,6 +137,9 @@ func TestTransfersRestart(t *testing.T) {
 		// Stopped between recording the launch and its answer: a runner
 		// may exist, so the job is read, not taken for a failed setup.
 		{Token: strings.Repeat("d", 32), SrcBoxID: 1, DstBoxID: 2, Phase: xferUnconfirmed, PubKey: testBlob, Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey},
+		// Into an existing directory: the same obligations, never the
+		// directory (nothing was created).
+		{Token: strings.Repeat("e", 32), SrcBoxID: 1, DstBoxID: 2, DstMode: xferModeKeep, Phase: xferPreparing, PubKey: testBlob, Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey},
 	}
 	for _, r := range rows {
 		if err := st.CreateTransfer(ctx, r); err != nil {
@@ -157,6 +162,9 @@ func TestTransfersRestart(t *testing.T) {
 	}
 	if v := got[rows[3].Token]; v.Phase != xferUnconfirmed || v.RC != "" {
 		t.Errorf("unconfirmed: %s", v.Phase)
+	}
+	if v := got[rows[4].Token]; v.Phase != xferSetupFailed || v.DstMode != xferModeKeep || v.Pending != store.TransferPendingSrcJob|store.TransferPendingDstKey {
+		t.Errorf("preparing into an existing directory: %s %s %d", v.Phase, v.DstMode, v.Pending)
 	}
 	v := got[rows[2].Token]
 	if v.Phase != xferRunning || v.RC != "" || !strings.Contains(v.StatusErr, "was removed") || !strings.Contains(v.Blocked, "removed") || v.Scanning {
@@ -281,6 +289,23 @@ func TestTransferOnePerSource(t *testing.T) {
 	_, err = m.StartTransfer(ctx, other.ID, TransferRequest{DstBox: b.ID, DstRev: m.poller(b.ID).box.Revision, SrcPath: "data", DstPath: "a'b"})
 	if !errors.Is(err, ErrTransferInput) {
 		t.Errorf("bad destination: %v", err)
+	}
+	_, err = m.StartTransfer(ctx, other.ID, TransferRequest{DstBox: b.ID, DstRev: m.poller(b.ID).box.Revision, SrcPath: "data", DstPath: "data", DstMode: "merge"})
+	if !errors.Is(err, ErrTransferInput) || !strings.Contains(err.Error(), "unknown destination mode") {
+		t.Errorf("bad mode: %v", err)
+	}
+	// One active copy per destination account too: an existing directory
+	// is not claimed, so two copies into one place are refused here.
+	recv := &store.Transfer{Token: newTok(t), SrcBoxID: 98, DstBoxID: b.ID, DstEndp: AuthEndpoint(m.poller(b.ID).box), DstMode: xferModeKeep, Phase: xferRunning}
+	if err := st.CreateTransfer(ctx, recv); err != nil {
+		t.Fatal(err)
+	}
+	m.xferMu.Lock()
+	m.xfers[recv.ID] = &xferJob{t: *recv}
+	m.xferMu.Unlock()
+	_, err = m.StartTransfer(ctx, other.ID, TransferRequest{DstBox: b.ID, DstRev: m.poller(b.ID).box.Revision, SrcPath: "data", DstPath: "data", DstMode: xferModeReplace})
+	if !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "already receiving a copy") {
+		t.Errorf("second copy into one destination: %v", err)
 	}
 }
 

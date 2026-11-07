@@ -295,8 +295,29 @@ test('the start-copy body uses the confirmed paths and the revisions they were l
   // names rev 3, so the server refuses with 409 instead of copying to the
   // record's new target.
   dst.box_rev = 4;
-  assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/dl/x', dst_path: '/home/v/in/x copy' });
+  assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/dl/x', dst_path: '/home/v/in/x copy', dst_mode: 'new' });
   assert.equal(c.srcRev, 5);
+});
+
+test('an existing destination folder is sent as itself, with its mode; the name and the exists flag belong to a new folder only', () => {
+  const src = { id: 2, name: 'pm1' }, dst = { id: 7, name: 'pmstor01' };
+  const sl = { box_rev: 5, path: '/home/u/data', rel: 'data' }, dl = { box_rev: 3, path: '/home/v/data', rel: 'data', dirs: ['x'] };
+  for (const mode of ['keep', 'replace']) {
+    const c = V.transferConfirmation(src, sl, dst, dl, 'x', mode);
+    assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/data', dst_path: '/home/v/data', dst_mode: mode });
+    assert.equal(c.exists, false, mode);
+    assert.match(c.lines[1], /^to pmstor01: \/home\/v\/data\/ \(an existing folder; /);
+  }
+  assert.match(V.transferConfirmation(src, sl, dst, dl, 'x', 'keep').lines[1], /files already there are kept/);
+  assert.match(V.transferConfirmation(src, sl, dst, dl, 'x', 'replace').lines[1], /files that differ in size or time are replaced/);
+  // Anything else, and a copy from before 1.15.0 (no mode), is a new folder.
+  assert.equal(V.transferMode(''), 'new');
+  assert.equal(V.transferMode('merge'), 'new');
+  assert.equal(V.transferRequest(V.transferConfirmation(src, sl, dst, dl, 'x', undefined)).dst_path, '/home/v/data/x');
+  assert.equal(V.transferModeLabel({ dst_mode: '' }), '');
+  assert.equal(V.transferModeLabel({ dst_mode: 'new' }), '');
+  assert.match(V.transferModeLabel({ dst_mode: 'keep' }), /kept/);
+  assert.match(V.transferModeLabel({ dst_mode: 'replace' }), /replaced/);
 });
 
 test('the confirmation names both exact paths and says the source stays untouched', () => {

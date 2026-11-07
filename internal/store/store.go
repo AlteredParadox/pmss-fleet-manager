@@ -348,7 +348,23 @@ func (s *Store) migrate() error {
 	if err := s.ensureRevisionColumn(); err != nil {
 		return err
 	}
-	return s.ensureRtColumns()
+	if err := s.ensureRtColumns(); err != nil {
+		return err
+	}
+	return s.ensureTransferDstModeColumn()
+}
+
+// ensureTransferDstModeColumn adds transfers.dst_mode to a database from
+// before it existed.
+func (s *Store) ensureTransferDstModeColumn() error {
+	has, err := s.hasColumn(transfersColumnsSQL, "dst_mode")
+	if err != nil || has {
+		return err
+	}
+	if _, err := s.db.Exec(addTransferDstModeColSQL); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	return nil
 }
 
 // Columns for rTorrent monitoring (1.10.0); constants like the others.
@@ -392,8 +408,9 @@ func (s *Store) ensureRevisionColumn() error {
 // Columns added after 1.3.1; SQLite has no ADD COLUMN IF NOT EXISTS, so the
 // table is inspected first. Both statements are constants.
 const (
-	boxesColumnsSQL    = "PRAGMA table_info(boxes)"
-	addAppsWatchColSQL = "ALTER TABLE boxes ADD COLUMN apps_watch TEXT NOT NULL DEFAULT ''"
+	boxesColumnsSQL     = "PRAGMA table_info(boxes)"
+	transfersColumnsSQL = "PRAGMA table_info(transfers)"
+	addAppsWatchColSQL  = "ALTER TABLE boxes ADD COLUMN apps_watch TEXT NOT NULL DEFAULT ''"
 )
 
 // ensureAppsWatchColumn adds boxes.apps_watch to a database from before it existed.
@@ -412,8 +429,12 @@ func (s *Store) ensureAppsWatchColumn() error {
 }
 
 // hasBoxesColumn reports whether the boxes table has the named column.
-func (s *Store) hasBoxesColumn(col string) (bool, error) {
-	rows, err := s.db.Query(boxesColumnsSQL)
+func (s *Store) hasBoxesColumn(col string) (bool, error) { return s.hasColumn(boxesColumnsSQL, col) }
+
+// hasColumn reports whether the table pragma (a PRAGMA table_info
+// constant) describes has the named column.
+func (s *Store) hasColumn(pragma, col string) (bool, error) {
+	rows, err := s.db.Query(pragma)
 	if err != nil {
 		return false, fmt.Errorf("migrate: %w", err)
 	}

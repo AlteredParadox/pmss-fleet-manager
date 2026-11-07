@@ -98,6 +98,8 @@ type TransferView struct {
 	Scanning  bool              `json:"scanning"`
 	Progress  *TransferProgress `json:"progress,omitempty"`
 	Skipped   int               `json:"skipped"`
+	Kept      int               `json:"kept"`      // existing files kept (mode keep)
+	Conflicts int               `json:"conflicts"` // file-vs-directory name conflicts skipped (mode keep)
 	ErrCount  int               `json:"error_count"`
 	Errors    string            `json:"errors,omitempty"`
 }
@@ -108,13 +110,15 @@ type TransferRequest struct {
 	DstRev  int64  `json:"dst_rev"`
 	SrcPath string `json:"src_path"`
 	DstPath string `json:"dst_path"`
+	DstMode string `json:"dst_mode"` // "" or new, keep, replace (see xferMode*)
 }
 
 // xferLive is one status read of a job on its source.
 type xferLive struct {
 	noJob, started, pidFile, alive bool
 	rc                             string
-	skipped, errCount              int
+	skipped, kept, conflicts       int
+	errCount                       int
 	progress                       string
 	errors                         string
 }
@@ -136,6 +140,10 @@ func parseXferStatus(s string) xferLive {
 			l.rc = strings.TrimSpace(ln[3:])
 		case strings.HasPrefix(ln, "skipped="):
 			l.skipped, _ = strconv.Atoi(strings.TrimSpace(ln[8:]))
+		case strings.HasPrefix(ln, "kept="):
+			l.kept, _ = strconv.Atoi(strings.TrimSpace(ln[5:]))
+		case strings.HasPrefix(ln, "conflicts="):
+			l.conflicts, _ = strconv.Atoi(strings.TrimSpace(ln[10:]))
 		case strings.HasPrefix(ln, "errors.count="):
 			l.errCount, _ = strconv.Atoi(strings.TrimSpace(ln[13:]))
 		case strings.HasPrefix(ln, "progress="):
@@ -204,6 +212,12 @@ func xferResult(phase string, l xferLive) string {
 	if l.skipped > 0 {
 		skipped = fmt.Sprintf("; %d symlinks or special files skipped", l.skipped)
 	}
+	if l.kept > 0 {
+		skipped += fmt.Sprintf("; %d existing files kept", l.kept)
+	}
+	if l.conflicts > 0 {
+		skipped += fmt.Sprintf("; %d name conflicts (a file against a folder) skipped", l.conflicts)
+	}
 	copied := ""
 	if p := parseProgress(l.progress); p != nil {
 		copied = fmt.Sprintf(" %s in %d files", fmtBytesShort(p.Bytes), p.Files)
@@ -229,6 +243,7 @@ func xferResult(phase string, l xferLive) string {
 	default:
 		s = "rsync exited with code " + l.rc
 	}
+	s += skipped
 	if first != "" {
 		s += " — " + first
 	}
@@ -555,6 +570,14 @@ func (m *Manager) StartTransfer(ctx context.Context, srcID int64, req TransferRe
 	if err := validXferPath(dstPath, true); err != nil {
 		return TransferView{}, fmt.Errorf("%w: destination: %v", ErrTransferInput, err)
 	}
+	mode := req.DstMode
+	switch mode {
+	case "", xferModeNew:
+		mode = xferModeNew
+	case xferModeKeep, xferModeReplace:
+	default:
+		return TransferView{}, fmt.Errorf("%w: unknown destination mode %q", ErrTransferInput, clip(mode, 40))
+	}
 	sKey, dKey := sp.hostKey(), dp.hostKey()
 	if sKey == "" || dKey == "" {
 		return TransferView{}, fmt.Errorf("%w: both boxes need a pinned host key (wait for their first poll)", ErrTransferInput)
@@ -565,14 +588,23 @@ func (m *Manager) StartTransfer(ctx context.Context, srcID int64, req TransferRe
 	}
 	t := store.Transfer{Token: token, SrcBoxID: srcID, SrcEndp: AuthEndpoint(sp.box), SrcHostKey: sKey,
 		DstBoxID: req.DstBox, DstEndp: AuthEndpoint(dp.box), DstHostKey: dKey,
-		SrcPath: src, DstPath: dstPath, Phase: xferPreparing, Pending: store.TransferPendingSrcJob}
-	// One active copy per source box, checked and recorded under one lock.
-	// The row exists before anything changes on a box.
+		SrcPath: src, DstPath: dstPath, DstMode: mode, Phase: xferPreparing, Pending: store.TransferPendingSrcJob}
+	// One active copy per source box and per destination account (an
+	// existing directory is not claimed, so two copies into one place
+	// are refused here), checked and recorded under one lock. The row
+	// exists before anything changes on a box.
 	m.xferMu.Lock()
 	for _, o := range m.xfers {
-		if o.t.SrcBoxID == srcID && xferActive(o.t.Phase) {
+		if !xferActive(o.t.Phase) {
+			continue
+		}
+		if o.t.SrcBoxID == srcID {
 			m.xferMu.Unlock()
 			return TransferView{}, fmt.Errorf("%w: %s already has a copy in progress", ErrTransferBusy, sp.box.Name)
+		}
+		if o.t.DstEndp == t.DstEndp {
+			m.xferMu.Unlock()
+			return TransferView{}, fmt.Errorf("%w: %s is already receiving a copy", ErrTransferBusy, dp.box.Name)
 		}
 	}
 	if err := m.st.CreateTransfer(ctx, &t); err != nil {
@@ -636,12 +668,13 @@ func (m *Manager) xferSetupLocked(ctx context.Context, j *xferJob, sp, dp *polle
 	if err != nil {
 		return fail(err)
 	}
-	dir, err := xferDstPrepare(ctx, dcli, t.Token, t.DstPath, blob)
-	if dir != "" {
-		// The claim answered: this job created the directory. Only then
-		// may a failed setup remove it (if still empty); a refused or
-		// unanswered claim proves nothing, and a directory that already
-		// existed is never touched (Codex on PR 142).
+	_, created, err := xferDstPrepare(ctx, dcli, t.Token, t.DstPath, blob, t.DstMode)
+	if created {
+		// The claim answered DST: this job created the directory. Only
+		// then may a failed setup remove it (if still empty); a refused
+		// or unanswered claim proves nothing, and a directory that
+		// already existed (a DIR answer) is never touched (Codex on PR
+		// 142).
 		t.Pending |= store.TransferPendingDstEmpty
 	}
 	if err != nil {
@@ -659,7 +692,7 @@ func (m *Manager) xferSetupLocked(ctx context.Context, j *xferJob, sp, dp *polle
 	if err := m.xferSave(j, t); err != nil {
 		return fail(err)
 	}
-	confirmed, err := xferLaunch(ctx, cli, t.Token, resolved, xferDest{dp.box.User, dp.box.Host, dp.box.Port, t.DstHostKey})
+	confirmed, err := xferLaunch(ctx, cli, t.Token, resolved, xferDest{dp.box.User, dp.box.Host, dp.box.Port, t.DstHostKey}, t.DstMode)
 	var refused *xferRefusal
 	if errors.As(err, &refused) {
 		return fail(err) // the launch script refused before starting anything
@@ -809,7 +842,7 @@ func (m *Manager) xferView(id int64) TransferView {
 	t, l, seen, serr := j.t, j.live, j.seen, j.err
 	m.xferMu.Unlock()
 	v := TransferView{Transfer: t, Cleanup: cleanupWords(t.Pending), LastSeen: seen, StatusErr: serr,
-		Skipped: l.skipped, ErrCount: l.errCount, Errors: l.errors, Progress: parseProgress(l.progress)}
+		Skipped: l.skipped, Kept: l.kept, Conflicts: l.conflicts, ErrCount: l.errCount, Errors: l.errors, Progress: parseProgress(l.progress)}
 	// Scanning: the runner was seen running and rsync has not printed
 	// progress yet (it is building its file list).
 	v.Scanning = t.Phase == xferRunning && v.Progress == nil && !seen.IsZero() && l.started && l.rc == ""
