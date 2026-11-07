@@ -607,6 +607,14 @@ function torrentsCell(b) {
   const ratio = b.qbt.enabled ? ` <span class="muted">r${b.qbt.global_ratio ? b.qbt.global_ratio.toFixed(2) : '—'}</span>` : '';
   return `${ct.torrents}${ratio}`;
 }
+// iowaitCell: the host's iowait now and averaged over the last 15 / 30 /
+// 60 minutes of this dashboard's polls (a window with no poll yet shows —).
+function iowaitCell(b) {
+  const h = b.host_sys, w = h.iowait || {};
+  const avg = (v, n) => (n ? fmtPct(v) : '—');
+  const title = `host iowait: last poll, then the mean over the polls of the last 15, 30 and 60 minutes (${w.n15 || 0} / ${w.n30 || 0} / ${w.n60 || 0} polls; the windows restart with the dashboard)`;
+  return `<div title="${esc(title)}"><div class="l">iowait now · 15m · 30m · 1h</div><div>${h.cpu_ok ? fmtPct(h.cpu_iowait_pct) : '—'} <span class="muted">· ${avg(w.avg15, w.n15)} · ${avg(w.avg30, w.n30)} · ${avg(w.avg60, w.n60)}</span></div></div>`;
+}
 function fleetCards() {
   const dt = S.settings.disk_threshold_pct || 90, tt = S.settings.traffic_threshold_pct || 90;
   return `<div class="cards" style="--card-min:${cardMin()}px">${S.boxes.map((b) => {
@@ -628,6 +636,7 @@ function fleetCards() {
         <div><div class="l">up/down</div><div><span class="up">↑</span>${fmtBits(b.rates.up_bps)} <span class="down">↓</span>${fmtBits(b.rates.down_bps)}</div></div>
         <div><div class="l">torrents</div><div>${torrentsCell(b) || (b.docker.enabled ? `${b.docker.running} <span class="muted">containers</span>` : '—')}</div></div>
         <div><div class="l">cpu/ram</div><div>${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} / ${b.ram.ok ? fmtPct(b.ram.pct) : '—'}</div></div>
+        ${iowaitCell(b)}
       </div>
     </div>`;
   }).join('')}</div>`;
