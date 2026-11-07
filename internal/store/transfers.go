@@ -37,6 +37,11 @@ type Transfer struct {
 	DstHostKey string `json:"-"`
 	SrcPath    string `json:"src_path"`
 	DstPath    string `json:"dst_path"`
+	// DstMode is what DstPath is: "new" (a directory the job creates; also
+	// "" on rows from before 1.15.0), "keep" (an existing directory, files
+	// already there kept) or "replace" (an existing directory, files that
+	// differ replaced).
+	DstMode string `json:"dst_mode"`
 	// PubKey is the job key's base64 blob, saved before the key is added
 	// to the destination: removal matches this exact key.
 	PubKey string `json:"-"`
@@ -64,10 +69,15 @@ const createTransfersSQL = `CREATE TABLE IF NOT EXISTS transfers (
 	src_path TEXT NOT NULL, dst_path TEXT NOT NULL, pubkey TEXT NOT NULL DEFAULT '',
 	phase TEXT NOT NULL, rc TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '',
 	pending INTEGER NOT NULL DEFAULT 0,
-	created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '')`
+	created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '',
+	dst_mode TEXT NOT NULL DEFAULT '')`
+
+// addTransferDstModeColSQL adds transfers.dst_mode to a database from
+// before it existed (1.15.0); a constant like the others.
+const addTransferDstModeColSQL = "ALTER TABLE transfers ADD COLUMN dst_mode TEXT NOT NULL DEFAULT ''"
 
 const transferCols = `id, token, src_box_id, src_endpoint, src_host_key, dst_box_id, dst_endpoint, dst_host_key,
-	src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at`
+	src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at, dst_mode`
 
 // listTransfersSQL is a constant: nothing from a request is spliced in.
 const listTransfersSQL = "SELECT " + transferCols + " FROM transfers ORDER BY id"
@@ -76,9 +86,9 @@ const listTransfersSQL = "SELECT " + transferCols + " FROM transfers ORDER BY id
 func (s *Store) CreateTransfer(ctx context.Context, t *Transfer) error {
 	t.CreatedAt = time.Now().UTC().Truncate(time.Second)
 	res, err := s.db.ExecContext(ctx, `INSERT INTO transfers (token, src_box_id, src_endpoint, src_host_key, dst_box_id, dst_endpoint, dst_host_key,
-		src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at, dst_mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Token, t.SrcBoxID, t.SrcEndp, t.SrcHostKey, t.DstBoxID, t.DstEndp, t.DstHostKey,
-		t.SrcPath, t.DstPath, t.PubKey, t.Phase, t.RC, t.Result, t.Pending, t.CreatedAt.Format(time.RFC3339), fmtTime(t.FinishedAt))
+		t.SrcPath, t.DstPath, t.PubKey, t.Phase, t.RC, t.Result, t.Pending, t.CreatedAt.Format(time.RFC3339), fmtTime(t.FinishedAt), t.DstMode)
 	if err != nil {
 		return err
 	}
@@ -111,7 +121,7 @@ func (s *Store) ListTransfers(ctx context.Context) ([]*Transfer, error) {
 		var t Transfer
 		var created, finished string
 		if err := rows.Scan(&t.ID, &t.Token, &t.SrcBoxID, &t.SrcEndp, &t.SrcHostKey, &t.DstBoxID, &t.DstEndp, &t.DstHostKey,
-			&t.SrcPath, &t.DstPath, &t.PubKey, &t.Phase, &t.RC, &t.Result, &t.Pending, &created, &finished); err != nil {
+			&t.SrcPath, &t.DstPath, &t.PubKey, &t.Phase, &t.RC, &t.Result, &t.Pending, &created, &finished, &t.DstMode); err != nil {
 			return nil, err
 		}
 		t.CreatedAt, _ = time.Parse(time.RFC3339, created)

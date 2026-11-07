@@ -18,10 +18,11 @@ package collect
 
 // Box-to-box copy: the source box runs rsync over ssh straight to the
 // destination box with a key made for the one job. The destination accepts
-// that key only for rrsync writing into the new directory, only for 30
-// minutes from setup, with forwarding, PTY and user rc off. The dashboard
-// carries no data and no private key: it runs short setup, launch, status
-// and cleanup scripts over its own connections.
+// that key only for rrsync writing into the chosen directory (one the job
+// creates, or an existing one), only for 30 minutes from setup, with
+// forwarding, PTY and user rc off. The dashboard carries no data and no
+// private key: it runs short setup, launch, status and cleanup scripts
+// over its own connections.
 
 import (
 	"context"
@@ -57,6 +58,22 @@ const xferRrsyncOpts = "-wo -no-del -munge"
 // PATH finds first (daybreak review: a user-writable rrsync ahead in PATH
 // would run instead of the confinement). The claim checks it is root's.
 const xferRrsync = "/usr/bin/rrsync"
+
+// Destination modes: what the destination path is. "new" is a directory
+// the job creates (and may remove again, while empty, if its setup
+// fails); "keep" and "replace" are an existing directory, with files
+// already there kept (rsync --ignore-existing) or replaced when they
+// differ in size or modification time (rsync's quick check). None of
+// them deletes a destination-only path.
+const (
+	xferModeNew     = "new"
+	xferModeKeep    = "keep"
+	xferModeReplace = "replace"
+)
+
+// xferScanTimeout bounds the symlink scan of an existing destination on
+// the box itself (seconds), apart from the script's deadline.
+const xferScanTimeout = "60"
 
 // xferOutCap bounds what any job script may send back; the largest, a
 // status read, stays under 18 KiB (the job files are bounded by cap.pl and
@@ -106,7 +123,7 @@ func validXferPath(p string, dest bool) error {
 		}
 	}
 	if dest && strings.Trim(p, "/.") == "" {
-		return errors.New("destination must name a new directory")
+		return errors.New("destination must be a folder inside the home, not the home itself")
 	}
 	return nil
 }
@@ -165,9 +182,17 @@ printf 'SRC %s\n' "$src"
 printf 'PUB %s\n' "$(cat "$J/key.pub")"
 `
 
-// xferDstClaimScript checks the destination and claims it: mkdir (not -p)
-// fails if the path exists, so a collision or a second job aimed at the
-// same path is refused here.
+// xferDstClaimScript checks the destination and claims it. Mode new:
+// mkdir (not -p) fails if the path exists, so a collision is refused
+// here, and the answer is DST. Modes keep and replace: the directory
+// must exist, be the account's to write, hold no symlink (through a link
+// already there a source that turned hostile can land a --partial-dir
+// file outside the directory, over ~/.ssh/authorized_keys, reproduced
+// against rrsync 3.4.1; -munge only covers links the copy writes), and
+// the answer is DIR: a different word, since DST
+// means "this job created it" to the Go side. Either way the directory
+// may not be the home, ~/.ssh, the dashboard's control directory, or
+// contain or lie inside those.
 const xferDstClaimScript = `rr=` + xferRrsync + `
 rt=$(realpath -e -- "$rr" 2>/dev/null) || die "$rr not found on the destination: a restricted transfer key is not possible"
 # Root's, and writable only by root, as is the folder it sits in: a
@@ -176,21 +201,45 @@ for f in "$rt" "$(dirname -- "$rt")"; do
   [ "$(stat -c %u -- "$f")" = 0 ] && [ $(( 0$(stat -c %a -- "$f") & 022 )) = 0 ] || die "$f is not root-owned and root-only writable: not trusting it as rrsync"
 done
 [ -f "$rt" ] && [ -x "$rt" ] || die "$rr is not an executable file"
+canon -m -- "$ctl"
+c=$CANON
 p=$(abspath "$DST")
 p=${p%/}
-case "$p" in */) die "destination must name a new directory";; esac
-[ -e "$p" ] || [ -L "$p" ] && die "destination already exists"
-canon -e -- "${p%/*}/" || die "destination's parent directory does not exist"
-d="${CANON%/}/${p##*/}"
+mode=${MODE:-new}
+case "$mode" in
+new)
+  case "$p" in */) die "destination must name a new directory";; esac
+  [ -e "$p" ] || [ -L "$p" ] && die "destination already exists"
+  canon -e -- "${p%/*}/" || die "destination's parent directory does not exist"
+  d="${CANON%/}/${p##*/}"
+  ;;
+keep|replace)
+  canon -e -- "$p" || die "destination folder does not exist"
+  d=$CANON
+  [ -d "$d" ] || die "destination is not a directory"
+  [ -w "$d" ] && [ -x "$d" ] || die "destination folder is not writable by your account"
+  [ "$d" = "$home" ] && die "destination is your whole home directory (it holds ~/.ssh and the transfer control directory)"
+  ;;
+*) die "bad destination mode";;
+esac
 inside "$d" "$home" || die "destination is not inside your home directory"
-inside "$d" "$home/.ssh" && die "destination is inside ~/.ssh"
-canon -m -- "$ctl"
-inside "$d" "$CANON" && die "destination is inside the dashboard's control directory"
+for s in "$home/.ssh" "$c"; do
+  if inside "$d" "$s" || inside "$s" "$d" || [ "$d" = "$s" ]; then die "destination is, contains or lies inside $s"; fi
+done
 # It goes into command="..." in authorized_keys: the typed path was
 # checked, but a symlinked parent can resolve to anything.
 case "$d" in *[\"\\,\']*|*[[:cntrl:]]*) die "the resolved destination path has characters authorized_keys cannot carry";; esac
-mkdir -- "$d" || die "could not create the destination directory"
-printf 'DST %s\n' "$d"
+if [ "$mode" = new ]; then
+  mkdir -- "$d" || die "could not create the destination directory"
+  printf 'DST %s\n' "$d"
+else
+  # The scan passes closed: only a clean exit with nothing found will do.
+  out=$(timeout ` + xferScanTimeout + ` find "$d" -type l -print -quit 2>&1); rc=$?
+  [ "$rc" = 124 ] && die "could not finish checking the folder for symlinks within ` + xferScanTimeout + ` s"
+  [ "$rc" = 0 ] || die "could not check the folder for symlinks: $(printf '%s\n' "$out" | head -n 1)"
+  [ -z "$out" ] || die "the folder contains symlinks; choose another folder, or copy into a new one"
+  printf 'DIR %s\n' "$d"
+fi
 `
 
 // xferKeyAddScript appends the job's key line to authorized_keys under a
@@ -269,17 +318,20 @@ print "REMOVED line\n";
 // reads, segments split on \r or \n by hand, every kept piece capped, so
 // neither memory nor the files it writes grow with the output, even output
 // without any separator. "progress" keeps the latest segment (512 B) and
-// counts skipped non-regular files; "errors" keeps the first 40 and last
-// 20 segments (256 B each) and a total. Files are rewritten (temp +
-// rename) at most once a second and at EOF.
+// counts skipped non-regular files, existing files kept and name
+// conflicts, each told by its shape (a line of another shape, or one cut
+// at the cap, counts for nothing and never stands in for the progress);
+// "errors" keeps the first 40 and last 20 segments (256 B each) and a
+// total. Files are rewritten (temp + rename) at most once a second and
+// at EOF.
 const xferCapScript = `use strict; use warnings;
 my ($mode, $dir) = @ARGV;
 my $cap = $mode eq "progress" ? 512 : 256;
 my ($seg, $trunc, $dirty, $wrote) = ("", 0, 0, 0);
-my ($last, $skipped, $count, @head, @ring) = ("", 0, 0);
+my ($last, $skipped, $kept, $conflicts, $count, @head, @ring) = ("", 0, 0, 0, 0);
 sub put { my ($n, $d) = @_; my $t = "$dir/$n.tmp"; open(my $f, ">", $t) or return; print $f $d; close $f; rename $t, "$dir/$n"; }
 sub out {
-  if ($mode eq "progress") { put("progress", "$last\n"); put("skipped", "$skipped\n"); }
+  if ($mode eq "progress") { put("progress", "$last\n"); put("skipped", "$skipped\n"); put("kept", "$kept\n"); put("conflicts", "$conflicts\n"); }
   else {
     my $more = $count - @head - @ring;
     put("errors", join("", map("$_\n", @head)) . ($more > 0 ? "... $more more ...\n" : "") . join("", map("$_\n", @ring)));
@@ -291,7 +343,12 @@ sub seg_end {
   my $s = $seg . ($trunc ? " [truncated]" : "");
   ($seg, $trunc) = ("", 0);
   return unless $s =~ /\S/;
-  if ($mode eq "progress") { if ($s =~ /^skipping non-regular file/) { $skipped++ } else { $last = $s } }
+  if ($mode eq "progress") {
+    if ($s =~ /^\s*[\d,]+\s+\d+%/) { $last = $s }
+    elsif ($s =~ /^skipping non-regular file/) { $skipped++ }
+    elsif ($s =~ / exists \(type change\)$/) { $conflicts++ }
+    elsif ($s =~ / exists( \([a-z ]+\))?$/) { $kept++ }
+  }
   else { $count++; if (@head < 40) { push @head, $s } else { push @ring, $s; shift @ring if @ring > 20 } }
   $dirty = 1;
 }
@@ -312,7 +369,8 @@ seg_end(); out();
 `
 
 // xferRunScript is the detached runner on the source, after the SRC,
-// DEST, PORT and HKALG assignments the launch writes in front of it. mkdir "started" makes
+// DEST, PORT, HKALG, SSH and ROPTS assignments the launch writes in front
+// of it (ROPTS: the mode's rsync options, see xferRsyncOpts). mkdir "started" makes
 // it run at most once per job, whoever launches it how often. The key
 // files go when it ends, however it ends; rc is written last, atomically.
 const xferRunScript = `set -u
@@ -333,7 +391,7 @@ date +%s >"$J/started_at"
 mkfifo "$J/out" "$J/err" || { finish "error: mkfifo failed"; exit 1; }
 perl "$J/cap.pl" progress "$J" <"$J/out" &
 perl "$J/cap.pl" errors "$J" <"$J/err" &
-rsync -rt --no-inc-recursive --info=progress2 \
+rsync -rt --no-inc-recursive $ROPTS \
   -e "$SSH -F /dev/null -p $PORT -i $J/key -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$J/known_hosts -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=$HKALG -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=30 -o ServerAliveInterval=60" \
   -- "$SRC/" "$DEST" >"$J/out" 2>"$J/err" &
 rpid=$!
@@ -369,7 +427,7 @@ const xferStatusScript = `[ -d "$J" ] || { echo "NOJOB"; exit 0; }
 [ -d "$J/started" ] && echo "STARTED"
 [ -f "$J/pid" ] && echo "PIDFILE"
 alive && echo "ALIVE"
-for f in rc pid started_at skipped errors.count; do [ -f "$J/$f" ] && printf '%s=%s\n' "$f" "$(head -c 64 "$J/$f" | tr -d '\n')"; done
+for f in rc pid started_at skipped kept conflicts errors.count; do [ -f "$J/$f" ] && printf '%s=%s\n' "$f" "$(head -c 64 "$J/$f" | tr -d '\n')"; done
 [ -f "$J/progress" ] && printf 'progress=%s\n' "$(head -c 512 "$J/progress" | tr -d '\r\n')"
 [ -f "$J/errors" ] && { echo "--errors"; head -c 16384 "$J/errors"; }
 exit 0
@@ -493,19 +551,60 @@ func xferOnly(lines []string, key string) (string, bool) {
 	return v, n == 1
 }
 
-// xferDstPrepare claims the new destination directory and adds the job's
-// restricted key line. The resolved directory comes back even on an
-// error after the claim, so the caller can try to remove it.
-func xferDstPrepare(ctx context.Context, cli *sshx.Client, token, dst, blob string) (dir string, err error) {
+// xferDstPrepare claims the destination directory (mode new creates it)
+// and adds the job's restricted key line. The resolved directory comes
+// back even on an error after the claim, with created telling whether
+// this job made it, so the caller can try to remove what it created.
+func xferDstPrepare(ctx context.Context, cli *sshx.Client, token, dst, blob, mode string) (dir string, created bool, err error) {
 	if !xferBlobRe.MatchString(blob) {
-		return "", errors.New("bad key")
+		return "", false, errors.New("bad key")
+	}
+	if mode == "" {
+		mode = xferModeNew
 	}
 	dst = strings.TrimPrefix(dst, "~/")
 	if err := validXferPath(dst, true); err != nil {
-		return "", fmt.Errorf("destination: %w", err)
+		return "", false, fmt.Errorf("destination: %w", err)
 	}
-	lines, err := xferRun(ctx, cli, xferVars("TOKEN", token, "DST", dst, "BLOB", blob), xferDstClaimScript+xferKeyAddScript)
-	return xferField(lines, "DST"), err
+	lines, err := xferRun(ctx, cli, xferVars("TOKEN", token, "DST", dst, "BLOB", blob, "MODE", mode), xferDstClaimScript+xferKeyAddScript)
+	dir, created, perr := parseDstClaim(lines)
+	if err != nil {
+		return dir, created, err
+	}
+	return dir, created, perr
+}
+
+// parseDstClaim reads the claim's answer: exactly one DST (created) or
+// DIR (existing) line carrying a usable absolute path; anything else is
+// no answer (the box's output is not trusted to be well formed).
+func parseDstClaim(lines []string) (dir string, created bool, err error) {
+	n := 0
+	for _, l := range lines {
+		for _, k := range []string{"DST ", "DIR "} {
+			if v, ok := strings.CutPrefix(l, k); ok {
+				dir, created, n = v, k == "DST ", n+1
+			}
+		}
+	}
+	if n != 1 || !strings.HasPrefix(dir, "/") || strings.ContainsFunc(dir, unicode.IsControl) || !utf8.ValidString(dir) {
+		return "", false, errors.New("destination returned no usable resolved path")
+	}
+	return dir, created, nil
+}
+
+// xferRsyncOpts is the runner's rsync options for a mode, beyond the
+// fixed -rt --no-inc-recursive: fixed strings, never input. Existing
+// directories are not given the source's timestamps (-O); keep skips
+// files already there and has rsync name each one (skip2, so a file
+// meeting a directory of its name, or the reverse, reads as a conflict).
+func xferRsyncOpts(mode string) string {
+	switch mode {
+	case xferModeKeep:
+		return "-O --ignore-existing --info=progress2,skip2"
+	case xferModeReplace:
+		return "-O --info=progress2"
+	}
+	return "--info=progress2"
 }
 
 // xferDest is where a runner copies to: the destination's account, its
@@ -530,7 +629,7 @@ func xferHostKeyAlgs(keyType string) string {
 
 // xferLaunchVars renders the launch script's input: the job's known_hosts
 // line (the pinned key, exactly) and the runner's assignments.
-func xferLaunchVars(token, src string, d xferDest) (string, error) {
+func xferLaunchVars(token, src string, d xferDest, mode string) (string, error) {
 	kf := strings.Fields(d.HostKey)
 	if len(kf) < 2 || !xferAlgRe.MatchString(kf[0]) {
 		return "", errors.New("destination has no pinned host key")
@@ -540,13 +639,13 @@ func xferLaunchVars(token, src string, d xferDest) (string, error) {
 	if d.Port != 22 {
 		name = "[" + host + "]:" + strconv.Itoa(d.Port)
 	}
-	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", xferHostKeyAlgs(kf[0]), "SSH", "/usr/bin/ssh")
+	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", xferHostKeyAlgs(kf[0]), "SSH", "/usr/bin/ssh", "ROPTS", xferRsyncOpts(mode))
 	return xferVars("TOKEN", token, "KNOWN", name+" "+kf[0]+" "+kf[1], "RUNVARS", run), nil
 }
 
 // xferLaunch starts the runner on the source.
-func xferLaunch(ctx context.Context, cli *sshx.Client, token, src string, d xferDest) (confirmed bool, err error) {
-	vars, err := xferLaunchVars(token, src, d)
+func xferLaunch(ctx context.Context, cli *sshx.Client, token, src string, d xferDest, mode string) (confirmed bool, err error) {
+	vars, err := xferLaunchVars(token, src, d, mode)
 	if err != nil {
 		return false, err
 	}

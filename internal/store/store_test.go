@@ -1647,3 +1647,38 @@ func TestMigrateDropsPMDBUploadKey(t *testing.T) {
 		t.Fatalf("inventory after the open: %q", v)
 	}
 }
+
+// A transfers table from before dst_mode (1.13.0) gains the column on
+// open; its rows read as mode "" (new), and new rows keep their mode.
+func TestMigrateAddsTransferDstMode(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := strings.Replace(createTransfersSQL, ",\n\tdst_mode TEXT NOT NULL DEFAULT ''", "", 1)
+	if old == createTransfersSQL {
+		t.Fatal("old schema not derived")
+	}
+	for _, q := range []string{"DROP TABLE transfers", old,
+		`INSERT INTO transfers (token, src_box_id, src_endpoint, src_host_key, dst_box_id, dst_endpoint, dst_host_key,
+		src_path, dst_path, phase, created_at) VALUES ('t', 1, 'a', 'k', 2, 'b', 'k', 'x', 'y', 'finished', '2026-01-01T00:00:00Z')`} {
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.CreateTransfer(ctx, &Transfer{Token: "u", SrcBoxID: 1, DstBoxID: 2, SrcPath: "x", DstPath: "y", DstMode: "keep", Phase: "preparing"}); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := s.ListTransfers(ctx)
+	if err != nil || len(ts) != 2 || ts[0].DstMode != "" || ts[1].DstMode != "keep" {
+		t.Fatalf("transfers after migration: %+v %v", ts, err)
+	}
+}
