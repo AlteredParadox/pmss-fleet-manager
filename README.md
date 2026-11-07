@@ -19,7 +19,8 @@ beyond the dashboard itself.
 **Fleet view.** Every box as a card or table row with status, disk against
 quota, upload for the rolling 30-day window PMSS enforces, live up/down rates,
 torrent count and share ratio, CPU/RAM of your systemd slice, the host's
-iowait now and averaged over the last 15 / 30 / 60 minutes of polls, host CPU model
+iowait now and averaged over the last 15 / 30 / 60 minutes of polls (on the
+card's title line and in its own table column), host CPU model
 (and hardware encoder, e.g. Intel QSV on N100 hosts), qBittorrent version with
 an update flag, and plan tags. Headline tiles for total storage, upload,
 aggregate bandwidth, torrents, containers, next renewal and monthly cost.

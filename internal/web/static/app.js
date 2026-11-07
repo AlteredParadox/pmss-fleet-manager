@@ -611,10 +611,17 @@ function torrentsCell(b) {
 // 60 minutes of this dashboard's polls, top right of the card on one line
 // (a window with no poll yet shows —).
 function iowaitCell(b) {
+  return `<span class="iowait" title="${esc(iowaitTitle(b))}"><span class="l">iowait</span> ${iowaitText(b)}</span>`;
+}
+// iowaitText is "3% · 2% · 4% · 5%" (now · 15m · 30m · 1h); iowaitTitle the tooltip.
+function iowaitText(b) {
   const h = b.host_sys, w = h.iowait || {};
   const avg = (v, n) => (n ? fmtPct(v) : '—');
-  const title = `host iowait: last poll · 15 min · 30 min · 1 h means over this dashboard's polls (${w.n15 || 0} / ${w.n30 || 0} / ${w.n60 || 0} polls; the windows restart with the dashboard)`;
-  return `<span class="iowait" title="${esc(title)}"><span class="l">iowait</span> ${h.cpu_ok ? fmtPct(h.cpu_iowait_pct) : '—'} <span class="muted">· ${avg(w.avg15, w.n15)} · ${avg(w.avg30, w.n30)} · ${avg(w.avg60, w.n60)}</span></span>`;
+  return `${h.cpu_ok ? fmtPct(h.cpu_iowait_pct) : '—'} <span class="muted">· ${avg(w.avg15, w.n15)} · ${avg(w.avg30, w.n30)} · ${avg(w.avg60, w.n60)}</span>`;
+}
+function iowaitTitle(b) {
+  const w = b.host_sys.iowait || {};
+  return `host iowait: last poll · 15 min · 30 min · 1 h means over this dashboard's polls (${w.n15 || 0} / ${w.n30 || 0} / ${w.n60 || 0} polls; the windows restart with the dashboard)`;
 }
 function fleetCards() {
   const dt = S.settings.disk_threshold_pct || 90, tt = S.settings.traffic_threshold_pct || 90;
@@ -644,7 +651,7 @@ function fleetCards() {
 function fleetTable() {
   const dt = S.settings.disk_threshold_pct || 90, tt = S.settings.traffic_threshold_pct || 90;
   return `<div class="table fleet-table">
-    <div class="trow head"><span>box</span><span>type</span><span>host cpu</span><span>disk</span><span>upload 30d</span><span>up / down</span><span>torrents</span><span>cpu/ram</span><span>host up</span></div>
+    <div class="trow head"><span>box</span><span>type</span><span>host cpu</span><span>disk</span><span>upload 30d</span><span>up / down</span><span>torrents</span><span>cpu/ram</span><span title="host iowait: now · 15 min · 30 min · 1 h">iowait</span><span>host up</span></div>
     ${S.boxes.map((b) => `
     <div class="trow click" data-go="/box/${b.id}">
       <div style="display:flex;align-items:center;gap:8px;min-width:0"><span class="led ${b.status}"></span><div class="ellip"><div class="ellip" style="font-weight:600">${esc(b.name)}</div><div class="sub">${esc(b.hostname || b.host)}</div></div></div>
@@ -655,6 +662,7 @@ function fleetTable() {
       <span class="num"><span class="up">↑</span>${fmtBits(b.rates.up_bps)} <span class="down">↓</span>${fmtBits(b.rates.down_bps)}</span>
       <span class="num">${torrentsCell(b) || '—'}</span>
       <span class="num">${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} / ${b.ram.ok ? fmtPct(b.ram.pct) : '—'}</span>
+      <span class="num" title="${esc(iowaitTitle(b))}">${iowaitText(b)}</span>
       <span class="muted">${b.host_sys.uptime_sec ? fmtDur(b.host_sys.uptime_sec) : '—'}</span>
     </div>`).join('')}
   </div>`;
