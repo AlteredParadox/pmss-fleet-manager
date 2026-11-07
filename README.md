@@ -488,7 +488,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.14
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.15
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -1047,7 +1047,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.14.1 is the current release. The code was written against five real Pulsed
+1.15.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1059,7 +1059,7 @@ checksums, and a matching container image on GHCR.
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
-**Unreleased**
+**1.15.0**
 
 - **Copies into an existing folder.** The transfers tab can put a copy
   straight into a folder that already exists on the other box (`~/data`
@@ -1074,6 +1074,13 @@ Newest first; each release's full notes are on the
   takes `dst_mode` (`new`, `keep`, `replace`), transfers carry `dst_mode`,
   `kept` and `conflicts`; the `transfers` table gains `dst_mode`. See
   *Copying between boxes*.
+- CI also runs the transfer tests on Debian 12's rsync 3.2.7, the version
+  every PMSS box has (ubuntu-latest had moved to 3.4.1).
+- `AGENTS.md` states the working principles for agents editing this
+  repository (`CLAUDE.md` points at it).
+- The lint-only npm tree overrides `minimatch` to 11.0.5
+  (GHSA-g3hv-75wg-m249); third-party notices regenerated for
+  modernc.org/sqlite 1.61.1.
 
 **1.14.1**
 
