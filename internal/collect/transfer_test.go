@@ -621,6 +621,20 @@ func startLocalJobTo(t *testing.T, mode, dstPath string, slow bool, prepare func
 
 func readFileOr(p string) string { b, _ := os.ReadFile(p); return string(b) }
 
+// procGone: pid has exited. A zombie counts: in a container whose PID 1
+// does not reap (GitHub's job containers run under tail -f), a killed
+// orphan keeps its /proc entry, state Z, until something waits for it.
+func procGone(pid string) bool {
+	b, err := os.ReadFile("/proc/" + pid + "/stat")
+	if err != nil {
+		return true
+	}
+	// "pid (comm) S ..."; comm may hold spaces or parens, so take the
+	// state after the last ')'.
+	i := strings.LastIndexByte(string(b), ')')
+	return i < 0 || i+2 >= len(b) || b[i+2] == 'Z'
+}
+
 func (j localJob) status(t *testing.T) xferLive {
 	t.Helper()
 	return parseXferStatus(runJobScript(t, j.home, xferVars("TOKEN", j.tok), xferStatusScript))
@@ -712,13 +726,10 @@ func TestXferRunnerCancel(t *testing.T) {
 		t.Error("key left after cancel")
 	}
 	if sshPid != "" {
-		for i := 0; i < 40; i++ {
-			if _, err := os.Stat("/proc/" + sshPid); os.IsNotExist(err) {
-				break
-			}
+		for i := 0; i < 40 && !procGone(sshPid); i++ {
 			time.Sleep(50 * time.Millisecond)
 		}
-		if _, err := os.Stat("/proc/" + sshPid); err == nil {
+		if !procGone(sshPid) {
 			t.Error("the transport process survived the cancel")
 		}
 	}
