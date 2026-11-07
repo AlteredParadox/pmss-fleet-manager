@@ -138,6 +138,24 @@ func TestLookupThroughLabels(t *testing.T) {
 	}
 }
 
+// Listings of the best length that disagree stay ambiguous however many
+// follow (Codex on PR 165: a third one used to dereference the cleared
+// match), and a longer listing supersedes an ambiguous shorter one.
+func TestLookupAmbiguityKeeps(t *testing.T) {
+	cat := &Catalogue{Plans: []Plan{
+		{Name: "Box A", CPUWeight: 100, IOWeight: 100},
+		{Name: "Box A", CPUWeight: 500, IOWeight: 100},
+		{Name: "Box A", CPUWeight: 500, IOWeight: 100},
+		{Name: "Box A Special", CPUWeight: 900, IOWeight: 900},
+	}}
+	if p, st := cat.Lookup("Box A"); p != nil || st != LookupAmbiguous {
+		t.Fatalf("got %+v, %q", p, st)
+	}
+	if p, st := cat.Lookup("Box A Special 2TB"); st != LookupMatched || p.CPUWeight != 900 {
+		t.Fatalf("got %+v, %q", p, st)
+	}
+}
+
 func TestWords(t *testing.T) {
 	for in, want := range map[string]string{
 		"🏆 Purnu   Trophy":                        "purnu trophy",

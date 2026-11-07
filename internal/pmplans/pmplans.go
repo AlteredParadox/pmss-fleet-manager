@@ -102,7 +102,7 @@ func (c *Catalogue) Lookup(name string) (*Plan, string) {
 		return nil, LookupUnknown
 	}
 	var found *Plan
-	best := 0
+	best, ambiguous := 0, false
 	for i := range c.Plans {
 		p := &c.Plans[i]
 		n := prefixLen(Words(p.Name), key)
@@ -115,15 +115,15 @@ func (c *Catalogue) Lookup(name string) (*Plan, string) {
 		case n == 0 || n < best:
 			continue
 		case n > best:
-			found, best = p, n
+			found, best, ambiguous = p, n, false // a longer listing supersedes
 		case found.CPUWeight != p.CPUWeight || found.IOWeight != p.IOWeight:
-			found = nil // two listings of this length disagree
+			ambiguous = true // two listings of this length disagree
 		}
 	}
 	if best == 0 {
 		return nil, LookupUnknown
 	}
-	if found == nil {
+	if ambiguous {
 		return nil, LookupAmbiguous
 	}
 	p := *found

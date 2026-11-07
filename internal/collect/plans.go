@@ -81,6 +81,9 @@ type plansCache struct {
 	autoAt    time.Time
 }
 
+// plansAutoDoneHook, when set (tests), runs as an automatic read ends.
+var plansAutoDoneHook func()
+
 const (
 	plansCacheKey = "pmplans_cache"
 	// plansAutoInterval spaces automatic fetches even when a new unknown
@@ -192,6 +195,11 @@ func (m *Manager) plansWanted() {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer func() {
+			if plansAutoDoneHook != nil {
+				plansAutoDoneHook()
+			}
+		}()
 		if err := m.SyncPlans(m.ctx); err != nil {
 			return // asked for again at the next occasion, after the interval
 		}

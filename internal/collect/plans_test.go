@@ -139,17 +139,25 @@ func TestSyncPlansAndAutoFetch(t *testing.T) {
 	a := m.Settings()
 	a.PMAPIKey = "k"
 	m.settings.Store(&a)
-	// sync runs a services sync and gives an automatic read it may start
-	// time to land: the expected count is waited for, an unexpected one
-	// has a moment to show up.
+	// sync runs a services sync; when an automatic read is expected it
+	// waits for that read to end (the hook), otherwise it gives an
+	// unexpected one a moment to show up.
+	done := make(chan struct{}, 8)
+	plansAutoDoneHook = func() { done <- struct{}{} }
+	t.Cleanup(func() { plansAutoDoneHook = nil })
 	sync := func(wantHits int32) {
 		t.Helper()
+		before := pageHits.Load()
 		if err := m.SyncServices(ctx); err != nil {
 			t.Fatal(err)
 		}
-		deadline := time.Now().Add(5 * time.Second)
-		for pageHits.Load() < wantHits && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
+		if wantHits > before {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the automatic read did not end in time")
+			}
+			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
