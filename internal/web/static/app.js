@@ -619,9 +619,11 @@ function iowaitText(b) {
   const avg = (v, n) => (n ? fmtPct(v) : '—');
   return `${h.cpu_ok ? fmtPct(h.cpu_iowait_pct) : '—'} <span class="muted">· ${avg(w.avg15, w.n15)} · ${avg(w.avg30, w.n30)} · ${avg(w.avg60, w.n60)}</span>`;
 }
+// The four readings are repeated in words so a clipped cell still tells.
 function iowaitTitle(b) {
-  const w = b.host_sys.iowait || {};
-  return `host iowait: last poll · 15 min · 30 min · 1 h means over this dashboard's polls (${w.n15 || 0} / ${w.n30 || 0} / ${w.n60 || 0} polls; the windows restart with the dashboard)`;
+  const h = b.host_sys, w = h.iowait || {};
+  const avg = (v, n) => (n ? fmtPct(v) : 'no polls yet');
+  return `host iowait: now ${h.cpu_ok ? fmtPct(h.cpu_iowait_pct) : 'unknown'} · 15 min ${avg(w.avg15, w.n15)} · 30 min ${avg(w.avg30, w.n30)} · 1 h ${avg(w.avg60, w.n60)} (means over this dashboard's polls, ${w.n15 || 0} / ${w.n30 || 0} / ${w.n60 || 0} of them; the windows restart with the dashboard)`;
 }
 function fleetCards() {
   const dt = S.settings.disk_threshold_pct || 90, tt = S.settings.traffic_threshold_pct || 90;
