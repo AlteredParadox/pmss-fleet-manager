@@ -62,6 +62,7 @@ type poller struct {
 	prevCPUAt   time.Time
 	prevTicks   probe.CPUTicks // last /proc/stat reading, for the host-wide busy figure
 	prevTicksAt time.Time
+	ioHist      []ioSample         // the last hour's iowait figures, oldest first (IOWaitState)
 	procPrev    map[int]procSample // last poll's per-pid CPU readings, see appsFromSnapshot
 	// qbtBinStat/qbtBinVersion remember the installed binary's stat and the
 	// version it answered, so the probe can skip --version (which writes to
@@ -737,8 +738,64 @@ func (p *poller) applyHostCPU(st *BoxState, snap *probe.Snapshot) {
 		st.HostSys.CPUBusyPct = pctOf(cur.Busy - prev.Busy)
 		st.HostSys.CPUIOWaitPct = pctOf(cur.IOWait - prev.IOWait)
 		st.HostSys.CPUStealPct = pctOf(cur.Steal - prev.Steal)
+		p.ioHist = appendIOSample(p.ioHist, ioSample{at: snap.At, pct: st.HostSys.CPUIOWaitPct})
 	}
+	st.HostSys.IOWait = ioWaitAverages(p.ioHist, snap.At)
 	p.prevTicks, p.prevTicksAt = cur, snap.At
+}
+
+// ioSample is one poll's host iowait.
+type ioSample struct {
+	at  time.Time
+	pct float64
+}
+
+// ioHistMax bounds the ring whatever the poll interval (an hour at the
+// 10 s minimum is 360).
+const ioHistMax = 400
+
+// appendIOSample adds a sample and drops those older than an hour or
+// beyond the cap.
+func appendIOSample(h []ioSample, s ioSample) []ioSample {
+	h = append(h, s)
+	cut := 0
+	for cut < len(h) && (h[cut].at.Before(s.at.Add(-time.Hour)) || len(h)-cut > ioHistMax) {
+		cut++
+	}
+	return append(h[:0:0], h[cut:]...) // a fresh slice: the old backing array is not kept growing
+}
+
+// ioWaitAverages is the mean of the samples within each window ending at
+// now; polls are evenly spaced, so a plain mean is the time average.
+func ioWaitAverages(h []ioSample, now time.Time) IOWaitState {
+	var st IOWaitState
+	var sum15, sum30, sum60 float64
+	for _, s := range h {
+		age := now.Sub(s.at)
+		if age < 0 || age > time.Hour {
+			continue
+		}
+		sum60 += s.pct
+		st.N60++
+		if age <= 30*time.Minute {
+			sum30 += s.pct
+			st.N30++
+		}
+		if age <= 15*time.Minute {
+			sum15 += s.pct
+			st.N15++
+		}
+	}
+	if st.N15 > 0 {
+		st.Avg15 = sum15 / float64(st.N15)
+	}
+	if st.N30 > 0 {
+		st.Avg30 = sum30 / float64(st.N30)
+	}
+	if st.N60 > 0 {
+		st.Avg60 = sum60 / float64(st.N60)
+	}
+	return st
 }
 
 func classify(st *BoxState) (string, string) {

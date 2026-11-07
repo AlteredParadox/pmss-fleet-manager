@@ -129,7 +129,7 @@ button.disc:hover{color:var(--text)}
 .lvnode{color:var(--dim)}.lvyou{color:var(--accent);font-weight:600}
 .kv{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:4px}
 .kv b{font-weight:400;color:var(--text)}
-.card-foot{display:grid;grid-template-columns:1.35fr 1fr 1fr;gap:8px;font-size:11px;border-top:1px solid var(--line);padding-top:10px}
+.card-foot{display:grid;grid-template-columns:1.35fr 1fr 1fr 1.3fr;gap:8px;font-size:11px;border-top:1px solid var(--line);padding-top:10px}
 .card-foot>div{min-width:0}
 .card-foot>div>div:last-child{overflow-wrap:anywhere}
 .card-foot .l{color:var(--muted)}

@@ -80,3 +80,32 @@ func TestHostShareBesideQuota(t *testing.T) {
 		t.Fatalf("cpu = %+v, want 50%% of the 2-core quota and 12.5%% of the 8-core host", st.CPU)
 	}
 }
+
+// The iowait ring keeps an hour of polls, bounded, and each window averages
+// only the polls inside it; an empty window reads as unknown, not zero.
+func TestIOWaitAverages(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	var h []ioSample
+	// One poll a minute for 70 minutes: the oldest ten fall out of the hour.
+	for i := 70; i >= 0; i-- {
+		h = appendIOSample(h, ioSample{at: now.Add(-time.Duration(i) * time.Minute), pct: float64(i)})
+	}
+	if len(h) != 61 || h[0].pct != 60 {
+		t.Fatalf("ring: %d samples, oldest %v", len(h), h[0])
+	}
+	w := ioWaitAverages(h, now)
+	if w.N15 != 16 || w.N30 != 31 || w.N60 != 61 || w.Avg15 != 7.5 || w.Avg30 != 15 || w.Avg60 != 30 {
+		t.Fatalf("averages: %+v", w)
+	}
+	if e := ioWaitAverages(nil, now); e.N15 != 0 || e.Avg60 != 0 {
+		t.Fatalf("empty: %+v", e)
+	}
+	// Fast polls: the cap holds whatever the interval.
+	h = nil
+	for i := 0; i < 2*ioHistMax; i++ {
+		h = appendIOSample(h, ioSample{at: now.Add(time.Duration(i) * time.Second), pct: 1})
+	}
+	if len(h) != ioHistMax {
+		t.Fatalf("cap: %d", len(h))
+	}
+}

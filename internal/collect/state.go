@@ -198,6 +198,20 @@ type RAMState struct {
 	LastOOM    string  `json:"last_oom,omitempty"` // RFC3339, when a rise of the counter was first seen
 }
 
+// IOWaitState is the host's iowait averaged over the polls of the last
+// 15, 30 and 60 minutes, from the figures applyHostCPU measured. The
+// samples live in the poller, so a restart or an edit starts the windows
+// over; N* say how many polls fed each average (0: none yet, shown as
+// unknown, never as a healthy zero).
+type IOWaitState struct {
+	Avg15 float64 `json:"avg15"`
+	Avg30 float64 `json:"avg30"`
+	Avg60 float64 `json:"avg60"`
+	N15   int     `json:"n15"`
+	N30   int     `json:"n30"`
+	N60   int     `json:"n60"`
+}
+
 // HostState is shared-host information.
 type HostState struct {
 	UptimeSec    float64 `json:"uptime_sec"`
@@ -207,35 +221,38 @@ type HostState struct {
 	CPUOK        bool    `json:"cpu_ok"`         // two /proc/stat readings framed this poll
 	CPUBusyPct   float64 `json:"cpu_busy_pct"`   // every tenant's cpu time: all but idle and iowait
 	CPUIOWaitPct float64 `json:"cpu_iowait_pct"` // cpus waiting on the disks, outside busy
-	CPUStealPct  float64 `json:"cpu_steal_pct"`  // time the hypervisor took, inside busy
-	MemTotal     int64   `json:"mem_total"`
-	MemAvail     int64   `json:"mem_avail"`
-	SwapTotal    int64   `json:"swap_total"`
-	SwapKnown    bool    `json:"swap_known"`
-	NCPU         int     `json:"ncpu"`
-	CPUMHz       int     `json:"cpu_mhz,omitempty"`
-	Kernel       string  `json:"kernel,omitempty"`
-	Debian       string  `json:"debian,omitempty"`
-	PMSSVersion  string  `json:"pmss_version,omitempty"`
-	Virt         string  `json:"virt,omitempty"`   // systemd-detect-virt: "none", "kvm", ...
-	Distro       string  `json:"distro,omitempty"` // /etc/os-release PRETTY_NAME
-	Arch         string  `json:"arch,omitempty"`   // uname -m
-	Users        int     `json:"users"`            // user accounts on the host (UIDs above 1000 except nobody)
-	UsersKnown   bool    `json:"users_known"`
-	CPUMHzYABS   float64 `json:"cpu_mhz_yabs,omitempty"` // the live clock as yabs.sh reads it; for the catalogue only
-	DiskYABS     int64   `json:"disk_yabs,omitempty"`    // every local filesystem, bytes, as yabs.sh counts it; for the catalogue only
-	HomeFSType   string  `json:"home_fs_type,omitempty"`
-	HomeSize     int64   `json:"home_size"`
-	HomeUsed     int64   `json:"home_used"`
-	HomeAvail    int64   `json:"home_avail"`
-	CPUModel     string  `json:"cpu_model,omitempty"`
-	CPUShort     string  `json:"cpu_short,omitempty"`
-	CPUFlags     string  `json:"cpu_flags,omitempty"`
-	GPUPresent   bool    `json:"gpu_present"`
-	GPUDevice    string  `json:"gpu_device,omitempty"`
-	GPUVendor    string  `json:"gpu_vendor,omitempty"`
-	GPUAccess    bool    `json:"gpu_access"`
-	HWEncode     string  `json:"hw_encode,omitempty"` // short human label for tags: "QSV", "VAAPI", "NVENC", "GPU no access", ""
+	// IOWait is the host's iowait over this dashboard's own recent polls
+	// (the card shows it): the live figure above and its averages.
+	IOWait      IOWaitState `json:"iowait"`
+	CPUStealPct float64     `json:"cpu_steal_pct"` // time the hypervisor took, inside busy
+	MemTotal    int64       `json:"mem_total"`
+	MemAvail    int64       `json:"mem_avail"`
+	SwapTotal   int64       `json:"swap_total"`
+	SwapKnown   bool        `json:"swap_known"`
+	NCPU        int         `json:"ncpu"`
+	CPUMHz      int         `json:"cpu_mhz,omitempty"`
+	Kernel      string      `json:"kernel,omitempty"`
+	Debian      string      `json:"debian,omitempty"`
+	PMSSVersion string      `json:"pmss_version,omitempty"`
+	Virt        string      `json:"virt,omitempty"`   // systemd-detect-virt: "none", "kvm", ...
+	Distro      string      `json:"distro,omitempty"` // /etc/os-release PRETTY_NAME
+	Arch        string      `json:"arch,omitempty"`   // uname -m
+	Users       int         `json:"users"`            // user accounts on the host (UIDs above 1000 except nobody)
+	UsersKnown  bool        `json:"users_known"`
+	CPUMHzYABS  float64     `json:"cpu_mhz_yabs,omitempty"` // the live clock as yabs.sh reads it; for the catalogue only
+	DiskYABS    int64       `json:"disk_yabs,omitempty"`    // every local filesystem, bytes, as yabs.sh counts it; for the catalogue only
+	HomeFSType  string      `json:"home_fs_type,omitempty"`
+	HomeSize    int64       `json:"home_size"`
+	HomeUsed    int64       `json:"home_used"`
+	HomeAvail   int64       `json:"home_avail"`
+	CPUModel    string      `json:"cpu_model,omitempty"`
+	CPUShort    string      `json:"cpu_short,omitempty"`
+	CPUFlags    string      `json:"cpu_flags,omitempty"`
+	GPUPresent  bool        `json:"gpu_present"`
+	GPUDevice   string      `json:"gpu_device,omitempty"`
+	GPUVendor   string      `json:"gpu_vendor,omitempty"`
+	GPUAccess   bool        `json:"gpu_access"`
+	HWEncode    string      `json:"hw_encode,omitempty"` // short human label for tags: "QSV", "VAAPI", "NVENC", "GPU no access", ""
 }
 
 // AccountState mirrors the PMSS account config.
