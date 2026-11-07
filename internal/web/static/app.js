@@ -608,12 +608,13 @@ function torrentsCell(b) {
   return `${ct.torrents}${ratio}`;
 }
 // iowaitCell: the host's iowait now and averaged over the last 15 / 30 /
-// 60 minutes of this dashboard's polls (a window with no poll yet shows —).
+// 60 minutes of this dashboard's polls, top right of the card on one line
+// (a window with no poll yet shows —).
 function iowaitCell(b) {
   const h = b.host_sys, w = h.iowait || {};
   const avg = (v, n) => (n ? fmtPct(v) : '—');
-  const title = `host iowait: last poll, then the mean over the polls of the last 15, 30 and 60 minutes (${w.n15 || 0} / ${w.n30 || 0} / ${w.n60 || 0} polls; the windows restart with the dashboard)`;
-  return `<div title="${esc(title)}"><div class="l">iowait now · 15m · 30m · 1h</div><div>${h.cpu_ok ? fmtPct(h.cpu_iowait_pct) : '—'} <span class="muted">· ${avg(w.avg15, w.n15)} · ${avg(w.avg30, w.n30)} · ${avg(w.avg60, w.n60)}</span></div></div>`;
+  const title = `host iowait: last poll · 15 min · 30 min · 1 h means over this dashboard's polls (${w.n15 || 0} / ${w.n30 || 0} / ${w.n60 || 0} polls; the windows restart with the dashboard)`;
+  return `<span class="iowait" title="${esc(title)}"><span class="l">iowait</span> ${h.cpu_ok ? fmtPct(h.cpu_iowait_pct) : '—'} <span class="muted">· ${avg(w.avg15, w.n15)} · ${avg(w.avg30, w.n30)} · ${avg(w.avg60, w.n60)}</span></span>`;
 }
 function fleetCards() {
   const dt = S.settings.disk_threshold_pct || 90, tt = S.settings.traffic_threshold_pct || 90;
@@ -622,7 +623,7 @@ function fleetCards() {
     return `
     <div class="card click" data-go="/box/${b.id}">
       <div class="card-head">
-        <div class="card-title"><span class="led ${b.status}" title="${esc(statusLabel(b.status))}${b.status_reason ? ' — ' + esc(b.status_reason) : ''}"></span><span class="n">${esc(b.name)}</span></div>
+        <div class="card-title"><span class="led ${b.status}" title="${esc(statusLabel(b.status))}${b.status_reason ? ' — ' + esc(b.status_reason) : ''}"></span><span class="n">${esc(b.name)}</span>${iowaitCell(b)}</div>
         <div class="sub">${esc(b.hostname || b.host)}${b.status_reason ? ` · <span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(b.status_reason)}</span>` : ''}${(() => { const n = retryNote(b); return n ? ` · <span class="muted">${esc(n)}</span>` : ''; })()}</div>
         <div class="tags"><span class="tag">${esc(b.type)}</span>${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${tiersTag(b)}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}${b.rtorrent?.enabled && b.rtorrent.version ? `<span class="tag" title="rTorrent">rt ${esc(b.rtorrent.version)}</span>` : ''}${discoveryTag(b.qbt)}</div>
       </div>
@@ -636,7 +637,6 @@ function fleetCards() {
         <div><div class="l">up/down</div><div><span class="up">↑</span>${fmtBits(b.rates.up_bps)} <span class="down">↓</span>${fmtBits(b.rates.down_bps)}</div></div>
         <div><div class="l">torrents</div><div>${torrentsCell(b) || (b.docker.enabled ? `${b.docker.running} <span class="muted">containers</span>` : '—')}</div></div>
         <div><div class="l">cpu/ram</div><div>${b.cpu.ok ? fmtPct(b.cpu.pct) : '—'} / ${b.ram.ok ? fmtPct(b.ram.pct) : '—'}</div></div>
-        ${iowaitCell(b)}
       </div>
     </div>`;
   }).join('')}</div>`;
