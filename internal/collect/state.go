@@ -44,6 +44,13 @@ type BoxState struct {
 	// API, when an API key is configured and a service matches this box.
 	Service *ServiceInfo `json:"service,omitempty"`
 
+	// IOWeight and CPUWeight are the record's typed-in priorities (0 =
+	// none); Tiers is what the box shows, resolved by decorate from them
+	// and the plan catalogue (plans.go).
+	IOWeight  int       `json:"io_weight"`
+	CPUWeight int       `json:"cpu_weight"`
+	Tiers     *TierInfo `json:"tiers,omitempty"`
+
 	// Unpolled marks a state restored from cache or carried across an
 	// edit: its reachability fields were reset and nothing has verified
 	// them yet, so alert rules must not run on it until a poll lands.
@@ -429,6 +436,7 @@ func (s BoxState) EffectiveRenewal() string {
 func (s *BoxState) adoptIdentity(from BoxState) {
 	s.Name, s.Host, s.Port, s.User, s.Type = from.Name, from.Host, from.Port, from.User, from.Type
 	s.Plan, s.Datacenter, s.Renewal, s.Enabled, s.HostKeyFP = from.Plan, from.Datacenter, from.Renewal, from.Enabled, from.HostKeyFP
+	s.IOWeight, s.CPUWeight = from.IOWeight, from.CPUWeight
 	s.BoxRev = from.BoxRev // box actions compare it with the poller's record (Codex on PR 130)
 	s.Qbt.Enabled, s.Rt.Enabled, s.Docker.Enabled, s.Dirs.Enabled = from.Qbt.Enabled, from.Rt.Enabled, from.Docker.Enabled, from.Dirs.Enabled
 	// The SCGI endpoint is nothing until the next poll resolves and checks
@@ -560,6 +568,7 @@ func fromBox(b *store.Box) BoxState {
 	return BoxState{
 		ID: b.ID, Name: b.Name, Host: b.Host, Port: b.Port, User: b.User, Type: b.Type,
 		Plan: b.Plan, Datacenter: b.Datacenter, Renewal: b.Renewal, Enabled: b.Enabled, BoxRev: b.Revision,
+		IOWeight: b.IOWeight, CPUWeight: b.CPUWeight,
 		Status:    "pending",
 		Qbt:       QbtState{Enabled: b.QbtEnabled, Port: b.QbtPort},
 		Rt:        RtState{Enabled: b.RtEnabled}, // Endpoint: only a poll sets it (rtEndpoint checks it)

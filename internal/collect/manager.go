@@ -30,6 +30,7 @@ import (
 
 	"pmss-fleet-manager/internal/pmapi"
 	"pmss-fleet-manager/internal/pmdb"
+	"pmss-fleet-manager/internal/pmplans"
 	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/rtorrent"
 	"pmss-fleet-manager/internal/sshx"
@@ -127,6 +128,13 @@ type Manager struct {
 	svc         servicesCache
 	syncMu      sync.Mutex // one SyncServices at a time: an older fetch must not land after a newer one
 
+	// The plan catalogue (plans.go): plansMu guards plans, plansSyncMu
+	// serialises SyncPlans.
+	pmplans     *pmplans.Client
+	plansMu     sync.RWMutex
+	plans       plansCache
+	plansSyncMu sync.Mutex
+
 	// The pmdb.fyi catalogue integration (pmdb.go): pmdbMu guards pmdbSt,
 	// pmdbSyncMu serialises SyncPMDB, pmdbWakeCh nudges the loop.
 	pmdb       *pmdb.Client
@@ -158,6 +166,7 @@ func New(st *store.Store, log *slog.Logger) *Manager {
 	m := &Manager{st: st, bus: NewBus(), log: log, states: map[int64]*BoxState{}, pollers: map[int64]*poller{},
 		pmapi:        &pmapi.Client{URL: os.Getenv("PMSS_PMAPI_URL")}, // URL overrides are for testing against a mock
 		pmdb:         &pmdb.Client{URL: os.Getenv("PMSS_PMDB_URL")},
+		pmplans:      &pmplans.Client{URL: os.Getenv("PMSS_PMPLANS_URL")},
 		pmdbWakeCh:   make(chan struct{}, 1),
 		rtLeases:     map[int64]chan struct{}{},
 		xfers:        map[int64]*xferJob{},
@@ -271,6 +280,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	m.settings.Store(&s)
 	m.loadServicesCache(ctx)
+	m.loadPlansCache(ctx)
 	if recs, err := m.st.PMDBSubmissions(ctx); err != nil {
 		m.log.Warn("pmdb receipts", "err", err) // each host is posted once more than it needed to be
 	} else {
@@ -638,6 +648,7 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 		return err
 	}
 	m.startPoller(b, nil) // publishes the new box
+	m.plansWanted(ctx)    // a product the catalogue has not seen is looked up
 	return nil
 }
 
@@ -720,6 +731,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 		return store.ErrNotFound
 	}
 	m.startPoller(fresh, prev) // carries the last measured data over; runs the hooks if disabled; publishes
+	m.plansWanted(ctx)
 	return nil
 }
 
