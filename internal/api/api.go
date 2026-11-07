@@ -36,6 +36,7 @@ import (
 
 	"pmss-fleet-manager/internal/collect"
 	"pmss-fleet-manager/internal/pmdb"
+	"pmss-fleet-manager/internal/pmplans"
 	"pmss-fleet-manager/internal/probe"
 	"pmss-fleet-manager/internal/qbt"
 	"pmss-fleet-manager/internal/rtorrent"
@@ -256,7 +257,7 @@ func changesNoBox(route string) bool {
 		"POST " + boxRoute + "/logs/read", "POST " + boxRoute + "/containers/{cid}/logs",
 		"POST /api/detect", "POST /api/transfers/{tid}/dismiss", "POST " + boxRoute + "/transfers/dirs",
 		"POST /api/alerts/ack-all", "POST /api/alerts/{id}/ack", "DELETE /api/alerts/{id}", "POST /api/alerts/clear-resolved",
-		"PUT /api/settings", "POST /api/services/sync", "POST /api/pmdb/sync":
+		"PUT /api/settings", "POST /api/services/sync", "POST /api/pmdb/sync", "POST /api/plans/sync":
 		return true
 	}
 	return false
@@ -374,6 +375,8 @@ func (s *Server) routes() {
 	handle("POST "+bp+"/api/services/sync", s.handleServicesSync)
 	handle("GET "+bp+"/api/pmdb", s.handlePMDB)
 	handle("POST "+bp+"/api/pmdb/sync", s.handlePMDBSync)
+	handle("GET "+bp+"/api/plans", s.handlePlans)
+	handle("POST "+bp+"/api/plans/sync", s.handlePlansSync)
 
 	static, _ := fs.Sub(web.FS, "static")
 	fileServer := http.FileServer(http.FS(static))
@@ -670,24 +673,28 @@ const sseWriteTimeout = 30 * time.Second
 
 // boxInput is the writable box shape, including secrets.
 type boxInput struct {
-	Name          string `json:"name"`
-	Host          string `json:"host"`
-	Port          int    `json:"port"`
-	User          string `json:"user"`
-	AuthMethod    string `json:"auth_method"`
-	KeyPath       string `json:"key_path"`
-	Password      string `json:"password"`
-	Type          string `json:"type"`
-	Plan          string `json:"plan"`
-	Datacenter    string `json:"datacenter"`
-	Renewal       string `json:"renewal"`
-	QbtEnabled    bool   `json:"qbt_enabled"`
-	QbtPort       int    `json:"qbt_port"`
-	QbtUser       string `json:"qbt_user"`
-	QbtPass       string `json:"qbt_pass"`
-	QbtStartCmd   string `json:"qbt_start_cmd"`
-	RtEnabled     bool   `json:"rt_enabled"`
-	RtSCGI        string `json:"rt_scgi"`
+	Name        string `json:"name"`
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	User        string `json:"user"`
+	AuthMethod  string `json:"auth_method"`
+	KeyPath     string `json:"key_path"`
+	Password    string `json:"password"`
+	Type        string `json:"type"`
+	Plan        string `json:"plan"`
+	Datacenter  string `json:"datacenter"`
+	Renewal     string `json:"renewal"`
+	QbtEnabled  bool   `json:"qbt_enabled"`
+	QbtPort     int    `json:"qbt_port"`
+	QbtUser     string `json:"qbt_user"`
+	QbtPass     string `json:"qbt_pass"`
+	QbtStartCmd string `json:"qbt_start_cmd"`
+	RtEnabled   bool   `json:"rt_enabled"`
+	RtSCGI      string `json:"rt_scgi"`
+	// IOWeight and CPUWeight are typed-in plan priorities (0 = from the
+	// plan catalogue), on systemd's weight scale.
+	IOWeight      int    `json:"io_weight"`
+	CPUWeight     int    `json:"cpu_weight"`
 	DockerEnabled bool   `json:"docker_enabled"`
 	DuEnabled     *bool  `json:"du_enabled"`
 	Enabled       *bool  `json:"enabled"`
@@ -721,6 +728,9 @@ func (in boxInput) validate() error {
 	}
 	if !collect.ValidRtEndpoint(strings.TrimSpace(in.RtSCGI)) {
 		return errors.New("rt_scgi must be blank, unix:/absolute/path or tcp:127.0.0.1:port")
+	}
+	if in.IOWeight < 0 || in.IOWeight > pmplans.MaxWeight || in.CPUWeight < 0 || in.CPUWeight > pmplans.MaxWeight {
+		return fmt.Errorf("io_weight and cpu_weight must be 0 (from the plan catalogue) or 1..%d", pmplans.MaxWeight)
 	}
 	switch in.Type {
 	case "", "seedbox", "storage":
@@ -758,6 +768,7 @@ func (in boxInput) apply(b *store.Box) {
 	b.Plan, b.Datacenter, b.Renewal = strings.TrimSpace(in.Plan), strings.TrimSpace(in.Datacenter), in.Renewal
 	b.QbtEnabled, b.QbtPort, b.QbtUser, b.QbtPass, b.QbtStartCmd = in.QbtEnabled, in.QbtPort, in.QbtUser, in.QbtPass, in.QbtStartCmd
 	b.RtEnabled, b.RtSCGI = in.RtEnabled, strings.TrimSpace(in.RtSCGI)
+	b.IOWeight, b.CPUWeight = in.IOWeight, in.CPUWeight
 	b.DockerEnabled = in.DockerEnabled
 	if in.DuEnabled != nil {
 		b.DuEnabled = *in.DuEnabled
@@ -1816,6 +1827,21 @@ func (s *Server) handlePMDBSync(w http.ResponseWriter, r *http.Request) {
 	}
 	s.m.SyncPMDB(r.Context())
 	writeJSON(w, 200, s.m.PMDB())
+}
+
+func (s *Server) handlePlans(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, s.m.Plans())
+}
+
+// handlePlansSync reads the campaign page now (the button on the settings
+// page and on a box whose priorities are unknown). It needs no key: the
+// page is public and the request carries nothing about the account.
+func (s *Server) handlePlansSync(w http.ResponseWriter, r *http.Request) {
+	if err := s.m.SyncPlans(r.Context()); err != nil {
+		writeErr(w, 502, err)
+		return
+	}
+	writeJSON(w, 200, s.m.Plans())
 }
 
 func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {

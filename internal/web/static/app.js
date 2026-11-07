@@ -38,6 +38,7 @@ const S = {
   torAdd: null, // open "add torrent" form: { urls, category, stopped, files: File[], busy }
   torrents: null, // fleet-wide torrent list from /api/torrents: [{id, name, status, status_reason, qbt}]
   pmdb: null, // pmdb.fyi catalogue standing from /api/pmdb, loaded on the settings view
+  plans: null, // the plan page's I/O and CPU priorities from /api/plans, loaded on the settings view
   logView: null, // open log on the logs tab: { kind: 'file'|'ctr', key, label, text, busy, err, at }
   logOpen: new Set(), // directories whose "older / rotated" group the user expanded on the logs tab
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
@@ -94,6 +95,38 @@ function retryNote(b) {
   return `retry ${s < 5 ? 'now' : s < 90 ? `in ${s}s` : `in ${Math.round(s / 60)} min`}${b.backoff ? ', backed off' : ''}`;
 }
 function planOf(b) { return b.plan || b.service?.product || ''; }
+/* ----- plan priorities (I/O and CPU weights) ----- */
+// tierText prints one priority as the plan page does: "Standard (100)".
+function tierText(w, tier) { return w ? `${tier} (${w})` : ''; }
+function tierSourceNote(src, listing) {
+  return src === 'manual' ? ' <span class="muted" title="typed in on the box">·manual</span>' : src === 'catalogue' ? ` <span class="muted" title="from the Pulsed Media plan page${listing ? `, its listing “${esc(listing)}”` : ''}">·page</span>` : '';
+}
+// tiersTag is the card tag, "IO 100 · CPU 500", with the tiers in the tooltip.
+function tiersTag(b) {
+  const t = b.tiers;
+  if (!t || (!t.io_weight && !t.cpu_weight)) return '';
+  const title = `I/O priority ${tierText(t.io_weight, t.io_tier) || 'unknown'} · CPU priority ${tierText(t.cpu_weight, t.cpu_tier) || 'unknown'}${t.cores ? ` · ${t.cores} cores` : ''}`;
+  return `<span class="tag" title="${esc(title)}">io ${t.io_weight || '?'} · cpu ${t.cpu_weight || '?'}</span>`;
+}
+// tiersNote says why a priority is missing and offers the page read.
+function tiersNote(b, t) {
+  const name = planOf(b);
+  const btn = (label) => `<button class="small ghost" data-act="settings:plans-sync">${label}</button>`;
+  switch (t.lookup) {
+    case 'no-catalogue': return `plan page not read yet ${btn('read plan page')}`;
+    case 'unknown': return `“${esc(name)}” is not on the plan page (older plans are not listed): type the weights in edit ${btn('read again')}`;
+    case 'ambiguous': return `the plan page lists “${esc(name)}” twice with different priorities: type the weights in edit`;
+    case 'matched': return 'the plan page gives no value for this: type it in edit';
+    default: return 'no plan name to look up: set the plan, or type the weights in edit';
+  }
+}
+function tiersRows(b) {
+  const t = b.tiers || {};
+  const io = tierText(t.io_weight, t.io_tier), cpu = tierText(t.cpu_weight, t.cpu_tier);
+  return `<div><span>I/O priority</span><span>${io ? esc(io) + tierSourceNote(t.io_source, t.product) : '—'}</span></div>
+      <div><span>CPU priority</span><span>${cpu ? esc(cpu) + tierSourceNote(t.cpu_source, t.product) : '—'}${t.cores ? ` <span class="muted">· ${t.cores} cores</span>` : ''}</span></div>
+      ${!io || !cpu ? `<div><span></span><span class="muted">${tiersNote(b, t)}</span></div>` : ''}`;
+}
 const boxById = (id) => S.boxes.find((b) => b.id === id);
 // serviceActive mirrors the server's ServiceActive: Active and Suspended
 // services count towards costs and renewals, every other status is history.
@@ -183,7 +216,7 @@ function route() {
   }
   if (S.view === 'alerts') void loadAlerts();
   if (S.view === 'torrents') void loadTorrents();
-  if (S.view === 'settings') { S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; void loadServices(); void loadPMDB(); }
+  if (S.view === 'settings') { S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; void loadServices(); void loadPMDB(); void loadPlans(); }
   S.filter = '';
   S.torAdd = null;
   S.logView = null;
@@ -198,7 +231,7 @@ const go = (hash) => { location.hash = hash; };
 // services and alerts lists). A successful save bumps the sequence too, so
 // a GET that started before the save cannot land after it with the old
 // values. Boxes and the alert badge carry revisions and merge on their own.
-let stateSeq = 0, servicesSeq = 0, alertsSeq = 0, pmdbSeq = 0;
+let stateSeq = 0, servicesSeq = 0, alertsSeq = 0, pmdbSeq = 0, plansSeq = 0;
 async function loadState() {
   const seq = ++stateSeq;
   try {
@@ -308,6 +341,14 @@ async function loadPMDB() {
   S.pmdb = next;
   if (S.view === 'settings') render();
 }
+async function loadPlans() {
+  const seq = ++plansSeq;
+  let next;
+  try { next = await api('GET', BASE + '/api/plans'); } catch (e) { next = { configured: false, plans: [], error: e.message }; }
+  if (seq !== plansSeq) return;
+  S.plans = next;
+  if (S.view === 'settings') render();
+}
 async function loadServices() {
   const seq = ++servicesSeq;
   let next;
@@ -401,6 +442,14 @@ function connectEvents() {
     pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
     await loadState();
     if (S.view === 'settings') void loadServices();
+    else if (S.view === 'box' && S.selId) void loadDetail(S.selId);
+    else render();
+  });
+  es.addEventListener('plans', async (ev) => {
+    const e = JSON.parse(ev.data);
+    pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
+    await loadState(); // every box's tiers were re-resolved
+    if (S.view === 'settings') void loadPlans();
     else if (S.view === 'box' && S.selId) void loadDetail(S.selId);
     else render();
   });
@@ -567,7 +616,7 @@ function fleetCards() {
       <div class="card-head">
         <div class="card-title"><span class="led ${b.status}" title="${esc(statusLabel(b.status))}${b.status_reason ? ' — ' + esc(b.status_reason) : ''}"></span><span class="n">${esc(b.name)}</span></div>
         <div class="sub">${esc(b.hostname || b.host)}${b.status_reason ? ` · <span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(b.status_reason)}</span>` : ''}${(() => { const n = retryNote(b); return n ? ` · <span class="muted">${esc(n)}</span>` : ''; })()}</div>
-        <div class="tags"><span class="tag">${esc(b.type)}</span>${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}${b.rtorrent?.enabled && b.rtorrent.version ? `<span class="tag" title="rTorrent">rt ${esc(b.rtorrent.version)}</span>` : ''}${discoveryTag(b.qbt)}</div>
+        <div class="tags"><span class="tag">${esc(b.type)}</span>${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${tiersTag(b)}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}${b.rtorrent?.enabled && b.rtorrent.version ? `<span class="tag" title="rTorrent">rt ${esc(b.rtorrent.version)}</span>` : ''}${discoveryTag(b.qbt)}</div>
       </div>
       <div style="display:grid;gap:8px">
         <div><div class="kv"><span>disk</span><b>${b.disk.ok || b.disk.quota_bytes ? `${fmtBytes(b.disk.used_bytes, 1)} / ${fmtBytes(b.disk.quota_bytes, 1)}` : 'n/a'}</b></div>
@@ -815,6 +864,7 @@ function ovBoxPanel(b, q) {
 function ovPlanBillingPanel(b, renewDays) {
   return `<div class="panel rows"><div class="tile-label">plan &amp; billing</div>
       <div><span>plan</span><span>${esc(planOf(b) || '—')}${b.service && !b.plan ? ' <span class="muted" title="from the Pulsed Media API">·api</span>' : ''}</span></div>
+      ${tiersRows(b)}
       <div><span>renews</span><span class="${renewDays !== null && renewDays <= (S.settings.renewal_warn_days || 7) ? 'warn' : ''}">${renewalOf(b) ? `${esc(renewalOf(b))} (${renewDays < 0 ? 'overdue' : renewDays + 'd'})` : '—'}</span></div>
       ${b.service ? billingRows(b.service) : `<div><span>billing</span><span class="muted">${S.settings.has_pm_api_key ? 'no matching service in the API feed' : 'set a Pulsed Media API key in settings'}</span></div>`}
       <div><span>datacenter</span><span>${esc(b.datacenter || '—')}</span></div>
@@ -1628,7 +1678,8 @@ function liveTrendPanel(b) {
 /* ----- add / edit ----- */
 function blankForm() {
   return { name: '', host: '', port: 22, user: '', auth_method: '', key_path: '', password: '', type: 'seedbox', plan: '', datacenter: '', renewal: '',
-    qbt_enabled: true, qbt_port: 0, qbt_user: '', qbt_pass: '', qbt_start_cmd: '', rt_enabled: false, rt_scgi: '', docker_enabled: false, du_enabled: true, enabled: true, host_key: '' };
+    qbt_enabled: true, qbt_port: 0, qbt_user: '', qbt_pass: '', qbt_start_cmd: '', rt_enabled: false, rt_scgi: '', docker_enabled: false, du_enabled: true, enabled: true, host_key: '',
+    io_weight: 0, cpu_weight: 0 };
 }
 function resetAdd() { S.add = { mode: 'add', step: 1, form: blankForm(), errors: {}, detect: null, busy: false, editId: null, service: null }; }
 async function startEdit(id) {
@@ -1728,6 +1779,7 @@ function addStep1(A, f, E, edit, back) {
         <label class="f">renewal date<input data-f="renewal" type="date" value="${esc(f.renewal)}"></label>
       </div>
       ${addServiceHint(A.service)}
+      ${addTierFields(f)}
       <details class="adv" ${edit ? 'open' : ''}><summary>torrent clients, Docker and measurement options</summary><div>
         ${addQbtFields(f, edit)}
         ${addRtFields(f)}
@@ -1744,6 +1796,17 @@ function addStep1(A, f, E, edit, back) {
 /* step 2: the detect log */
 function addDetectLog(steps, mark) {
   return steps.map((s) => `<div><span class="mk ${s.status === 'run' ? 'pulse' : ''}" style="color:${mark[s.status]?.[1]}">${mark[s.status]?.[0] || '·'}</span><span style="color:${s.status === 'fail' ? 'var(--bad)' : s.status === 'info' ? 'var(--muted)' : 'var(--text)'}">${esc(s.text)}</span></div>`).join('');
+}
+// addTierFields: the plan's I/O and CPU priority weights, typed in when the
+// plan page does not list the plan (older plans) or to override it.
+function addTierFields(f) {
+  const t = S.add.mode === 'edit' ? boxById(S.add.editId)?.tiers : null;
+  const ph = (w, tier) => (w ? `${tier} (${w}) from the plan page` : 'from the plan page');
+  return `<div class="f3">
+        <label class="f">I/O priority <span class="hint">(weight, optional)</span><input data-f="io_weight" type="number" min="0" max="10000" value="${Number(f.io_weight) || ''}" placeholder="${esc(ph(t?.io_source === 'catalogue' ? t.io_weight : 0, t?.io_tier))}"></label>
+        <label class="f">CPU priority <span class="hint">(weight, optional)</span><input data-f="cpu_weight" type="number" min="0" max="10000" value="${Number(f.cpu_weight) || ''}" placeholder="${esc(ph(t?.cpu_source === 'catalogue' ? t.cpu_weight : 0, t?.cpu_tier))}"></label>
+        <div class="hint" style="align-self:end">The weights behind the Archive / Standard / Performance / High tiers (1–10000, as printed on <a href="https://pulsedmedia.com/eternal-vainamoinen.php" target="_blank" rel="noopener">the plan page ↗</a>). Blank: taken from that page for the plan name above or the matched service's product.</div>
+      </div>`;
 }
 // addServiceHint explains why plan and renewal are left blank when the box is
 // matched to a Pulsed Media service: the API values stay live, a typed value
@@ -1817,6 +1880,7 @@ function validateForm(f) {
 function payload(f) {
   const p = { ...f };
   p.port = Number(p.port) || 22; p.qbt_port = Number(p.qbt_port) || 0;
+  p.io_weight = Number(p.io_weight) || 0; p.cpu_weight = Number(p.cpu_weight) || 0;
   p.host = p.host.trim(); p.user = p.user.trim(); p.rt_scgi = (p.rt_scgi || '').trim();
   if (p.auth_method === 'key' || p.auth_method === 'agent') p.password = ''; // typed before switching auth: not used, not stored
   return p;
@@ -1926,6 +1990,10 @@ function viewSettings() {
       <label class="row">API key<input data-s="pm_api_key" type="password" autocomplete="off" value="${esc(s.pm_api_key || '')}" placeholder="${s.clear_pm_api_key ? 'will be removed on save' : S.settings.has_pm_api_key ? '•••••••• (stored)' : 'paste key'}"></label>
       <div class="hint">Read-only customer API key from the client area (<a href="https://pulsedmedia.com/clients/index.php?m=pmapi" target="_blank" rel="noopener">?m=pmapi ↗</a>). Fills in plan names, prices and renewal dates for boxes whose host or username matches a service. Stored in the local database; leave blank to keep the current key.${S.settings.has_pm_api_key && !s.clear_pm_api_key ? ` <button class="small ghost" data-act="settings:clear-key">remove key</button>` : ''}</div>
     </div>
+    <div class="panel"><div class="tile-label">plan priorities (I/O and CPU)</div>
+      <div class="hint">Each Pulsed Media plan has an I/O priority and a CPU priority: a weight on systemd's scale that decides the box's share of the disk or the processor when the host is busy (Archive below 100, Standard from 100, Performance from 500, High from 1000). The customer API does not report them; the public <a href="https://pulsedmedia.com/eternal-vainamoinen.php" target="_blank" rel="noopener">plan page ↗</a> prints them for every plan on sale, so the dashboard reads that page and matches its listings to each box's plan name (the plan typed on the box, else the product the API matched). <b>What leaves this dashboard:</b> one request for that public page, carrying nothing about your account, when you press the button below, and on its own, only while an API key is set, when a box's product is missing from the last read (once per product, automatic reads at least an hour apart). Plans no longer sold are not on the page: type their weights into the box's edit form instead.</div>
+      ${viewPlans()}
+    </div>
     <div class="panel"><div class="tile-label">pmdb.fyi hardware catalogue</div>
       <label class="check"><input type="checkbox" data-s="pmdb_enabled" ${s.pmdb_enabled ? 'checked' : ''}> submit the hosts my boxes run on to the community hardware catalogue and keep their rows current</label>
       <label class="row">submission identifier<input data-s="pmdb_username" maxlength="64" autocomplete="off" value="${esc(s.pmdb_username || '')}" placeholder="a nickname, reused for every submission"></label>
@@ -1940,6 +2008,17 @@ function viewSettings() {
     </div>
   </div>
   ${viewServices()}`;
+}
+// viewPlans shows when the plan page was last read and what it listed,
+// marking the listings the fleet's boxes resolve to.
+function viewPlans() {
+  const v = S.plans;
+  if (!v) return '';
+  const status = v.error ? `<span class="bad">${esc(v.error)}</span>` : v.fetched_at ? `read ${fmtAgo(v.fetched_at)} · ${v.plans.length} listings` : 'not read yet';
+  const used = new Set(S.boxes.map((b) => b.tiers?.product).filter(Boolean));
+  const rows = v.plans.map((p) => `<div class="trow${used.has(p.name) ? '' : ' muted'}"><span class="ellip" title="${esc(p.name)}">${esc(p.name)}${used.has(p.name) ? ' <span class="ok" title="a box in the fleet has this plan">●</span>' : ''}</span><span>${esc(tierText(p.io_weight, p.io_tier))}</span><span>${esc(tierText(p.cpu_weight, p.cpu_tier))}</span><span class="num">${p.cores || '—'}</span></div>`).join('');
+  return `<div class="row" style="margin-top:8px"><span class="muted">${status}</span><button class="small ghost" data-act="settings:plans-sync">read plan page now</button></div>
+    ${rows ? `<details class="adv"><summary>${v.plans.length} listings</summary><div class="table plans-table"><div class="trow head"><span>plan</span><span>I/O priority</span><span>CPU priority</span><span>cores</span></div>${rows}</div></details>` : ''}`;
 }
 // viewPMDB lists each distinct host and its standing with the catalogue,
 // below the settings that enable the integration.
@@ -2166,6 +2245,15 @@ async function settingsAction(a) {
     if (pmdbChanged) void loadPMDB(); // the first check runs a few seconds later and announces itself with a pmdb event
   }
   else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; S.settingsTouched.clear_pm_api_key = true; render(); }
+  else if (a === 'settings:plans-sync') {
+    toast('reading the plan page…');
+    let v;
+    try { v = await api('POST', BASE + '/api/plans/sync'); } catch (e) { toast(e.message, 'bad'); return; }
+    plansSeq++; S.plans = v;
+    await loadState(); // the boxes' tiers follow the fresh read
+    if (S.view === 'box' && S.selId) await loadDetail(S.selId);
+    toast(`plan page read: ${v.plans.length} listings`, 'ok'); render();
+  }
   else if (a === 'settings:pmdb-sync') { toast('checking pmdb.fyi…'); const v = await api('POST', BASE + '/api/pmdb/sync'); pmdbSeq++; S.pmdb = v; toast(v.error ? v.error : `checked ${v.hosts.length} hosts`, v.error ? 'bad' : 'ok'); render(); }
 }
 // settingsPatch is the settings save body: the touched fields, numbers as

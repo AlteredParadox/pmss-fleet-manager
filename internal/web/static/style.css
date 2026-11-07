@@ -183,6 +183,8 @@ button.th-sort:hover,button.th-sort.on{color:var(--text)}
 .svc-table .trow{grid-template-columns:minmax(200px,2fr) minmax(200px,1.6fr) 110px 90px 150px 70px 170px;min-width:1000px}
 .svc-table .trow>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .svc-table a{color:var(--accent)}
+.plans-table .trow{grid-template-columns:minmax(200px,2fr) 140px 140px 60px;min-width:560px}
+.plans-table .trow.muted{color:var(--muted)}
 .ellip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .num{font-variant-numeric:tabular-nums}
 

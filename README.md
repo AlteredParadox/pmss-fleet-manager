@@ -127,6 +127,26 @@ services count towards costs and renewal alerts; any other status (Cancelled,
 Terminated, Pending, Fraud, Completed) stays listed but counts towards
 neither.
 
+**Plan I/O and CPU priority.** Every Pulsed Media plan has an I/O priority
+and a CPU priority, weights on systemd's scale (Archive below 100, Standard
+from 100, Performance from 500, High from 1000) that decide the box's share of
+the disk or the processor when the host is busy. The customer API does not
+report them, but the public plan page
+(`https://pulsedmedia.com/eternal-vainamoinen.php`) prints them for every plan
+on sale, so the dashboard reads that page and matches its listings to each
+box's plan name (the plan typed on the box, else the product the API matched;
+the API dresses the names up, "Eternal Väinämöinen - Seedbox 1TB R5 10G" or
+"Dragon-R Trophy 100 Years GiveAway", so a listing matches when its words
+open the name and the longest one wins).
+The result is a card tag (`IO 100 · CPU 500`) and two rows on the box's
+overview, each marked with where it came from. The page is read when you press
+the button (settings, or the box's overview when a value is missing) and on
+its own only while an API key is set, when a box's product is missing from
+the last read (once per product, and automatic reads at least an hour apart);
+the request carries nothing about your account. Plans no longer sold are not on the page, and one name sold twice
+with different priorities is left blank: type the weights into the box's edit
+form in either case, which also overrides the page's values.
+
 **pmdb.fyi hardware catalogue (opt-in).** [pmdb.fyi](https://pmdb.fyi) is a
 community-run public table of Pulsed Media host hardware
 ([source](https://github.com/schmintendo/pmdb)). Tick the box in settings and
@@ -999,7 +1019,9 @@ data sources on a PMSS box and the package layout. The design mockup the UI
 follows is in `design/`.
 
 Set `PMSS_PMAPI_URL` to point the customer API client at a mock server when
-working on that feature.
+working on that feature, and `PMSS_PMPLANS_URL` likewise for the plan page
+reader (`internal/pmplans/testdata/eternal.html` is a copy of the page's card
+section).
 
 ## License
 

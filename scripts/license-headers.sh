@@ -6,7 +6,8 @@
 # front-end (app.js, style.css, index.html). Deliberately NOT stamped: build
 # tooling (Makefile, these scripts — they carry a descriptive comment
 # instead), the design mockup under design/ (reference material, not shipped),
-# and anything outside the repo's own source.
+# test fixtures under testdata/ (copies of third-party input the parsers are
+# tested against, not our work), and anything outside the repo's own source.
 #
 # Comment syntax per type:
 #   .go/.js   //          plain line comments
@@ -60,7 +61,7 @@ header_for() {
 
 # Tracked, first-party, stampable files.
 files() {
-	git ls-files -- '*.go' '*.js' '*.css' '*.html' | grep -v '^design/'
+	git ls-files -- '*.go' '*.js' '*.css' '*.html' | grep -v -e '^design/' -e '/testdata/'
 }
 
 missing=()

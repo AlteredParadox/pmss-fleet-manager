@@ -30,6 +30,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1348,5 +1349,57 @@ func TestTransferDirsNeedRevision(t *testing.T) {
 	}
 	if code, body := do(t, srv, "POST", p+"?rev=0", `{"path":"a/../b"}`, hdr); code == 403 || code == 200 {
 		t.Errorf("current rev: %d %s", code, body)
+	}
+}
+
+// Typed-in plan priorities are bounded to systemd's weight scale, stored
+// with the box and shown on its state as manual tiers; the plan page can be
+// read on demand and its listings fill the rest.
+func TestPlanTiers(t *testing.T) {
+	page, err := os.ReadFile(filepath.Join("..", "pmplans", "testdata", "eternal.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(page) }))
+	defer mock.Close()
+	t.Setenv("PMSS_PMPLANS_URL", mock.URL)
+	s, st := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	for _, bad := range []string{`"io_weight":-1`, `"io_weight":10001`, `"cpu_weight":20000`} {
+		if code, body := do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","auth_method":"key",`+bad+`}`, hdr); code != 400 {
+			t.Fatalf("%s: %d %s", bad, code, body)
+		}
+	}
+	code, body := do(t, s, "POST", "/api/boxes", `{"name":"b","host":"a.example","user":"u","auth_method":"key","plan":"Seedbox 1TB R5 10G","io_weight":42,"enabled":false}`, hdr)
+	if code != 201 {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	boxes, _ := st.ListBoxes(context.Background())
+	id := boxes[0].ID
+	if boxes[0].IOWeight != 42 || boxes[0].CPUWeight != 0 {
+		t.Fatalf("stored weights: %+v", boxes[0])
+	}
+	// Before the page is read: the typed value shows, the rest waits for
+	// the catalogue.
+	code, body = do(t, s, "GET", fmt.Sprintf("/api/boxes/%d", id), "", nil)
+	if code != 200 || !strings.Contains(body, `"io_weight":42,"io_tier":"Archive","io_source":"manual"`) || !strings.Contains(body, `"lookup":"no-catalogue"`) {
+		t.Fatalf("state before the catalogue: %d %s", code, body)
+	}
+	if code, body = do(t, s, "GET", "/api/plans", "", nil); code != 200 || !strings.Contains(body, `"plans":[]`) || strings.Contains(body, `"fetched_at"`) {
+		t.Fatalf("empty catalogue: %d %s", code, body)
+	}
+	if code, body = do(t, s, "POST", "/api/plans/sync", "", hdr); code != 200 || !strings.Contains(body, `"name":"Seedbox 1TB R5 10G"`) || !strings.Contains(body, `"fetched_at"`) {
+		t.Fatalf("sync: %d %s", code, body)
+	}
+	code, body = do(t, s, "GET", fmt.Sprintf("/api/boxes/%d", id), "", nil)
+	if code != 200 || !strings.Contains(body, `"io_source":"manual"`) || !strings.Contains(body, `"cpu_weight":500,"cpu_tier":"Performance","cpu_source":"catalogue","cores":2,"product":"Seedbox 1TB R5 10G","lookup":"matched"`) {
+		t.Fatalf("state after the catalogue: %d %s", code, body)
+	}
+	// An edit that clears the typed value falls back to the catalogue's.
+	if code, body = put(t, s, st, id, `{"name":"b","host":"a.example","user":"u","auth_method":"key","plan":"Seedbox 1TB R5 10G","io_weight":0,"enabled":false}`, hdr); code != 200 {
+		t.Fatalf("edit: %d %s", code, body)
+	}
+	if code, body = do(t, s, "GET", fmt.Sprintf("/api/boxes/%d", id), "", nil); code != 200 || !strings.Contains(body, `"io_weight":100,"io_tier":"Standard","io_source":"catalogue"`) {
+		t.Fatalf("state after clearing: %d %s", code, body)
 	}
 }

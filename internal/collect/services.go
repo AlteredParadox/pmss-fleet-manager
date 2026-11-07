@@ -148,6 +148,7 @@ func (m *Manager) decorate(s *BoxState) {
 	feed := m.svc.feed
 	m.svcMu.RUnlock()
 	s.Service = nil
+	defer func() { s.Tiers = m.tiersFor(s) }() // after the service is known, feed or no feed
 	if feed == nil {
 		return
 	}
@@ -266,6 +267,7 @@ func (m *Manager) SyncServices(ctx context.Context) error {
 	m.svcMu.Unlock()
 	m.log.Info("pmapi sync", "services", len(feed.Services))
 	m.reattachServices()
+	m.plansWanted()
 	if perr != nil {
 		return fmt.Errorf("services fetched and applied, but not saved for the next start: %w", perr)
 	}
