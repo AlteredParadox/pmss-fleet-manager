@@ -95,6 +95,24 @@ func TestLookup(t *testing.T) {
 		{"Dragon-R Trophy", LookupMatched, 500},        // two listings that agree
 		{"Dragon-R 2TB", LookupUnknown, 0},
 		{"", LookupUnknown, 0},
+		{"Eternal Väinämöinen", LookupUnknown, 0},
+		// The customer API's spellings (a real feed, 2026-11-07): the
+		// campaign prefix, marketing after the plan, the size sold.
+		{"Eternal Väinämöinen - Seedbox 1TB R5 10G", LookupMatched, 100},
+		{"Dragon-R Trophy 100 Years GiveAway", LookupMatched, 500},
+		{"Eternal Väinämöinen - Storage 2TB R5 1G", LookupMatched, 2},
+		{"Sampo Trophy 16TB R5 10G - 150 Years GivenAway", LookupMatched, 300},
+		{"Eternal Väinämöinen - Dragon-R DDoS Recovery Special 1TB", LookupMatched, 100},
+		{"Eternal Väinämöinen - M1000 DDoS Recovery Special 666GiB", LookupMatched, 100},
+		{"Eternal Väinämöinen - Storage Box 1TB 10G", LookupMatched, 5},
+		{"Eternal Väinämöinen - AI AppBox M1000 x30", LookupMatched, 150},
+		{"Eternal Väinämöinen - AI AppBox M10G x30", LookupMatched, 150},
+		{"Eternal Väinämöinen - Storage 4TB R5 10G", LookupMatched, 4},
+		{"Arkku Trophy Storage Box 6TB R5 10G - GiveAway 8000€", LookupMatched, 6},
+		// The longest listing wins: the Special, not the plain SSD seedbox
+		// it starts with; a word that only begins the same is no match.
+		{"Eternal Väinämöinen - SSD Seedbox 1TB 10G Special", LookupMatched, 400},
+		{"Storage 2TB R5 10", LookupUnknown, 0},
 	}
 	for _, c := range cases {
 		p, st := cat.Lookup(c.name)
@@ -117,6 +135,21 @@ func TestLookupThroughLabels(t *testing.T) {
 	}
 	if p, st := cat.Lookup("WHMCS Product Name"); st != LookupMatched || p.Name != "Fancy Card Title" {
 		t.Fatalf("got %+v, %q", p, st)
+	}
+}
+
+func TestWords(t *testing.T) {
+	for in, want := range map[string]string{
+		"🏆 Purnu   Trophy":                        "purnu trophy",
+		"Eternal Väinämöinen - Purnu Trophy":      "purnu trophy",
+		"The Eternal Väinämöinen":                 "",
+		"Dragon-R DDoS Recovery Special 1TB":      "dragon r ddos recovery special 1tb",
+		"Storage Box 6TB R5 10G - GiveAway 8000€": "storage box 6tb r5 10g giveaway 8000",
+		"Seedbox Eternal":                         "seedbox eternal", // only a leading campaign word goes
+	} {
+		if got := Normalize(in); got != want {
+			t.Fatalf("Normalize(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

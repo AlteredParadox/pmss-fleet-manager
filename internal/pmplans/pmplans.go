@@ -81,52 +81,104 @@ const (
 	LookupAmbiguous = "ambiguous" // listings with the name disagree
 )
 
-// Lookup finds the plan sold under a product name: the card titled so, or
-// the card whose order link names the product id the page labels so. When
-// several listings carry the name they must agree on the priorities (the
-// page sells two "SSD Seedbox 250GiB 10G" with different ones), otherwise
-// the name is ambiguous and nothing is returned.
+// Lookup finds the plan sold under a product name. The customer API's
+// names are the page's card titles dressed up: a campaign prefix ("Eternal
+// Väinämöinen - Seedbox 1TB R5 10G") and marketing after the plan ("Dragon-R
+// Trophy 100 Years GiveAway", "Arkku Trophy Storage Box 6TB R5 10G -
+// GiveAway 8000€", "Dragon-R DDoS Recovery Special 1TB"). So the name is
+// compared word by word (Words): a listing matches when its words open the
+// name, and the longest such listing wins (the exact one when there is one;
+// "SSD Seedbox 1TB 10G Special" over "SSD Seedbox 1TB 10G"). A card's
+// title and, through its order link, the page's own WHMCS name for its
+// product id both count. When the listings that match best disagree on the
+// priorities (the page sells two "SSD Seedbox 250GiB 10G" with different
+// ones) the name is ambiguous and nothing is returned.
 func (c *Catalogue) Lookup(name string) (*Plan, string) {
 	if c == nil {
 		return nil, LookupUnknown
 	}
-	key := Normalize(name)
-	if key == "" {
+	key := Words(name)
+	if len(key) == 0 {
 		return nil, LookupUnknown
 	}
 	var found *Plan
+	best := 0
 	for i := range c.Plans {
 		p := &c.Plans[i]
-		if Normalize(p.Name) != key && (p.PID == 0 || Normalize(c.Labels[p.PID]) != key) {
-			continue
+		n := prefixLen(Words(p.Name), key)
+		if p.PID != 0 {
+			if m := prefixLen(Words(c.Labels[p.PID]), key); m > n {
+				n = m
+			}
 		}
-		if found == nil {
-			found = p
+		switch {
+		case n == 0 || n < best:
 			continue
-		}
-		if found.CPUWeight != p.CPUWeight || found.IOWeight != p.IOWeight {
-			return nil, LookupAmbiguous
+		case n > best:
+			found, best = p, n
+		case found.CPUWeight != p.CPUWeight || found.IOWeight != p.IOWeight:
+			found = nil // two listings of this length disagree
 		}
 	}
-	if found == nil {
+	if best == 0 {
 		return nil, LookupUnknown
+	}
+	if found == nil {
+		return nil, LookupAmbiguous
 	}
 	p := *found
 	return &p, LookupMatched
 }
 
-// Normalize folds a product name for comparison: letters and digits only,
-// lower case, so "🏆 Purnu Trophy", "Purnu  Trophy" and "purnu-trophy" are
-// one name.
-func Normalize(s string) string {
+// prefixLen is len(listing) when the listing's words open the name, else 0.
+func prefixLen(listing, name []string) int {
+	if len(listing) == 0 || len(listing) > len(name) {
+		return 0
+	}
+	for i, w := range listing {
+		if name[i] != w {
+			return 0
+		}
+	}
+	return len(listing)
+}
+
+// campaignWords open the API's product names and the page's group name;
+// they are not part of any plan name.
+var campaignWords = map[string]bool{"the": true, "eternal": true, "väinämöinen": true, "vainamoinen": true}
+
+// Words folds a product name for comparison: its runs of letters and digits,
+// lower case, with the campaign's own words dropped from the front, so
+// "🏆 Purnu Trophy", "Purnu  Trophy", "purnu-trophy" and "Eternal
+// Väinämöinen - Purnu Trophy" are all ["purnu", "trophy"].
+func Words(s string) []string {
+	var out []string
 	var b strings.Builder
+	flush := func() {
+		if b.Len() == 0 {
+			return
+		}
+		w := b.String()
+		b.Reset()
+		if len(out) == 0 && campaignWords[w] {
+			return
+		}
+		out = append(out, w)
+	}
 	for _, r := range strings.ToLower(s) {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			b.WriteRune(r)
+		} else {
+			flush()
 		}
 	}
-	return b.String()
+	flush()
+	return out
 }
+
+// Normalize is a product name's Words joined, one string per name for use
+// as a key.
+func Normalize(s string) string { return strings.Join(Words(s), " ") }
 
 // Tier is the label the ladder gives a weight (the wiki's table): Archive
 // below 100, Standard to 499, Performance to 999, High from 1000.

@@ -98,8 +98,8 @@ function planOf(b) { return b.plan || b.service?.product || ''; }
 /* ----- plan priorities (I/O and CPU weights) ----- */
 // tierText prints one priority as the plan page does: "Standard (100)".
 function tierText(w, tier) { return w ? `${tier} (${w})` : ''; }
-function tierSourceNote(src) {
-  return src === 'manual' ? ' <span class="muted" title="typed in on the box">·manual</span>' : src === 'catalogue' ? ' <span class="muted" title="from the Pulsed Media plan page">·page</span>' : '';
+function tierSourceNote(src, listing) {
+  return src === 'manual' ? ' <span class="muted" title="typed in on the box">·manual</span>' : src === 'catalogue' ? ` <span class="muted" title="from the Pulsed Media plan page${listing ? `, its listing “${esc(listing)}”` : ''}">·page</span>` : '';
 }
 // tiersTag is the card tag, "IO 100 · CPU 500", with the tiers in the tooltip.
 function tiersTag(b) {
@@ -123,8 +123,8 @@ function tiersNote(b, t) {
 function tiersRows(b) {
   const t = b.tiers || {};
   const io = tierText(t.io_weight, t.io_tier), cpu = tierText(t.cpu_weight, t.cpu_tier);
-  return `<div><span>I/O priority</span><span>${io ? esc(io) + tierSourceNote(t.io_source) : '—'}</span></div>
-      <div><span>CPU priority</span><span>${cpu ? esc(cpu) + tierSourceNote(t.cpu_source) : '—'}${t.cores ? ` <span class="muted">· ${t.cores} cores</span>` : ''}</span></div>
+  return `<div><span>I/O priority</span><span>${io ? esc(io) + tierSourceNote(t.io_source, t.product) : '—'}</span></div>
+      <div><span>CPU priority</span><span>${cpu ? esc(cpu) + tierSourceNote(t.cpu_source, t.product) : '—'}${t.cores ? ` <span class="muted">· ${t.cores} cores</span>` : ''}</span></div>
       ${!io || !cpu ? `<div><span></span><span class="muted">${tiersNote(b, t)}</span></div>` : ''}`;
 }
 const boxById = (id) => S.boxes.find((b) => b.id === id);
