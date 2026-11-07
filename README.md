@@ -139,8 +139,8 @@ The result is a card tag (`IO 100 · CPU 500`) and two rows on the box's
 overview, each marked with where it came from. The page is read when you press
 the button (settings, or the box's overview when a value is missing) and on
 its own only while an API key is set, when a box's product is missing from
-the last read (at most once an hour); the request carries nothing about your
-account. Plans no longer sold are not on the page, and one name sold twice
+the last read (once per product, and automatic reads at least an hour apart);
+the request carries nothing about your account. Plans no longer sold are not on the page, and one name sold twice
 with different priorities is left blank: type the weights into the box's edit
 form in either case, which also overrides the page's values.
 

@@ -73,11 +73,12 @@ type PlansView struct {
 type plansCache struct {
 	cat *pmplans.Catalogue
 	err string
-	// The automatic fetch: the product names it last ran for and when, so
-	// a name the page does not sell is asked for once, not after every
-	// services sync (plansWanted).
-	autoFor string
-	autoAt  time.Time
+	// The automatic read (plansWanted): autoTried holds the normalised
+	// product names a successful read was made for, so a name the page
+	// does not sell is asked for once and not after every services sync;
+	// autoAt is when the last automatic read started, for the hourly cap.
+	autoTried map[string]bool
+	autoAt    time.Time
 }
 
 const (
@@ -127,7 +128,8 @@ func (m *Manager) SyncPlans(ctx context.Context) error {
 		m.log.Warn("persist plan catalogue", "err", perr)
 	}
 	m.log.Info("plan catalogue", "plans", len(cat.Plans))
-	m.reattachServices() // decorate resolves the tiers; the event it sends refreshes the page
+	m.reattachServices() // decorate resolves every box's tiers
+	m.Publish(Event{Type: "plans"})
 	if perr != nil {
 		return errors.New("plans fetched and applied, but not saved for the next start: " + perr.Error())
 	}
@@ -152,41 +154,55 @@ func (m *Manager) Plans() PlansView {
 }
 
 // plansWanted reads the page on its own when a customer API key is set and
-// a box's matched product is missing from the catalogue: once per distinct
-// set of missing names and at most hourly, so a product the page does not
-// sell (an older plan) is not asked for again and again. Runs after a
-// services sync and after a box is added or edited, in the background.
-func (m *Manager) plansWanted(ctx context.Context) {
+// a box's matched product is missing from the catalogue. A name is asked
+// for once (a product the page does not sell, an older plan, is not asked
+// for after every services sync; a failed read leaves it to be asked for
+// again), and automatic reads are at least plansAutoInterval apart whatever
+// is added or edited meanwhile. Runs after a services sync and after a box
+// is added or edited, in the background.
+func (m *Manager) plansWanted() {
 	if m.Settings().PMAPIKey == "" || m.ctx == nil || m.ctx.Err() != nil {
 		return
 	}
-	var missing []string
+	missing := map[string]bool{}
 	for _, s := range m.States() {
 		if s.Service == nil || s.Service.Product == "" || s.Tiers == nil {
 			continue
 		}
 		if s.Tiers.Lookup == pmplans.LookupUnknown || s.Tiers.Lookup == lookupNoCatalogue {
-			missing = append(missing, pmplans.Normalize(s.Service.Product))
+			missing[pmplans.Normalize(s.Service.Product)] = true
 		}
 	}
-	if len(missing) == 0 {
-		return
-	}
-	sort.Strings(missing)
-	key := strings.Join(missing, "\n")
 	m.plansMu.Lock()
-	due := key != m.plans.autoFor || time.Since(m.plans.autoAt) >= plansAutoInterval
+	var names []string
+	for n := range missing {
+		if !m.plans.autoTried[n] {
+			names = append(names, n)
+		}
+	}
+	due := len(names) > 0 && time.Since(m.plans.autoAt) >= plansAutoInterval
 	if due {
-		m.plans.autoFor, m.plans.autoAt = key, time.Now()
+		m.plans.autoAt = time.Now()
 	}
 	m.plansMu.Unlock()
 	if !due {
 		return
 	}
+	sort.Strings(names)
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		_ = m.SyncPlans(m.ctx)
+		if err := m.SyncPlans(m.ctx); err != nil {
+			return // asked for again at the next occasion, after the interval
+		}
+		m.plansMu.Lock()
+		if m.plans.autoTried == nil {
+			m.plans.autoTried = map[string]bool{}
+		}
+		for _, n := range names {
+			m.plans.autoTried[n] = true
+		}
+		m.plansMu.Unlock()
 	}()
 }
 
@@ -218,24 +234,30 @@ func (m *Manager) tiersFor(s *BoxState) *TierInfo {
 	case cat == nil:
 		t.Lookup = lookupNoCatalogue
 	default:
-		t.Lookup = pmplans.LookupUnknown
-		for _, n := range names {
-			p, st := cat.Lookup(n)
-			if st == pmplans.LookupAmbiguous {
-				t.Lookup = st // a later name may still match
-			}
-			if p == nil {
-				continue
-			}
-			t.Lookup, t.Product, t.Cores = pmplans.LookupMatched, p.Name, p.Cores
-			if t.IOSource == "" {
-				t.IOWeight, t.IOTier, t.IOSource = p.IOWeight, p.IOTier, tierCatalogue
-			}
-			if t.CPUSource == "" {
-				t.CPUWeight, t.CPUTier, t.CPUSource = p.CPUWeight, p.CPUTier, tierCatalogue
-			}
-			break
-		}
+		t.fillFromCatalogue(cat, names)
 	}
 	return t
+}
+
+// fillFromCatalogue takes the first name the catalogue lists (unambiguously)
+// and fills the weights not typed in from that listing.
+func (t *TierInfo) fillFromCatalogue(cat *pmplans.Catalogue, names []string) {
+	t.Lookup = pmplans.LookupUnknown
+	for _, n := range names {
+		p, st := cat.Lookup(n)
+		if st == pmplans.LookupAmbiguous {
+			t.Lookup = st // a later name may still match
+		}
+		if p == nil {
+			continue
+		}
+		t.Lookup, t.Product, t.Cores = pmplans.LookupMatched, p.Name, p.Cores
+		if t.IOSource == "" {
+			t.IOWeight, t.IOTier, t.IOSource = p.IOWeight, p.IOTier, tierCatalogue
+		}
+		if t.CPUSource == "" {
+			t.CPUWeight, t.CPUTier, t.CPUSource = p.CPUWeight, p.CPUTier, tierCatalogue
+		}
+		return
+	}
 }

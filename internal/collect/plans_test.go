@@ -94,15 +94,18 @@ func TestDecorateAttachesTiers(t *testing.T) {
 
 // SyncPlans reads the page, keeps the catalogue for the next start and
 // resolves the boxes; a failed read keeps the last catalogue. The
-// automatic fetch after a services sync runs once for a set of unknown
-// products, not after every sync.
+// automatic read after a services sync happens once per unknown product
+// (not after every sync), at least an hour apart, and a failed one is
+// retried at the next occasion.
 func TestSyncPlansAndAutoFetch(t *testing.T) {
 	page, err := os.ReadFile(filepath.Join("..", "pmplans", "testdata", "eternal.html"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var pageHits, feedHits atomic.Int32
+	var pageHits atomic.Int32
 	var pageDown atomic.Bool
+	var product atomic.Value
+	product.Store("Dragon-R 2TB")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/plans":
@@ -113,8 +116,7 @@ func TestSyncPlansAndAutoFetch(t *testing.T) {
 			}
 			_, _ = w.Write(page)
 		case "/feed":
-			feedHits.Add(1)
-			_, _ = io.WriteString(w, `{"client_id":1,"currency":"EUR","services":[{"id":5,"product":"Dragon-R 2TB","domain":"h.pulsedmedia.com","status":"Active","recurring_amount":"10","billing_cycle":"Monthly","seedbox":{"username":"u"}}]}`)
+			_, _ = io.WriteString(w, `{"client_id":1,"currency":"EUR","services":[{"id":5,"product":"`+product.Load().(string)+`","domain":"h.pulsedmedia.com","status":"Active","recurring_amount":"10","billing_cycle":"Monthly","seedbox":{"username":"u"}}]}`)
 		}
 	}))
 	defer srv.Close()
@@ -137,36 +139,71 @@ func TestSyncPlansAndAutoFetch(t *testing.T) {
 	a := m.Settings()
 	a.PMAPIKey = "k"
 	m.settings.Store(&a)
+	// sync runs a services sync and gives an automatic read it may start
+	// time to land: the expected count is waited for, an unexpected one
+	// has a moment to show up.
+	sync := func(wantHits int32) {
+		t.Helper()
+		if err := m.SyncServices(ctx); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for pageHits.Load() < wantHits && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	ageAuto := func() { m.plansMu.Lock(); m.plans.autoAt = time.Now().Add(-2 * plansAutoInterval); m.plansMu.Unlock() }
+	hits := func(want int32, what string) {
+		t.Helper()
+		if n := pageHits.Load(); n != want {
+			t.Fatalf("%s: page read %d times, want %d", what, n, want)
+		}
+	}
 
 	// Without a key nothing was fetched on its own; with one, the sync's
 	// unknown product triggers one read of the page.
-	if pageHits.Load() != 0 {
-		t.Fatal("page read before any key was set")
-	}
-	if err := m.SyncServices(ctx); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 5*time.Second, func() bool { return m.Plans().FetchedAt != "" }, func() string { return "the automatic read never landed" })
-	if n := pageHits.Load(); n != 1 {
-		t.Fatalf("page read %d times, want 1", n)
+	hits(0, "before any key")
+	sync(1)
+	hits(1, "first unknown product")
+	if m.Plans().FetchedAt == "" {
+		t.Fatal("catalogue not kept")
 	}
 	if v, _ := st.GetValue(ctx, plansCacheKey); v == "" {
 		t.Fatal("catalogue not persisted")
-	}
-	// The same unknown product again: no second read.
-	if err := m.SyncServices(ctx); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(50 * time.Millisecond)
-	if n := pageHits.Load(); n != 1 {
-		t.Fatalf("page read %d times after a repeat sync, want 1", n)
 	}
 	states := m.States()
 	if len(states) != 1 || states[0].Tiers == nil || states[0].Tiers.Lookup != "unknown" {
 		t.Fatalf("states %+v", states)
 	}
-	// A manual read that fails keeps the catalogue and reports the error.
+	// The same unknown product again, even after the interval: no read.
+	sync(1)
+	hits(1, "repeat sync")
+	ageAuto()
+	sync(1)
+	hits(1, "repeat sync after the interval")
+	// A new unknown product within the hour waits for the interval.
+	product.Store("M1000 2TB")
+	m.plansMu.Lock()
+	m.plans.autoAt = time.Now()
+	m.plansMu.Unlock()
+	sync(1)
+	hits(1, "new product within the hour")
+	ageAuto()
+	sync(2)
+	hits(2, "new product after the interval")
+	sync(2)
+	hits(2, "the new product is tried once too")
+	// A failed automatic read is tried again at the next occasion.
 	pageDown.Store(true)
+	product.Store("Value250")
+	ageAuto()
+	sync(3)
+	hits(3, "failed read")
+	ageAuto()
+	sync(4)
+	hits(4, "failed read retried")
+	// A manual read that fails keeps the catalogue and reports the error.
 	if err := m.SyncPlans(ctx); err == nil {
 		t.Fatal("expected an error from the 503")
 	}

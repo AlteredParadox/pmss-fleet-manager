@@ -267,7 +267,7 @@ func (m *Manager) SyncServices(ctx context.Context) error {
 	m.svcMu.Unlock()
 	m.log.Info("pmapi sync", "services", len(feed.Services))
 	m.reattachServices()
-	m.plansWanted(ctx)
+	m.plansWanted()
 	if perr != nil {
 		return fmt.Errorf("services fetched and applied, but not saved for the next start: %w", perr)
 	}

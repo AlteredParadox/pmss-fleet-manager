@@ -648,7 +648,7 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 		return err
 	}
 	m.startPoller(b, nil) // publishes the new box
-	m.plansWanted(ctx)    // a product the catalogue has not seen is looked up
+	m.plansWanted()       // a product the catalogue has not seen is looked up
 	return nil
 }
 
@@ -731,7 +731,7 @@ func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clea
 		return store.ErrNotFound
 	}
 	m.startPoller(fresh, prev) // carries the last measured data over; runs the hooks if disabled; publishes
-	m.plansWanted(ctx)
+	m.plansWanted()
 	return nil
 }
 
