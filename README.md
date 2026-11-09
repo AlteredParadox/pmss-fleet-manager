@@ -791,7 +791,21 @@ account and machine it started on: after an edit that points a box record
 elsewhere, or forgets its pinned key, the job refuses to touch that box and
 lists what may need removing by hand. An unfinished copy whose source box
 was removed or now points elsewhere can be forgotten; the dashboard then
-says it may still be running and does nothing on either box. Cleanup that could not be confirmed
+says it may still be running and does nothing on either box. A source
+that simply stops answering (down, unreachable, or withholding its status)
+leaves the copy listed as "source not answering" after three minutes, and
+offers two recoveries that need no source, each on its own confirmation:
+"revoke destination key" removes the job's line from the destination's
+`authorized_keys` (a session already open keeps running, as the key's own
+30-minute expiry would have let it; no new login is possible afterwards;
+the action runs under the destination box's own revision, so it is there
+even after the source box record was deleted),
+and "stop tracking" forgets the job here, which frees the source box and
+the destination account for new transfers. Stopping tracking is never
+automatic and is not implied by the key's expiry: the copy, or a move's
+removal step, may still be running on the source, and a later move into
+the same account would not know files may still be landing there; the
+confirmation says so. Cleanup that could not be confirmed
 (a box unreachable when the copy ended) is shown as "credential cleanup
 needed" with a retry button, never as a failed copy.
 
@@ -1149,6 +1163,16 @@ Newest first; each release's full notes are on the
 
 **Unreleased**
 
+- **A transfer whose source stops answering can be recovered.** After three
+  minutes without a status read the copy shows "source not answering" and
+  offers, each on its own confirmation, to revoke the job's key line on the
+  destination and to stop tracking the job, which frees both accounts for
+  new transfers. Before, such a job could only be closed by editing or
+  deleting the source box record, and its key line was never removed
+  (2026-11 audits). Neither action claims the copy ended: the confirmation
+  says it may still be running, and a move's removal step with it. New
+  route `POST /api/boxes/{dst}/transfers/{tid}/revoke-key` (with the
+  destination's `?rev=`; refused in monitor-only mode).
 - **qBittorrent downloads need curl.** The wget fallback followed a
   redirect from https to plain http (reproduced by the 2026-11 audits);
   with a custom URL and no release digest that put an unauthenticated

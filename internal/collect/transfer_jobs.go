@@ -89,21 +89,27 @@ type TransferProgress struct {
 // TransferView is a transfer for the UI.
 type TransferView struct {
 	store.Transfer
-	SrcName   string            `json:"src_name"`
-	DstName   string            `json:"dst_name"`
-	Cleanup   []string          `json:"cleanup,omitempty"` // owed, in words
-	Blocked   string            `json:"blocked,omitempty"` // why the job will not act on a box
-	SrcLost   bool              `json:"source_lost"`       // unfinished, and its source can no longer be reached as saved
-	LastSeen  time.Time         `json:"last_seen"`
-	StatusErr string            `json:"status_error,omitempty"`
-	Scanning  bool              `json:"scanning"`
-	Progress  *TransferProgress `json:"progress,omitempty"`
-	Skipped   int               `json:"skipped"`
-	Kept      int               `json:"kept"`      // existing files kept (mode keep)
-	Conflicts int               `json:"conflicts"` // file-vs-directory name conflicts skipped (mode keep)
-	ErrCount  int               `json:"error_count"`
-	Errors    string            `json:"errors,omitempty"`
-	Stage     string            `json:"stage,omitempty"` // "remove" while a move removes its source (the outcome is the row's MoveState)
+	SrcName string   `json:"src_name"`
+	DstName string   `json:"dst_name"`
+	Cleanup []string `json:"cleanup,omitempty"` // owed, in words
+	Blocked string   `json:"blocked,omitempty"` // why the job will not act on a box
+	SrcLost bool     `json:"source_lost"`       // unfinished, and its source can no longer be reached as saved
+	// SrcUnreadable: unfinished, and the source has not answered a status
+	// read for xferStale (see xferUnreadable). KeyRevocable: the job's
+	// key line on the destination can be removed from here although the
+	// job is not over (its source unreadable or lost).
+	SrcUnreadable bool              `json:"source_unreadable"`
+	KeyRevocable  bool              `json:"key_revocable"`
+	LastSeen      time.Time         `json:"last_seen"`
+	StatusErr     string            `json:"status_error,omitempty"`
+	Scanning      bool              `json:"scanning"`
+	Progress      *TransferProgress `json:"progress,omitempty"`
+	Skipped       int               `json:"skipped"`
+	Kept          int               `json:"kept"`      // existing files kept (mode keep)
+	Conflicts     int               `json:"conflicts"` // file-vs-directory name conflicts skipped (mode keep)
+	ErrCount      int               `json:"error_count"`
+	Errors        string            `json:"errors,omitempty"`
+	Stage         string            `json:"stage,omitempty"` // "remove" while a move removes its source (the outcome is the row's MoveState)
 }
 
 // TransferRequest starts a copy from the box the route names.
@@ -317,6 +323,30 @@ func xferActive(phase string) bool {
 	return phase == xferPreparing || phase == xferRunning || phase == xferUnconfirmed
 }
 
+// xferStale is how long a running or unconfirmed job's status may go
+// unread, its source not answering, before the dashboard offers the two
+// recoveries that need no source: removing the job's key line from the
+// destination, and stopping the job's tracking. Before, such a job could
+// be closed only by editing or deleting the source box record, and its key
+// line was never removed (2026-11 audits).
+const xferStale = 3 * time.Minute
+
+// xferUnreadable reports whether an active job's source has stopped
+// answering: the last status read failed, and the last one that succeeded
+// (or, with none since the dashboard started, the job's creation) is more
+// than xferStale ago. A failed read proves nothing about the copy, which
+// may well still be running; this only says the dashboard cannot tell.
+func xferUnreadable(t store.Transfer, seen time.Time, statusErr string, now time.Time) bool {
+	if t.Phase != xferRunning && t.Phase != xferUnconfirmed || statusErr == "" {
+		return false
+	}
+	last := seen
+	if last.IsZero() {
+		last = t.CreatedAt
+	}
+	return now.Sub(last) > xferStale
+}
+
 func cleanupWords(p int) []string {
 	var out []string
 	if p&store.TransferPendingSrcJob != 0 {
@@ -505,20 +535,6 @@ func (m *Manager) xferApplyLocked(ctx context.Context, j *xferJob, l xferLive, c
 func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 	t := m.xferSnapshot(j)
 	var errs []string
-	dst := func(bit int, run func(c context.Context, p *poller) (string, error)) {
-		if t.Pending&bit == 0 {
-			return
-		}
-		p, err := m.xferPoller(t.DstBoxID, t.DstEndp, t.DstHostKey)
-		if err == nil {
-			_, err = run(ctx, p)
-		}
-		if err != nil {
-			errs = append(errs, err.Error())
-			return
-		}
-		t.Pending &^= bit
-	}
 	// The source first: its cleanup refuses while the runner is alive, and
 	// then nothing else is touched (a live copy is a job to read or cancel,
 	// not to clean up after).
@@ -532,20 +548,11 @@ func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 		}
 	}
 	if !running {
-		dst(store.TransferPendingDstKey, func(c context.Context, p *poller) (string, error) {
-			cli, err := p.conn(c)
-			if err != nil {
-				return "", err
+		for _, bit := range []int{store.TransferPendingDstKey, store.TransferPendingDstEmpty} {
+			if err := m.xferDstLeg(ctx, &t, bit); err != nil {
+				errs = append(errs, err.Error())
 			}
-			return xferDstRemoveKey(c, cli, t.Token, t.PubKey)
-		})
-		dst(store.TransferPendingDstEmpty, func(c context.Context, p *poller) (string, error) {
-			cli, err := p.conn(c)
-			if err != nil {
-				return "", err
-			}
-			return xferDstRmdirEmpty(c, cli, t.Token, t.DstPath)
-		})
+		}
 	}
 	var err error
 	if len(errs) > 0 {
@@ -555,11 +562,7 @@ func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 		// Not cut by an expired setup deadline: the row must go now.
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if m.st.DeleteTransfer(dctx, t.ID) == nil {
-			m.xferMu.Lock()
-			delete(m.xfers, t.ID)
-			m.xferMu.Unlock()
-			m.Publish(Event{Type: "transfers"})
+		if m.xferForget(dctx, t.ID) == nil {
 			return nil
 		}
 	}
@@ -568,6 +571,53 @@ func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 	}
 	m.xferNote(j, nil, err)
 	return err
+}
+
+// xferDstLeg does one owed destination leg (bit: the key line, or the
+// empty directory) on a destination whose record still names the job's
+// machine, and clears the bit on success. Nothing to do when the bit is
+// not owed.
+func (m *Manager) xferDstLeg(ctx context.Context, t *store.Transfer, bit int) error {
+	if t.Pending&bit == 0 {
+		return nil
+	}
+	p, err := m.xferPoller(t.DstBoxID, t.DstEndp, t.DstHostKey)
+	if err != nil {
+		return err
+	}
+	cli, err := p.conn(ctx)
+	if err != nil {
+		return err
+	}
+	switch bit {
+	case store.TransferPendingDstKey:
+		_, err = xferDstRemoveKey(ctx, cli, t.Token, t.PubKey)
+	case store.TransferPendingDstEmpty:
+		_, err = xferDstRmdirEmpty(ctx, cli, t.Token, t.DstPath)
+	}
+	if err != nil {
+		return err
+	}
+	t.Pending &^= bit
+	return nil
+}
+
+// xferRevokeKeyLocked removes an active job's key line from the
+// destination (under op), the one recovery a job whose source stopped
+// answering can have without the source: a copy already connected keeps
+// its session, as the key's own expiry would have let it, but no new login
+// with the key is possible afterwards. The job stays in its phase, the
+// source box and the destination account stay reserved.
+func (m *Manager) xferRevokeKeyLocked(ctx context.Context, j *xferJob) error {
+	t := m.xferSnapshot(j)
+	if t.Pending&store.TransferPendingDstKey == 0 {
+		return fmt.Errorf("%w: no key line is owed on the destination", ErrTransferBusy)
+	}
+	if err := m.xferDstLeg(ctx, &t, store.TransferPendingDstKey); err != nil {
+		m.xferNote(j, nil, err)
+		return err
+	}
+	return m.xferSave(j, t) // publishes; the status note stays as it was, the source has not answered
 }
 
 // xferCleanSource removes the job directory on the source; running
@@ -852,11 +902,51 @@ func (m *Manager) RetryTransferCleanup(ctx context.Context, srcID, id int64) err
 	return m.xferCleanupLocked(ctx, j)
 }
 
+// RevokeTransferKey removes an active job's key line from its destination
+// box dstID (the box this changes, so its revision is the one the route
+// checks; the source record may be gone) once the source has stopped
+// answering or now names another machine: see xferRevokeKeyLocked.
+func (m *Manager) RevokeTransferKey(ctx context.Context, dstID, id int64) error {
+	j, err := m.xferJobFor(id, 0)
+	if err != nil {
+		return err
+	}
+	if m.xferSnapshot(j).DstBoxID != dstID {
+		return store.ErrNotFound
+	}
+	j.op.Lock()
+	defer j.op.Unlock()
+	t := m.xferSnapshot(j)
+	if !(t.Phase == xferRunning || t.Phase == xferUnconfirmed) {
+		return fmt.Errorf("%w: the transfer is %s; its cleanup, if any is owed, removes the key", ErrTransferBusy, t.Phase)
+	}
+	if lost, unreadable := m.xferSourceGone(j, t); !lost && !unreadable {
+		return fmt.Errorf("%w: the transfer is %s and its source answers; cancel it, or wait until it has not answered for %s", ErrTransferBusy, t.Phase, xferStale)
+	}
+	return m.xferRevokeKeyLocked(ctx, j)
+}
+
+// xferSourceGone is how an active job's source is out of reach, if it is:
+// lost (its record names another machine, or is gone) or unreadable (not
+// answering for xferStale).
+func (m *Manager) xferSourceGone(j *xferJob, t store.Transfer) (lost, unreadable bool) {
+	_, err := m.xferPoller(t.SrcBoxID, t.SrcEndp, t.SrcHostKey)
+	m.xferMu.Lock()
+	seen, serr := j.seen, j.err
+	m.xferMu.Unlock()
+	return errors.Is(err, ErrTransferIdentity), xferUnreadable(t, seen, serr, time.Now())
+}
+
 // DismissTransfer forgets a finished job. While cleanup is still owed it
 // takes force, and the answer lists what may be left on the boxes. A job
 // that is not finished but whose source box was removed or now names
 // another machine can never be read, cancelled or cleaned up again; force
-// forgets it too, touching neither box (daybreak review B2).
+// forgets it too, touching neither box (daybreak review B2). So does a job
+// whose source has stopped answering for xferStale: forgetting it is the
+// operator's explicit word that the copy may still be running there, and
+// it frees the source box and the destination account for new transfers,
+// which is why it is never automatic and never implied by the key's
+// expiry (the expiry stops new logins, not a session already open).
 func (m *Manager) DismissTransfer(ctx context.Context, id int64, force bool) ([]string, error) {
 	j, err := m.xferJobFor(id, 0)
 	if err != nil {
@@ -868,12 +958,16 @@ func (m *Manager) DismissTransfer(ctx context.Context, id int64, force bool) ([]
 	defer j.op.Unlock()
 	t := m.xferSnapshot(j)
 	if !xferFinal(t.Phase) {
-		if _, err := m.xferPoller(t.SrcBoxID, t.SrcEndp, t.SrcHostKey); !errors.Is(err, ErrTransferIdentity) {
+		lost, unreadable := m.xferSourceGone(j, t)
+		if !lost && !unreadable {
 			return nil, fmt.Errorf("%w: the transfer is %s; cancel it first", ErrTransferBusy, t.Phase)
 		}
 		left := append([]string{"the copy may still be running on the source"}, cleanupWords(t.Pending)...)
 		if !force {
-			return left, fmt.Errorf("%w: the source box is gone or points elsewhere, so this copy cannot be checked or stopped from here (%s); dismiss anyway", ErrTransferBusy, strings.Join(left, "; "))
+			if lost {
+				return left, fmt.Errorf("%w: the source box is gone or points elsewhere, so this copy cannot be checked or stopped from here (%s); dismiss anyway", ErrTransferBusy, strings.Join(left, "; "))
+			}
+			return left, fmt.Errorf("%w: the source has not answered for %s, so this copy cannot be checked or stopped from here (%s); stop tracking it anyway", ErrTransferBusy, xferStale, strings.Join(left, "; "))
 		}
 		return left, m.xferForget(ctx, id)
 	}
@@ -933,12 +1027,14 @@ func (m *Manager) xferView(id int64) TransferView {
 	if s, ok := m.State(t.DstBoxID); ok {
 		v.DstName = s.Name
 	}
+	v.SrcUnreadable = xferUnreadable(t, seen, serr, time.Now())
 	if xferActive(t.Phase) || t.Pending != 0 {
 		var why []string
 		if _, err := m.xferPoller(t.SrcBoxID, t.SrcEndp, t.SrcHostKey); errors.Is(err, ErrTransferIdentity) {
 			why = append(why, "source: "+err.Error())
 			v.SrcLost = xferActive(t.Phase)
 		}
+		v.KeyRevocable = (v.SrcLost || v.SrcUnreadable) && t.Pending&store.TransferPendingDstKey != 0
 		if t.Pending&(store.TransferPendingDstKey|store.TransferPendingDstEmpty) != 0 {
 			if _, err := m.xferPoller(t.DstBoxID, t.DstEndp, t.DstHostKey); errors.Is(err, ErrTransferIdentity) {
 				why = append(why, "destination: "+err.Error())
