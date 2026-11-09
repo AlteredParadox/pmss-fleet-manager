@@ -303,7 +303,8 @@ func wantRt(s *collect.BoxState) []want {
 
 // firewalledGrace is how long a client may report no incoming connectivity
 // before it is an alert: after a start libtorrent says "firewalled" until
-// the first peer dials in, which on a quiet box takes minutes.
+// the first peer dials in, which on a quiet box takes minutes (and never
+// happens while the client has no torrents, which is not timed at all).
 const firewalledGrace = 10 * time.Minute
 
 // wantQbtConnection raises the alert for a reachable client that has had no
@@ -312,6 +313,13 @@ const firewalledGrace = 10 * time.Minute
 // the box can seed to.
 func wantQbtConnection(s *collect.BoxState, now time.Time) []want {
 	if !s.Qbt.Enabled || !s.Qbt.Reachable || (s.Qbt.Connection != "firewalled" && s.Qbt.Connection != "disconnected") {
+		return nil
+	}
+	if s.Qbt.Connection == "firewalled" && s.Qbt.Total == 0 {
+		// Nothing announced, so no peer can learn the port and the flag
+		// cannot clear; nothing is lost either. The poller also leaves the
+		// clock unset in this case (see firewalledSince); this is the
+		// alert's own statement of the rule.
 		return nil
 	}
 	since, err := time.Parse(time.RFC3339, s.Qbt.FirewalledSince)

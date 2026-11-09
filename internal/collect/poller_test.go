@@ -50,7 +50,7 @@ func fakeWebUI(t *testing.T, connection string) *httptest.Server {
 		w.Write([]byte(`{"dht":false,"pex":false,"lsd":false,"listen_port":51413}`))
 	})
 	mux.HandleFunc("/api/v2/sync/maindata", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"server_state":{"dl_info_speed":0,"up_info_speed":0,"global_ratio":"1.0","connection_status":"` + connection + `"},"torrents":{}}`))
+		w.Write([]byte(`{"server_state":{"dl_info_speed":0,"up_info_speed":0,"global_ratio":"1.0","connection_status":"` + connection + `"},"torrents":{"abababababababababababababababababababab":{"name":"one","state":"stalledUP","size":1,"progress":1}}}`))
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -143,20 +143,35 @@ func TestResolveQbtVersion(t *testing.T) {
 
 func TestFirewalledSince(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
-	if got := firewalledSince("", "firewalled", now); got != "2026-10-21T12:00:00Z" {
+	if got := firewalledSince("", "firewalled", 1, now); got != "2026-10-21T12:00:00Z" {
 		t.Fatalf("first sighting: %q", got)
 	}
-	if got := firewalledSince("2026-10-21T11:00:00Z", "firewalled", now); got != "2026-10-21T11:00:00Z" {
+	if got := firewalledSince("2026-10-21T11:00:00Z", "firewalled", 1, now); got != "2026-10-21T11:00:00Z" {
 		t.Fatalf("kept: %q", got)
 	}
-	if got := firewalledSince("2026-10-21T11:00:00Z", "disconnected", now); got != "2026-10-21T11:00:00Z" {
+	if got := firewalledSince("2026-10-21T11:00:00Z", "disconnected", 1, now); got != "2026-10-21T11:00:00Z" {
 		t.Fatalf("disconnected keeps it: %q", got)
 	}
-	if got := firewalledSince("garbage", "firewalled", now); got != "2026-10-21T12:00:00Z" {
+	if got := firewalledSince("garbage", "firewalled", 1, now); got != "2026-10-21T12:00:00Z" {
 		t.Fatalf("unparsable previous value restarts the clock: %q", got)
 	}
+	// No torrents: "firewalled" is not timed (no peer can learn the port),
+	// a clock already running is dropped, and the first torrent starts it
+	// from then; "disconnected" is timed whatever the torrent count.
+	if got := firewalledSince("", "firewalled", 0, now); got != "" {
+		t.Fatalf("idle client timed: %q", got)
+	}
+	if got := firewalledSince("2026-10-21T11:00:00Z", "firewalled", 0, now); got != "" {
+		t.Fatalf("idle client keeps a clock: %q", got)
+	}
+	if got := firewalledSince(firewalledSince("2026-10-21T11:00:00Z", "firewalled", 0, now.Add(-time.Hour)), "firewalled", 1, now); got != "2026-10-21T12:00:00Z" {
+		t.Fatalf("first torrent must start the clock now: %q", got)
+	}
+	if got := firewalledSince("2026-10-21T11:00:00Z", "disconnected", 0, now); got != "2026-10-21T11:00:00Z" {
+		t.Fatalf("disconnected with no torrents must keep the clock: %q", got)
+	}
 	for _, c := range []string{"connected", ""} {
-		if got := firewalledSince("2026-10-21T11:00:00Z", c, now); got != "" {
+		if got := firewalledSince("2026-10-21T11:00:00Z", c, 1, now); got != "" {
 			t.Fatalf("%q must clear: %q", c, got)
 		}
 	}
@@ -173,7 +188,7 @@ func TestFirewalledSinceSurvivesAPIFailure(t *testing.T) {
 	t0 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	prev := QbtState{}
 	// Poll 1: firewalled.
-	prev.FirewalledSince = firewalledSince(carriedFirewalledSince(prev, true, false), "firewalled", t0)
+	prev.FirewalledSince = firewalledSince(carriedFirewalledSince(prev, true, false), "firewalled", 1, t0)
 	if prev.FirewalledSince != "2026-10-21T12:00:00Z" {
 		t.Fatalf("poll 1: %q", prev.FirewalledSince)
 	}
@@ -184,7 +199,7 @@ func TestFirewalledSinceSurvivesAPIFailure(t *testing.T) {
 		t.Fatalf("API failure cleared it: %q", failed.FirewalledSince)
 	}
 	// Poll 3: API back, still firewalled: the original time stands.
-	got := firewalledSince(carriedFirewalledSince(failed, true, false), "firewalled", t0.Add(20*time.Minute))
+	got := firewalledSince(carriedFirewalledSince(failed, true, false), "firewalled", 1, t0.Add(20*time.Minute))
 	if got != "2026-10-21T12:00:00Z" {
 		t.Fatalf("recovery restarted the clock: %q", got)
 	}
@@ -237,7 +252,7 @@ func TestTrackQbtProcessAndRestartReset(t *testing.T) {
 	t0 := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	prev := QbtState{FirewalledSince: t0.Add(-20 * time.Minute).Format(time.RFC3339)}
 	qs := QbtState{FirewalledSince: carriedFirewalledSince(prev, true, true)}
-	qs.FirewalledSince = firewalledSince(qs.FirewalledSince, "firewalled", t0)
+	qs.FirewalledSince = firewalledSince(qs.FirewalledSince, "firewalled", 1, t0)
 	if qs.FirewalledSince != "2026-10-21T12:00:00Z" {
 		t.Fatalf("restart reset overwritten: %q", qs.FirewalledSince)
 	}

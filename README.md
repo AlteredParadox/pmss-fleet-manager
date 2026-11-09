@@ -108,7 +108,8 @@ panel's watchdog.
 **Alerts.** Unreachable box, suspended account, disk at threshold or over
 quota, traffic at threshold, throttled, qBittorrent or Docker down,
 qBittorrent without incoming connectivity (firewalled or disconnected) for
-more than ten minutes, container
+more than ten minutes (a client with no torrents is not timed: nothing can
+reach its port), container
 exited non-zero, a watched application not running, process memory near the
 slice limit, a kernel OOM kill in
 the slice, renewal within N days or overdue (counted in calendar days of the
@@ -1125,6 +1126,17 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**Unreleased**
+
+- **No "firewalled" alert for an idle qBittorrent.** libtorrent reports
+  `firewalled` until the first peer connects inbound, and with no torrents
+  no peer can learn the port, so an idle client stays firewalled for good
+  whatever the port (one box sat so for eleven days). A client with no
+  torrents is no longer timed or alerted on that status; the ten-minute
+  clock starts with its first torrent. The overview says "firewalled (no
+  torrents yet)" without a warning colour. `disconnected` (no listen
+  socket) is alerted as before.
 
 **1.17.0**
 
