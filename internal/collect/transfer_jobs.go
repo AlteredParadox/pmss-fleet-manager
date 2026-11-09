@@ -534,28 +534,8 @@ func (m *Manager) xferApplyLocked(ctx context.Context, j *xferJob, l xferLive, c
 // deleted: nothing is left to show or to clean.
 func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 	t := m.xferSnapshot(j)
-	var errs []string
-	// The source first: its cleanup refuses while the runner is alive, and
-	// then nothing else is touched (a live copy is a job to read or cancel,
-	// not to clean up after).
-	running := false
-	if t.Pending&store.TransferPendingSrcJob != 0 {
-		var err error
-		if running, err = m.xferCleanSource(ctx, t); err != nil {
-			errs = append(errs, err.Error())
-		} else {
-			t.Pending &^= store.TransferPendingSrcJob
-		}
-	}
-	if !running {
-		for _, bit := range []int{store.TransferPendingDstKey, store.TransferPendingDstEmpty} {
-			if err := m.xferDstLeg(ctx, &t, bit); err != nil {
-				errs = append(errs, err.Error())
-			}
-		}
-	}
 	var err error
-	if len(errs) > 0 {
+	if errs := m.xferCleanupLegs(ctx, &t); len(errs) > 0 {
 		err = errors.New("cleanup not confirmed: " + strings.Join(errs, "; "))
 	}
 	if t.Phase == xferSetupFailed && t.Pending == 0 {
@@ -571,6 +551,30 @@ func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 	}
 	m.xferNote(j, nil, err)
 	return err
+}
+
+// xferCleanupLegs runs the cleanup legs t still owes, clearing each bit
+// it confirmed, and returns what the others said. The source first: its
+// cleanup refuses while the runner is alive, and then nothing else is
+// touched (a live copy is a job to read or cancel, not to clean up after).
+func (m *Manager) xferCleanupLegs(ctx context.Context, t *store.Transfer) (errs []string) {
+	if t.Pending&store.TransferPendingSrcJob != 0 {
+		running, err := m.xferCleanSource(ctx, *t)
+		if err != nil {
+			errs = append(errs, err.Error())
+		} else {
+			t.Pending &^= store.TransferPendingSrcJob
+		}
+		if running {
+			return errs
+		}
+	}
+	for _, bit := range []int{store.TransferPendingDstKey, store.TransferPendingDstEmpty} {
+		if err := m.xferDstLeg(ctx, t, bit); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	return errs
 }
 
 // xferDstLeg does one owed destination leg (bit: the key line, or the
