@@ -326,6 +326,14 @@ func TestKeyPathMustBeRegularFile(t *testing.T) {
 			t.Fatal("a FIFO key path blocked the read")
 		}
 	}
+	// A regular file that cannot be read is still that error.
+	if os.Getuid() != 0 {
+		sealed := filepath.Join(dir, "sealed")
+		os.WriteFile(sealed, []byte("x"), 0o000)
+		if _, _, err := keySigners(Config{KeyPath: sealed}); err == nil || !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("unreadable key: %v", err)
+		}
+	}
 	// A real key still loads.
 	writeKey(t, filepath.Join(dir, "ok"))
 	if s, _, err := keySigners(Config{KeyPath: filepath.Join(dir, "ok")}); err != nil || len(s) != 1 {

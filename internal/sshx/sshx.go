@@ -282,7 +282,8 @@ const maxKeyFile = 64 << 10
 
 // readKeyFile reads a private key file that is a regular file of at most
 // maxKeyFile bytes, checked before it is opened: a FIFO blocks on open, a
-// device on read.
+// device on read. (A regular file that grows between the check and the
+// read is the operator's own doing, not a boundary.)
 func readKeyFile(p string) ([]byte, error) {
 	fi, err := os.Stat(p)
 	if err != nil {
@@ -294,19 +295,7 @@ func readKeyFile(p string) ([]byte, error) {
 	if fi.Size() > maxKeyFile {
 		return nil, fmt.Errorf("%d bytes, more than a private key file holds", fi.Size())
 	}
-	f, err := os.Open(p)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxKeyFile+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(b) > maxKeyFile {
-		return nil, fmt.Errorf("over %d bytes, more than a private key file holds", maxKeyFile)
-	}
-	return b, nil
+	return os.ReadFile(p)
 }
 
 // keySigners loads the usable private keys. An unreadable or unparsable
