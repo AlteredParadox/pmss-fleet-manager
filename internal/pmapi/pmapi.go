@@ -240,27 +240,42 @@ func Parse(body []byte) (*Feed, error) {
 	if len(body) > maxFeedBytes {
 		return nil, fmt.Errorf("feed larger than %d MiB; refusing to parse it", maxFeedBytes>>20)
 	}
-	var env map[string]json.RawMessage
+	var env feedEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("parse feed: %w (%s)", err, firstLine(body))
 	}
-	if e, ok := env["error"]; ok && string(e) != "null" {
-		return nil, fmt.Errorf("feed reports an error: %s", firstLine(e))
+	if len(env.Error) > 0 && string(env.Error) != "null" {
+		return nil, fmt.Errorf("feed reports an error: %s", firstLine(env.Error))
 	}
-	raw, ok := env["services"]
-	if !ok {
+	if env.Services == nil {
 		return nil, fmt.Errorf("feed has no services member (%s)", firstLine(body))
 	}
-	if n, err := countArray(raw, maxServices); err != nil {
+	if n, err := countArray(env.Services, maxServices); err != nil {
 		return nil, fmt.Errorf("parse feed: services: %w", err)
 	} else if n > maxServices {
 		return nil, fmt.Errorf("feed lists more than %d services; refusing it", maxServices)
 	}
-	var f Feed
-	if err := json.Unmarshal(body, &f); err != nil {
-		return nil, fmt.Errorf("parse feed: %w (%s)", err, firstLine(body))
+	f := &Feed{ClientID: env.ClientID, GeneratedAt: env.GeneratedAt, Currency: env.Currency}
+	if string(env.Services) != "null" {
+		if err := json.Unmarshal(env.Services, &f.Services); err != nil {
+			return nil, fmt.Errorf("parse feed: services: %w (%s)", err, firstLine(env.Services))
+		}
 	}
-	return &f, nil
+	return f, nil
+}
+
+// feedEnvelope is Feed with its services left undecoded. The count is
+// taken from, and the services then decoded from, this one value: the
+// decoder matches member names without regard to case and keeps the last
+// of duplicate names, so a count read off one spelling of the member and
+// a decode of the whole body again could settle on different arrays (fred
+// on PR 176). Absent and null differ: nil, and the four bytes.
+type feedEnvelope struct {
+	ClientID    int64           `json:"client_id"`
+	GeneratedAt string          `json:"generated_at"`
+	Currency    string          `json:"currency"`
+	Services    json.RawMessage `json:"services"`
+	Error       json.RawMessage `json:"error"`
 }
 
 // countArray counts the elements of a JSON array (null counts as empty)

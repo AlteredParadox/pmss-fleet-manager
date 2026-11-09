@@ -22,6 +22,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -192,5 +193,28 @@ func TestParseRefusesOversizeAndTooManyServices(t *testing.T) {
 	}
 	if _, err := Parse([]byte(`{"services":[{},`)); err == nil {
 		t.Fatal("a cut array must be an error")
+	}
+	// The decoder matches names without regard to case and keeps the last
+	// duplicate: the count and the decode must see the same array.
+	many := strings.TrimSuffix(strings.Repeat("{},", maxServices+1), ",")
+	if _, err := Parse([]byte(`{"services":[],"Services":[` + many + `]}`)); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("mixed-case duplicate: %v", err)
+	}
+	if f, err := Parse([]byte(`{"Services":[{}]}`)); err != nil || len(f.Services) != 1 {
+		t.Fatalf("a capitalised member alone is the member: %v", err)
+	}
+	// An oversized array followed by an empty duplicate: the empty one is
+	// the member, and the big one costs its bytes once, not a Service each.
+	dup := []byte(`{"services":[` + strings.TrimSuffix(strings.Repeat("{},", 200000), ",") + `],"services":[]}`)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	f, err := Parse(dup)
+	runtime.ReadMemStats(&after)
+	if err != nil || len(f.Services) != 0 {
+		t.Fatalf("duplicate member: %v, %d services", err, len(f.Services))
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 8*uint64(len(dup)) {
+		t.Fatalf("the discarded array was decoded: %d bytes allocated for a %d-byte body", alloc, len(dup))
 	}
 }
