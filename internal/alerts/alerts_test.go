@@ -95,12 +95,23 @@ func TestDaysUntilDate(t *testing.T) {
 func TestWantQbtConnection(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	s := collect.BoxState{Name: "seed-01"}
-	s.Qbt.Enabled, s.Qbt.Reachable, s.Qbt.Connection, s.Qbt.ListenPort = true, true, "firewalled", 51413
+	s.Qbt.Enabled, s.Qbt.Reachable, s.Qbt.Connection, s.Qbt.ListenPort, s.Qbt.Total = true, true, "firewalled", 51413, 3
 	s.Qbt.FirewalledSince = now.Add(-5 * time.Minute).Format(time.RFC3339)
 	if got := wantQbtConnection(&s, now); len(got) != 0 {
 		t.Fatalf("inside the grace period: %+v", got)
 	}
 	s.Qbt.FirewalledSince = now.Add(-15 * time.Minute).Format(time.RFC3339)
+	// No torrents: nothing can reach the port, so "firewalled" is no alert
+	// however long it lasts; "disconnected" still is.
+	s.Qbt.Total = 0
+	if got := wantQbtConnection(&s, now); len(got) != 0 {
+		t.Fatalf("idle client alerted: %+v", got)
+	}
+	s.Qbt.Connection = "disconnected"
+	if got := wantQbtConnection(&s, now); len(got) != 1 {
+		t.Fatalf("disconnected idle client must alert: %+v", got)
+	}
+	s.Qbt.Connection, s.Qbt.Total = "firewalled", 3
 	got := wantQbtConnection(&s, now)
 	if len(got) != 1 || got[0].key != "qbt-conn" || got[0].title != "seed-01 — qBittorrent: no peer has reached listen port 51413 (firewalled) for 15m; check the port in qBittorrent against the one Pulsed Media assigned" {
 		t.Fatalf("alert: %+v", got)

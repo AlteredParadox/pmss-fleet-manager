@@ -812,6 +812,11 @@ function ovConnectionRow(q) {
   const port = q.listen_port ? ` · listen port ${q.listen_port}` : '';
   if (q.connection === 'connected') return `<div><span>connection</span><span>incoming OK${port}</span></div>`;
   const since = q.firewalled_since ? ` since ${fmtAgo(q.firewalled_since)}` : '';
+  if (q.connection === 'firewalled' && !q.total) {
+    // Nothing announced: no peer can learn the port, so libtorrent keeps
+    // saying firewalled whatever the port is. Not a warning, and not timed.
+    return `<div><span>connection</span><span class="muted" title="no torrents yet: no peer can learn the listen port, so libtorrent reports firewalled until the first torrent is announced and a peer connects; this says nothing about the port">firewalled (no torrents yet)${port}</span></div>`;
+  }
   return `<div><span>connection</span><span class="warn" title="${q.connection === 'firewalled' ? 'no peer has connected inbound yet: expected for a few minutes after a start, otherwise the listen port is wrong or not the one Pulsed Media assigned' : 'libtorrent reports no network connection'}">${q.connection === 'firewalled' ? 'firewalled' : 'disconnected'}${since}${port}</span></div>`;
 }
 function ovBinaryRow(q) {
@@ -1145,9 +1150,11 @@ function discoveryTag(q) {
 // Torrents header: every mechanism with its state, so "all off" is visible
 // too. Each is a toggle; enabling asks first, since that is the direction
 // that breaks private-tracker rules.
-// " · firewalled" in the torrents header while incoming connectivity is missing.
+// " · firewalled" in the torrents header while incoming connectivity is
+// missing; not for a client without torrents, whose flag cannot clear.
 function connectionNote(q) {
   if (!q.reachable || !q.connection || q.connection === 'connected') return '';
+  if (q.connection === 'firewalled' && !q.total) return '';
   return ` · <span class="warn" title="no incoming connections${q.listen_port ? ` on listen port ${q.listen_port}` : ''}${q.firewalled_since ? ` since ${fmtAgo(q.firewalled_since)}` : ''}">${esc(q.connection)}</span>`;
 }
 // A discovery setting as plain text, for monitor-only mode: the state

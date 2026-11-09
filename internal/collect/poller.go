@@ -1170,7 +1170,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	qs.Connection = connectionStatus(ss.ConnectionStatus)
 	// From qs's own carried value, not st.Qbt's: the carry already dropped
 	// it when the process was gone or restarted (fred review on PR 87).
-	qs.FirewalledSince = firewalledSince(qs.FirewalledSince, qs.Connection, time.Now())
+	qs.FirewalledSince = firewalledSince(qs.FirewalledSince, qs.Connection, len(md.Torrents), time.Now())
 	if f, err := strconv.ParseFloat(strings.TrimSpace(ss.GlobalRatio), 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) && f >= 0 && f < 1e9 {
 		qs.GlobalRatio = f // qBittorrent sends "∞" for undefined, which parses as 0 here
 	}
@@ -1278,9 +1278,17 @@ func qbtProcKey(procs []probe.ProcInfo) (key string, known bool) {
 
 // firewalledSince carries the time the client was first seen not
 // connected: kept while it stays firewalled or disconnected, cleared when
-// it is connected or the status is unknown.
-func firewalledSince(prev, conn string, now time.Time) string {
+// it is connected or the status is unknown. A client with no torrents is
+// not timed while "firewalled": libtorrent clears that flag on the first
+// incoming peer connection, and with nothing announced no peer can learn
+// the port, so an idle client stays firewalled for good whatever the port
+// (pm5 sat so for 11 days). The clock starts with the first torrent.
+// "disconnected" (no listen socket at all) is timed regardless.
+func firewalledSince(prev, conn string, torrents int, now time.Time) string {
 	if conn != "firewalled" && conn != "disconnected" {
+		return ""
+	}
+	if conn == "firewalled" && torrents == 0 {
 		return ""
 	}
 	if _, err := time.Parse(time.RFC3339, prev); err == nil {
