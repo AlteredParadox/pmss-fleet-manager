@@ -514,7 +514,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.17
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.18
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -1149,7 +1149,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.17.1 is the current release. The code was written against five real Pulsed
+1.18.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1161,7 +1161,7 @@ checksums, and a matching container image on GHCR.
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
-**Unreleased**
+**1.18.0**
 
 - **A transfer whose source stops answering can be recovered.** After three
   minutes without a status read the copy shows "source not answering" and
