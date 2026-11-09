@@ -838,7 +838,12 @@ func TestDirsAndPortCheckOverSSH(t *testing.T) {
 		t.Errorf("a missing folder is the box's refusal: %v", err)
 	}
 	// The port re-check: a socket this process owns passes, a port with
-	// nothing listening is refused.
+	// nothing listening is refused. Not as root: the gate refuses uid 0
+	// (the shell runs as the test process's user, whatever the SSH name).
+	if os.Getuid() == 0 {
+		t.Log("running as root: the port re-check is not exercised")
+		return
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
