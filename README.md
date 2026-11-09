@@ -840,6 +840,9 @@ account runs, nothing is copied into that account (a copy arriving with
 its old timestamps could otherwise be removed without ever having been
 copied on), and a move does not start from an account a copy is still
 writing into; both are refused with a message until the other job ends.
+In practice: for as long as a move runs (hours, for terabytes), the box
+it runs from takes no other transfer in, even into an unrelated folder;
+copies from it, and transfers between other boxes, are not affected.
 Stop anything else writing to the source first, as for a copy: a program
 that writes files with an old modification time (a client that preserves
 timestamps) could have one removed that was never copied.
