@@ -16,7 +16,8 @@
 
 package collect
 
-// The dashboard's side of a box-to-box copy (the box side is transfer.go):
+// The dashboard's side of a box-to-box copy or move (the box side is
+// transfer.go):
 // setup, the status loop, cancel, cleanup and dismiss. A job only ever
 // acts on a box whose current record still has the endpoint and pinned
 // host key saved when the job started. Completion comes from the runner's
@@ -102,6 +103,7 @@ type TransferView struct {
 	Conflicts int               `json:"conflicts"` // file-vs-directory name conflicts skipped (mode keep)
 	ErrCount  int               `json:"error_count"`
 	Errors    string            `json:"errors,omitempty"`
+	Stage     string            `json:"stage,omitempty"` // "remove" while a move removes its source (the outcome is the row's MoveState)
 }
 
 // TransferRequest starts a copy from the box the route names.
@@ -111,6 +113,7 @@ type TransferRequest struct {
 	SrcPath string `json:"src_path"`
 	DstPath string `json:"dst_path"`
 	DstMode string `json:"dst_mode"` // "" or new, keep, replace (see xferMode*)
+	Move    bool   `json:"move"`     // remove the source folder after a clean copy (not with mode keep)
 }
 
 // xferLive is one status read of a job on its source.
@@ -121,6 +124,7 @@ type xferLive struct {
 	errCount                       int
 	progress                       string
 	errors                         string
+	stage, move, removeErr         string // a move's removal: its stage marker, outcome and first error
 }
 
 func parseXferStatus(s string) xferLive {
@@ -148,6 +152,12 @@ func parseXferStatus(s string) xferLive {
 			l.errCount, _ = strconv.Atoi(strings.TrimSpace(ln[13:]))
 		case strings.HasPrefix(ln, "progress="):
 			l.progress = strings.TrimSpace(ln[9:])
+		case strings.HasPrefix(ln, "stage="):
+			l.stage = strings.TrimSpace(ln[6:])
+		case strings.HasPrefix(ln, "move="):
+			l.move = strings.TrimSpace(ln[5:])
+		case strings.HasPrefix(ln, "remove_err="):
+			l.removeErr = strings.TrimSpace(ln[11:])
 		case ln == "--errors":
 			l.errors = strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
 			return l
@@ -202,8 +212,10 @@ func xferDecide(phase string, l xferLive, cancelAsked bool) string {
 
 // xferResult words a final outcome. rsync's codes: 23 some files not
 // transferred, 24 source files vanished, 11/12 file or stream I/O (out of
-// space shows up as 11 or 12 with ENOSPC/EDQUOT text).
-func xferResult(phase string, l xferLive) string {
+// space shows up as 11 or 12 with ENOSPC/EDQUOT text). For a move, only
+// exit code 0 removed anything; every other outcome says the source is
+// still there.
+func xferResult(phase string, l xferLive, move bool) string {
 	first := ""
 	if l.errors != "" {
 		first = strings.SplitN(l.errors, "\n", 2)[0]
@@ -222,20 +234,30 @@ func xferResult(phase string, l xferLive) string {
 	if p := parseProgress(l.progress); p != nil {
 		copied = fmt.Sprintf(" %s in %d files", fmtBytesShort(p.Bytes), p.Files)
 	}
+	kept := ""
+	if move {
+		kept = "; the source was left in place"
+	}
 	var s string
 	switch {
 	case phase == xferInterrupted && l.noJob:
 		s = "interrupted: the job directory on the source is gone"
 	case phase == xferInterrupted && !l.started:
 		s = "not started: the runner never started on the source"
+	case phase == xferInterrupted && move && l.stage == "remove":
+		// The copy had ended clean and the removal was under way: part
+		// of the source may be gone, every file of it on the destination.
+		return clip("interrupted while removing the source: the copy completed, the removal ended without a result (box rebooted or the process was killed?); check the source folder;"+copied, 4096)
 	case phase == xferInterrupted:
 		s = "interrupted: the runner ended without a result (box rebooted or the process was killed?)"
+	case l.rc == "0" && move:
+		return clip(xferMoveResult(l)+copied+skipped, 4096)
 	case l.rc == "0":
 		return "copied" + copied + skipped
 	case l.rc == "24":
-		return "completed with warnings: some source files vanished during the copy;" + copied + skipped
+		return "completed with warnings: some source files vanished during the copy;" + copied + skipped + kept
 	case l.rc == "cancelled":
-		return "cancelled" // rsync's own "received SIGTERM" line adds nothing
+		return "cancelled" + kept // rsync's own "received SIGTERM" line adds nothing
 	case l.rc == "23":
 		s = "partial: some files could not be transferred"
 	case (l.rc == "11" || l.rc == "12") && noSpaceRe.MatchString(l.errors):
@@ -243,11 +265,35 @@ func xferResult(phase string, l xferLive) string {
 	default:
 		s = "rsync exited with code " + l.rc
 	}
-	s += skipped
+	s += skipped + kept
 	if first != "" {
 		s += " — " + first
 	}
 	return clip(s, 4096)
+}
+
+// xferMoveResult words a move whose copy ended clean, from the removal's
+// outcome: moved outright, moved with entries left in the source (which
+// then still exists), or, when the runner recorded no outcome, copied
+// only.
+func xferMoveResult(l xferLive) string {
+	n, isLeft := strings.CutPrefix(l.move, "left ")
+	switch {
+	case l.move == "moved":
+		return "moved: copied and the source folder removed;"
+	case isLeft && n == "0":
+		return "moved: copied; the source folder is empty but could not be removed" + xferRemoveErr(l) + ";"
+	case isLeft:
+		return "moved: copied; " + n + " entries left in the source folder (symlinks and special files, which are never copied; files changed since the copy started; or entries that could not be removed)" + xferRemoveErr(l) + ";"
+	}
+	return "copied, but not moved: the runner recorded no removal outcome; the source was left as it is;"
+}
+
+func xferRemoveErr(l xferLive) string {
+	if l.removeErr == "" {
+		return ""
+	}
+	return " — " + clip(l.removeErr, 300)
 }
 
 func fmtBytesShort(n int64) string {
@@ -428,7 +474,13 @@ func (m *Manager) xferApplyLocked(ctx context.Context, j *xferJob, l xferLive, c
 	prev := t
 	t.Phase = next
 	if xferFinal(next) {
-		t.RC, t.Result, t.FinishedAt = l.rc, xferResult(next, l), time.Now().UTC()
+		t.RC, t.Result, t.FinishedAt = l.rc, xferResult(next, l, t.Move), time.Now().UTC()
+		if t.Move {
+			// Stored with the result: the source job's cleanup deletes the
+			// runner's files, and a finished job is not read again (fred on
+			// PR 171).
+			t.MoveState = l.move
+		}
 	}
 	if err := m.xferSave(j, t); err != nil {
 		// Not stored: keep the old phase, and above all the source's rc,
@@ -578,6 +630,11 @@ func (m *Manager) StartTransfer(ctx context.Context, srcID int64, req TransferRe
 	default:
 		return TransferView{}, fmt.Errorf("%w: unknown destination mode %q", ErrTransferInput, clip(mode, 40))
 	}
+	if req.Move && mode == xferModeKeep {
+		// A kept destination file may differ from the source's; removing
+		// the source would then discard the only copy of that version.
+		return TransferView{}, fmt.Errorf("%w: a move cannot keep the destination's files (a source file would be discarded for one that may differ); choose a new folder or replace", ErrTransferInput)
+	}
 	sKey, dKey := sp.hostKey(), dp.hostKey()
 	if sKey == "" || dKey == "" {
 		return TransferView{}, fmt.Errorf("%w: both boxes need a pinned host key (wait for their first poll)", ErrTransferInput)
@@ -588,11 +645,19 @@ func (m *Manager) StartTransfer(ctx context.Context, srcID int64, req TransferRe
 	}
 	t := store.Transfer{Token: token, SrcBoxID: srcID, SrcEndp: AuthEndpoint(sp.box), SrcHostKey: sKey,
 		DstBoxID: req.DstBox, DstEndp: AuthEndpoint(dp.box), DstHostKey: dKey,
-		SrcPath: src, DstPath: dstPath, DstMode: mode, Phase: xferPreparing, Pending: store.TransferPendingSrcJob}
+		SrcPath: src, DstPath: dstPath, DstMode: mode, Move: req.Move, Phase: xferPreparing, Pending: store.TransferPendingSrcJob}
 	// One active copy per source box and per destination account (an
 	// existing directory is not claimed, so two copies into one place
 	// are refused here), checked and recorded under one lock. The row
-	// exists before anything changes on a box.
+	// exists before anything changes on a box. A move also reserves its
+	// source account against writers of the dashboard's own making, in
+	// either order of admission: its removal deletes every file not
+	// modified since the copy started, not only the ones rsync listed, so
+	// a copy landing in that account meanwhile (with its old timestamps
+	// kept) could be removed without ever having been copied on, and a
+	// move must not start from an account a copy is still writing into
+	// (fred on PR 171). Account-wide, since paths across two boxes are
+	// not compared.
 	m.xferMu.Lock()
 	for _, o := range m.xfers {
 		if !xferActive(o.t.Phase) {
@@ -605,6 +670,14 @@ func (m *Manager) StartTransfer(ctx context.Context, srcID int64, req TransferRe
 		if o.t.DstEndp == t.DstEndp {
 			m.xferMu.Unlock()
 			return TransferView{}, fmt.Errorf("%w: %s is already receiving a copy", ErrTransferBusy, dp.box.Name)
+		}
+		if o.t.Move && o.t.SrcEndp == t.DstEndp {
+			m.xferMu.Unlock()
+			return TransferView{}, fmt.Errorf("%w: a move from %s is in progress; nothing is copied into that account until it ends", ErrTransferBusy, dp.box.Name)
+		}
+		if t.Move && o.t.DstEndp == t.SrcEndp {
+			m.xferMu.Unlock()
+			return TransferView{}, fmt.Errorf("%w: %s is still receiving a copy; a move from it waits until that copy ends", ErrTransferBusy, sp.box.Name)
 		}
 	}
 	if err := m.st.CreateTransfer(ctx, &t); err != nil {
@@ -692,7 +765,7 @@ func (m *Manager) xferSetupLocked(ctx context.Context, j *xferJob, sp, dp *polle
 	if err := m.xferSave(j, t); err != nil {
 		return fail(err)
 	}
-	confirmed, err := xferLaunch(ctx, cli, t.Token, resolved, xferDest{dp.box.User, dp.box.Host, dp.box.Port, t.DstHostKey}, t.DstMode)
+	confirmed, err := xferLaunch(ctx, cli, t.Token, resolved, xferDest{dp.box.User, dp.box.Host, dp.box.Port, t.DstHostKey}, t.DstMode, t.Move)
 	var refused *xferRefusal
 	if errors.As(err, &refused) {
 		return fail(err) // the launch script refused before starting anything
@@ -730,6 +803,14 @@ func (m *Manager) CancelTransfer(ctx context.Context, srcID, id int64) error {
 	t := m.xferSnapshot(j)
 	if t.Phase != xferRunning && t.Phase != xferUnconfirmed {
 		return fmt.Errorf("%w: the transfer is %s", ErrTransferBusy, t.Phase)
+	}
+	m.xferMu.Lock()
+	removing := j.live.stage == "remove"
+	m.xferMu.Unlock()
+	if removing {
+		// The runner ignores the signal from here on (see xferRunScript);
+		// say so instead of reporting a cancel that changes nothing.
+		return fmt.Errorf("%w: the copy has completed and the source is being removed; that step cannot be stopped", ErrTransferBusy)
 	}
 	p, err := m.xferPoller(t.SrcBoxID, t.SrcEndp, t.SrcHostKey)
 	if err != nil {
@@ -842,7 +923,7 @@ func (m *Manager) xferView(id int64) TransferView {
 	t, l, seen, serr := j.t, j.live, j.seen, j.err
 	m.xferMu.Unlock()
 	v := TransferView{Transfer: t, Cleanup: cleanupWords(t.Pending), LastSeen: seen, StatusErr: serr,
-		Skipped: l.skipped, Kept: l.kept, Conflicts: l.conflicts, ErrCount: l.errCount, Errors: l.errors, Progress: parseProgress(l.progress)}
+		Skipped: l.skipped, Kept: l.kept, Conflicts: l.conflicts, ErrCount: l.errCount, Errors: l.errors, Progress: parseProgress(l.progress), Stage: l.stage}
 	// Scanning: the runner was seen running and rsync has not printed
 	// progress yet (it is building its file list).
 	v.Scanning = t.Phase == xferRunning && v.Progress == nil && !seen.IsZero() && l.started && l.rc == ""

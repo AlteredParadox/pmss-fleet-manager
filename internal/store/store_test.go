@@ -1648,8 +1648,9 @@ func TestMigrateDropsPMDBUploadKey(t *testing.T) {
 	}
 }
 
-// A transfers table from before dst_mode (1.13.0) gains the column on
-// open; its rows read as mode "" (new), and new rows keep their mode.
+// A transfers table from before dst_mode (1.13.0) and move (1.17.0) gains
+// the columns on open; its rows read as mode "" (new) and not a move, and
+// new rows keep theirs.
 func TestMigrateAddsTransferDstMode(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "t.db")
@@ -1657,7 +1658,7 @@ func TestMigrateAddsTransferDstMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := strings.Replace(createTransfersSQL, ",\n\tdst_mode TEXT NOT NULL DEFAULT ''", "", 1)
+	old := strings.Replace(createTransfersSQL, ",\n\tdst_mode TEXT NOT NULL DEFAULT '', move INTEGER NOT NULL DEFAULT 0, move_state TEXT NOT NULL DEFAULT ''", "", 1)
 	if old == createTransfersSQL {
 		t.Fatal("old schema not derived")
 	}
@@ -1674,11 +1675,19 @@ func TestMigrateAddsTransferDstMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.CreateTransfer(ctx, &Transfer{Token: "u", SrcBoxID: 1, DstBoxID: 2, SrcPath: "x", DstPath: "y", DstMode: "keep", Phase: "preparing"}); err != nil {
+	if err := s.CreateTransfer(ctx, &Transfer{Token: "u", SrcBoxID: 1, DstBoxID: 2, SrcPath: "x", DstPath: "y", DstMode: "replace", Move: true, Phase: "preparing"}); err != nil {
 		t.Fatal(err)
 	}
 	ts, err := s.ListTransfers(ctx)
-	if err != nil || len(ts) != 2 || ts[0].DstMode != "" || ts[1].DstMode != "keep" {
+	if err != nil || len(ts) != 2 || ts[0].DstMode != "" || ts[0].Move || ts[0].MoveState != "" || ts[1].DstMode != "replace" || !ts[1].Move {
 		t.Fatalf("transfers after migration: %+v %v", ts, err)
+	}
+	// The removal's outcome is part of what a job's life changes.
+	ts[1].Phase, ts[1].RC, ts[1].MoveState = "finished", "0", "left 2"
+	if err := s.SaveTransfer(ctx, ts[1]); err != nil {
+		t.Fatal(err)
+	}
+	if ts, err = s.ListTransfers(ctx); err != nil || ts[1].MoveState != "left 2" {
+		t.Fatalf("move_state after save: %+v %v", ts, err)
 	}
 }

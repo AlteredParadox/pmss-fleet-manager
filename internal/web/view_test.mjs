@@ -267,6 +267,42 @@ test('a transfer is over, and succeeded, by its exit code alone', () => {
   assert.equal(V.transferMeter({ phase: 'running' }), 0);
 });
 
+test('a move reads by its exit code and then its removal outcome; the removal stage cannot be mistaken for copying', () => {
+  assert.deepEqual(V.transferState({ phase: 'finished', rc: '0', move: true, move_state: 'moved' }), { label: 'moved', kind: 'ok', over: true });
+  assert.deepEqual(V.transferState({ phase: 'finished', rc: '0', move: true, move_state: 'left 2' }), { label: 'moved, source not empty', kind: 'warn', over: true });
+  assert.deepEqual(V.transferState({ phase: 'finished', rc: '0', move: true }), { label: 'copied, not moved', kind: 'warn', over: true }, 'no removal outcome recorded');
+  assert.equal(V.transferState({ phase: 'finished', rc: '23', move: true, move_state: 'moved' }).label, 'failed', 'a failed copy never reads as moved');
+  assert.equal(V.transferState({ phase: 'finished', rc: 'cancelled', move: true }).label, 'cancelled');
+  assert.equal(V.transferState({ phase: 'running', move: true, stage: 'remove', progress: { pct: 100 } }).label, 'removing the source');
+  assert.equal(V.transferState({ phase: 'running', move: true, stage: 'remove' }).over, false);
+  assert.equal(V.transferState({ phase: 'running', move: false, stage: 'remove' }).label, 'copying', 'a stage marker on a plain copy means nothing');
+  assert.equal(V.transferState({ phase: 'finished', rc: '0', move: false, move_state: 'moved' }).label, 'copied');
+  assert.equal(V.transferMeter({ phase: 'finished', rc: '0', move: true, move_state: 'left 1' }), 100);
+  assert.match(V.transferCleanupLabel({ phase: 'finished', rc: '0', move: true }), /^move completed/);
+  assert.deepEqual(V.startToast({ phase: 'running', move: true }), ['move started', 'ok']);
+});
+
+test('a move may not keep the destination\'s files, and the confirmation says what the removal does', () => {
+  assert.match(V.moveError(true, 'keep'), /cannot keep/);
+  assert.equal(V.moveError(true, 'new'), '');
+  assert.equal(V.moveError(true, 'replace'), '');
+  assert.equal(V.moveError(false, 'keep'), '');
+  const src = { id: 2, name: 'pm1' }, dst = { id: 7, name: 'pmstor01' };
+  const sl = { box_rev: 5, path: '/home/u/dl/x', rel: 'dl/x' }, dl = { box_rev: 3, path: '/home/v/in', rel: 'in', dirs: [] };
+  const c = V.transferConfirmation(src, sl, dst, dl, 'x', 'new', true);
+  assert.equal(c.move, true);
+  assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/dl/x', dst_path: '/home/v/in/x', dst_mode: 'new', move: true });
+  assert.match(c.lines[2], /^Then the source is removed: once rsync reports every file delivered and checked \(exit code 0\), the files in \/home\/u\/dl\/x on pm1 are deleted/);
+  assert.match(c.lines[2], /Any other outcome, a cancel included, leaves the source as it is/);
+  // Anything but true is a copy, as every confirmation before 1.17.0.
+  for (const move of [undefined, false, 'yes', 1]) {
+    const k = V.transferConfirmation(src, sl, dst, dl, 'x', 'new', move);
+    assert.equal(k.move, false, String(move));
+    assert.equal(V.transferRequest(k).move, false, String(move));
+    assert.match(k.lines[2], /^The source stays untouched/);
+  }
+});
+
 test('only a confirmed launch toasts "copy started" (daybreak review)', () => {
   assert.deepEqual(V.startToast({ phase: 'running' }), ['copy started', 'ok']);
   assert.equal(V.startToast({ phase: 'unconfirmed' })[1], 'warn');
@@ -295,7 +331,7 @@ test('the start-copy body uses the confirmed paths and the revisions they were l
   // names rev 3, so the server refuses with 409 instead of copying to the
   // record's new target.
   dst.box_rev = 4;
-  assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/dl/x', dst_path: '/home/v/in/x copy', dst_mode: 'new' });
+  assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/dl/x', dst_path: '/home/v/in/x copy', dst_mode: 'new', move: false });
   assert.equal(c.srcRev, 5);
 });
 
@@ -304,7 +340,7 @@ test('an existing destination folder is sent as itself, with its mode; the name 
   const sl = { box_rev: 5, path: '/home/u/data', rel: 'data' }, dl = { box_rev: 3, path: '/home/v/data', rel: 'data', dirs: ['x'] };
   for (const mode of ['keep', 'replace']) {
     const c = V.transferConfirmation(src, sl, dst, dl, 'x', mode);
-    assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/data', dst_path: '/home/v/data', dst_mode: mode });
+    assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/data', dst_path: '/home/v/data', dst_mode: mode, move: false });
     assert.equal(c.exists, false, mode);
     assert.match(c.lines[1], /^to pmstor01: \/home\/v\/data\/ \(an existing folder; /);
   }

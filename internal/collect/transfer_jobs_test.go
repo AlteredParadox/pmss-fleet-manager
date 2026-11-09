@@ -31,7 +31,10 @@ import (
 
 func TestParseXferStatus(t *testing.T) {
 	l := parseXferStatus("STARTED\nPIDFILE\nALIVE\nrc=24\npid=12\nskipped=3\nerrors.count=2\nprogress=  1,073,741,894  99%   48.31MB/s    0:00:21 (xfr#11, to-chk=0/14)\n--errors\nfile vanished: \"a\"\nfile vanished: \"b\"")
-	if !l.started || !l.pidFile || !l.alive || l.rc != "24" || l.skipped != 3 || l.errCount != 2 || !strings.HasPrefix(l.errors, "file vanished: \"a\"\nfile") {
+	if !l.started || !l.pidFile || !l.alive || l.rc != "24" || l.skipped != 3 || l.errCount != 2 || !strings.HasPrefix(l.errors, "file vanished: \"a\"\nfile") || l.stage != "" || l.move != "" {
+		t.Fatalf("%+v", l)
+	}
+	if l := parseXferStatus("STARTED\nPIDFILE\nrc=0\nstage=remove\nmove=left 2\nremove_err=find: cannot delete 'x': Permission denied"); l.stage != "remove" || l.move != "left 2" || !strings.HasPrefix(l.removeErr, "find: cannot delete") {
 		t.Fatalf("%+v", l)
 	}
 	p := parseProgress(l.progress)
@@ -96,8 +99,32 @@ func TestXferResult(t *testing.T) {
 		{xferInterrupted, xferLive{started: true, pidFile: true}, "interrupted: the runner ended without a result (box rebooted or the process was killed?)"},
 		{xferInterrupted, xferLive{}, "not started: the runner never started on the source"},
 	} {
-		if got := xferResult(c.phase, c.l); got != c.want {
+		if got := xferResult(c.phase, c.l, false); got != c.want {
 			t.Errorf("rc %q: %q\nwant %q", c.l.rc, got, c.want)
+		}
+	}
+	// A move: only exit code 0 removed anything; every other outcome says
+	// the source is still there, and an interrupted removal says what may
+	// be half done.
+	for _, c := range []struct {
+		phase string
+		l     xferLive
+		want  string
+	}{
+		{xferFinished, xferLive{rc: "0", progress: prog, stage: "remove", move: "moved"}, "moved: copied and the source folder removed; 3.0 MiB in 2 files"},
+		{xferFinished, xferLive{rc: "0", progress: prog, stage: "remove", move: "left 3", skipped: 1}, "moved: copied; 3 entries left in the source folder (symlinks and special files, which are never copied; files changed since the copy started; or entries that could not be removed); 3.0 MiB in 2 files; 1 symlinks or special files skipped"},
+		{xferFinished, xferLive{rc: "0", stage: "remove", move: "left 0", removeErr: "find: cannot delete '/h/src': Permission denied"}, "moved: copied; the source folder is empty but could not be removed — find: cannot delete '/h/src': Permission denied;"},
+		{xferFinished, xferLive{rc: "0", stage: "remove", move: "left 1", removeErr: "find: cannot delete '/h/src/a': Permission denied"}, "moved: copied; 1 entries left in the source folder (symlinks and special files, which are never copied; files changed since the copy started; or entries that could not be removed) — find: cannot delete '/h/src/a': Permission denied;"},
+		{xferFinished, xferLive{rc: "0", progress: prog}, "copied, but not moved: the runner recorded no removal outcome; the source was left as it is; 3.0 MiB in 2 files"},
+		{xferFinished, xferLive{rc: "24", progress: prog}, "completed with warnings: some source files vanished during the copy; 3.0 MiB in 2 files; the source was left in place"},
+		{xferFinished, xferLive{rc: "cancelled"}, "cancelled; the source was left in place"},
+		{xferFinished, xferLive{rc: "23", errors: "rsync: open \"x\" failed: Permission denied (13)"}, "partial: some files could not be transferred; the source was left in place — rsync: open \"x\" failed: Permission denied (13)"},
+		{xferFinished, xferLive{rc: "11", errors: "rsync: write failed: No space left on device (28)"}, "destination out of space or quota; the source was left in place — rsync: write failed: No space left on device (28)"},
+		{xferInterrupted, xferLive{started: true, pidFile: true}, "interrupted: the runner ended without a result (box rebooted or the process was killed?); the source was left in place"},
+		{xferInterrupted, xferLive{started: true, pidFile: true, stage: "remove", progress: prog}, "interrupted while removing the source: the copy completed, the removal ended without a result (box rebooted or the process was killed?); check the source folder; 3.0 MiB in 2 files"},
+	} {
+		if got := xferResult(c.phase, c.l, true); got != c.want {
+			t.Errorf("move rc %q: %q\nwant %q", c.l.rc, got, c.want)
 		}
 	}
 }
@@ -294,6 +321,12 @@ func TestTransferOnePerSource(t *testing.T) {
 	if !errors.Is(err, ErrTransferInput) || !strings.Contains(err.Error(), "unknown destination mode") {
 		t.Errorf("bad mode: %v", err)
 	}
+	// A move may not keep the destination's files: a kept file may differ
+	// from the source's, whose only copy the removal would then discard.
+	_, err = m.StartTransfer(ctx, other.ID, TransferRequest{DstBox: b.ID, DstRev: m.poller(b.ID).box.Revision, SrcPath: "data", DstPath: "data", DstMode: xferModeKeep, Move: true})
+	if !errors.Is(err, ErrTransferInput) || !strings.Contains(err.Error(), "a move cannot keep") {
+		t.Errorf("move with keep: %v", err)
+	}
 	// One active copy per destination account too: an existing directory
 	// is not claimed, so two copies into one place are refused here.
 	recv := &store.Transfer{Token: newTok(t), SrcBoxID: 98, DstBoxID: b.ID, DstEndp: AuthEndpoint(m.poller(b.ID).box), DstMode: xferModeKeep, Phase: xferRunning}
@@ -306,6 +339,100 @@ func TestTransferOnePerSource(t *testing.T) {
 	_, err = m.StartTransfer(ctx, other.ID, TransferRequest{DstBox: b.ID, DstRev: m.poller(b.ID).box.Revision, SrcPath: "data", DstPath: "data", DstMode: xferModeReplace})
 	if !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "already receiving a copy") {
 		t.Errorf("second copy into one destination: %v", err)
+	}
+}
+
+// A move reserves its source account, whichever side is admitted first:
+// while a move from an account runs, nothing is copied into that account
+// (its removal would delete what lands there without copying it on); a
+// move does not start from an account a copy is still writing into. Plain
+// copies from or into other accounts are unaffected (fred on PR 171).
+func TestTransferMoveReservesSourceAccount(t *testing.T) {
+	ctx := context.Background()
+	m, st, b := genTestManager(t)
+	seedRemote(m, b.ID)
+	other := &store.Box{Name: "b", Host: "127.0.0.2", Port: 1, User: "v", AuthMethod: "password", Password: "x", Enabled: true}
+	if err := m.AddBox(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	waitPoll(t, m, other.ID)
+	seedRemote(m, other.ID)
+	for _, id := range []int64{b.ID, other.ID} {
+		p := m.poller(id)
+		p.mu.Lock()
+		p.box.HostKey = "ecdsa-sha2-nistp256 AAAA"
+		p.mu.Unlock()
+	}
+	add := func(tr *store.Transfer) int64 {
+		if err := st.CreateTransfer(ctx, tr); err != nil {
+			t.Fatal(err)
+		}
+		m.xferMu.Lock()
+		m.xfers[tr.ID] = &xferJob{t: *tr}
+		m.xferMu.Unlock()
+		return tr.ID
+	}
+	drop := func(id int64) {
+		m.xferMu.Lock()
+		delete(m.xfers, id)
+		m.xferMu.Unlock()
+	}
+	req := func(dst *store.Box, move bool) TransferRequest {
+		return TransferRequest{DstBox: dst.ID, DstRev: m.poller(dst.ID).box.Revision, SrcPath: "data", DstPath: "copy", Move: move}
+	}
+	// Order 1: the move from b is active; a copy into b is refused.
+	mv := add(&store.Transfer{Token: newTok(t), SrcBoxID: b.ID, SrcEndp: AuthEndpoint(m.poller(b.ID).box), DstBoxID: 99, DstEndp: "elsewhere:22/w", Move: true, Phase: xferRunning})
+	if _, err := m.StartTransfer(ctx, other.ID, req(b, false)); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "a move from a is in progress") {
+		t.Errorf("copy into a moving source: %v", err)
+	}
+	drop(mv)
+	// The same copy from b (not a move) reserves nothing of the kind.
+	cp := add(&store.Transfer{Token: newTok(t), SrcBoxID: b.ID, SrcEndp: AuthEndpoint(m.poller(b.ID).box), DstBoxID: 99, DstEndp: "elsewhere:22/w", Phase: xferRunning})
+	if _, err := m.StartTransfer(ctx, other.ID, req(b, false)); errors.Is(err, ErrTransferBusy) {
+		t.Errorf("copy into a copying source refused: %v", err)
+	}
+	drop(cp)
+	// Order 2: a copy into b is active; a move from b is refused, a copy
+	// from b is not (the account check is the move's).
+	rc := add(&store.Transfer{Token: newTok(t), SrcBoxID: 98, SrcEndp: "elsewhere:22/w", DstBoxID: b.ID, DstEndp: AuthEndpoint(m.poller(b.ID).box), Phase: xferRunning})
+	if _, err := m.StartTransfer(ctx, b.ID, req(other, true)); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "a is still receiving a copy; a move from it waits") {
+		t.Errorf("move from a receiving account: %v", err)
+	}
+	if _, err := m.StartTransfer(ctx, b.ID, req(other, false)); errors.Is(err, ErrTransferBusy) {
+		t.Errorf("copy from a receiving account refused: %v", err)
+	}
+	drop(rc)
+}
+
+// A move's removal outcome is stored with the final phase and read back
+// after a restart: the card must not say "copied, not moved" of a source
+// that is gone (fred on PR 171).
+func TestTransferMoveStateStored(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	done := &store.Transfer{Token: strings.Repeat("f", 32), SrcBoxID: 1, DstBoxID: 2, Move: true, Phase: xferFinished, RC: "0", MoveState: "left 2", Result: "moved: copied; 2 entries left"}
+	if err := st.CreateTransfer(ctx, done); err != nil {
+		t.Fatal(err)
+	}
+	m := xferTestManager(t, st)
+	if v := m.xferView(done.ID); v.MoveState != "left 2" || !v.Move {
+		t.Errorf("after restart: %+v", v.Transfer)
+	}
+	// Applying a final read stores the outcome the runner recorded.
+	tr := &store.Transfer{Token: strings.Repeat("g", 32), SrcBoxID: 1, DstBoxID: 2, Move: true, Phase: xferRunning}
+	if err := st.CreateTransfer(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	j := &xferJob{t: *tr}
+	m.xferMu.Lock()
+	m.xfers[tr.ID] = j
+	m.xferMu.Unlock()
+	j.op.Lock()
+	m.xferApplyLocked(ctx, j, xferLive{started: true, pidFile: true, rc: "0", stage: "remove", move: "moved"}, false)
+	j.op.Unlock()
+	ts, err := st.ListTransfers(ctx)
+	if err != nil || len(ts) != 2 || ts[1].MoveState != "moved" || ts[1].Phase != xferFinished || !strings.HasPrefix(ts[1].Result, "moved: copied and the source folder removed") {
+		t.Errorf("stored after a final read: %+v %v", ts, err)
 	}
 }
 

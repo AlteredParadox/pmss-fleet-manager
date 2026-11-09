@@ -1435,14 +1435,14 @@ function tabStorage(b) {
 function tabTransfers(b) {
   const mine = (S.transfers || []).filter((v) => v.src_box === b.id || v.dst_box === b.id);
   const list = S.transfers === null ? '<div class="muted">loading…</div>'
-    : mine.length ? mine.map((v) => transferCard(v)).join('') : '<div class="empty">no copies from or to this box</div>';
+    : mine.length ? mine.map((v) => transferCard(v)).join('') : '<div class="empty">no copies or moves from or to this box</div>';
   return `${S.monitorOnly ? '' : transferForm(b)}<div style="display:grid;gap:12px;margin-top:16px">${list}</div>`;
 }
 // The copy form's state: per source box, reset when another box's page
 // opens. dst_rev is the destination record the operator chose; picker is
 // the open folder list, confirm the reviewed copy waiting for its start.
 function blankXferDraft(boxId) {
-  return { box: boxId, src: '', dst_box: '', dst_rev: 0, dst_parent: '', dst_name: '', dst_mode: 'new', busy: false, picker: null, confirm: null, err: '' };
+  return { box: boxId, src: '', dst_box: '', dst_rev: 0, dst_parent: '', dst_name: '', dst_mode: 'new', move: false, busy: false, picker: null, confirm: null, err: '' };
 }
 function transferForm(b) {
   if (S.xferDraft?.box !== b.id) S.xferDraft = blankXferDraft(b.id);
@@ -1451,7 +1451,7 @@ function transferForm(b) {
   const free = dst?.disk?.ok && dst.disk.quota_bytes ? Math.max(0, dst.disk.quota_bytes - dst.disk.used_bytes) : null;
   const ready = b.ready ? '' : 'disabled title="waiting for the first poll of this box"';
   if (d.confirm) return transferConfirmPanel(b, d);
-  return `<div class="panel"><div class="tile-label">copy a folder to another box</div>
+  return `<div class="panel"><div class="tile-label">copy or move a folder to another box</div>
     <div class="muted" style="margin:6px 0 12px">The data goes straight from ${esc(b.name)} to the other box with rsync over SSH, never through this dashboard. Each copy uses its own key, allowed on the destination only to write into the chosen folder and only for 30 minutes from setup; it is removed when the copy ends. Symlinks and special files are skipped. Stop anything still writing to the source (a downloading torrent) first: files that change during the copy may arrive inconsistent. When copying into an existing folder, stop anything using it on the destination too: a torrent seeding a file that gets replaced fails its checks.</div>
     <div style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
       <label class="f">folder to copy, on ${esc(b.name)} <span class="muted">(relative to home, or absolute)</span>
@@ -1462,9 +1462,12 @@ function transferForm(b) {
         <span style="display:flex;gap:6px"><input data-xf="dst_parent" value="${esc(d.dst_parent)}" placeholder="~" spellcheck="false"><button type="button" class="small" data-act="xfer:browse" data-side="dst" ${dst?.ready ? '' : 'disabled title="choose a destination box first"'}>browse</button></span></label>
     </div>
     ${transferModeChoice(b, d)}
+    <div class="f" style="margin-top:10px;display:grid;gap:6px;font-size:11px;color:var(--muted)">afterwards
+      <label class="check"><input type="checkbox" data-xf="move" ${d.move ? 'checked' : ''}> move: remove the folder from ${esc(b.name)} once rsync reports every file delivered and checked (its exit code 0). Files changed meanwhile, symlinks and special files stay behind; a copy that ends any other way leaves the source as it is. Not with “keeping files already there”.</label>
+    </div>
     ${d.picker ? folderPicker(d.picker) : ''}
     ${d.err ? `<div class="meta"><span class="bad">${esc(d.err)}</span></div>` : ''}
-    <div class="actions" style="margin-top:12px"><button ${boxRef(b)} data-act="xfer:review" ${d.busy ? 'disabled' : ready}>${d.busy ? 'checking…' : 'review copy'}</button></div>
+    <div class="actions" style="margin-top:12px"><button ${boxRef(b)} data-act="xfer:review" ${d.busy ? 'disabled' : ready}>${d.busy ? 'checking…' : d.move ? 'review move' : 'review copy'}</button></div>
   </div>`;
 }
 // The destination's shape: one choice, each spelled out. Only the first
@@ -1504,12 +1507,12 @@ function folderPicker(P) {
 function homeLabelOf(L) { return `${pfmView.homeLabel(L.rel)}  (${L.path})`; }
 function transferConfirmPanel(b, d) {
   const c = d.confirm;
-  return `<div class="panel"><div class="tile-label">confirm the copy</div>
-    <div style="display:grid;gap:6px;margin:10px 0">${c.lines.map((l, i) => `<div class="${i === 2 ? 'ok' : ''}">${esc(l)}</div>`).join('')}</div>
+  return `<div class="panel"><div class="tile-label">confirm the ${c.move ? 'move' : 'copy'}</div>
+    <div style="display:grid;gap:6px;margin:10px 0">${c.lines.map((l, i) => `<div class="${i === 2 ? (c.move ? 'warn' : 'ok') : ''}">${esc(l)}</div>`).join('')}</div>
     ${c.exists ? `<div class="meta"><span class="bad">${esc(c.name)} already exists in that folder: the copy will be refused. Go back and choose another name.</span></div>` : ''}
-    <div class="muted">Symlinks and special files are skipped. Progress shows below once it starts; cancel keeps what arrived complete.</div>
+    <div class="muted">Symlinks and special files are skipped. Progress shows below once it starts; cancel keeps what arrived complete${c.move ? ' and leaves the source as it is; the removal itself, once it begins, cannot be stopped' : ''}.</div>
     <div class="actions" style="margin-top:12px">
-      <button data-act="xfer:start" ${d.busy || c.exists ? 'disabled' : ''}>${d.busy ? 'setting up…' : 'start copy'}</button>
+      <button data-act="xfer:start" ${d.busy || c.exists ? 'disabled' : ''}>${d.busy ? 'setting up…' : c.move ? 'start move' : 'start copy'}</button>
       <button class="ghost" data-act="xfer:back" ${d.busy ? 'disabled' : ''}>back</button>
     </div>
   </div>`;
@@ -1540,21 +1543,23 @@ function transferCard(v) {
   const counts = [];
   if (v.kept) counts.push(`${v.kept} existing files kept`);
   if (v.conflicts) counts.push(`${v.conflicts} name conflicts (a file against a folder) skipped`);
-  const prog = v.phase === 'running' && p ? `${esc(fmtBytes(p.bytes))} · ${esc(p.rate)} · ${esc(p.time)} left · ~${p.pct}% (rsync's estimate)${p.total ? ` · ${p.total - p.to_check}/${p.total} checked` : ''}` : '';
+  const removing = v.move && v.stage === 'remove';
+  const prog = v.phase === 'running' && p && !removing ? `${esc(fmtBytes(p.bytes))} · ${esc(p.rate)} · ${esc(p.time)} left · ~${p.pct}% (rsync's estimate)${p.total ? ` · ${p.total - p.to_check}/${p.total} checked` : ''}` : '';
   const btn = [];
-  if (!S.monitorOnly && src && !v.source_lost && (v.phase === 'running' || v.phase === 'unconfirmed')) btn.push(`<button class="small danger" ${boxRef(src)} data-act="xfer:cancel" data-id="${v.id}" data-confirm="Stop this copy? Files that arrived complete stay on the destination; the one in flight is discarded.">cancel</button>`);
+  if (!S.monitorOnly && src && !v.source_lost && !removing && (v.phase === 'running' || v.phase === 'unconfirmed')) btn.push(`<button class="small danger" ${boxRef(src)} data-act="xfer:cancel" data-id="${v.id}" data-confirm="Stop this ${v.move ? 'move' : 'copy'}? Files that arrived complete stay on the destination; the one in flight is discarded${v.move ? '; the source is left as it is' : ''}.">cancel</button>`);
   if (!S.monitorOnly && src && st.over && v.cleanup?.length) btn.push(`<button class="small" ${boxRef(src)} data-act="xfer:cleanup" data-id="${v.id}">retry cleanup</button>`);
   if (v.source_lost && v.phase !== 'preparing') btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" data-force="1" data-confirm="The source box is gone or points elsewhere, so this copy can no longer be checked, stopped or cleaned up from here. It may still be running. Forget it anyway? Its job directory on the source and its key line on the destination would have to be removed by hand.">forget</button>`);
   if (st.over) btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" ${v.cleanup?.length ? `data-force="1" data-confirm="Cleanup is still owed: ${esc(v.cleanup.join('; '))}. Forget this copy anyway? Those items would have to be removed by hand."` : ''}>dismiss</button>`);
   return `<div class="panel xfer" id="xfer-${Number(v.id)}">
     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
-      <div><span class="${st.kind}">${esc(st.label)}</span> <span class="muted">${name(v.src_name, v.src_box)}:</span>${esc(v.src_path)} <span class="muted">→ ${name(v.dst_name, v.dst_box)}:</span>${esc(v.dst_path)}${modeLabel ? ` <span class="muted">(${esc(modeLabel)})</span>` : ''}</div>
+      <div><span class="${st.kind}">${esc(st.label)}</span> <span class="muted">${name(v.src_name, v.src_box)}:</span>${esc(v.src_path)} <span class="muted">${v.move ? '⇢ move to' : '→'} ${name(v.dst_name, v.dst_box)}:</span>${esc(v.dst_path)}${modeLabel ? ` <span class="muted">(${esc(modeLabel)})</span>` : ''}</div>
       <div class="actions">${btn.join('')}</div>
     </div>
     ${st.over ? '' : `<div class="meter thick" style="margin:10px 0 6px"><i style="width:${pfmView.transferMeter(v)}%"></i></div>`}
     ${prog ? `<div class="meta"><span>${prog}</span></div>` : ''}
     ${v.result ? `<div class="meta"><span class="${st.kind}">${esc(v.result)}</span></div>` : ''}
     ${v.phase === 'unconfirmed' ? '<div class="meta"><span class="warn">the launch did not confirm; the next status read shows whether the copy started (it is never started twice)</span></div>' : ''}
+    ${removing && !st.over ? '<div class="meta"><span class="muted">the copy ended clean; the source files are being removed (this step cannot be cancelled: every file it removes is on the destination)</span></div>' : ''}
     ${v.cleanup?.length ? `<div class="meta"><span class="warn">${esc(pfmView.transferCleanupLabel(v))}${esc(v.cleanup.join('; '))}</span></div>` : ''}
     ${v.blocked ? `<div class="meta"><span class="bad">${esc(v.blocked)}</span></div>` : ''}
     ${v.status_error && !st.over ? `<div class="meta"><span class="warn">${v.last_seen && !String(v.last_seen).startsWith('0001') ? 'last seen ' + esc(fmtAgo(v.last_seen)) + ' — ' : ''}${esc(v.status_error)}</span></div>` : ''}
@@ -1585,8 +1590,8 @@ async function transferAction(a, act) {
     // so the confirmation shows the exact paths the copy will use.
     // Paths as picked or typed, never trimmed: a folder whose name starts
     // or ends with a space is a different folder without it.
-    const src = boxById(d.box), dst = boxById(Number(d.dst_box)), name = d.dst_name, mode = pfmView.transferMode(d.dst_mode);
-    d.err = !d.src.trim() ? 'choose the folder to copy' : !dst ? 'choose the destination box' : mode === 'new' ? pfmView.newFolderError(name) : '';
+    const src = boxById(d.box), dst = boxById(Number(d.dst_box)), name = d.dst_name, mode = pfmView.transferMode(d.dst_mode), move = d.move === true;
+    d.err = !d.src.trim() ? 'choose the folder to copy' : !dst ? 'choose the destination box' : pfmView.moveError(move, mode) || (mode === 'new' ? pfmView.newFolderError(name) : '');
     if (d.err) { render(); return; }
     d.busy = true; d.picker = null; render();
     try {
@@ -1594,7 +1599,7 @@ async function transferAction(a, act) {
       if (S.xferDraft !== d) return;
       if (!sl.rel) throw new Error('choose a folder inside the home, not the whole home');
       if (mode !== 'new' && !dl.rel) throw new Error('choose a folder inside the destination\'s home to copy into, not the whole home');
-      d.confirm = pfmView.transferConfirmation(src, sl, dst, dl, name, mode);
+      d.confirm = pfmView.transferConfirmation(src, sl, dst, dl, name, mode, move);
     } catch (e) { d.err = e.message; }
     finally { d.busy = false; render(); }
     return;
@@ -1611,7 +1616,7 @@ async function transferAction(a, act) {
       S.xferDraft = pfmView.draftAfterStart(S.xferDraft, d, blankXferDraft(d.box));
     } catch (e) {
       d.busy = false; d.confirm = null; d.err = e.message; // on the draft that started, wherever it is now
-      if (S.xferDraft === d) render(); else toast(`copy not started: ${e.message}`, 'bad');
+      if (S.xferDraft === d) render(); else toast(`${c.move ? 'move' : 'copy'} not started: ${e.message}`, 'bad');
       return;
     }
     void loadTransfers();
@@ -2341,14 +2346,14 @@ document.addEventListener('input', (e) => {
   const xf = e.target.closest('[data-xf]');
   if (xf && S.xferDraft) {
     const d = S.xferDraft;
-    d[xf.dataset.xf] = xf.value; d.err = '';
+    d[xf.dataset.xf] = xf.type === 'checkbox' ? xf.checked : xf.value; d.err = '';
     if (xf.dataset.xf === 'dst_box') {
       // The record the operator chose; a folder from another box means nothing here.
       d.dst_rev = boxById(Number(xf.value))?.box_rev || 0; d.dst_parent = '';
       if (d.picker?.side === 'dst') d.picker = null;
       render(); // the free-space hint and the browse button follow the chosen box
     }
-    if (xf.dataset.xf === 'dst_mode') render(); // the name field shows for a new folder only
+    if (xf.dataset.xf === 'dst_mode' || xf.dataset.xf === 'move') render(); // the name field shows for a new folder only; the button names the action
     return;
   }
   const ta = e.target.closest('[data-ta]');

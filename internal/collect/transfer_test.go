@@ -554,9 +554,9 @@ SSH_ORIGINAL_COMMAND="$*" exec rrsync ` + xferRrsyncOpts + ` "$FAKE_DST"
 `
 
 type localJob struct {
-	home, bin, tok, blob, dst string
-	env                       []string
-	launch                    string // the launch script's answer
+	home, bin, tok, blob, dst, src string
+	env                            []string
+	launch                         string // the launch script's answer
 }
 
 // startLocalJob runs prepare, claim and launch locally, with real rsync
@@ -573,8 +573,25 @@ func startLocalJob(t *testing.T, slow bool, beforeLaunch ...func(jobDir string))
 // say) before the claim.
 func startLocalJobTo(t *testing.T, mode, dstPath string, slow bool, prepare func(home string), beforeLaunch ...func(jobDir string)) localJob {
 	t.Helper()
+	return startLocalJobOpts(t, localOpts{mode: mode, dst: dstPath, slow: slow, prepare: prepare, beforeLaunch: beforeLaunch})
+}
+
+// localOpts shapes a local job: the destination mode and path, a move,
+// a slow stand-in ssh, a home filled before the claim, a source without
+// its symlink, hooks run before the launch.
+type localOpts struct {
+	mode, dst    string
+	slow, move   bool
+	noLink       bool
+	prepare      func(home string)
+	beforeLaunch []func(jobDir string)
+}
+
+func startLocalJobOpts(t *testing.T, o localOpts) localJob {
+	t.Helper()
 	needTools(t, "perl", "flock", "rrsync", "rsync", "ssh-keygen", "setsid", "mkfifo")
 	home := t.TempDir()
+	mode, dstPath, slow, prepare, beforeLaunch := o.mode, o.dst, o.slow, o.prepare, o.beforeLaunch
 	if prepare != nil {
 		prepare(home)
 	}
@@ -584,7 +601,9 @@ func startLocalJobTo(t *testing.T, mode, dstPath string, slow bool, prepare func
 	os.MkdirAll(filepath.Join(src, "sub"), 0o700)
 	os.WriteFile(filepath.Join(src, `it's "q".txt`), []byte("hello"), 0o600)
 	os.WriteFile(filepath.Join(src, "sub", "big"), bytes.Repeat([]byte("z"), 3<<20), 0o600)
-	os.Symlink("/etc/passwd", filepath.Join(src, "link"))
+	if !o.noLink {
+		os.Symlink("/etc/passwd", filepath.Join(src, "link"))
+	}
 	tok := "0123456789abcdef0123456789abcdef"
 	env := []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH")}
 	if slow {
@@ -605,12 +624,16 @@ func startLocalJobTo(t *testing.T, mode, dstPath string, slow bool, prepare func
 	for _, f := range beforeLaunch {
 		f(filepath.Join(home, xferJobDir, tok))
 	}
-	run := xferVars("SRC", src, "DEST", "u@example.invalid:", "PORT", "22", "HKALG", "ecdsa-sha2-nistp256", "SSH", filepath.Join(bin, "ssh"), "ROPTS", xferRsyncOpts(mode))
+	mv := "0"
+	if o.move {
+		mv = "1"
+	}
+	run := xferVars("SRC", src, "DEST", "u@example.invalid:", "PORT", "22", "HKALG", "ecdsa-sha2-nistp256", "SSH", filepath.Join(bin, "ssh"), "ROPTS", xferRsyncOpts(mode), "MOVE", mv)
 	out = runJobScript(t, home, xferVars("TOKEN", tok, "KNOWN", "example.invalid ecdsa-sha2-nistp256 AAAA", "RUNVARS", run), xferLaunchScript, env...)
 	if !strings.Contains(out, "LAUNCHED") && len(beforeLaunch) == 0 {
 		t.Fatalf("launch: %s", out)
 	}
-	j := localJob{home: home, bin: bin, tok: tok, blob: blob, dst: dst, env: env, launch: out}
+	j := localJob{home: home, bin: bin, tok: tok, blob: blob, dst: dst, src: src, env: env, launch: out}
 	t.Cleanup(func() { // never leave a runner behind
 		if pid := strings.TrimSpace(readFileOr(filepath.Join(home, xferJobDir, tok, "pid"))); pid != "" {
 			exec.Command("kill", "-KILL", "--", "-"+pid).Run()
@@ -673,7 +696,7 @@ func TestXferRunnerLocal(t *testing.T) {
 	if l.rc != "0" || l.skipped != 1 || xferDecide(xferRunning, l, false) != xferFinished {
 		t.Fatalf("status: %+v", l)
 	}
-	if res := xferResult(xferFinished, l); !strings.HasPrefix(res, "copied 3.0 MiB in 2 files; 1 symlinks") {
+	if res := xferResult(xferFinished, l, false); !strings.HasPrefix(res, "copied 3.0 MiB in 2 files; 1 symlinks") {
 		t.Errorf("result %q", res)
 	}
 	if !j.keyGone(t) {
@@ -719,8 +742,8 @@ func TestXferRunnerCancel(t *testing.T) {
 	}
 	// The trap writes rc just before the runner exits: wait for both.
 	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" && !l.alive })
-	if l.rc != "cancelled" || xferDecide(xferRunning, l, true) != xferFinished || xferResult(xferFinished, l) != "cancelled" {
-		t.Fatalf("after cancel: %+v %q", l, xferResult(xferFinished, l))
+	if l.rc != "cancelled" || xferDecide(xferRunning, l, true) != xferFinished || xferResult(xferFinished, l, false) != "cancelled" {
+		t.Fatalf("after cancel: %+v %q", l, xferResult(xferFinished, l, false))
 	}
 	if !j.keyGone(t) {
 		t.Error("key left after cancel")
@@ -760,7 +783,7 @@ func TestXferRunnerInterrupted(t *testing.T) {
 	if got := xferDecide(xferRunning, l, false); got != xferInterrupted {
 		t.Fatalf("decided %s", got)
 	}
-	if res := xferResult(xferInterrupted, l); !strings.HasPrefix(res, "interrupted: the runner ended without a result") {
+	if res := xferResult(xferInterrupted, l, false); !strings.HasPrefix(res, "interrupted: the runner ended without a result") {
 		t.Errorf("result %q", res)
 	}
 	if j.keyGone(t) {
@@ -851,7 +874,7 @@ func TestXferLaunchVars(t *testing.T) {
 		// negotiated with SHA-2 signatures, never SHA-1 (fred on PR 142).
 		{"ssh-rsa AAAAB3", "h", 22, "h ssh-rsa AAAAB3", "rsa-sha2-512,rsa-sha2-256"},
 	} {
-		v, err := xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: c.host, Port: c.port, HostKey: c.key}, xferModeNew)
+		v, err := xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: c.host, Port: c.port, HostKey: c.key}, xferModeNew, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -859,10 +882,10 @@ func TestXferLaunchVars(t *testing.T) {
 			t.Errorf("%s: %s", c.key, v)
 		}
 	}
-	if _, err := xferLaunchVars("t", "s", xferDest{HostKey: ""}, xferModeNew); err == nil {
+	if _, err := xferLaunchVars("t", "s", xferDest{HostKey: ""}, xferModeNew, false); err == nil {
 		t.Error("no pinned key accepted")
 	}
-	if _, err := xferLaunchVars("t", "s", xferDest{HostKey: "BAD;TYPE AAAA"}, xferModeNew); err == nil {
+	if _, err := xferLaunchVars("t", "s", xferDest{HostKey: "BAD;TYPE AAAA"}, xferModeNew, false); err == nil {
 		t.Error("odd key type accepted")
 	}
 }
@@ -1034,7 +1057,7 @@ func TestXferRunnerKeep(t *testing.T) {
 	if l.rc != "0" || l.kept != 1 || l.conflicts != 0 || l.skipped != 1 {
 		t.Fatalf("status: %+v", l)
 	}
-	if res := xferResult(xferFinished, l); !strings.Contains(res, "; 1 existing files kept") {
+	if res := xferResult(xferFinished, l, false); !strings.Contains(res, "; 1 existing files kept") {
 		t.Errorf("result %q", res)
 	}
 	for name, want := range map[string]string{`it's "q".txt`: "OLD", "extra.txt": "mine"} {
@@ -1067,7 +1090,7 @@ func TestXferRunnerKeepConflictsAndTimes(t *testing.T) {
 	if l.rc != "23" || l.kept != 0 || l.conflicts != 2 {
 		t.Fatalf("status: %+v", l)
 	}
-	if res := xferResult(xferFinished, l); !strings.HasPrefix(res, "partial: some files could not be transferred; ") || !strings.Contains(res, "; 2 name conflicts (a file against a folder) skipped — ") {
+	if res := xferResult(xferFinished, l, false); !strings.HasPrefix(res, "partial: some files could not be transferred; ") || !strings.Contains(res, "; 2 name conflicts (a file against a folder) skipped — ") {
 		t.Errorf("result %q", res)
 	}
 	if fi, _ := os.Stat(filepath.Join(j.dst, `it's "q".txt`)); fi == nil || !fi.IsDir() {
@@ -1131,7 +1154,7 @@ func TestXferRunnerReplaceNonEmptyConflict(t *testing.T) {
 	if l.rc != "23" {
 		t.Fatalf("status: %+v", l)
 	}
-	if res := xferResult(xferFinished, l); !strings.HasPrefix(res, "partial: some files could not be transferred") {
+	if res := xferResult(xferFinished, l, false); !strings.HasPrefix(res, "partial: some files could not be transferred") {
 		t.Errorf("result %q", res)
 	}
 	if got := readFile(t, filepath.Join(j.dst, `it's "q".txt`, "inner", "keepme")); got != "k" {
@@ -1142,14 +1165,147 @@ func TestXferRunnerReplaceNonEmptyConflict(t *testing.T) {
 	}
 }
 
+// A move: the copy runs as ever, then the source's files go and the
+// folders they leave empty; the symlink, never copied, stays with its
+// folder, and the result counts it. The copy's key is gone like any job's.
+func TestXferRunnerMove(t *testing.T) {
+	j := startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", move: true})
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	if l.rc != "0" || l.stage != "remove" || l.move != "left 1" || l.skipped != 1 || l.removeErr != "" {
+		t.Fatalf("status: %+v", l)
+	}
+	if res := xferResult(xferFinished, l, true); !strings.HasPrefix(res, "moved: copied; 1 entries left in the source folder (symlinks and special files, which are never copied; ") || !strings.Contains(res, "; 3.0 MiB in 2 files; 1 symlinks or special files skipped") {
+		t.Errorf("result %q", res)
+	}
+	if readFile(t, filepath.Join(j.dst, `it's "q".txt`)) != "hello" {
+		t.Error("file not copied")
+	}
+	if fi, err := os.Stat(filepath.Join(j.dst, "sub", "big")); err != nil || fi.Size() != 3<<20 {
+		t.Errorf("big file not copied: %v", err)
+	}
+	for _, p := range []string{`it's "q".txt`, "sub/big", "sub"} {
+		if _, err := os.Lstat(filepath.Join(j.src, p)); !os.IsNotExist(err) {
+			t.Errorf("%s left in the source", p)
+		}
+	}
+	if target, err := os.Readlink(filepath.Join(j.src, "link")); err != nil || target != "/etc/passwd" {
+		t.Errorf("the symlink should stay untouched: %q %v", target, err)
+	}
+	if !j.keyGone(t) {
+		t.Error("key left")
+	}
+}
+
+// A source of regular files only is removed entirely.
+func TestXferRunnerMoveAll(t *testing.T) {
+	j := startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", move: true, noLink: true})
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	if l.rc != "0" || l.move != "moved" {
+		t.Fatalf("status: %+v", l)
+	}
+	if res := xferResult(xferFinished, l, true); res != "moved: copied and the source folder removed; 3.0 MiB in 2 files" {
+		t.Errorf("result %q", res)
+	}
+	if _, err := os.Lstat(j.src); !os.IsNotExist(err) {
+		t.Error("source folder left")
+	}
+	if readFile(t, filepath.Join(j.dst, `it's "q".txt`)) != "hello" {
+		t.Error("file not copied")
+	}
+}
+
+// A move whose copy did not end clean (here mode replace against a
+// non-empty directory, rsync 23) removes nothing and says so.
+func TestXferRunnerMovePartialKeepsSource(t *testing.T) {
+	j := startLocalJobOpts(t, localOpts{mode: xferModeReplace, dst: "data", move: true, prepare: func(home string) {
+		os.MkdirAll(filepath.Join(home, "data", `it's "q".txt`, "inner"), 0o700)
+		os.WriteFile(filepath.Join(home, "data", `it's "q".txt`, "inner", "keepme"), []byte("k"), 0o600)
+	}})
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	if l.rc != "23" || l.move != "" || l.stage != "" {
+		t.Fatalf("status: %+v", l)
+	}
+	if res := xferResult(xferFinished, l, true); !strings.HasPrefix(res, "partial: some files could not be transferred; ") || !strings.Contains(res, "; the source was left in place — ") {
+		t.Errorf("result %q", res)
+	}
+	for _, p := range []string{`it's "q".txt`, "sub/big", "link"} {
+		if _, err := os.Lstat(filepath.Join(j.src, p)); err != nil {
+			t.Errorf("%s gone from the source: %v", p, err)
+		}
+	}
+}
+
+// The removal step alone, against a prepared tree: files not modified
+// since the copy started go, with the folders that leaves empty; a file
+// changed since, a symlink and the folder holding either stay and are
+// counted; the source folder itself goes only when nothing is left.
+func TestXferRemoveSnippet(t *testing.T) {
+	needTools(t, "find")
+	home := t.TempDir()
+	j := filepath.Join(home, "job")
+	src := filepath.Join(home, "src")
+	os.MkdirAll(j, 0o700)
+	os.MkdirAll(filepath.Join(src, "sub", "deeper"), 0o700)
+	os.MkdirAll(filepath.Join(src, "later"), 0o700)
+	os.MkdirAll(filepath.Join(src, "empty"), 0o700)
+	old := time.Now().Add(-time.Hour)
+	for _, p := range []string{"a.txt", "sub/b", "sub/deeper/c"} {
+		os.WriteFile(filepath.Join(src, p), []byte("x"), 0o600)
+		os.Chtimes(filepath.Join(src, p), old, old)
+	}
+	os.WriteFile(filepath.Join(j, "started_at"), []byte("1\n"), 0o600)
+	os.WriteFile(filepath.Join(src, "later", "n"), []byte("written during the copy"), 0o600)
+	future := time.Now().Add(time.Hour)
+	os.Chtimes(filepath.Join(src, "later", "n"), future, future)
+	os.Symlink("/etc/passwd", filepath.Join(src, "link"))
+	run := func() string {
+		cmd := exec.Command("sh")
+		cmd.Stdin = strings.NewReader(xferVars("SRC", src, "J", j) + "set -u\n" + xferRemoveSnippet)
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v %s", err, b)
+		}
+		return strings.TrimSpace(readFile(t, filepath.Join(j, "move")))
+	}
+	if got := run(); got != "left 3" {
+		t.Fatalf("move = %q", got)
+	}
+	for _, p := range []string{"a.txt", "sub", "empty"} {
+		if _, err := os.Lstat(filepath.Join(src, p)); !os.IsNotExist(err) {
+			t.Errorf("%s not removed", p)
+		}
+	}
+	if readFile(t, filepath.Join(src, "later", "n")) != "written during the copy" {
+		t.Error("a file modified after the copy started was removed")
+	}
+	if _, err := os.Lstat(filepath.Join(src, "link")); err != nil {
+		t.Error("symlink removed")
+	}
+	if s := readFile(t, filepath.Join(j, "remove_err")); s != "" {
+		t.Errorf("remove_err %q", s)
+	}
+	// Run again once what was left is gone by hand: the folder goes too.
+	os.Remove(filepath.Join(src, "link"))
+	os.RemoveAll(filepath.Join(src, "later"))
+	if got := run(); got != "moved" {
+		t.Errorf("move = %q", got)
+	}
+	if _, err := os.Lstat(src); !os.IsNotExist(err) {
+		t.Error("source folder left")
+	}
+}
+
 func TestXferRsyncOpts(t *testing.T) {
 	for mode, want := range map[string]string{xferModeNew: "--info=progress2", "": "--info=progress2", xferModeKeep: "-O --ignore-existing --info=progress2,skip2", xferModeReplace: "-O --info=progress2"} {
 		if got := xferRsyncOpts(mode); got != want {
 			t.Errorf("%q: %q", mode, got)
 		}
 	}
-	v, err := xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: "h", Port: 22, HostKey: "ssh-ed25519 AAAAC3"}, xferModeKeep)
-	if err != nil || !strings.Contains(v, "ROPTS="+strings.ReplaceAll(shellQuote("-O --ignore-existing --info=progress2,skip2"), "'", `'\''`)) {
+	v, err := xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: "h", Port: 22, HostKey: "ssh-ed25519 AAAAC3"}, xferModeKeep, false)
+	if err != nil || !strings.Contains(v, "ROPTS="+strings.ReplaceAll(shellQuote("-O --ignore-existing --info=progress2,skip2"), "'", `'\''`)) || !strings.Contains(v, "MOVE='\\''0'\\''") {
 		t.Errorf("launch vars: %v %s", err, v)
+	}
+	if v, err = xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: "h", Port: 22, HostKey: "ssh-ed25519 AAAAC3"}, xferModeNew, true); err != nil || !strings.Contains(v, "MOVE='\\''1'\\''") {
+		t.Errorf("launch vars (move): %v %s", err, v)
 	}
 }

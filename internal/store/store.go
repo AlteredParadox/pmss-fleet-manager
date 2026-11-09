@@ -360,18 +360,23 @@ func (s *Store) migrate() error {
 	if err := s.ensureTierColumns(); err != nil {
 		return err
 	}
-	return s.ensureTransferDstModeColumn()
+	return s.ensureTransferColumns()
 }
 
-// ensureTransferDstModeColumn adds transfers.dst_mode to a database from
-// before it existed.
-func (s *Store) ensureTransferDstModeColumn() error {
-	has, err := s.hasColumn(transfersColumnsSQL, "dst_mode")
-	if err != nil || has {
-		return err
-	}
-	if _, err := s.db.Exec(addTransferDstModeColSQL); err != nil {
-		return fmt.Errorf("migrate: %w", err)
+// ensureTransferColumns adds transfers.dst_mode, move and move_state to a
+// database from before they existed.
+func (s *Store) ensureTransferColumns() error {
+	for _, c := range []struct{ name, ddl string }{{"dst_mode", addTransferDstModeColSQL}, {"move", addTransferMoveColSQL}, {"move_state", addTransferMoveStateColSQL}} {
+		has, err := s.hasColumn(transfersColumnsSQL, c.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := s.db.Exec(c.ddl); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
 	}
 	return nil
 }

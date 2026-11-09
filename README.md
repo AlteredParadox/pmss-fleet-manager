@@ -53,11 +53,12 @@ default order); the choice is remembered per table in the browser.
   start all; and start / stop / restart of the client.
 - Containers: rootless Docker containers with CPU and memory, start / stop /
   restart.
-- Transfers: copy a directory to another of your boxes, into a new
+- Transfers: copy or move a directory to another of your boxes, into a new
   directory or an existing one (keeping the files already there, or
   replacing those that differ), straight from box to box with rsync over
   SSH (see *Copying between boxes*), with bytes, rate, rsync's estimate of
-  progress, and the result.
+  progress, and the result; a move removes the source only after rsync
+  reports every file delivered and checked.
 - Services: every process the account runs on the shared host (PMSS hides
   the other tenants'), grouped into the applications the PMSS stack ships or
   that customers commonly install: qBittorrent, rTorrent, Deluge, Radarr /
@@ -707,7 +708,8 @@ switching a source off for the box resolves its alerts.
 
 ### Copying between boxes
 
-The transfers tab copies one directory from this box to another box. Pick
+The transfers tab copies, or moves, one directory from this box to another
+box. Pick
 the folder to copy with *browse* (or type its path), choose the
 destination box, browse to an existing folder there (or type it), and say
 where the copy goes: into a **new folder** inside it, which you name and
@@ -721,8 +723,9 @@ and scrolls to its progress card. The picker lists one folder's subfolders
 at a time (at most 1000, symlinks not followed), never leaves the
 account's home, and shows no files. The data goes straight from box to box
 (Pulsed Media does not charge for internal traffic); the dashboard only
-sets the copy up, starts it and reads its status. This is copy only: no
-move, no sync, no `--delete`, no queue, no retries.
+sets the copy up, starts it and reads its status. Ticking *move* removes
+the source afterwards (see *Moving*, below). There is no sync, no
+`--delete`, no queue and no retries.
 
 How it is authenticated, per copy:
 
@@ -805,6 +808,45 @@ anything using the destination folder too: a torrent client seeding a
 file that gets replaced fails its checks. After a hard kill (a reboot)
 rsync's temporary files (`.name.XXXXXX`) can be left in the folder.
 
+Moving. A move is the same copy, run by the same job on the source, with
+one more step once rsync has exited 0: the regular files in the source
+folder that were not modified since the copy started are deleted, then
+the folders that leaves empty, the source folder itself included. Nothing
+is removed after any other outcome: a partial copy (code 23), files that
+vanished (24), a cancel, a failure or an interrupted runner all leave the
+source exactly as it is, and the result says so. Exit code 0 is the check:
+rsync verifies every file it transfers against a whole-file checksum on
+arrival, retransmits one that fails and reports the failure in its exit
+code, so a second pass over the data would prove nothing more (and could
+not reuse the job key, which takes no new login 30 minutes after setup).
+What that code does not cover is handled by what the removal leaves
+behind: a file modified after the copy started (something still writing
+to the source) may differ from what arrived, so it stays; symlinks and
+special files are never copied, so they stay; anything that could not be
+deleted stays; and a folder holding any of these stays with them. The
+card then reads "moved, source not empty" and the result counts the
+entries left. A move into an existing folder may *replace* but not *keep*:
+a kept destination file may differ from the source's, whose only copy the
+removal would then discard, so that combination is refused. *Replace*
+skips files identical to the destination's by size and modification time
+without transferring them, rsync's rule, and the removal trusts it; that
+also makes a repeated move cheap after a cancel or a failure. The removal
+cannot be cancelled once it begins (every file it deletes is on the
+destination by then); a dashboard restart or lost contact does not affect
+it, since the runner on the source does it. The removal deletes by
+timestamp, not from a list of what rsync sent, so the dashboard keeps its
+own copies away from a move's source account: while a move from an
+account runs, nothing is copied into that account (a copy arriving with
+its old timestamps could otherwise be removed without ever having been
+copied on), and a move does not start from an account a copy is still
+writing into; both are refused with a message until the other job ends.
+In practice: for as long as a move runs (hours, for terabytes), the box
+it runs from takes no other transfer in, even into an unrelated folder;
+copies from it, and transfers between other boxes, are not affected.
+Stop anything else writing to the source first, as for a copy: a program
+that writes files with an old modification time (a client that preserves
+timestamps) could have one removed that was never copied.
+
 Why an existing folder may not contain symlinks: `-munge` neutralises the
 links the copy *writes*, not one already there. Through a link already in
 the folder, a source that turned hostile (it holds the job key) can name
@@ -819,7 +861,8 @@ source can still do inside the chosen folder: overwrite or remove anything
 (rrsync blocks the delete options, not `--force` or `--inplace`), whatever
 the rule chosen (the keep/replace rule is the copy's own behaviour, not
 enforced by the destination; rrsync 3.3.0+ could enforce *keep* with
-`-no-overwrite`, which the boxes' 3.2.7 lacks). A file hard-linked to
+`-no-overwrite`, which the boxes' 3.2.7 lacks; Debian 12's security
+update carries 3.5.0, and CI tests both). A file hard-linked to
 another name is that same file, so its other names show such a change;
 the dashboard's own copy replaces by rename and never writes through a
 link. Nothing outside the chosen folder is reachable.
@@ -1082,6 +1125,27 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**Unreleased**
+
+- **Moving a folder to another box.** The transfers tab's form has a
+  *move* option: the same box-to-box copy, and once rsync has exited 0
+  (every file delivered and checked against its whole-file checksum) the
+  runner on the source deletes the source folder's regular files not
+  modified since the copy started and the folders that leaves empty. Any
+  other outcome, a cancel included, leaves the source as it is; symlinks,
+  special files and files changed meanwhile stay behind and are counted
+  ("moved, source not empty"). Not with *keep* (a kept destination file
+  may differ from the source's); while a move runs nothing is copied into
+  its source account, and a move does not start from an account still
+  receiving a copy. `POST /api/boxes/{id}/transfers` takes `move`;
+  transfers carry `move`, `stage` and `move_state` (stored with the
+  result); the `transfers` table gains `move` and `move_state`. See
+  *Moving* under *Copying between boxes*.
+- CI runs the transfer tests on both rsync versions a Debian 12 box can
+  have: 3.2.7 (the bookworm suite, what the boxes run today) and 3.5.0
+  (bookworm-security since DSA-6282-1, what a box gets with its next
+  security update).
 
 **1.16.0**
 
