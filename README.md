@@ -1130,6 +1130,10 @@ Newest first; each release's full notes are on the
   `move`; transfers carry `move`, `stage` and `move_state`; the
   `transfers` table gains `move`. See *Moving* under *Copying between
   boxes*.
+- CI's transfer-test job on Debian 12 now checks that it tests Debian 12's
+  own rsync package, whatever version that is, instead of 3.2.7:
+  DSA-6282-1 moved bookworm-security to 3.5.0, which the boxes get with
+  their security updates.
 
 **1.16.0**
 

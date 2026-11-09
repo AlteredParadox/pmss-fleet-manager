@@ -64,7 +64,7 @@ jobs:
       # rsync and rrsync (Ubuntu's rsync package ships /usr/bin/rrsync);
       # with CI set they fail rather than skip when a tool is missing.
       # ubuntu-latest carries a current rsync (3.4.1 on 26.04); the boxes'
-      # 3.2.7 is covered by the rsync-3-2-7 job below.
+      # Debian 12's is covered by the rsync-debian-12 job below.
       - name: Install rsync
         run: sudo apt-get install -y --no-install-recommends rsync
 
@@ -77,27 +77,31 @@ jobs:
       - name: Race tests
         run: go test -race ./...
 
-  # The copy scripts against the rsync and rrsync the boxes run: Debian 12
-  # ships 3.2.7, which every PMSS box has (fred on PR 162: ubuntu-latest
-  # had moved to 3.4.1, so the main job no longer proved the production
-  # version). Only the transfer tests, in a bookworm container; its own
-  # job so a package-mirror hiccup does not block the required `check`.
-  rsync-3-2-7:
+  # The copy scripts against the rsync and rrsync the boxes run: whatever
+  # Debian 12 ships, security updates included, since every PMSS box is a
+  # Debian 12 box that takes them (fred on PR 162: ubuntu-latest had moved
+  # to 3.4.1, so the main job no longer proved the production version).
+  # That was 3.2.7 until DSA-6282-1 (2026-11) moved bookworm-security to
+  # 3.5.0, so the guard checks the package is Debian 12's build (+deb12),
+  # not a version number; the version is printed. Only the transfer tests,
+  # in a bookworm container; its own job so a package-mirror hiccup does
+  # not block the required `check`.
+  rsync-debian-12:
     runs-on: ubuntu-latest
     container: debian:12
     steps:
-      - name: Install rsync 3.2.7 and the tools the job scripts use
+      - name: Install Debian 12's rsync and the tools the job scripts use
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             rsync python3 perl util-linux openssh-client procps ca-certificates git
           rsync --version | head -1
-          rsync --version | grep -q 'version 3\.2\.7' || { echo "not rsync 3.2.7"; exit 1; }
+          dpkg-query -W -f '${Version}\n' rsync | grep -q 'deb12' || { echo "not Debian 12's rsync package"; exit 1; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Transfer tests on rsync 3.2.7
+      - name: Transfer tests on Debian 12's rsync
         run: go test -run 'Xfer|Transfer|ParseDst' ./internal/collect
 
   # Known-vulnerability scan of what the binary actually links (stdlib
