@@ -49,12 +49,13 @@ mkdir -p "$HOME/bin" || exit 1
 # A download interrupted by a lost session leaves its temp file; sweep old ones.
 find "$HOME/bin" -maxdepth 1 -type f -name '.qbittorrent-nox.new.*' -mmin +30 -delete 2>/dev/null
 tmp="$HOME/bin/.qbittorrent-nox.new.$$"
-# curl first: --proto / --proto-redir stop a redirect from downgrading the
-# download to plain HTTP. wget is only the fallback: its --https-only applies
-# to recursive downloads alone, so that path relies on the source not
-# redirecting to http. wget has no size option either: the subshell's
-# file-size limit (ulimit -f, 512-byte blocks under dash = 200 MiB) stops a
-# runaway download as it is written.
+# curl only: --proto / --proto-redir stop a redirect from downgrading the
+# download to plain HTTP, and --max-filesize bounds it. wget was the
+# fallback until the 2026-11 audits: its --https-only applies to recursive
+# downloads alone, so it followed an https-to-http redirect, and without a
+# release digest that put an unauthenticated download through the
+# --version check and into ~/bin; a tokened custom URL would travel the
+# plain leg too. Every PMSS box has curl.
 ` + downloadShell + `[ "$rc" -eq 0 ] && [ -s "$tmp" ] || { echo "download failed (exit $rc)"; rm -f "$tmp"; exit 1; }
 # The static build is ~30 MB; anything far above that is not it.
 size=$(wc -c < "$tmp")
@@ -72,18 +73,19 @@ echo "installed: $new"
 echo "previous: ${old:-none}"
 `
 
-// downloadShell fetches $url into $tmp. The URL goes to the downloader on
-// ITS stdin (curl's config file, wget's URL list), never on its command
-// line: a custom URL may carry a private-build token, and on a host
-// without process hiding another tenant could read it from
-// /proc/<pid>/cmdline for the whole download. safeURL admits neither a
-// double quote nor a backslash, so the curl config line needs no escaping.
+// downloadShell fetches $url into $tmp with curl, or refuses: no other
+// downloader keeps the transport authenticated across redirects (wget's
+// --https-only is for recursive downloads; it followed an https-to-http
+// redirect, reproduced by the 2026-11 audits). The URL goes to curl on ITS
+// stdin (its config file), never on its command line: a custom URL may
+// carry a private-build token, and on a host without process hiding
+// another tenant could read it from /proc/<pid>/cmdline for the whole
+// download. safeURL admits neither a double quote nor a backslash, so the
+// curl config line needs no escaping.
 const (
 	curlDownload  = `printf 'url = "%s"\n' "$url" | curl -fsSL -K - --proto '=https' --proto-redir '=https' --max-filesize 209715200 -o "$tmp"; rc=$?`
-	wgetDownload  = `(ulimit -f 409600; printf '%s\n' "$url" | wget -q -i - -O "$tmp"); rc=$?`
 	downloadShell = `if command -v curl >/dev/null 2>&1; then ` + curlDownload + `
-elif command -v wget >/dev/null 2>&1; then ` + wgetDownload + `
-else echo "neither curl nor wget available"; exit 1; fi
+else echo "curl is required for the download: no other downloader keeps a redirect on https"; exit 1; fi
 `
 )
 
