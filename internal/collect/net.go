@@ -68,10 +68,16 @@ func gibToBytes(gib float64) int64 {
 // port is bound by the account we are logged in as. It is the live
 // counterpart of the probe's check, run immediately before an action that
 // would send WebUI credentials or an rTorrent command over a loopback port.
+// socketTableLimit bounds a listener or established-socket table read: a
+// row is some 150 bytes and a busy box has thousands of sockets, so this
+// is far above any real table and far below the transport's 16 MiB
+// (2026-11 audits).
+const socketTableLimit = 4 << 20
+
 func verifyPortNow(ctx context.Context, cli *sshx.Client, port int) error {
 	vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, _, err := cli.Run(vctx, "sh", strings.NewReader(probe.ListenScript))
+	out, _, err := cli.RunLimited(vctx, "sh", strings.NewReader(probe.ListenScript), socketTableLimit)
 	if err != nil && len(out) == 0 {
 		return fmt.Errorf("could not re-check the owner of port %d: %w", port, err)
 	}
@@ -86,6 +92,7 @@ func verifyPortNow(ctx context.Context, cli *sshx.Client, port int) error {
 type tunnel interface {
 	DialTCP(ctx context.Context, addr string) (net.Conn, error)
 	Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error)
+	RunLimited(ctx context.Context, cmd string, stdin io.Reader, limit int) ([]byte, []byte, error)
 }
 
 // verifiedDial returns a qBittorrent dialer over cli's tunnel that, after
@@ -108,7 +115,7 @@ func verifiedDial(cli tunnel, hp string, port int) qbt.Dialer {
 		}
 		vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		out, _, err := cli.Run(vctx, "sh", strings.NewReader(probe.EstablishedScript(port)))
+		out, _, err := cli.RunLimited(vctx, "sh", strings.NewReader(probe.EstablishedScript(port)), socketTableLimit)
 		if err != nil && len(out) == 0 {
 			conn.Close()
 			return nil, fmt.Errorf("could not verify who accepted the connection on port %d: %w", port, err)

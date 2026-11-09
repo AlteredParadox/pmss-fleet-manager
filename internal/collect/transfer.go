@@ -541,7 +541,8 @@ func (e *xferRefusal) Error() string { return e.msg }
 func xferRun(ctx context.Context, cli *sshx.Client, vars, script string) ([]string, error) {
 	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	out, stderr, err := cli.Run(rctx, "/bin/sh", strings.NewReader(vars+xferPrelude+script))
+	// One byte over the cap is enough for xferScan to refuse the answer.
+	out, stderr, err := cli.RunLimited(rctx, "/bin/sh", strings.NewReader(vars+xferPrelude+script), xferOutCap+1)
 	return xferScan(out, stderr, err)
 }
 

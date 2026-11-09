@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -807,5 +808,57 @@ func TestTransferRevokeKeyOverSSH(t *testing.T) {
 	ts, _ := st.ListTransfers(ctx)
 	if len(ts) != 1 || ts[0].Pending != store.TransferPendingSrcJob || ts[0].Phase != xferRunning {
 		t.Errorf("stored: %+v", ts)
+	}
+}
+
+// Over the in-process sshd: the folder listing for the transfer picker and
+// the port re-check run their scripts on the box and read the answers
+// (the paths behind poller.conn that the fakes could not reach).
+func TestDirsAndPortCheckOverSSH(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := genTestManager(t)
+	root := t.TempDir()
+	port, hostKey := testSSHServer(t, root)
+	b := sshTestBox(t, m, "box", "u", port, hostKey)
+	seedRemote(m, b.ID)
+	home := filepath.Join(root, "u")
+	for _, d := range []string{"data/alpha", "data/beta", "data/.hidden"} {
+		os.MkdirAll(filepath.Join(home, d), 0o700)
+	}
+	os.WriteFile(filepath.Join(home, "data", "file"), []byte("x"), 0o600)
+	p := m.poller(b.ID)
+	l, err := m.ListTransferDirs(WithBoxRevision(ctx, p.box.Revision), b.ID, "data")
+	if err != nil {
+		t.Fatalf("listing: %v", err)
+	}
+	if l.Rel != "data" || len(l.Dirs) != 3 || l.Dirs[0] != ".hidden" || l.Dirs[1] != "alpha" || l.Dirs[2] != "beta" || l.BoxRev != p.box.Revision {
+		t.Fatalf("listing: %+v", l)
+	}
+	if _, err := m.ListTransferDirs(WithBoxRevision(ctx, p.box.Revision), b.ID, "missing"); !errors.Is(err, ErrTransferInput) {
+		t.Errorf("a missing folder is the box's refusal: %v", err)
+	}
+	// The port re-check: a socket this process owns passes, a port with
+	// nothing listening is refused. Not as root: the gate refuses uid 0
+	// (the shell runs as the test process's user, whatever the SSH name).
+	if os.Getuid() == 0 {
+		t.Log("running as root: the port re-check is not exercised")
+		return
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	cli, err := p.conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := ln.Addr().(*net.TCPAddr).Port
+	if err := verifyPortNow(ctx, cli, own); err != nil {
+		t.Errorf("our own listener: %v", err)
+	}
+	ln.Close()
+	if err := verifyPortNow(ctx, cli, own); err == nil || !strings.Contains(err.Error(), "nothing is listening") {
+		t.Errorf("a closed port: %v", err)
 	}
 }

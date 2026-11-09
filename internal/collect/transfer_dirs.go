@@ -204,7 +204,7 @@ func (m *Manager) ListTransferDirs(ctx context.Context, id int64, path string) (
 	}
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, stderr, err := cli.Run(rctx, "/bin/sh", strings.NewReader("P="+shellQuote(path)+"\n"+xferDirsScript))
+	out, stderr, err := cli.RunLimited(rctx, "/bin/sh", strings.NewReader("P="+shellQuote(path)+"\n"+xferDirsScript), xferDirsOutCap+1) // one byte over the cap is enough for xferDirsResult to refuse
 	l, err := xferDirsResult(out, stderr, err)
 	if err != nil {
 		return DirListing{}, err

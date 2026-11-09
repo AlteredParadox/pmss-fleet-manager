@@ -494,11 +494,17 @@ func (e *Evaluator) reconcile(ctx context.Context, s *collect.BoxState, active [
 	}
 }
 
+// maxAlertLogLines bounds the per-alert log lines one evaluation writes;
+// the rest are counted in one line. Alert titles carry box-reported text,
+// and a box's output must not set the log's volume (2026-11 audits).
+const maxAlertLogLines = 10
+
 // raise persists every wanted alert and returns the set of wanted keys and
 // whether any alert was newly created.
 func (e *Evaluator) raise(ctx context.Context, s *collect.BoxState, active []want) (wanted map[string]bool, changed bool) {
 	name := s.Name
 	wanted = map[string]bool{}
+	logged := 0
 	for _, w := range active {
 		wanted[w.key] = true
 		raised, err := e.st.RaiseAlert(ctx, s.ID, w.key, w.sev, w.title)
@@ -508,8 +514,13 @@ func (e *Evaluator) raise(ctx context.Context, s *collect.BoxState, active []wan
 		}
 		if raised { // new, or its title/severity changed: the open alerts page must reload
 			changed = true
-			e.log.Info("alert", "box", name, "key", w.key, "title", w.title)
+			if logged++; logged <= maxAlertLogLines {
+				e.log.Info("alert", "box", name, "key", w.key, "title", w.title)
+			}
 		}
+	}
+	if logged > maxAlertLogLines {
+		e.log.Info("alerts", "box", name, "more", logged-maxAlertLogLines)
 	}
 	return wanted, changed
 }

@@ -507,6 +507,10 @@ func (f *fakeTunnel) DialTCP(ctx context.Context, addr string) (net.Conn, error)
 	return c, nil
 }
 
+func (f *fakeTunnel) RunLimited(ctx context.Context, cmd string, stdin io.Reader, _ int) ([]byte, []byte, error) {
+	return f.Run(ctx, cmd, stdin)
+}
+
 func (f *fakeTunnel) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
 	return []byte(f.out), nil, f.runErr
 }
