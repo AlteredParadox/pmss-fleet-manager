@@ -1152,7 +1152,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.18.0 is the current release. The code was written against five real Pulsed
+1.18.1 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1164,7 +1164,7 @@ checksums, and a matching container image on GHCR.
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
-**Unreleased**
+**1.18.1**
 
 - **Hardening notes from the 2026-11 audits.** The socket-table reads,
   folder listings and transfer job scripts run under their own SSH output
