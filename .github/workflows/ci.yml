@@ -77,31 +77,40 @@ jobs:
       - name: Race tests
         run: go test -race ./...
 
-  # The copy scripts against the rsync and rrsync the boxes run: whatever
-  # Debian 12 ships, security updates included, since every PMSS box is a
-  # Debian 12 box that takes them (fred on PR 162: ubuntu-latest had moved
-  # to 3.4.1, so the main job no longer proved the production version).
-  # That was 3.2.7 until DSA-6282-1 (2026-11) moved bookworm-security to
-  # 3.5.0, so the guard checks the package is Debian 12's build (+deb12),
-  # not a version number; the version is printed. Only the transfer tests,
-  # in a bookworm container; its own job so a package-mirror hiccup does
-  # not block the required `check`.
+  # The copy scripts against the rsync and rrsync the boxes run, twice:
+  # Debian 12's own 3.2.7 (the bookworm suite, which every PMSS box has
+  # today; fred on PR 162: ubuntu-latest had moved to 3.4.1, so the main
+  # job no longer proved the production version) and the 3.5.0 that
+  # bookworm-security carries since DSA-6282-1 (2026-11), which a box
+  # gets with its next security update. `-t <suite>` makes apt take that
+  # suite's build; the guard checks it did. Only the transfer tests, in a
+  # bookworm container; its own job so a package-mirror hiccup does not
+  # block the required `check`.
   rsync-debian-12:
     runs-on: ubuntu-latest
     container: debian:12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: bookworm
+            want: '^3\.2\.7-'
+          - suite: bookworm-security
+            want: '^3\.[3-9]\..*\+deb12u'
     steps:
-      - name: Install Debian 12's rsync and the tools the job scripts use
+      - name: Install rsync from ${{ matrix.suite }} and the tools the job scripts use
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            rsync python3 perl util-linux openssh-client procps ca-certificates git
+            python3 perl util-linux openssh-client procps ca-certificates git
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends -t '${{ matrix.suite }}' rsync
           rsync --version | head -1
-          dpkg-query -W -f '${Version}\n' rsync | grep -q 'deb12' || { echo "not Debian 12's rsync package"; exit 1; }
+          dpkg-query -W -f '${Version}\n' rsync | grep -q -- '${{ matrix.want }}' || { echo "not the rsync expected from ${{ matrix.suite }}"; dpkg-query -W rsync; exit 1; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Transfer tests on Debian 12's rsync
+      - name: Transfer tests on this rsync
         run: go test -run 'Xfer|Transfer|ParseDst' ./internal/collect
 
   # Known-vulnerability scan of what the binary actually links (stdlib

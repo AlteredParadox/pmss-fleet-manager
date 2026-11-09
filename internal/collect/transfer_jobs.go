@@ -103,8 +103,7 @@ type TransferView struct {
 	Conflicts int               `json:"conflicts"` // file-vs-directory name conflicts skipped (mode keep)
 	ErrCount  int               `json:"error_count"`
 	Errors    string            `json:"errors,omitempty"`
-	Stage     string            `json:"stage,omitempty"`      // "remove" while a move removes its source
-	MoveState string            `json:"move_state,omitempty"` // the removal's outcome: "moved", or "left N" (N entries still in the source)
+	Stage     string            `json:"stage,omitempty"` // "remove" while a move removes its source (the outcome is the row's MoveState)
 }
 
 // TransferRequest starts a copy from the box the route names.
@@ -476,6 +475,12 @@ func (m *Manager) xferApplyLocked(ctx context.Context, j *xferJob, l xferLive, c
 	t.Phase = next
 	if xferFinal(next) {
 		t.RC, t.Result, t.FinishedAt = l.rc, xferResult(next, l, t.Move), time.Now().UTC()
+		if t.Move {
+			// Stored with the result: the source job's cleanup deletes the
+			// runner's files, and a finished job is not read again (fred on
+			// PR 171).
+			t.MoveState = l.move
+		}
 	}
 	if err := m.xferSave(j, t); err != nil {
 		// Not stored: keep the old phase, and above all the source's rc,
@@ -644,7 +649,15 @@ func (m *Manager) StartTransfer(ctx context.Context, srcID int64, req TransferRe
 	// One active copy per source box and per destination account (an
 	// existing directory is not claimed, so two copies into one place
 	// are refused here), checked and recorded under one lock. The row
-	// exists before anything changes on a box.
+	// exists before anything changes on a box. A move also reserves its
+	// source account against writers of the dashboard's own making, in
+	// either order of admission: its removal deletes every file not
+	// modified since the copy started, not only the ones rsync listed, so
+	// a copy landing in that account meanwhile (with its old timestamps
+	// kept) could be removed without ever having been copied on, and a
+	// move must not start from an account a copy is still writing into
+	// (fred on PR 171). Account-wide, since paths across two boxes are
+	// not compared.
 	m.xferMu.Lock()
 	for _, o := range m.xfers {
 		if !xferActive(o.t.Phase) {
@@ -657,6 +670,14 @@ func (m *Manager) StartTransfer(ctx context.Context, srcID int64, req TransferRe
 		if o.t.DstEndp == t.DstEndp {
 			m.xferMu.Unlock()
 			return TransferView{}, fmt.Errorf("%w: %s is already receiving a copy", ErrTransferBusy, dp.box.Name)
+		}
+		if o.t.Move && o.t.SrcEndp == t.DstEndp {
+			m.xferMu.Unlock()
+			return TransferView{}, fmt.Errorf("%w: a move from %s is in progress; nothing is copied into that account until it ends", ErrTransferBusy, dp.box.Name)
+		}
+		if t.Move && o.t.DstEndp == t.SrcEndp {
+			m.xferMu.Unlock()
+			return TransferView{}, fmt.Errorf("%w: %s is still receiving a copy; a move from it waits until that copy ends", ErrTransferBusy, sp.box.Name)
 		}
 	}
 	if err := m.st.CreateTransfer(ctx, &t); err != nil {
@@ -902,8 +923,7 @@ func (m *Manager) xferView(id int64) TransferView {
 	t, l, seen, serr := j.t, j.live, j.seen, j.err
 	m.xferMu.Unlock()
 	v := TransferView{Transfer: t, Cleanup: cleanupWords(t.Pending), LastSeen: seen, StatusErr: serr,
-		Skipped: l.skipped, Kept: l.kept, Conflicts: l.conflicts, ErrCount: l.errCount, Errors: l.errors, Progress: parseProgress(l.progress),
-		Stage: l.stage, MoveState: l.move}
+		Skipped: l.skipped, Kept: l.kept, Conflicts: l.conflicts, ErrCount: l.errCount, Errors: l.errors, Progress: parseProgress(l.progress), Stage: l.stage}
 	// Scanning: the runner was seen running and rsync has not printed
 	// progress yet (it is building its file list).
 	v.Scanning = t.Phase == xferRunning && v.Progress == nil && !seen.IsZero() && l.started && l.rc == ""

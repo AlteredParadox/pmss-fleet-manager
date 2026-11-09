@@ -1658,7 +1658,7 @@ func TestMigrateAddsTransferDstMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := strings.Replace(createTransfersSQL, ",\n\tdst_mode TEXT NOT NULL DEFAULT '', move INTEGER NOT NULL DEFAULT 0", "", 1)
+	old := strings.Replace(createTransfersSQL, ",\n\tdst_mode TEXT NOT NULL DEFAULT '', move INTEGER NOT NULL DEFAULT 0, move_state TEXT NOT NULL DEFAULT ''", "", 1)
 	if old == createTransfersSQL {
 		t.Fatal("old schema not derived")
 	}
@@ -1679,7 +1679,15 @@ func TestMigrateAddsTransferDstMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts, err := s.ListTransfers(ctx)
-	if err != nil || len(ts) != 2 || ts[0].DstMode != "" || ts[0].Move || ts[1].DstMode != "replace" || !ts[1].Move {
+	if err != nil || len(ts) != 2 || ts[0].DstMode != "" || ts[0].Move || ts[0].MoveState != "" || ts[1].DstMode != "replace" || !ts[1].Move {
 		t.Fatalf("transfers after migration: %+v %v", ts, err)
+	}
+	// The removal's outcome is part of what a job's life changes.
+	ts[1].Phase, ts[1].RC, ts[1].MoveState = "finished", "0", "left 2"
+	if err := s.SaveTransfer(ctx, ts[1]); err != nil {
+		t.Fatal(err)
+	}
+	if ts, err = s.ListTransfers(ctx); err != nil || ts[1].MoveState != "left 2" {
+		t.Fatalf("move_state after save: %+v %v", ts, err)
 	}
 }

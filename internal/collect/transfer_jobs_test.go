@@ -342,6 +342,100 @@ func TestTransferOnePerSource(t *testing.T) {
 	}
 }
 
+// A move reserves its source account, whichever side is admitted first:
+// while a move from an account runs, nothing is copied into that account
+// (its removal would delete what lands there without copying it on); a
+// move does not start from an account a copy is still writing into. Plain
+// copies from or into other accounts are unaffected (fred on PR 171).
+func TestTransferMoveReservesSourceAccount(t *testing.T) {
+	ctx := context.Background()
+	m, st, b := genTestManager(t)
+	seedRemote(m, b.ID)
+	other := &store.Box{Name: "b", Host: "127.0.0.2", Port: 1, User: "v", AuthMethod: "password", Password: "x", Enabled: true}
+	if err := m.AddBox(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	waitPoll(t, m, other.ID)
+	seedRemote(m, other.ID)
+	for _, id := range []int64{b.ID, other.ID} {
+		p := m.poller(id)
+		p.mu.Lock()
+		p.box.HostKey = "ecdsa-sha2-nistp256 AAAA"
+		p.mu.Unlock()
+	}
+	add := func(tr *store.Transfer) int64 {
+		if err := st.CreateTransfer(ctx, tr); err != nil {
+			t.Fatal(err)
+		}
+		m.xferMu.Lock()
+		m.xfers[tr.ID] = &xferJob{t: *tr}
+		m.xferMu.Unlock()
+		return tr.ID
+	}
+	drop := func(id int64) {
+		m.xferMu.Lock()
+		delete(m.xfers, id)
+		m.xferMu.Unlock()
+	}
+	req := func(dst *store.Box, move bool) TransferRequest {
+		return TransferRequest{DstBox: dst.ID, DstRev: m.poller(dst.ID).box.Revision, SrcPath: "data", DstPath: "copy", Move: move}
+	}
+	// Order 1: the move from b is active; a copy into b is refused.
+	mv := add(&store.Transfer{Token: newTok(t), SrcBoxID: b.ID, SrcEndp: AuthEndpoint(m.poller(b.ID).box), DstBoxID: 99, DstEndp: "elsewhere:22/w", Move: true, Phase: xferRunning})
+	if _, err := m.StartTransfer(ctx, other.ID, req(b, false)); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "a move from a is in progress") {
+		t.Errorf("copy into a moving source: %v", err)
+	}
+	drop(mv)
+	// The same copy from b (not a move) reserves nothing of the kind.
+	cp := add(&store.Transfer{Token: newTok(t), SrcBoxID: b.ID, SrcEndp: AuthEndpoint(m.poller(b.ID).box), DstBoxID: 99, DstEndp: "elsewhere:22/w", Phase: xferRunning})
+	if _, err := m.StartTransfer(ctx, other.ID, req(b, false)); errors.Is(err, ErrTransferBusy) {
+		t.Errorf("copy into a copying source refused: %v", err)
+	}
+	drop(cp)
+	// Order 2: a copy into b is active; a move from b is refused, a copy
+	// from b is not (the account check is the move's).
+	rc := add(&store.Transfer{Token: newTok(t), SrcBoxID: 98, SrcEndp: "elsewhere:22/w", DstBoxID: b.ID, DstEndp: AuthEndpoint(m.poller(b.ID).box), Phase: xferRunning})
+	if _, err := m.StartTransfer(ctx, b.ID, req(other, true)); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "a is still receiving a copy; a move from it waits") {
+		t.Errorf("move from a receiving account: %v", err)
+	}
+	if _, err := m.StartTransfer(ctx, b.ID, req(other, false)); errors.Is(err, ErrTransferBusy) {
+		t.Errorf("copy from a receiving account refused: %v", err)
+	}
+	drop(rc)
+}
+
+// A move's removal outcome is stored with the final phase and read back
+// after a restart: the card must not say "copied, not moved" of a source
+// that is gone (fred on PR 171).
+func TestTransferMoveStateStored(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	done := &store.Transfer{Token: strings.Repeat("f", 32), SrcBoxID: 1, DstBoxID: 2, Move: true, Phase: xferFinished, RC: "0", MoveState: "left 2", Result: "moved: copied; 2 entries left"}
+	if err := st.CreateTransfer(ctx, done); err != nil {
+		t.Fatal(err)
+	}
+	m := xferTestManager(t, st)
+	if v := m.xferView(done.ID); v.MoveState != "left 2" || !v.Move {
+		t.Errorf("after restart: %+v", v.Transfer)
+	}
+	// Applying a final read stores the outcome the runner recorded.
+	tr := &store.Transfer{Token: strings.Repeat("g", 32), SrcBoxID: 1, DstBoxID: 2, Move: true, Phase: xferRunning}
+	if err := st.CreateTransfer(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	j := &xferJob{t: *tr}
+	m.xferMu.Lock()
+	m.xfers[tr.ID] = j
+	m.xferMu.Unlock()
+	j.op.Lock()
+	m.xferApplyLocked(ctx, j, xferLive{started: true, pidFile: true, rc: "0", stage: "remove", move: "moved"}, false)
+	j.op.Unlock()
+	ts, err := st.ListTransfers(ctx)
+	if err != nil || len(ts) != 2 || ts[1].MoveState != "moved" || ts[1].Phase != xferFinished || !strings.HasPrefix(ts[1].Result, "moved: copied and the source folder removed") {
+		t.Errorf("stored after a final read: %+v %v", ts, err)
+	}
+}
+
 func newTok(t *testing.T) string {
 	tok, err := newXferToken()
 	if err != nil {

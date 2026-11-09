@@ -833,10 +833,16 @@ without transferring them, rsync's rule, and the removal trusts it; that
 also makes a repeated move cheap after a cancel or a failure. The removal
 cannot be cancelled once it begins (every file it deletes is on the
 destination by then); a dashboard restart or lost contact does not affect
-it, since the runner on the source does it. Stop anything writing to the
-source first, as for a copy: a program that writes files with an old
-modification time (a client that preserves timestamps) could have one
-removed that was never copied.
+it, since the runner on the source does it. The removal deletes by
+timestamp, not from a list of what rsync sent, so the dashboard keeps its
+own copies away from a move's source account: while a move from an
+account runs, nothing is copied into that account (a copy arriving with
+its old timestamps could otherwise be removed without ever having been
+copied on), and a move does not start from an account a copy is still
+writing into; both are refused with a message until the other job ends.
+Stop anything else writing to the source first, as for a copy: a program
+that writes files with an old modification time (a client that preserves
+timestamps) could have one removed that was never copied.
 
 Why an existing folder may not contain symlinks: `-munge` neutralises the
 links the copy *writes*, not one already there. Through a link already in
@@ -852,7 +858,8 @@ source can still do inside the chosen folder: overwrite or remove anything
 (rrsync blocks the delete options, not `--force` or `--inplace`), whatever
 the rule chosen (the keep/replace rule is the copy's own behaviour, not
 enforced by the destination; rrsync 3.3.0+ could enforce *keep* with
-`-no-overwrite`, which the boxes' 3.2.7 lacks). A file hard-linked to
+`-no-overwrite`, which the boxes' 3.2.7 lacks; Debian 12's security
+update carries 3.5.0, and CI tests both). A file hard-linked to
 another name is that same file, so its other names show such a change;
 the dashboard's own copy replaces by rename and never writes through a
 link. Nothing outside the chosen folder is reachable.
@@ -1126,14 +1133,16 @@ Newest first; each release's full notes are on the
   other outcome, a cancel included, leaves the source as it is; symlinks,
   special files and files changed meanwhile stay behind and are counted
   ("moved, source not empty"). Not with *keep* (a kept destination file
-  may differ from the source's). `POST /api/boxes/{id}/transfers` takes
-  `move`; transfers carry `move`, `stage` and `move_state`; the
-  `transfers` table gains `move`. See *Moving* under *Copying between
-  boxes*.
-- CI's transfer-test job on Debian 12 now checks that it tests Debian 12's
-  own rsync package, whatever version that is, instead of 3.2.7:
-  DSA-6282-1 moved bookworm-security to 3.5.0, which the boxes get with
-  their security updates.
+  may differ from the source's); while a move runs nothing is copied into
+  its source account, and a move does not start from an account still
+  receiving a copy. `POST /api/boxes/{id}/transfers` takes `move`;
+  transfers carry `move`, `stage` and `move_state` (stored with the
+  result); the `transfers` table gains `move` and `move_state`. See
+  *Moving* under *Copying between boxes*.
+- CI runs the transfer tests on both rsync versions a Debian 12 box can
+  have: 3.2.7 (the bookworm suite, what the boxes run today) and 3.5.0
+  (bookworm-security since DSA-6282-1, what a box gets with its next
+  security update).
 
 **1.16.0**
 
