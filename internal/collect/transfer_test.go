@@ -18,12 +18,15 @@ package collect
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"pmss-fleet-manager/internal/sshx"
 	"time"
 )
 
@@ -1140,6 +1143,11 @@ func TestXferScanStopsAtErrors(t *testing.T) {
 	}
 	if _, err := xferScan([]byte("ERR real\n--errors\nERR x\n"), nil, nil); !errors.As(err, &ref) || ref.msg != "real" {
 		t.Errorf("got %v", err)
+	}
+	// Through xferRun itself: a client with no transport answers the
+	// error, not a refusal.
+	if _, err := xferRun(context.Background(), &sshx.Client{}, xferVars("TOKEN", tok), xferStatusScript); err == nil || errors.As(err, &ref) {
+		t.Errorf("no transport: %v", err)
 	}
 }
 

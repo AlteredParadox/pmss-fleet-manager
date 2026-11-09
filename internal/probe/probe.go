@@ -144,7 +144,7 @@ func loopbackReachable(addr string) bool {
 	case "0.0.0.0", "127.0.0.1", "*", // ss: v4 any, v4 loopback, any
 		"[::]", "::", // ss: v6 any (dual-stack reaches 127.0.0.1 too)
 		"[::ffff:127.0.0.1]", "::ffff:127.0.0.1",
-		"[::ffff:0.0.0.0]", "::ffff:0.0.0.0": // the v4 any address on a v6 socket: reached like 0.0.0.0
+		"[::ffff:0.0.0.0]", "::ffff:0.0.0.0": // NOSONAR: not an address to connect to; the socket table's spellings of the v4 any address on a v6 socket, reached like 0.0.0.0
 		return true
 	}
 	switch strings.ToUpper(addr) {
