@@ -562,11 +562,7 @@ func (m *Manager) xferCleanupLocked(ctx context.Context, j *xferJob) error {
 		// Not cut by an expired setup deadline: the row must go now.
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if m.st.DeleteTransfer(dctx, t.ID) == nil {
-			m.xferMu.Lock()
-			delete(m.xfers, t.ID)
-			m.xferMu.Unlock()
-			m.Publish(Event{Type: "transfers"})
+		if m.xferForget(dctx, t.ID) == nil {
 			return nil
 		}
 	}

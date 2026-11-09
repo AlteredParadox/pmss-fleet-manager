@@ -633,6 +633,35 @@ func TestTransferUnreadableSourceRecovery(t *testing.T) {
 	if ts, _ := st.ListTransfers(ctx); len(ts) != 0 {
 		t.Errorf("stored after stop tracking: %+v", ts)
 	}
+	if err := m.RevokeTransferKey(ctx, other.ID, tr.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("revoking a forgotten job: %v", err)
+	}
+	// Revocation is for jobs that are not over, and only while the key
+	// line is still owed.
+	addJob := func(phase string, pending int) *xferJob {
+		x := &store.Transfer{Token: newTok(t), SrcBoxID: b.ID, SrcEndp: AuthEndpoint(m.poller(b.ID).box), SrcHostKey: m.poller(b.ID).hostKey(),
+			DstBoxID: other.ID, DstEndp: AuthEndpoint(m.poller(other.ID).box), DstHostKey: m.poller(other.ID).hostKey(), Phase: phase, PubKey: testBlob, Pending: pending}
+		if err := st.CreateTransfer(ctx, x); err != nil {
+			t.Fatal(err)
+		}
+		x.CreatedAt = time.Now().Add(-xferStale - time.Minute)
+		k := &xferJob{t: *x, err: "dial: connection refused"}
+		m.xferMu.Lock()
+		m.xfers[x.ID] = k
+		m.xferMu.Unlock()
+		return k
+	}
+	done := addJob(xferFinished, store.TransferPendingDstKey)
+	if err := m.RevokeTransferKey(ctx, other.ID, done.t.ID); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "its cleanup") {
+		t.Errorf("revoking on a finished job: %v", err)
+	}
+	noKey := addJob(xferRunning, store.TransferPendingSrcJob)
+	if v := m.xferView(noKey.t.ID); !v.SrcUnreadable || v.KeyRevocable {
+		t.Errorf("no key owed: %+v", v)
+	}
+	if err := m.RevokeTransferKey(ctx, other.ID, noKey.t.ID); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "no key line is owed") {
+		t.Errorf("revoking with no key owed: %v", err)
+	}
 	// The rule itself: a recent successful read, an empty error, or a
 	// final phase is never "unreadable".
 	now := time.Now()
