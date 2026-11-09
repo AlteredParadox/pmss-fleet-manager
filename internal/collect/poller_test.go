@@ -18,12 +18,14 @@ package collect
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -359,4 +361,54 @@ func TestRefreshRequestsInventory(t *testing.T) {
 	if err := m.Refresh(8); err == nil {
 		t.Fatal("unknown box")
 	}
+}
+
+// The probe's stdout budget holds a probe whose every bounded section is
+// at the script's own cap (two traffic files and two live rings of 256 KiB,
+// 4,096 processes with 400-byte command lines and their stat rows, ten
+// log directories of 40 rows), with room to spare, and that probe parses.
+func TestProbeOutputLimitFitsTheScriptsCaps(t *testing.T) {
+	tag := probe.NewTag()
+	var b strings.Builder
+	sec := func(name string) { b.WriteString("@@" + tag + name + "\n") }
+	sec("uid")
+	b.WriteString("1000\n")
+	for _, s := range []string{"traffic", "traffic_in", "live_node", "live_user"} {
+		sec(s)
+		b.WriteString(strings.Repeat("x", 262145))
+		b.WriteByte('\n')
+	}
+	sec("procs")
+	for i := 1; i <= 4096; i++ {
+		fmt.Fprintf(&b, "%7d %7d %8d %6d %8d %-15s\n", i, 1, 1<<20, 123456, 1234567, "qbittorrent-nox")
+	}
+	sec("proc_args")
+	for i := 1; i <= 4096; i++ {
+		fmt.Fprintf(&b, "%7d %s\n", i, strings.Repeat("a", 392))
+	}
+	b.WriteString("end\n")
+	sec("proc_stat")
+	b.WriteString("100\n")
+	for i := 1; i <= 4096; i++ {
+		fmt.Fprintf(&b, "%d 123456789 123456789 123456789\n", i)
+	}
+	sec("logs")
+	for d := 0; d < 10; d++ {
+		for i := 0; i < 40; i++ {
+			fmt.Fprintf(&b, "1700000000.0000000000\t1234567890\t./%s/%s.log\n", strings.Repeat("d", 100), strings.Repeat("f", 180))
+		}
+	}
+	sec("end")
+	raw := []byte(b.String())
+	if len(raw) >= probeOutputLimit*3/4 {
+		t.Fatalf("a probe at every cap is %d bytes; the budget of %d leaves too little room", len(raw), probeOutputLimit)
+	}
+	snap, err := probe.ParseTagged(raw, tag, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.ProcsKnown || !snap.ArgsKnown || len(snap.Logs) != 200 {
+		t.Fatalf("procs %v args %v logs %d", snap.ProcsKnown, snap.ArgsKnown, len(snap.Logs))
+	}
+	t.Logf("a probe at every cap: %d bytes against a %d-byte budget", len(raw), probeOutputLimit)
 }

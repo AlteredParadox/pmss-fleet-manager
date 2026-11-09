@@ -18,6 +18,7 @@ package alerts
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -362,5 +363,140 @@ func TestRtRemoveNoticeAlertIgnoresProbe(t *testing.T) {
 	e.Evaluate(ctx, s)
 	if keys, _ := st.ActiveAlertKeys(ctx, b.ID); len(keys) != 0 {
 		t.Fatalf("dismiss while disabled: %v", keys)
+	}
+}
+
+// One box may hold open at most maxContainerAlerts per-container alerts;
+// the rest are one aggregate. An open alert whose container is still
+// failing is always kept (and keeps its acknowledgement), a resolved key
+// coming back is a new one and counts against the bound, a database
+// already over the bound admits no new one, and a poll that could not
+// read dockerd resolves neither the kept alerts nor the aggregate.
+func TestContainerAlertCap(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	hostile := &store.Box{Name: "hostile", Host: "h1", User: "u", Port: 22, Enabled: true}
+	victim := &store.Box{Name: "victim", Host: "h2", User: "u", Port: 22, Enabled: true}
+	for _, b := range []*store.Box{hostile, victim} {
+		if err := st.CreateBox(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st.RaiseAlert(ctx, victim.ID, "disk", "warn", "victim disk")
+	e := New(st, store.DefaultSettings, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	state := func(prefix string, n int) *collect.BoxState {
+		s := &collect.BoxState{ID: hostile.ID, Name: "hostile", Status: "online"}
+		s.Docker.Enabled, s.Docker.Reachable = true, true
+		for i := 0; i < n; i++ {
+			s.Docker.Containers = append(s.Docker.Containers, collect.ContainerView{Name: fmt.Sprintf("%s-c%04d", prefix, i), State: "exited", Status: "Exited (137) 2 hours ago"})
+		}
+		return s
+	}
+	count := func() (total, active, containers, aggregate int, victimListed bool) {
+		rows, err := st.ListAlerts(ctx, 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range rows {
+			if a.BoxID == victim.ID {
+				victimListed = victimListed || a.Active
+				continue
+			}
+			total++
+			if a.Active {
+				active++
+				if strings.HasPrefix(a.Key, "container:") {
+					containers++
+				}
+				if a.Key == "containers" {
+					aggregate++
+				}
+			}
+		}
+		return
+	}
+	// Two polls of 2,000 fresh names each (the audits' reproduction).
+	e.Evaluate(ctx, state("poll1", 2000))
+	if total, active, containers, aggregate, victimListed := count(); total != maxContainerAlerts+1 || active != maxContainerAlerts+1 || containers != maxContainerAlerts || aggregate != 1 || !victimListed {
+		t.Fatalf("after poll 1: total %d active %d containers %d aggregate %d victim listed %v", total, active, containers, aggregate, victimListed)
+	}
+	e.Evaluate(ctx, state("poll2", 2000))
+	if total, active, containers, aggregate, victimListed := count(); total != 2*maxContainerAlerts+1 || active != maxContainerAlerts+1 || containers != maxContainerAlerts || aggregate != 1 || !victimListed {
+		t.Fatalf("after poll 2: total %d active %d containers %d aggregate %d victim listed %v", total, active, containers, aggregate, victimListed)
+	}
+	rows, _ := st.ListAlerts(ctx, 200)
+	for _, a := range rows {
+		if a.Key == "containers" && !strings.Contains(a.Title, "1980 more containers") {
+			t.Errorf("aggregate title %q", a.Title)
+		}
+	}
+	// A poll that could not read dockerd keeps the kept alerts and the
+	// aggregate (nothing was re-checked).
+	down := state("poll2", 0)
+	down.Docker.Reachable, down.Docker.Error = false, "no socket"
+	e.Evaluate(ctx, down)
+	if _, active, containers, aggregate, _ := count(); active != maxContainerAlerts+2 || containers != maxContainerAlerts || aggregate != 1 {
+		t.Fatalf("unreadable docker: active %d containers %d aggregate %d", active, containers, aggregate)
+	}
+	// All healthy again: everything container-related resolves.
+	e.Evaluate(ctx, state("poll3", 0))
+	if _, active, _, _, _ := count(); active != 0 {
+		t.Fatalf("healthy poll left %d active", active)
+	}
+
+	// A database already over the bound: 30 open alerts whose containers
+	// still fail all stay, with their acknowledgements, and no new one is
+	// admitted while they do.
+	st.ClearResolved(ctx)
+	for i := 0; i < 30; i++ {
+		st.RaiseAlert(ctx, hostile.ID, fmt.Sprintf("container:old-c%04d", i), "warn", "x")
+	}
+	rows, _ = st.ListAlerts(ctx, 200)
+	for _, a := range rows {
+		if a.Key == "container:old-c0000" {
+			st.AckAlert(ctx, a.ID)
+		}
+	}
+	s := state("old", 30)
+	for i := 0; i < 10; i++ {
+		s.Docker.Containers = append(s.Docker.Containers, collect.ContainerView{Name: fmt.Sprintf("new-c%d", i), State: "dead", Status: "Dead"})
+	}
+	e.Evaluate(ctx, s)
+	keys, _ := st.ActiveAlertKeys(ctx, hostile.ID)
+	old, fresh := 0, 0
+	for _, k := range keys {
+		switch {
+		case strings.HasPrefix(k, "container:old-"):
+			old++
+		case strings.HasPrefix(k, "container:new-"):
+			fresh++
+		}
+	}
+	if old != 30 || fresh != 0 || !slices.Contains(keys, "containers") {
+		t.Fatalf("over the bound: old %d new %d keys %v", old, fresh, keys)
+	}
+	rows, _ = st.ListAlerts(ctx, 200)
+	for _, a := range rows {
+		if a.Key == "container:old-c0000" && (!a.Active || !a.Acked) {
+			t.Errorf("kept alert lost its acknowledgement: %+v", a)
+		}
+		if a.Key == "containers" && !strings.Contains(a.Title, "10 more containers") {
+			t.Errorf("aggregate title %q", a.Title)
+		}
+	}
+	// One old container recovers and later fails again: its key is not
+	// open then, so it is a new one, and the bound (29 kept) folds it.
+	s.Docker.Containers = s.Docker.Containers[1:] // old-c0000 recovered
+	e.Evaluate(ctx, s)
+	if keys, _ := st.ActiveAlertKeys(ctx, hostile.ID); slices.Contains(keys, "container:old-c0000") {
+		t.Fatal("recovered container still open")
+	}
+	e.Evaluate(ctx, state("old", 30)) // old-c0000 is back, with the other 29 still failing
+	if keys, _ := st.ActiveAlertKeys(ctx, hostile.ID); slices.Contains(keys, "container:old-c0000") || !slices.Contains(keys, "containers") {
+		t.Fatalf("a returning key bypassed the bound: %v", keys)
 	}
 }

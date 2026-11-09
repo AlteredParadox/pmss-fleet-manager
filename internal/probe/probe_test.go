@@ -20,10 +20,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -345,11 +348,11 @@ func TestParseProcsHostileAndMissing(t *testing.T) {
 	if procs[2].Args != "cmd with args" || procs[2].CPUSec != 1 || procs[2].StartTick != 0 {
 		t.Fatalf("args / stat fallback: %+v", procs[2])
 	}
-	if st := parseProcStat("100\n3 100 50 7\n4 -1 0 7\n5 1 1\nx"); len(st) != 1 || st[3].cpuSec != 1.5 || st[3].start != 7 {
+	if st := parseProcStat("100\n3 100 50 7\n4 -1 0 7\n5 1 1\nx", nil); len(st) != 1 || st[3].cpuSec != 1.5 || st[3].start != 7 {
 		t.Fatalf("proc stat: %+v", st)
 	}
 	for _, hz := range []string{"0.5", "1e-300", "NaN", "0", "-1", "1e9"} {
-		if st := parseProcStat(hz + "\n3 100 50 7"); len(st) != 0 {
+		if st := parseProcStat(hz+"\n3 100 50 7", nil); len(st) != 0 {
 			t.Errorf("CLK_TCK %s must be rejected: %+v", hz, st)
 		}
 	}
@@ -469,9 +472,9 @@ func TestParseGPU(t *testing.T) {
 }
 
 func TestParseDu(t *testing.T) {
-	rows := ParseDu([]byte("1024\tdata\n4096\twatch dir\n20\t.config\nbad\tx\n"))
-	if len(rows) != 3 || rows[0].Name != "watch dir" || rows[2].Name != ".config" {
-		t.Fatalf("%+v", rows)
+	rows, rest := ParseDu([]byte("1024\tdata\n4096\twatch dir\n20\t.config\nbad\tx\n"))
+	if len(rows) != 3 || rest != 0 || rows[0].Name != "watch dir" || rows[2].Name != ".config" {
+		t.Fatalf("%+v %d", rows, rest)
 	}
 }
 
@@ -1752,5 +1755,135 @@ func TestYABSDiskTotalAboveTwoTiB(t *testing.T) {
 	}
 	if ran == 0 {
 		t.Skip("no awk")
+	}
+}
+
+// A section the box fills to the transport budget is parsed within a
+// small multiple of its size: the parsers bound their rows while reading
+// instead of materialising everything and trimming (2026-11 audits: a
+// 16 MiB process section cost 66x its size in allocation and 26x in live
+// heap for the 2,000 rows kept). The multiple here is generous; the
+// point is that it is a constant, not the row count's doing.
+func TestParseTaggedBoundedAllocation(t *testing.T) {
+	const size = 5 << 20
+	build := func(section, row string) []byte {
+		var b bytes.Buffer
+		b.WriteString("@@tuid\n1000\n@@t" + section + "\n")
+		for b.Len() < size {
+			b.WriteString(row)
+		}
+		b.WriteString("@@tend\n")
+		return b.Bytes()
+	}
+	for _, c := range []struct {
+		section, row string
+		check        func(*Snapshot) string
+	}{
+		{"procs", "7 1 0 0 0 c\n", func(s *Snapshot) string {
+			if len(s.Procs) != maxProcs || !s.ProcsTruncated || !s.ProcsKnown {
+				return fmt.Sprintf("procs %d truncated %v known %v", len(s.Procs), s.ProcsTruncated, s.ProcsKnown)
+			}
+			return ""
+		}},
+		{"proc_args", "7 some command line here\n", func(s *Snapshot) string { // no "end": discarded whole, cheaply
+			if s.ArgsKnown {
+				return "args from a cut listing were used"
+			}
+			return ""
+		}},
+		{"proc_stat", "100\n7 1 1 1\n", func(*Snapshot) string { return "" }},
+		{"logs", "1700000000\t10\t./a/b.log\n", func(s *Snapshot) string {
+			if len(s.Logs) != maxLogFiles {
+				return fmt.Sprintf("logs %d", len(s.Logs))
+			}
+			return ""
+		}},
+	} {
+		raw := build(c.section, c.row)
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		snap, err := ParseTagged(raw, "t", time.Now())
+		runtime.ReadMemStats(&after)
+		if err != nil {
+			t.Fatalf("%s: %v", c.section, err)
+		}
+		if msg := c.check(snap); msg != "" {
+			t.Errorf("%s: %s", c.section, msg)
+		}
+		alloc := after.TotalAlloc - before.TotalAlloc
+		if alloc > 16*uint64(len(raw)) {
+			t.Errorf("%s: a %d-byte section allocated %d bytes (%.1fx)", c.section, len(raw), alloc, float64(alloc)/float64(len(raw)))
+		}
+		t.Logf("%s: %d bytes, %.1fx allocated", c.section, len(raw), float64(alloc)/float64(len(raw)))
+	}
+	// The process rows past the bound, and the args and stat rows of pids
+	// not listed, are not read into values; the listed pids keep theirs.
+	var procs, args, stat strings.Builder
+	stat.WriteString("100\n")
+	for i := 1; i <= maxProcRows+500; i++ {
+		fmt.Fprintf(&procs, "%d 1 10 1 1 p%d\n", i, i)
+		fmt.Fprintf(&args, "%d /usr/bin/p%d --flag\n", i, i)
+		fmt.Fprintf(&stat, "%d 200 100 %d\n", i, i)
+	}
+	args.WriteString("end\n")
+	rows, known, argsKnown, truncated := parseProcs(procs.String(), args.String(), stat.String(), 0)
+	if !known || !argsKnown || !truncated || len(rows) != maxProcs {
+		t.Fatalf("known %v args %v truncated %v kept %d", known, argsKnown, truncated, len(rows))
+	}
+	if rows[0].Args != "/usr/bin/p1 --flag" || rows[0].CPUSec != 3 || rows[0].StartTick != 1 {
+		t.Fatalf("first row lost its args or stat: %+v", rows[0])
+	}
+	if st := parseProcStat(stat.String(), map[int]bool{5: true}); len(st) != 1 || st[5].start != 5 {
+		t.Fatalf("stat filtered to the listed pids: %v", st)
+	}
+}
+
+// parseLogs's bounded working set keeps exactly the files a sort of the
+// whole listing keeps, ties (equal mtimes) in the box's order included.
+func TestParseLogsBoundedMatchesFullSort(t *testing.T) {
+	var sb strings.Builder
+	var all []LogFile
+	for i := 0; i < 7*maxLogFiles; i++ {
+		mt := int64(1700000000 + (i*7919)%97) // a small set of mtimes: many ties
+		p := fmt.Sprintf("d%d/f%d.log", i%5, i)
+		fmt.Fprintf(&sb, "%d\t%d\t./%s\n", mt, i, p)
+		all = append(all, LogFile{Path: p, Size: int64(i), MTime: time.Unix(mt, 0)})
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].MTime.After(all[j].MTime) })
+	want := all[:maxLogFiles]
+	got := parseLogs(sb.String())
+	if len(got) != len(want) {
+		t.Fatalf("kept %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("row %d: %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// ParseDu keeps the largest maxDuRows rows and sums the rest, so the
+// whole listing's total survives a box that prints far more lines than a
+// home has entries.
+func TestParseDuBounded(t *testing.T) {
+	var sb strings.Builder
+	for i := 1; i <= 5000; i++ {
+		fmt.Fprintf(&sb, "%d\t./d%d\n", i, i)
+	}
+	rows, rest := ParseDu([]byte(sb.String()))
+	if len(rows) != maxDuRows || rows[0].Bytes != 5000 || rows[maxDuRows-1].Bytes != 5000-maxDuRows+1 {
+		t.Fatalf("kept %d rows, first %d last %d", len(rows), rows[0].Bytes, rows[len(rows)-1].Bytes)
+	}
+	if want := int64(3000) * 3001 / 2; rest != want {
+		t.Fatalf("rest %d, want %d", rest, want)
+	}
+	// Forged sizes saturate the remainder rather than wrap.
+	sb.Reset()
+	for i := 0; i < maxDuRows+20; i++ {
+		fmt.Fprintf(&sb, "%d\t./x%d\n", int64(1)<<60, i)
+	}
+	if _, rest := ParseDu([]byte(sb.String())); rest != math.MaxInt64 {
+		t.Fatalf("rest %d, want saturation", rest)
 	}
 }

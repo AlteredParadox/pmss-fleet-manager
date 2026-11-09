@@ -62,7 +62,7 @@ func TestScriptRunsLocally(t *testing.T) {
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	_ = cmd.Run() // du may exit non-zero on unreadable entries; output is still usable
-	rows := ParseDu(out.Bytes())
+	rows, _ := ParseDu(out.Bytes())
 	if len(rows) == 0 {
 		t.Fatalf("du produced no rows: %s", errb.String())
 	}

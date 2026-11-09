@@ -180,14 +180,14 @@ func TestFoldDu(t *testing.T) {
 	for i := 0; i < maxDuEntries+3; i++ {
 		ds = append(ds, probe.DirUsage{Name: "d", Bytes: 10})
 	}
-	got := foldDu(ds)
+	got := foldDu(ds, 0)
 	if len(got) != maxDuEntries+1 {
 		t.Fatalf("len %d, want %d", len(got), maxDuEntries+1)
 	}
 	if last := got[maxDuEntries]; last.Name != duRestName || last.Bytes != 30 {
 		t.Fatalf("rest entry %+v", last)
 	}
-	if small := foldDu(ds[:3]); len(small) != 3 || small[2].Name != "d" {
+	if small := foldDu(ds[:3], 0); len(small) != 3 || small[2].Name != "d" {
 		t.Fatalf("short list altered: %+v", small)
 	}
 	// A row an older build cached unbounded is capped the same way on restore.

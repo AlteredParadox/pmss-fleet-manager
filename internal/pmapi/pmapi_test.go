@@ -166,3 +166,31 @@ func TestFetchRefusesRedirect(t *testing.T) {
 		t.Fatal("API key was sent to the redirect target")
 	}
 }
+
+// Parse refuses what Fetch would never hand it but a cache might: a body
+// over the byte cap, and a services array longer than an account can
+// have, counted before the services are decoded.
+func TestParseRefusesOversizeAndTooManyServices(t *testing.T) {
+	big := []byte(`{"services":[` + strings.Repeat(" ", maxFeedBytes) + `]}`)
+	if _, err := Parse(big); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("oversize body: %v", err)
+	}
+	feed := func(n int) []byte {
+		return []byte(`{"client_id":1,"currency":"EUR","services":[` + strings.TrimSuffix(strings.Repeat("{},", n), ",") + `]}`)
+	}
+	if f, err := Parse(feed(maxServices)); err != nil || len(f.Services) != maxServices {
+		t.Fatalf("%d services: %v", maxServices, err)
+	}
+	if _, err := Parse(feed(maxServices + 1)); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("%d services: %v", maxServices+1, err)
+	}
+	if f, err := Parse([]byte(`{"services":null}`)); err != nil || len(f.Services) != 0 {
+		t.Fatalf("null services: %v", err)
+	}
+	if _, err := Parse([]byte(`{"services":{"a":1}}`)); err == nil {
+		t.Fatal("an object where the array goes must be an error")
+	}
+	if _, err := Parse([]byte(`{"services":[{},`)); err == nil {
+		t.Fatal("a cut array must be an error")
+	}
+}

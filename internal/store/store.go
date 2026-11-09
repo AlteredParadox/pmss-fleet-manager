@@ -938,9 +938,21 @@ func (s *Store) AckAll(ctx context.Context) error {
 	return err
 }
 
-// PruneAlerts removes resolved alerts older than keep.
+// maxResolvedPerBox bounds the resolved alerts kept per box, on top of the
+// age rule: alert keys built from box-reported names (containers) can be
+// fresh every poll, and thirty days of that would be a table nothing
+// reads to the end (2026-11 audits). Active alerts are never pruned.
+const maxResolvedPerBox = 500
+
+// PruneAlerts removes resolved alerts older than keep, and the resolved
+// alerts of a box beyond its newest maxResolvedPerBox.
 func (s *Store) PruneAlerts(ctx context.Context, keep time.Duration) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM alerts WHERE active=0 AND updated_at < ?`, time.Now().Add(-keep).UTC().Format(time.RFC3339))
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM alerts WHERE active=0 AND updated_at < ?`, time.Now().Add(-keep).UTC().Format(time.RFC3339)); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM alerts WHERE id IN (
+		SELECT id FROM (SELECT id, row_number() OVER (PARTITION BY box_id ORDER BY updated_at DESC, id DESC) AS rn FROM alerts WHERE active=0)
+		WHERE rn > ?)`, maxResolvedPerBox)
 	return err
 }
 

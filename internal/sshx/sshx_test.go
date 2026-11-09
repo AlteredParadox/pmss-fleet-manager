@@ -53,14 +53,14 @@ func TestCappedWriterRecordsOverflow(t *testing.T) {
 // PR 103).
 func TestRunResultOverflowOutranksExitStatus(t *testing.T) {
 	exit := &ssh.ExitError{}
-	if err := runResult(exit, false); err != exit {
+	if err := runResult(exit, false, maxOutput); err != exit {
 		t.Fatalf("no overflow: %v", err)
 	}
-	if err := runResult(nil, false); err != nil {
+	if err := runResult(nil, false, maxOutput); err != nil {
 		t.Fatalf("clean: %v", err)
 	}
 	for _, under := range []error{nil, exit, errors.New("session closed")} {
-		err := runResult(under, true)
+		err := runResult(under, true, maxOutput)
 		var ee *ssh.ExitError
 		if !errors.Is(err, ErrOutputLimit) || errors.As(err, &ee) {
 			t.Fatalf("overflow with %v: %v (want ErrOutputLimit and no ExitError)", under, err)
