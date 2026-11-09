@@ -292,17 +292,27 @@ function rtDiscoveryOn(r) {
   return { labels, title: why.length ? `${why.join('; ')} — private trackers usually forbid these` : '' };
 }
 
-// transferState: how a box-to-box copy reads in the list. Whether it is
-// over and how it went come from the phase and the runner's exit code
-// (rc), never from rsync's percentage: its last line can say 99% after a
-// complete copy, or 100% before the copy has recorded a result.
+// transferState: how a box-to-box copy (or move) reads in the list.
+// Whether it is over and how it went come from the phase and the runner's
+// exit code (rc), never from rsync's percentage: its last line can say 99%
+// after a complete copy, or 100% before the copy has recorded a result. A
+// move's exit code 0 then reads with its removal's outcome (move_state:
+// "moved", or "left N" entries in the source); while the removal runs the
+// stage says so.
 function transferState(v) {
   const rc = v?.rc || '';
   switch (v?.phase) {
     case 'preparing': return { label: 'setting up', kind: '', over: false };
-    case 'running': return { label: v.scanning ? 'scanning' : 'copying', kind: '', over: false };
+    case 'running':
+      if (v.move && v.stage === 'remove') return { label: 'removing the source', kind: '', over: false };
+      return { label: v.scanning ? 'scanning' : 'copying', kind: '', over: false };
     case 'unconfirmed': return { label: 'launch unconfirmed', kind: 'warn', over: false };
     case 'finished':
+      if (rc === '0' && v.move) {
+        if (v.move_state === 'moved') return { label: 'moved', kind: 'ok', over: true };
+        if (String(v.move_state || '').startsWith('left ')) return { label: 'moved, source not empty', kind: 'warn', over: true };
+        return { label: 'copied, not moved', kind: 'warn', over: true };
+      }
       if (rc === '0') return { label: 'copied', kind: 'ok', over: true };
       if (rc === '24') return { label: 'copied with warnings', kind: 'warn', over: true };
       if (rc === 'cancelled') return { label: 'cancelled', kind: 'dim', over: true };
@@ -317,15 +327,16 @@ function transferState(v) {
 // failure.
 function transferCleanupLabel(v) {
   const done = v?.phase === 'finished' && (v.rc === '0' || v.rc === '24');
-  return done ? 'copy completed; credential cleanup needed: ' : 'cleanup owed: ';
+  return done ? `${v.move ? 'move' : 'copy'} completed; credential cleanup needed: ` : 'cleanup owed: ';
 }
 // startToast: what the page says once a start answered. Only a launch the
 // source confirmed is "started"; setup may still be going, or the launch
 // answer may have been lost (the card shows how it ends).
 function startToast(v) {
-  if (v?.phase === 'running') return ['copy started', 'ok'];
-  if (v?.phase === 'unconfirmed') return ['launch not confirmed yet; watch the copy\'s card', 'warn'];
-  return ['copy submitted; setup is still going, watch the copy\'s card', 'warn'];
+  const what = v?.move ? 'move' : 'copy';
+  if (v?.phase === 'running') return [`${what} started`, 'ok'];
+  if (v?.phase === 'unconfirmed') return [`launch not confirmed yet; watch the ${what}'s card`, 'warn'];
+  return [`${what} submitted; setup is still going, watch the ${what}'s card`, 'warn'];
 }
 // transferMeter: the progress bar's width, rsync's own estimate; full only
 // once the exit code says the copy succeeded.
@@ -384,11 +395,18 @@ function transferModeLabel(v) {
 // operator confirmed; the revisions are the ones those listings were read
 // under, never the boxes' state at submit time: a box edited since
 // (perhaps to another machine) is refused with 409 instead of being
-// copied from or to (fred on PR 142).
+// copied from or to (fred on PR 142). move asks for the source to be
+// removed after a clean copy.
 function transferRequest(c) {
   const mode = transferMode(c.mode);
   return { dst_box: Number(c.dstBox), dst_rev: Number(c.dstRev) || 0, src_path: String(c.srcPath),
-    dst_path: mode === 'new' ? joinPath(c.dstParent, c.name) : String(c.dstParent), dst_mode: mode };
+    dst_path: mode === 'new' ? joinPath(c.dstParent, c.name) : String(c.dstParent), dst_mode: mode, move: c.move === true };
+}
+// moveError: why a move cannot start with this mode ('' when it can): a
+// kept destination file may differ from the source's, whose only copy the
+// removal would then discard. The server refuses it too.
+function moveError(move, mode) {
+  return move && transferMode(mode) === 'keep' ? 'a move cannot keep the destination\'s files (a source file would be discarded for one that may differ); choose a new folder or replace' : '';
 }
 // draftAfterStart: the form to keep once a start answers. Only the draft
 // that started is reset; one the operator opened meanwhile (another box's
@@ -398,23 +416,28 @@ function draftAfterStart(current, started, blank) {
 }
 // transferConfirmation: what the confirmation step shows, from the two
 // resolved listings (source folder, destination folder), the name of the
-// new folder (mode new) and the mode.
-function transferConfirmation(srcBox, srcList, dstBox, dstList, name, mode) {
+// new folder (mode new), the mode, and whether this is a move (the source
+// removed after a clean copy).
+function transferConfirmation(srcBox, srcList, dstBox, dstList, name, mode, move) {
   mode = transferMode(mode);
+  move = move === true;
   const dstPath = mode === 'new' ? joinPath(dstList.path, name) : dstList.path;
   const how = {
     new: 'a new folder, created for this copy',
     keep: 'an existing folder; files already there are kept, only what is missing is copied; nothing there is removed',
     replace: 'an existing folder; files that differ in size or time are replaced and the previous version is lost; files only there are kept',
   }[mode];
+  const source = move
+    ? `Then the source is removed: once rsync reports every file delivered and checked (exit code 0), the files in ${srcList.path} on ${srcBox.name} are deleted and the folder with them. Files changed since the copy started, symlinks and special files (never copied) are left there, and so is the folder if anything stays. Any other outcome, a cancel included, leaves the source as it is.`
+    : `The source stays untouched: nothing in ${srcList.path} on ${srcBox.name} is moved, changed or deleted.`;
   return {
     srcBox: srcBox.id, srcRev: srcList.box_rev, srcPath: srcList.path,
-    dstBox: dstBox.id, dstRev: dstList.box_rev, dstParent: dstList.path, name, mode,
+    dstBox: dstBox.id, dstRev: dstList.box_rev, dstParent: dstList.path, name, mode, move,
     exists: mode === 'new' && (dstList.dirs || []).includes(name),
     lines: [
       `from ${srcBox.name}: ${srcList.path}/ (its contents)`,
       `to ${dstBox.name}: ${dstPath}/ (${how})`,
-      `The source stays untouched: nothing in ${srcList.path} on ${srcBox.name} is moved, changed or deleted.`,
+      source,
     ],
   };
 }
@@ -428,5 +451,5 @@ function resyncLoads(view, tab, selId) {
   return [];
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart, transferMode, transferModeLabel };
+globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError };
 })();

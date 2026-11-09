@@ -42,6 +42,10 @@ type Transfer struct {
 	// already there kept) or "replace" (an existing directory, files that
 	// differ replaced).
 	DstMode string `json:"dst_mode"`
+	// Move: the source folder is removed once the copy has ended clean
+	// (rsync exit code 0), never otherwise. The runner on the source does
+	// the removal, right after the copy, as part of the one job.
+	Move bool `json:"move"`
 	// PubKey is the job key's base64 blob, saved before the key is added
 	// to the destination: removal matches this exact key.
 	PubKey string `json:"-"`
@@ -70,14 +74,18 @@ const createTransfersSQL = `CREATE TABLE IF NOT EXISTS transfers (
 	phase TEXT NOT NULL, rc TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '',
 	pending INTEGER NOT NULL DEFAULT 0,
 	created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '',
-	dst_mode TEXT NOT NULL DEFAULT '')`
+	dst_mode TEXT NOT NULL DEFAULT '', move INTEGER NOT NULL DEFAULT 0)`
 
-// addTransferDstModeColSQL adds transfers.dst_mode to a database from
-// before it existed (1.15.0); a constant like the others.
-const addTransferDstModeColSQL = "ALTER TABLE transfers ADD COLUMN dst_mode TEXT NOT NULL DEFAULT ''"
+// Columns added to transfers after 1.13.0, for a database from before
+// they existed: dst_mode (1.15.0) and move (1.17.0); constants like the
+// others.
+const (
+	addTransferDstModeColSQL = "ALTER TABLE transfers ADD COLUMN dst_mode TEXT NOT NULL DEFAULT ''"
+	addTransferMoveColSQL    = "ALTER TABLE transfers ADD COLUMN move INTEGER NOT NULL DEFAULT 0"
+)
 
 const transferCols = `id, token, src_box_id, src_endpoint, src_host_key, dst_box_id, dst_endpoint, dst_host_key,
-	src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at, dst_mode`
+	src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at, dst_mode, move`
 
 // listTransfersSQL is a constant: nothing from a request is spliced in.
 const listTransfersSQL = "SELECT " + transferCols + " FROM transfers ORDER BY id"
@@ -86,9 +94,9 @@ const listTransfersSQL = "SELECT " + transferCols + " FROM transfers ORDER BY id
 func (s *Store) CreateTransfer(ctx context.Context, t *Transfer) error {
 	t.CreatedAt = time.Now().UTC().Truncate(time.Second)
 	res, err := s.db.ExecContext(ctx, `INSERT INTO transfers (token, src_box_id, src_endpoint, src_host_key, dst_box_id, dst_endpoint, dst_host_key,
-		src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at, dst_mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at, dst_mode, move) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Token, t.SrcBoxID, t.SrcEndp, t.SrcHostKey, t.DstBoxID, t.DstEndp, t.DstHostKey,
-		t.SrcPath, t.DstPath, t.PubKey, t.Phase, t.RC, t.Result, t.Pending, t.CreatedAt.Format(time.RFC3339), fmtTime(t.FinishedAt), t.DstMode)
+		t.SrcPath, t.DstPath, t.PubKey, t.Phase, t.RC, t.Result, t.Pending, t.CreatedAt.Format(time.RFC3339), fmtTime(t.FinishedAt), t.DstMode, t.Move)
 	if err != nil {
 		return err
 	}
@@ -121,7 +129,7 @@ func (s *Store) ListTransfers(ctx context.Context) ([]*Transfer, error) {
 		var t Transfer
 		var created, finished string
 		if err := rows.Scan(&t.ID, &t.Token, &t.SrcBoxID, &t.SrcEndp, &t.SrcHostKey, &t.DstBoxID, &t.DstEndp, &t.DstHostKey,
-			&t.SrcPath, &t.DstPath, &t.PubKey, &t.Phase, &t.RC, &t.Result, &t.Pending, &created, &finished, &t.DstMode); err != nil {
+			&t.SrcPath, &t.DstPath, &t.PubKey, &t.Phase, &t.RC, &t.Result, &t.Pending, &created, &finished, &t.DstMode, &t.Move); err != nil {
 			return nil, err
 		}
 		t.CreatedAt, _ = time.Parse(time.RFC3339, created)

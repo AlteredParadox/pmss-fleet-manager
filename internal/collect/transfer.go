@@ -16,7 +16,8 @@
 
 package collect
 
-// Box-to-box copy: the source box runs rsync over ssh straight to the
+// Box-to-box copy (or move: the same copy, the source removed after a
+// clean exit): the source box runs rsync over ssh straight to the
 // destination box with a key made for the one job. The destination accepts
 // that key only for rrsync writing into the chosen directory (one the job
 // creates, or an existing one), only for 30 minutes from setup, with
@@ -76,7 +77,7 @@ const (
 const xferScanTimeout = "60"
 
 // xferOutCap bounds what any job script may send back; the largest, a
-// status read, stays under 18 KiB (the job files are bounded by cap.pl and
+// status read, stays under 19 KiB (the job files are bounded by cap.pl and
 // read with head -c). More is not a job script's answer, and is refused
 // before it is split: a box sending megabytes of bare newlines must not
 // cost the dashboard millions of strings (daybreak review B3).
@@ -369,10 +370,22 @@ seg_end(); out();
 `
 
 // xferRunScript is the detached runner on the source, after the SRC,
-// DEST, PORT, HKALG, SSH and ROPTS assignments the launch writes in front
-// of it (ROPTS: the mode's rsync options, see xferRsyncOpts). mkdir "started" makes
-// it run at most once per job, whoever launches it how often. The key
-// files go when it ends, however it ends; rc is written last, atomically.
+// DEST, PORT, HKALG, SSH, ROPTS and MOVE assignments the launch writes in
+// front of it (ROPTS: the mode's rsync options, see xferRsyncOpts; MOVE:
+// 1 to remove the source after a clean copy). mkdir "started" makes it
+// run at most once per job, whoever launches it how often. The key files
+// go when it ends, however it ends; rc is written last, atomically.
+//
+// A move removes the source only after rsync exited 0: rsync checks every
+// file it sends against a whole-file checksum on arrival and that code
+// says each one passed, so no second pass over the data is needed (and
+// none could reuse the job key: a new login is refused 30 minutes after
+// setup). Removed are the regular files not modified since the copy
+// started (one written to meanwhile may differ from what arrived) and the
+// folders that leaves empty; symlinks and special files were never copied
+// and stay, as does a folder holding any of these. The removal cannot be
+// cancelled: everything it removes is on the destination already, and a
+// source half removed under a "cancelled" label would only mislead.
 const xferRunScript = `set -u
 PATH=/usr/bin:/bin; export PATH
 J=$(cd "$(dirname -- "$0")" && pwd -P) || exit 1
@@ -397,7 +410,30 @@ rsync -rt --no-inc-recursive $ROPTS \
 rpid=$!
 wait "$rpid"; rc=$?
 wait
+rpid=""
+if [ "${MOVE:-0}" = 1 ] && [ "$rc" = 0 ]; then
+  trap '' TERM INT HUP
+  printf 'remove\n' >"$J/stage"
+` + xferRemoveSnippet + `fi
 finish "$rc"
+`
+
+// xferRemoveSnippet is the move's removal step, within the runner after a
+// clean copy (see xferRunScript); its own constant so it can be tested
+// against a prepared tree. Needs $SRC (the resolved source) and
+// $J/started_at (the copy's start, as a timestamp); writes $J/move
+// ("moved", or "left N" with N entries still in the source) and the first
+// 2 KiB of the removal's errors to $J/remove_err. head is kept reading to
+// its end so find never gets a broken pipe mid-removal.
+const xferRemoveSnippet = `  find "$SRC" -type f ! -newer "$J/started_at" -delete 2>&1 | { head -c 2048 >"$J/remove_err"; cat >/dev/null; }
+  find "$SRC" -depth -type d -empty -delete 2>/dev/null
+  if [ -e "$SRC" ] || [ -L "$SRC" ]; then
+    left=$(find "$SRC" -mindepth 1 2>/dev/null | head -n 100000 | wc -l | tr -cd 0-9)
+    mv_res="left ${left:-0}"
+  else
+    mv_res=moved
+  fi
+  printf '%s\n' "$mv_res" >"$J/move.tmp" && mv -f "$J/move.tmp" "$J/move"
 `
 
 // xferLaunchScript writes the runner, the helper and the pinned
@@ -423,12 +459,14 @@ if [ -f "$J/pid" ] || [ -f "$J/rc" ]; then echo "LAUNCHED"; else echo "UNCONFIRM
 // xferStatusScript reads a job's bounded files. Liveness is read before rc:
 // the runner writes rc before it exits, so "not alive" followed by "no rc"
 // means it ended without a result, never that rc was about to appear.
+// stage, move and remove_err belong to a move's removal step.
 const xferStatusScript = `[ -d "$J" ] || { echo "NOJOB"; exit 0; }
 [ -d "$J/started" ] && echo "STARTED"
 [ -f "$J/pid" ] && echo "PIDFILE"
 alive && echo "ALIVE"
-for f in rc pid started_at skipped kept conflicts errors.count; do [ -f "$J/$f" ] && printf '%s=%s\n' "$f" "$(head -c 64 "$J/$f" | tr -d '\n')"; done
+for f in rc pid started_at skipped kept conflicts errors.count stage move; do [ -f "$J/$f" ] && printf '%s=%s\n' "$f" "$(head -c 64 "$J/$f" | tr -d '\n')"; done
 [ -f "$J/progress" ] && printf 'progress=%s\n' "$(head -c 512 "$J/progress" | tr -d '\r\n')"
+[ -s "$J/remove_err" ] && printf 'remove_err=%s\n' "$(head -c 300 "$J/remove_err" | tr '\r\n' '  ')"
 [ -f "$J/errors" ] && { echo "--errors"; head -c 16384 "$J/errors"; }
 exit 0
 `
@@ -629,7 +667,7 @@ func xferHostKeyAlgs(keyType string) string {
 
 // xferLaunchVars renders the launch script's input: the job's known_hosts
 // line (the pinned key, exactly) and the runner's assignments.
-func xferLaunchVars(token, src string, d xferDest, mode string) (string, error) {
+func xferLaunchVars(token, src string, d xferDest, mode string, move bool) (string, error) {
 	kf := strings.Fields(d.HostKey)
 	if len(kf) < 2 || !xferAlgRe.MatchString(kf[0]) {
 		return "", errors.New("destination has no pinned host key")
@@ -639,13 +677,17 @@ func xferLaunchVars(token, src string, d xferDest, mode string) (string, error) 
 	if d.Port != 22 {
 		name = "[" + host + "]:" + strconv.Itoa(d.Port)
 	}
-	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", xferHostKeyAlgs(kf[0]), "SSH", "/usr/bin/ssh", "ROPTS", xferRsyncOpts(mode))
+	mv := "0"
+	if move {
+		mv = "1"
+	}
+	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", xferHostKeyAlgs(kf[0]), "SSH", "/usr/bin/ssh", "ROPTS", xferRsyncOpts(mode), "MOVE", mv)
 	return xferVars("TOKEN", token, "KNOWN", name+" "+kf[0]+" "+kf[1], "RUNVARS", run), nil
 }
 
 // xferLaunch starts the runner on the source.
-func xferLaunch(ctx context.Context, cli *sshx.Client, token, src string, d xferDest, mode string) (confirmed bool, err error) {
-	vars, err := xferLaunchVars(token, src, d, mode)
+func xferLaunch(ctx context.Context, cli *sshx.Client, token, src string, d xferDest, mode string, move bool) (confirmed bool, err error) {
+	vars, err := xferLaunchVars(token, src, d, mode, move)
 	if err != nil {
 		return false, err
 	}

@@ -31,7 +31,10 @@ import (
 
 func TestParseXferStatus(t *testing.T) {
 	l := parseXferStatus("STARTED\nPIDFILE\nALIVE\nrc=24\npid=12\nskipped=3\nerrors.count=2\nprogress=  1,073,741,894  99%   48.31MB/s    0:00:21 (xfr#11, to-chk=0/14)\n--errors\nfile vanished: \"a\"\nfile vanished: \"b\"")
-	if !l.started || !l.pidFile || !l.alive || l.rc != "24" || l.skipped != 3 || l.errCount != 2 || !strings.HasPrefix(l.errors, "file vanished: \"a\"\nfile") {
+	if !l.started || !l.pidFile || !l.alive || l.rc != "24" || l.skipped != 3 || l.errCount != 2 || !strings.HasPrefix(l.errors, "file vanished: \"a\"\nfile") || l.stage != "" || l.move != "" {
+		t.Fatalf("%+v", l)
+	}
+	if l := parseXferStatus("STARTED\nPIDFILE\nrc=0\nstage=remove\nmove=left 2\nremove_err=find: cannot delete 'x': Permission denied"); l.stage != "remove" || l.move != "left 2" || !strings.HasPrefix(l.removeErr, "find: cannot delete") {
 		t.Fatalf("%+v", l)
 	}
 	p := parseProgress(l.progress)
@@ -96,8 +99,32 @@ func TestXferResult(t *testing.T) {
 		{xferInterrupted, xferLive{started: true, pidFile: true}, "interrupted: the runner ended without a result (box rebooted or the process was killed?)"},
 		{xferInterrupted, xferLive{}, "not started: the runner never started on the source"},
 	} {
-		if got := xferResult(c.phase, c.l); got != c.want {
+		if got := xferResult(c.phase, c.l, false); got != c.want {
 			t.Errorf("rc %q: %q\nwant %q", c.l.rc, got, c.want)
+		}
+	}
+	// A move: only exit code 0 removed anything; every other outcome says
+	// the source is still there, and an interrupted removal says what may
+	// be half done.
+	for _, c := range []struct {
+		phase string
+		l     xferLive
+		want  string
+	}{
+		{xferFinished, xferLive{rc: "0", progress: prog, stage: "remove", move: "moved"}, "moved: copied and the source folder removed; 3.0 MiB in 2 files"},
+		{xferFinished, xferLive{rc: "0", progress: prog, stage: "remove", move: "left 3", skipped: 1}, "moved: copied; 3 entries left in the source folder (symlinks and special files, which are never copied; files changed since the copy started; or entries that could not be removed); 3.0 MiB in 2 files; 1 symlinks or special files skipped"},
+		{xferFinished, xferLive{rc: "0", stage: "remove", move: "left 0", removeErr: "find: cannot delete '/h/src': Permission denied"}, "moved: copied; the source folder is empty but could not be removed — find: cannot delete '/h/src': Permission denied;"},
+		{xferFinished, xferLive{rc: "0", stage: "remove", move: "left 1", removeErr: "find: cannot delete '/h/src/a': Permission denied"}, "moved: copied; 1 entries left in the source folder (symlinks and special files, which are never copied; files changed since the copy started; or entries that could not be removed) — find: cannot delete '/h/src/a': Permission denied;"},
+		{xferFinished, xferLive{rc: "0", progress: prog}, "copied, but not moved: the runner recorded no removal outcome; the source was left as it is; 3.0 MiB in 2 files"},
+		{xferFinished, xferLive{rc: "24", progress: prog}, "completed with warnings: some source files vanished during the copy; 3.0 MiB in 2 files; the source was left in place"},
+		{xferFinished, xferLive{rc: "cancelled"}, "cancelled; the source was left in place"},
+		{xferFinished, xferLive{rc: "23", errors: "rsync: open \"x\" failed: Permission denied (13)"}, "partial: some files could not be transferred; the source was left in place — rsync: open \"x\" failed: Permission denied (13)"},
+		{xferFinished, xferLive{rc: "11", errors: "rsync: write failed: No space left on device (28)"}, "destination out of space or quota; the source was left in place — rsync: write failed: No space left on device (28)"},
+		{xferInterrupted, xferLive{started: true, pidFile: true}, "interrupted: the runner ended without a result (box rebooted or the process was killed?); the source was left in place"},
+		{xferInterrupted, xferLive{started: true, pidFile: true, stage: "remove", progress: prog}, "interrupted while removing the source: the copy completed, the removal ended without a result (box rebooted or the process was killed?); check the source folder; 3.0 MiB in 2 files"},
+	} {
+		if got := xferResult(c.phase, c.l, true); got != c.want {
+			t.Errorf("move rc %q: %q\nwant %q", c.l.rc, got, c.want)
 		}
 	}
 }
@@ -293,6 +320,12 @@ func TestTransferOnePerSource(t *testing.T) {
 	_, err = m.StartTransfer(ctx, other.ID, TransferRequest{DstBox: b.ID, DstRev: m.poller(b.ID).box.Revision, SrcPath: "data", DstPath: "data", DstMode: "merge"})
 	if !errors.Is(err, ErrTransferInput) || !strings.Contains(err.Error(), "unknown destination mode") {
 		t.Errorf("bad mode: %v", err)
+	}
+	// A move may not keep the destination's files: a kept file may differ
+	// from the source's, whose only copy the removal would then discard.
+	_, err = m.StartTransfer(ctx, other.ID, TransferRequest{DstBox: b.ID, DstRev: m.poller(b.ID).box.Revision, SrcPath: "data", DstPath: "data", DstMode: xferModeKeep, Move: true})
+	if !errors.Is(err, ErrTransferInput) || !strings.Contains(err.Error(), "a move cannot keep") {
+		t.Errorf("move with keep: %v", err)
 	}
 	// One active copy per destination account too: an existing directory
 	// is not claimed, so two copies into one place are refused here.
