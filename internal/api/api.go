@@ -341,9 +341,9 @@ func (s *Server) routes() {
 	handle("POST "+bp+boxRoute+"/containers/{cid}/logs", s.handleContainerLogs) // literal segment wins over {action}
 	handle("GET "+bp+"/api/transfers", s.handleTransfers)
 	handle("POST "+bp+boxRoute+"/transfers", s.handleStartTransfer)
-	handle("POST "+bp+boxRoute+"/transfers/dirs", s.handleTransferDirs) // lists one folder over SSH (reads only): POST so the CSRF check applies; literal segment wins over {tid}
+	handle("POST "+bp+boxRoute+"/transfers/dirs", s.handleTransferDirs)             // lists one folder over SSH (reads only): POST so the CSRF check applies; literal segment wins over {tid}
 	handle("POST "+bp+boxRoute+"/transfers/{tid}/{action}", s.handleTransferAction) // cancel and cleanup under the source box; revoke-key under the destination
-	handle("POST "+bp+"/api/transfers/{tid}/dismiss", s.handleDismissTransfer) // forgets a finished job: changes no box
+	handle("POST "+bp+"/api/transfers/{tid}/dismiss", s.handleDismissTransfer)      // forgets a finished job: changes no box
 	handle("POST "+bp+"/api/detect", s.handleDetect)
 	handle("GET "+bp+"/api/alerts", s.handleAlerts)
 	handle("POST "+bp+"/api/alerts/ack-all", s.handleAckAll)
