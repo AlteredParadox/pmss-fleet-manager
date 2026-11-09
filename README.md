@@ -1004,7 +1004,10 @@ These are the design decisions that came out of it.
   (2026-11 audits); error texts and alert titles are clipped; directory
   listings keep the 500 largest entries; the services feed may list a
   thousand services, counted before they are decoded, and is refused
-  beyond that wherever it came from. The Docker container list is bounded
+  beyond that wherever it came from; the small-reply SSH calls (socket
+  tables, folder listings, job scripts) have their own output budgets;
+  an SSH key file must be a regular file under 64 KiB, checked before it
+  is opened, so a misconfigured path cannot stall a dial. The Docker container list is bounded
   by that body cap and a container count, not per container (names,
   ports): only your own account's daemon writes it, and the cap keeps it
   finite; the alerts it feeds are capped per box (above), and resolved
@@ -1160,6 +1163,17 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**Unreleased**
+
+- **Hardening notes from the 2026-11 audits.** The socket-table reads,
+  folder listings and transfer job scripts run under their own SSH output
+  budgets instead of the transport's 16 MiB; an SSH key file must be a
+  regular file under 64 KiB, checked before it is opened; one alert
+  evaluation logs at most ten new alerts individually and counts the rest.
+  The fleet-wide hook lock the audits flagged was re-measured with the
+  container-alert cap in place: 9 ms for a box reporting 2,000 rotating
+  containers, against 28 s before the cap, so it stays as it is.
 
 **1.18.0**
 

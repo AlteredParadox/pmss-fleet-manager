@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -298,4 +299,36 @@ func keyServer(t *testing.T, pub ssh.PublicKey) int {
 		}
 	}()
 	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// A configured key path must name a regular file of a key's size: a
+// directory, a FIFO or a device would block or flood the read, which runs
+// before the dial's deadline applies (2026-11 audits).
+func TestKeyPathMustBeRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := keySigners(Config{KeyPath: dir}); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("directory as key: %v", err)
+	}
+	big := filepath.Join(dir, "big")
+	os.WriteFile(big, make([]byte, maxKeyFile+1), 0o600)
+	if _, _, err := keySigners(Config{KeyPath: big}); err == nil || !strings.Contains(err.Error(), "more than a private key file holds") {
+		t.Fatalf("oversized key: %v", err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o600); err == nil {
+		done := make(chan error, 1)
+		go func() { _, _, err := keySigners(Config{KeyPath: filepath.Join(dir, "fifo")}); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+				t.Fatalf("fifo as key: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a FIFO key path blocked the read")
+		}
+	}
+	// A real key still loads.
+	writeKey(t, filepath.Join(dir, "ok"))
+	if s, _, err := keySigners(Config{KeyPath: filepath.Join(dir, "ok")}); err != nil || len(s) != 1 {
+		t.Fatalf("regular key: %d %v", len(s), err)
+	}
 }

@@ -500,3 +500,30 @@ func TestContainerAlertCap(t *testing.T) {
 		t.Fatalf("a returning key bypassed the bound: %v", keys)
 	}
 }
+
+// One evaluation logs at most maxAlertLogLines new alerts one by one and
+// counts the rest in a single line: alert titles carry box-reported text.
+func TestRaiseLogVolume(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	b := &store.Box{Name: "x", Host: "h", User: "u", Port: 22, Enabled: true}
+	if err := st.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	e := New(st, store.DefaultSettings, slog.New(slog.NewTextHandler(&buf, nil)), nil)
+	s := &collect.BoxState{ID: b.ID, Name: "x", Status: "online"}
+	s.Docker.Enabled, s.Docker.Reachable = true, true
+	for i := 0; i < maxContainerAlerts+5; i++ {
+		s.Docker.Containers = append(s.Docker.Containers, collect.ContainerView{Name: fmt.Sprintf("c%02d", i), State: "exited", Status: "Exited (1) 1 hour ago"})
+	}
+	e.Evaluate(ctx, s) // maxContainerAlerts + the aggregate are raised
+	single, summary := strings.Count(buf.String(), "msg=alert "), strings.Count(buf.String(), "msg=alerts ")
+	if single != maxAlertLogLines || summary != 1 || !strings.Contains(buf.String(), fmt.Sprintf("more=%d", maxContainerAlerts+1-maxAlertLogLines)) {
+		t.Fatalf("single %d summary %d:\n%s", single, summary, buf.String())
+	}
+}

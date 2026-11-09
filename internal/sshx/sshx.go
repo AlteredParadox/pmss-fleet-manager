@@ -273,6 +273,42 @@ func keyPaths(cfg Config) []string {
 	return paths
 }
 
+// maxKeyFile bounds a private key file. The largest real one, a 16384-bit
+// RSA key in PEM, is under 16 KiB; a configured path naming a FIFO, a
+// device or a huge file must neither stall the dial (this read runs
+// before the connection's deadline applies) nor fill memory (2026-11
+// audits).
+const maxKeyFile = 64 << 10
+
+// readKeyFile reads a private key file that is a regular file of at most
+// maxKeyFile bytes, checked before it is opened: a FIFO blocks on open, a
+// device on read.
+func readKeyFile(p string) ([]byte, error) {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
+	}
+	if fi.Size() > maxKeyFile {
+		return nil, fmt.Errorf("%d bytes, more than a private key file holds", fi.Size())
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxKeyFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxKeyFile {
+		return nil, fmt.Errorf("over %d bytes, more than a private key file holds", maxKeyFile)
+	}
+	return b, nil
+}
+
 // keySigners loads the usable private keys. An unreadable or unparsable
 // file is an error only for an explicitly configured key path; the default
 // names are skipped, missing ones silently, and the ones that exist but
@@ -283,7 +319,7 @@ func keySigners(cfg Config) ([]ssh.Signer, []string, error) {
 	var unreadable []string
 	for _, p := range keyPaths(cfg) {
 		global := cfg.KeyPath == "" && DefaultKey != "" && p == expandHome(DefaultKey)
-		pem, err := os.ReadFile(p)
+		pem, err := readKeyFile(p)
 		if err != nil {
 			if cfg.KeyPath != "" {
 				return nil, nil, fmt.Errorf("read key %s: %w", p, err)
