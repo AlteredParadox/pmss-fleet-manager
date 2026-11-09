@@ -298,15 +298,20 @@ function rtDiscoveryOn(r) {
 // after a complete copy, or 100% before the copy has recorded a result. A
 // move's exit code 0 then reads with its removal's outcome (move_state:
 // "moved", or "left N" entries in the source); while the removal runs the
-// stage says so.
+// stage says so. A source that has stopped answering (source_unreadable)
+// reads as that: the copy may still be running there, the dashboard
+// cannot tell.
 function transferState(v) {
   const rc = v?.rc || '';
   switch (v?.phase) {
     case 'preparing': return { label: 'setting up', kind: '', over: false };
     case 'running':
+      if (v.source_unreadable) return { label: 'source not answering', kind: 'warn', over: false };
       if (v.move && v.stage === 'remove') return { label: 'removing the source', kind: '', over: false };
       return { label: v.scanning ? 'scanning' : 'copying', kind: '', over: false };
-    case 'unconfirmed': return { label: 'launch unconfirmed', kind: 'warn', over: false };
+    case 'unconfirmed':
+      if (v.source_unreadable) return { label: 'source not answering', kind: 'warn', over: false };
+      return { label: 'launch unconfirmed', kind: 'warn', over: false };
     case 'finished':
       if (rc === '0' && v.move) {
         if (v.move_state === 'moved') return { label: 'moved', kind: 'ok', over: true };

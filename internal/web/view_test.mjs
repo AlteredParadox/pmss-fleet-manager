@@ -261,6 +261,10 @@ test('a transfer is over, and succeeded, by its exit code alone', () => {
   assert.equal(V.transferMeter({ phase: 'finished', rc: '23', progress: { pct: 100 } }), 99);
   assert.equal(V.transferState({ phase: 'finished', rc: '24' }).label, 'copied with warnings');
   assert.equal(V.transferState({ phase: 'finished', rc: 'cancelled' }).label, 'cancelled');
+  // A source that stopped answering: that, before anything the last read said.
+  assert.deepEqual(V.transferState({ phase: 'running', source_unreadable: true, move: true, stage: 'remove' }), { label: 'source not answering', kind: 'warn', over: false });
+  assert.equal(V.transferState({ phase: 'unconfirmed', source_unreadable: true }).label, 'source not answering');
+  assert.equal(V.transferState({ phase: 'running', source_unreadable: false, scanning: true }).label, 'scanning');
   assert.equal(V.transferState({ phase: 'interrupted' }).over, true);
   assert.equal(V.transferState({ phase: 'running', scanning: true }).label, 'scanning');
   assert.equal(V.transferState({ phase: 'unconfirmed' }).over, false);

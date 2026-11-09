@@ -548,3 +548,104 @@ func TestTransferMarkerOnlyStaysCancellable(t *testing.T) {
 		t.Errorf("stored: %+v", ts)
 	}
 }
+
+// A running job whose source stops answering: for xferStale nothing but
+// cancel is offered (the source may be back in a moment); after that the
+// destination's key line can be revoked and the tracking stopped, each
+// explicitly, and neither before. Here the destination is as unreachable
+// as the source, so the revocation fails and changes nothing; the phase
+// never moves, and admission keeps both accounts until the job is
+// forgotten (2026-11 audits).
+func TestTransferUnreadableSourceRecovery(t *testing.T) {
+	ctx := context.Background()
+	m, st, b := genTestManager(t)
+	seedRemote(m, b.ID)
+	other := &store.Box{Name: "b", Host: "127.0.0.2", Port: 1, User: "v", AuthMethod: "password", Password: "x", Enabled: true}
+	if err := m.AddBox(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	waitPoll(t, m, other.ID)
+	seedRemote(m, other.ID)
+	for _, id := range []int64{b.ID, other.ID} {
+		p := m.poller(id)
+		p.mu.Lock()
+		p.box.HostKey = "ecdsa-sha2-nistp256 AAAA"
+		p.mu.Unlock()
+	}
+	tr := &store.Transfer{Token: newTok(t), SrcBoxID: b.ID, SrcEndp: AuthEndpoint(m.poller(b.ID).box), SrcHostKey: m.poller(b.ID).hostKey(),
+		DstBoxID: other.ID, DstEndp: AuthEndpoint(m.poller(other.ID).box), DstHostKey: m.poller(other.ID).hostKey(), Phase: xferRunning, PubKey: testBlob,
+		Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey}
+	if err := st.CreateTransfer(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	j := &xferJob{t: *tr}
+	m.xferMu.Lock()
+	m.xfers[tr.ID] = j
+	m.xferMu.Unlock()
+	j.op.Lock()
+	m.xferRefreshLocked(ctx, j, false) // connection refused: the read fails, the phase stays
+	j.op.Unlock()
+	v := m.xferView(tr.ID)
+	if v.Phase != xferRunning || v.StatusErr == "" || v.SrcUnreadable || v.KeyRevocable || v.SrcLost {
+		t.Fatalf("just after a failed read: %+v", v)
+	}
+	if err := m.RetryTransferCleanup(ctx, b.ID, tr.ID); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "cancel it, or wait") {
+		t.Errorf("cleanup while the source may be back: %v", err)
+	}
+	if _, err := m.DismissTransfer(ctx, tr.ID, true); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "cancel it first") {
+		t.Errorf("dismiss while the source may be back: %v", err)
+	}
+	// Three minutes on (the job's creation stands in for the last read,
+	// none has succeeded since the dashboard started).
+	m.xferMu.Lock()
+	j.t.CreatedAt = time.Now().Add(-xferStale - time.Minute)
+	m.xferMu.Unlock()
+	v = m.xferView(tr.ID)
+	if !v.SrcUnreadable || !v.KeyRevocable || v.SrcLost || v.Phase != xferRunning {
+		t.Fatalf("stale: %+v", v)
+	}
+	if err := m.RetryTransferCleanup(ctx, b.ID, tr.ID); err == nil || errors.Is(err, ErrTransferBusy) {
+		t.Errorf("revoking against an unreachable destination: %v", err)
+	}
+	if v = m.xferView(tr.ID); v.Phase != xferRunning || v.Pending != tr.Pending || !v.KeyRevocable {
+		t.Fatalf("a failed revocation changed the job: %+v", v)
+	}
+	req := TransferRequest{DstBox: other.ID, DstRev: m.poller(other.ID).box.Revision, SrcPath: "data", DstPath: "copy"}
+	if _, err := m.StartTransfer(ctx, b.ID, req); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "already has a copy in progress") {
+		t.Errorf("the stale job must keep its source reserved: %v", err)
+	}
+	left, err := m.DismissTransfer(ctx, tr.ID, false)
+	if !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "stop tracking") || len(left) != 3 || !strings.Contains(left[0], "may still be running") {
+		t.Errorf("without force: %v %v", left, err)
+	}
+	if ts, _ := st.ListTransfers(ctx); len(ts) != 1 {
+		t.Fatalf("refused dismiss forgot the job: %+v", ts)
+	}
+	if _, err := m.DismissTransfer(ctx, tr.ID, true); err != nil {
+		t.Fatalf("forced: %v", err)
+	}
+	if ts, _ := st.ListTransfers(ctx); len(ts) != 0 {
+		t.Errorf("stored after stop tracking: %+v", ts)
+	}
+	// The rule itself: a recent successful read, an empty error, or a
+	// final phase is never "unreadable".
+	now := time.Now()
+	old := store.Transfer{Phase: xferRunning, CreatedAt: now.Add(-time.Hour)}
+	for i, c := range []struct {
+		t    store.Transfer
+		seen time.Time
+		err  string
+		want bool
+	}{
+		{old, time.Time{}, "dial", true},
+		{old, now.Add(-time.Minute), "dial", false},
+		{old, now.Add(-xferStale - time.Second), "dial", true},
+		{old, time.Time{}, "", false},
+		{store.Transfer{Phase: xferFinished, CreatedAt: now.Add(-time.Hour)}, time.Time{}, "dial", false},
+		{store.Transfer{Phase: xferRunning, CreatedAt: now}, time.Time{}, "dial", false},
+	} {
+		if got := xferUnreadable(c.t, c.seen, c.err, now); got != c.want {
+			t.Errorf("case %d: %v, want %v", i, got, c.want)
+		}
+	}
+}
