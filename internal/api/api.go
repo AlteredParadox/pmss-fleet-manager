@@ -342,7 +342,7 @@ func (s *Server) routes() {
 	handle("GET "+bp+"/api/transfers", s.handleTransfers)
 	handle("POST "+bp+boxRoute+"/transfers", s.handleStartTransfer)
 	handle("POST "+bp+boxRoute+"/transfers/dirs", s.handleTransferDirs) // lists one folder over SSH (reads only): POST so the CSRF check applies; literal segment wins over {tid}
-	handle("POST "+bp+boxRoute+"/transfers/{tid}/{action}", s.handleTransferAction)
+	handle("POST "+bp+boxRoute+"/transfers/{tid}/{action}", s.handleTransferAction) // cancel and cleanup under the source box; revoke-key under the destination
 	handle("POST "+bp+"/api/transfers/{tid}/dismiss", s.handleDismissTransfer) // forgets a finished job: changes no box
 	handle("POST "+bp+"/api/detect", s.handleDetect)
 	handle("GET "+bp+"/api/alerts", s.handleAlerts)
@@ -1334,6 +1334,11 @@ func (s *Server) handleTransferAction(w http.ResponseWriter, r *http.Request) {
 		err = s.m.CancelTransfer(ctx, id, tid)
 	case "cleanup":
 		err = s.m.RetryTransferCleanup(ctx, id, tid)
+	case "revoke-key":
+		// The route's box is the DESTINATION here: the box whose
+		// authorized_keys changes, and whose revision ?rev= names. The
+		// source may be gone or silent, which is what this is for.
+		err = s.m.RevokeTransferKey(ctx, id, tid)
 	default:
 		writeErr(w, 400, fmt.Errorf("unknown action %q", r.PathValue("action")))
 		return

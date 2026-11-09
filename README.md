@@ -797,7 +797,9 @@ leaves the copy listed as "source not answering" after three minutes, and
 offers two recoveries that need no source, each on its own confirmation:
 "revoke destination key" removes the job's line from the destination's
 `authorized_keys` (a session already open keeps running, as the key's own
-30-minute expiry would have let it; no new login is possible afterwards),
+30-minute expiry would have let it; no new login is possible afterwards;
+the action runs under the destination box's own revision, so it is there
+even after the source box record was deleted),
 and "stop tracking" forgets the job here, which frees the source box and
 the destination account for new transfers. Stopping tracking is never
 automatic and is not implied by the key's expiry: the copy, or a move's
@@ -1168,7 +1170,9 @@ Newest first; each release's full notes are on the
   new transfers. Before, such a job could only be closed by editing or
   deleting the source box record, and its key line was never removed
   (2026-11 audits). Neither action claims the copy ended: the confirmation
-  says it may still be running, and a move's removal step with it.
+  says it may still be running, and a move's removal step with it. New
+  route `POST /api/boxes/{dst}/transfers/{tid}/revoke-key` (with the
+  destination's `?rev=`; refused in monitor-only mode).
 - **qBittorrent downloads need curl.** The wget fallback followed a
   redirect from https to plain http (reproduced by the 2026-11 audits);
   with a custom URL and no release digest that put an unauthenticated

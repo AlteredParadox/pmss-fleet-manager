@@ -589,8 +589,11 @@ func TestTransferUnreadableSourceRecovery(t *testing.T) {
 	if v.Phase != xferRunning || v.StatusErr == "" || v.SrcUnreadable || v.KeyRevocable || v.SrcLost {
 		t.Fatalf("just after a failed read: %+v", v)
 	}
-	if err := m.RetryTransferCleanup(ctx, b.ID, tr.ID); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "cancel it, or wait") {
-		t.Errorf("cleanup while the source may be back: %v", err)
+	if err := m.RevokeTransferKey(ctx, other.ID, tr.ID); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "cancel it, or wait") {
+		t.Errorf("revoking while the source may be back: %v", err)
+	}
+	if err := m.RetryTransferCleanup(ctx, b.ID, tr.ID); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "no cleanup is owed") {
+		t.Errorf("cleanup of a job that is not over: %v", err)
 	}
 	if _, err := m.DismissTransfer(ctx, tr.ID, true); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "cancel it first") {
 		t.Errorf("dismiss while the source may be back: %v", err)
@@ -604,7 +607,10 @@ func TestTransferUnreadableSourceRecovery(t *testing.T) {
 	if !v.SrcUnreadable || !v.KeyRevocable || v.SrcLost || v.Phase != xferRunning {
 		t.Fatalf("stale: %+v", v)
 	}
-	if err := m.RetryTransferCleanup(ctx, b.ID, tr.ID); err == nil || errors.Is(err, ErrTransferBusy) {
+	if err := m.RevokeTransferKey(ctx, b.ID, tr.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("revoking under the source's box id: %v", err)
+	}
+	if err := m.RevokeTransferKey(ctx, other.ID, tr.ID); err == nil || errors.Is(err, ErrTransferBusy) {
 		t.Errorf("revoking against an unreachable destination: %v", err)
 	}
 	if v = m.xferView(tr.ID); v.Phase != xferRunning || v.Pending != tr.Pending || !v.KeyRevocable {

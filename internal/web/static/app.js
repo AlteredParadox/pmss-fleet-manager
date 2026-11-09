@@ -1545,7 +1545,7 @@ async function pickerOpen(rel) {
   P.busy = false; render();
 }
 function transferCard(v) {
-  const st = pfmView.transferState(v), p = v.progress, src = boxById(v.src_box), modeLabel = pfmView.transferModeLabel(v);
+  const st = pfmView.transferState(v), p = v.progress, src = boxById(v.src_box), dst = boxById(v.dst_box), modeLabel = pfmView.transferModeLabel(v);
   const name = (n, id) => esc(n || `box ${id} (removed)`);
   const counts = [];
   if (v.kept) counts.push(`${v.kept} existing files kept`);
@@ -1555,10 +1555,11 @@ function transferCard(v) {
   const btn = [];
   if (!S.monitorOnly && src && !v.source_lost && !removing && (v.phase === 'running' || v.phase === 'unconfirmed')) btn.push(`<button class="small danger" ${boxRef(src)} data-act="xfer:cancel" data-id="${v.id}" data-confirm="Stop this ${v.move ? 'move' : 'copy'}? Files that arrived complete stay on the destination; the one in flight is discarded${v.move ? '; the source is left as it is' : ''}.">cancel</button>`);
   if (!S.monitorOnly && src && st.over && v.cleanup?.length) btn.push(`<button class="small" ${boxRef(src)} data-act="xfer:cleanup" data-id="${v.id}">retry cleanup</button>`);
-  // A source that stopped answering (or now names another machine): the
-  // key line on the destination can go without it, and the job's tracking
-  // can be stopped, each on its own word. Neither says the copy ended.
-  if (!S.monitorOnly && src && !st.over && v.key_revocable) btn.push(`<button class="small" ${boxRef(src)} data-act="xfer:cleanup" data-id="${v.id}" data-done="destination key revoked" data-confirm="Remove this job's key line from the destination's authorized_keys? A copy still connected keeps its session (the key's 30-minute expiry would have let it too); no new login with the key is possible afterwards. The ${v.move ? 'move' : 'copy'} stays listed and both accounts stay reserved.">revoke destination key</button>`);
+  // A source that stopped answering (or now names another machine, or is
+  // deleted): the key line on the destination can go without it, under the
+  // destination's own revision, and the job's tracking can be stopped,
+  // each on its own word. Neither says the copy ended.
+  if (!S.monitorOnly && dst && !st.over && v.key_revocable) btn.push(`<button class="small" ${boxRef(dst)} data-act="xfer:revoke" data-id="${v.id}" data-confirm="Remove this job's key line from the destination's authorized_keys? A copy still connected keeps its session (the key's 30-minute expiry would have let it too); no new login with the key is possible afterwards. The ${v.move ? 'move' : 'copy'} stays listed and both accounts stay reserved.">revoke destination key</button>`);
   if (v.source_lost && v.phase !== 'preparing') btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" data-force="1" data-confirm="The source box is gone or points elsewhere, so this copy can no longer be checked, stopped or cleaned up from here. It may still be running. Forget it anyway? Its job directory on the source and its key line on the destination would have to be removed by hand.">forget</button>`);
   if (v.source_unreadable && !v.source_lost && !st.over) btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" data-force="1" data-confirm="The source has not answered for a while, so this ${v.move ? 'move' : 'copy'} cannot be checked or stopped from here. It may still be running there${v.move ? ', and a move removes its source files once its copy ends' : ''}. Stopping tracking only forgets it here: the source box and the destination account become free for new transfers, and a later move into that account would not know files may still be landing. ${v.cleanup?.length ? 'Left to remove by hand unless done first: ' + esc(v.cleanup.join('; ')) + '. ' : ''}Stop tracking anyway?">stop tracking</button>`);
   if (st.over) btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" ${v.cleanup?.length ? `data-force="1" data-confirm="Cleanup is still owed: ${esc(v.cleanup.join('; '))}. Forget this copy anyway? Those items would have to be removed by hand."` : ''}>dismiss</button>`);
@@ -1637,7 +1638,8 @@ async function transferAction(a, act) {
   act.disabled = true;
   const id = encodeURIComponent(act.dataset.id);
   if (a === 'xfer:cancel') { await api('POST', boxURL(act.dataset, `transfers/${id}/cancel`)); toast('cancel requested; the card shows when it stops', 'ok'); }
-  else if (a === 'xfer:cleanup') { await api('POST', boxURL(act.dataset, `transfers/${id}/cleanup`)); toast(act.dataset.done || 'cleanup done', 'ok'); }
+  else if (a === 'xfer:cleanup') { await api('POST', boxURL(act.dataset, `transfers/${id}/cleanup`)); toast('cleanup done', 'ok'); }
+  else if (a === 'xfer:revoke') { await api('POST', boxURL(act.dataset, `transfers/${id}/revoke-key`)); toast('destination key revoked', 'ok'); }
   else if (a === 'xfer:dismiss') { await api('POST', `${BASE}/api/transfers/${id}/dismiss${act.dataset.force ? '?force=1' : ''}`); }
   void loadTransfers();
 }

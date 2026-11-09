@@ -891,10 +891,7 @@ func (m *Manager) CancelTransfer(ctx context.Context, srcID, id int64) error {
 	return nil
 }
 
-// RetryTransferCleanup tries the owed cleanup of a finished job again. For
-// a job that is not over but whose source has stopped answering (or now
-// names another machine), it removes the job's key line from the
-// destination and nothing else: see xferRevokeKeyLocked.
+// RetryTransferCleanup tries the owed cleanup of a finished job again.
 func (m *Manager) RetryTransferCleanup(ctx context.Context, srcID, id int64) error {
 	j, err := m.xferJobFor(id, srcID)
 	if err != nil {
@@ -903,11 +900,29 @@ func (m *Manager) RetryTransferCleanup(ctx context.Context, srcID, id int64) err
 	j.op.Lock()
 	defer j.op.Unlock()
 	t := m.xferSnapshot(j)
-	if xferFinal(t.Phase) {
-		if t.Pending == 0 {
-			return fmt.Errorf("%w: no cleanup is owed", ErrTransferBusy)
-		}
-		return m.xferCleanupLocked(ctx, j)
+	if !xferFinal(t.Phase) || t.Pending == 0 {
+		return fmt.Errorf("%w: no cleanup is owed", ErrTransferBusy)
+	}
+	return m.xferCleanupLocked(ctx, j)
+}
+
+// RevokeTransferKey removes an active job's key line from its destination
+// box dstID (the box this changes, so its revision is the one the route
+// checks; the source record may be gone) once the source has stopped
+// answering or now names another machine: see xferRevokeKeyLocked.
+func (m *Manager) RevokeTransferKey(ctx context.Context, dstID, id int64) error {
+	j, err := m.xferJobFor(id, 0)
+	if err != nil {
+		return err
+	}
+	if m.xferSnapshot(j).DstBoxID != dstID {
+		return store.ErrNotFound
+	}
+	j.op.Lock()
+	defer j.op.Unlock()
+	t := m.xferSnapshot(j)
+	if !(t.Phase == xferRunning || t.Phase == xferUnconfirmed) {
+		return fmt.Errorf("%w: the transfer is %s; its cleanup, if any is owed, removes the key", ErrTransferBusy, t.Phase)
 	}
 	if lost, unreadable := m.xferSourceGone(j, t); !lost && !unreadable {
 		return fmt.Errorf("%w: the transfer is %s and its source answers; cancel it, or wait until it has not answered for %s", ErrTransferBusy, t.Phase, xferStale)
