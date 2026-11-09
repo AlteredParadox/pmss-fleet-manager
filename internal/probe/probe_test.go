@@ -697,6 +697,35 @@ func TestListenersAddressAware(t *testing.T) {
 	}
 }
 
+// TestListenersMappedWildcard: a socket bound to the v4 any address on a
+// v6 socket ([::ffff:0.0.0.0]) accepts a 127.0.0.1 dial exactly like
+// 0.0.0.0, so a co-tenant there contests the port, in the hex table and
+// in the ss fallback (the 2026-11 audits found it dropped as unreachable,
+// which left such a co-tenant invisible to the gate).
+func TestListenersMappedWildcard(t *testing.T) {
+	raw := "@@uid\n1001\n@@listen\nh 1F90 1001 0100007F\nh 1F90 1002 0000000000000000FFFF000000000000\nh 1F91 1002 0000000000000000ffff000000000000\n@@end\n"
+	snap, _ := Parse([]byte(raw), time.Now())
+	if ok, reason := snap.PortOwner(8080); ok || !strings.Contains(reason, "more than one") {
+		t.Fatalf("a co-tenant on the mapped wildcard is reachable and must contest: %v %q", ok, reason)
+	}
+	if ok, reason := snap.PortOwner(8081); ok || !strings.Contains(reason, "not by this account") {
+		t.Fatalf("a foreign mapped-wildcard listener alone must be refused: %v %q", ok, reason)
+	}
+	raw2 := "@@uid\n1001\n@@listen\nvia ss\nd 8080 1001 [::]\nd 8080 x [::ffff:0.0.0.0]\nd 8081 1001 ::ffff:0.0.0.0\n@@end\n"
+	snap2, _ := Parse([]byte(raw2), time.Now())
+	if ok, reason := snap2.PortOwner(8080); ok || !strings.Contains(reason, "more than one") {
+		t.Fatalf("ss form: an unattributed mapped-wildcard listener beside ours is contested: %v %q", ok, reason)
+	}
+	if ok, reason := snap2.PortOwner(8081); !ok {
+		t.Fatalf("our own mapped-wildcard listener is ours: %q", reason)
+	}
+	for _, a := range []string{"[::ffff:0.0.0.0]", "::ffff:0.0.0.0", "0000000000000000FFFF000000000000"} {
+		if !loopbackReachable(a) {
+			t.Errorf("%s must be reachable", a)
+		}
+	}
+}
+
 func TestNonFiniteEverywhere(t *testing.T) {
 	raw := "@@uid\n1\n@@uptime\nnan 1\n@@loadavg\ninf 0.1 0.2 1/2 3\n@@traffic_limit\nNaN\n@@pmss_user\n{\"quota\":\"NaN\",\"ramMiB\":\"Inf\",\"trafficCapMbit\":1e308}\n@@traffic\na:2:{s:3:\"raw\";a:1:{s:5:\"month\";d:1.0E+14;}s:5:\"daily\";a:1:{s:10:\"2026/10/16\";s:3:\"NaN\";}}\n@@end\n"
 	snap, err := Parse([]byte(raw), time.Now())

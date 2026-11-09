@@ -856,17 +856,26 @@ leaving a file of its choosing where the link points, for instance over
 `~/.ssh/authorized_keys` (reproduced; the test suite keeps the case). The
 claim therefore walks the folder (bounded to 60 s on the box, failing
 closed: an unfinished or failed walk refuses) and refuses one with any
-symlink. The walk is a setup-time check; the destination account's own
-processes are trusted, since they already own the data. What such a
-source can still do inside the chosen folder: overwrite or remove anything
-(rrsync blocks the delete options, not `--force` or `--inplace`), whatever
-the rule chosen (the keep/replace rule is the copy's own behaviour, not
+symlink, or any file that has a name outside the folder (a hard link: the
+file is the same one under both names, and with `--inplace` such a source
+writes it, so the outside name would change too; reproduced against
+rsync/rrsync 3.5.0 in the 2026-11 security audits, and the test suite
+keeps that case as well). The walk counts each hard-linked file's names
+inside the folder against its link count, so a library that hard-links
+within the chosen folder (cross-seeding, Sonarr and Radarr imports)
+passes, and only a file with a name elsewhere refuses; choose the folder
+that holds all its names, or copy into a new one. The walk is a
+setup-time check against links present when the job is set up; the
+destination account's own processes are trusted, since they already own
+the data, and a link one of them creates afterwards is not covered. What such a source can
+still do inside the chosen folder: overwrite or remove anything (rrsync
+blocks the delete options, not `--force` or `--inplace`), whatever the
+rule chosen (the keep/replace rule is the copy's own behaviour, not
 enforced by the destination; rrsync 3.3.0+ could enforce *keep* with
 `-no-overwrite`, which the boxes' 3.2.7 lacks; Debian 12's security
-update carries 3.5.0, and CI tests both). A file hard-linked to
-another name is that same file, so its other names show such a change;
-the dashboard's own copy replaces by rename and never writes through a
-link. Nothing outside the chosen folder is reachable.
+update carries 3.5.0, and CI tests both). The dashboard's own copy
+replaces by rename and never writes through a link. With the folder
+holding neither kind of link, nothing outside it is reachable.
 
 ## Security and hardening
 
@@ -1126,6 +1135,18 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**Unreleased**
+
+- **Transfer hardening from the 2026-11 security audits.** An existing
+  destination folder is also refused when a file in it has a name outside
+  the folder (a hard link: with `--inplace` a source that turned hostile
+  writes that outside name too; links within the folder, as a seedbox
+  library makes them, pass). A line starting `ERR ` inside rsync's copied
+  stderr no longer reads as the job script refusing, which could keep a
+  finished job active with no way to close it. A co-tenant's listener on
+  `[::ffff:0.0.0.0]` counts as reachable from 127.0.0.1, so the port-owner
+  check sees it like one on `0.0.0.0`.
 
 **1.17.1**
 

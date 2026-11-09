@@ -72,8 +72,8 @@ const (
 	xferModeReplace = "replace"
 )
 
-// xferScanTimeout bounds the symlink scan of an existing destination on
-// the box itself (seconds), apart from the script's deadline.
+// xferScanTimeout bounds the link scan of an existing destination on the
+// box itself (seconds), apart from the script's deadline.
 const xferScanTimeout = "60"
 
 // xferOutCap bounds what any job script may send back; the largest, a
@@ -186,11 +186,14 @@ printf 'PUB %s\n' "$(cat "$J/key.pub")"
 // xferDstClaimScript checks the destination and claims it. Mode new:
 // mkdir (not -p) fails if the path exists, so a collision is refused
 // here, and the answer is DST. Modes keep and replace: the directory
-// must exist, be the account's to write, hold no symlink (through a link
-// already there a source that turned hostile can land a --partial-dir
-// file outside the directory, over ~/.ssh/authorized_keys, reproduced
-// against rrsync 3.4.1; -munge only covers links the copy writes), and
-// the answer is DIR: a different word, since DST
+// must exist, be the account's to write, hold no symlink and no file
+// with a name outside the directory (through a symlink already there a
+// source that turned hostile can land a --partial-dir file outside the
+// directory, over ~/.ssh/authorized_keys, reproduced against rrsync
+// 3.4.1; through a hard link it can write the file's other name with
+// --inplace, reproduced against 3.5.0 by the 2026-11 audits; -munge only
+// covers links the copy writes), and the answer is DIR: a different
+// word, since DST
 // means "this job created it" to the Go side. Either way the directory
 // may not be the home, ~/.ssh, the dashboard's control directory, or
 // contain or lie inside those.
@@ -234,11 +237,28 @@ if [ "$mode" = new ]; then
   mkdir -- "$d" || die "could not create the destination directory"
   printf 'DST %s\n' "$d"
 else
-  # The scan passes closed: only a clean exit with nothing found will do.
-  out=$(timeout ` + xferScanTimeout + ` find "$d" -type l -print -quit 2>&1); rc=$?
-  [ "$rc" = 124 ] && die "could not finish checking the folder for symlinks within ` + xferScanTimeout + ` s"
-  [ "$rc" = 0 ] || die "could not check the folder for symlinks: $(printf '%s\n' "$out" | head -n 1)"
-  [ -z "$out" ] || die "the folder contains symlinks; choose another folder, or copy into a new one"
+  # The scan passes closed: only a clean, complete walk with nothing
+  # found will do. A hard-linked file is refused when the folder holds
+  # fewer of its names than it has (the rest are outside); seedbox
+  # libraries hard-link within one tree all the time, and those pass.
+  v=$( { timeout ` + xferScanTimeout + ` find "$d" \( -type l -printf 'l\n' \) -o \( -type f -links +1 -printf '%D %i %n\n' \) 2>&1; echo "rc=$?"; } | awk '
+    /^rc=/ { rc = substr($0, 4); next }
+    /^l$/ { link = 1; next }
+    NF == 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { k = $1 " " $2; inside[k]++; names[k] = $3; next }
+    { if (err == "") err = $0 }
+    END {
+      if (rc != "0") { print "rc " rc; print err; exit }
+      if (link) { print "link"; exit }
+      for (k in inside) if (inside[k] != names[k]) { print "hardlink"; exit }
+      print "ok"
+    }')
+  case "$v" in
+  ok) ;;
+  link) die "the folder contains symlinks; choose another folder, or copy into a new one";;
+  hardlink) die "a file in the folder has another name outside it (a hard link); choose another folder, or copy into a new one";;
+  "rc 124"*) die "could not finish checking the folder for links within ` + xferScanTimeout + ` s";;
+  *) die "could not check the folder for links: $(printf '%s\n' "$v" | sed -n 2p | head -c 200)";;
+  esac
   printf 'DIR %s\n' "$d"
 fi
 `
@@ -522,11 +542,24 @@ func xferRun(ctx context.Context, cli *sshx.Client, vars, script string) ([]stri
 	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	out, stderr, err := cli.Run(rctx, "/bin/sh", strings.NewReader(vars+xferPrelude+script))
+	return xferScan(out, stderr, err)
+}
+
+// xferScan reads a job script's answer. Only the script itself speaks in
+// "ERR ..." lines, and it does so before any data it copies out of a job
+// file: the status script's "--errors" marker opens rsync's stderr, which
+// the destination's transport can write (one forged line there kept a
+// finished job active, 2026-11 audits), so the scan stops at the marker,
+// where parseXferStatus also stops reading fields.
+func xferScan(out, stderr []byte, err error) ([]string, error) {
 	if len(out) > xferOutCap {
 		return nil, fmt.Errorf("the box sent %d bytes, more than a job script writes", len(out))
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	for _, l := range lines {
+		if l == "--errors" {
+			break
+		}
 		if msg, ok := strings.CutPrefix(l, "ERR "); ok {
 			return lines, &xferRefusal{msg}
 		}

@@ -143,13 +143,15 @@ func loopbackReachable(addr string) bool {
 	switch addr {
 	case "0.0.0.0", "127.0.0.1", "*", // ss: v4 any, v4 loopback, any
 		"[::]", "::", // ss: v6 any (dual-stack reaches 127.0.0.1 too)
-		"[::ffff:127.0.0.1]", "::ffff:127.0.0.1":
+		"[::ffff:127.0.0.1]", "::ffff:127.0.0.1",
+		"[::ffff:0.0.0.0]", "::ffff:0.0.0.0": // NOSONAR: not an address to connect to; the socket table's spellings of the v4 any address on a v6 socket, reached like 0.0.0.0
 		return true
 	}
 	switch strings.ToUpper(addr) {
 	case "00000000", "0100007F", // v4 any, v4 loopback
 		"00000000000000000000000000000000", // v6 any (dual-stack reaches 127.0.0.1 too)
-		"0000000000000000FFFF00000100007F": // ::ffff:127.0.0.1
+		"0000000000000000FFFF00000100007F", // ::ffff:127.0.0.1
+		"0000000000000000FFFF000000000000": // ::ffff:0.0.0.0
 		return true
 	}
 	// ::1 is deliberately absent: a 127.0.0.1 dial never reaches it, so a

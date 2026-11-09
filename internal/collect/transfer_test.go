@@ -18,12 +18,16 @@ package collect
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"pmss-fleet-manager/internal/sshx"
 )
 
 func TestValidXferPath(t *testing.T) {
@@ -917,6 +921,13 @@ func TestXferDstClaimExisting(t *testing.T) {
 	os.WriteFile(filepath.Join(home, "data", "f"), []byte("x"), 0o600)
 	os.WriteFile(filepath.Join(home, "file"), []byte("x"), 0o600)
 	os.Symlink("f", filepath.Join(home, "withlink", "sub", "l"))
+	os.MkdirAll(filepath.Join(home, "hardlinked", "sub"), 0o700)
+	os.Link(filepath.Join(home, "file"), filepath.Join(home, "hardlinked", "sub", "notes.txt")) // its other name is outside the folder
+	os.MkdirAll(filepath.Join(home, "innerlinks", "dl"), 0o700)
+	os.MkdirAll(filepath.Join(home, "innerlinks", "lib"), 0o700)
+	os.WriteFile(filepath.Join(home, "innerlinks", "dl", "ep1.mkv"), []byte("x"), 0o600)
+	os.Link(filepath.Join(home, "innerlinks", "dl", "ep1.mkv"), filepath.Join(home, "innerlinks", "lib", "ep1.mkv")) // a seedbox library: both names inside
+	os.Link(filepath.Join(home, "innerlinks", "dl", "ep1.mkv"), filepath.Join(home, "innerlinks", "lib", "ep1 again.mkv"))
 	os.Symlink(t.TempDir(), filepath.Join(home, "outlink"))
 	os.Symlink("data", filepath.Join(home, "inlink"))
 	os.Chmod(filepath.Join(home, "unreadable", "sub"), 0)
@@ -934,7 +945,11 @@ func TestXferDstClaimExisting(t *testing.T) {
 		{".ssh", "keep", "ERR destination is, contains or lies inside " + home + "/.ssh"},
 		{"outlink", "keep", "ERR destination is not inside your home directory"},
 		{"withlink", "keep", "ERR the folder contains symlinks"},
-		{"unreadable", "keep", "ERR could not check the folder for symlinks: find:"},
+		{"hardlinked", "keep", "ERR a file in the folder has another name outside it"},
+		{"hardlinked", "replace", "ERR a file in the folder has another name outside it"},
+		{"innerlinks", "keep", "DIR " + home + "/innerlinks\n"}, // hard links whose names all lie inside pass
+		{"innerlinks/lib", "keep", "ERR a file in the folder has another name outside it"},
+		{"unreadable", "keep", "ERR could not check the folder for links: find:"},
 		{"data", "new", "ERR destination already exists"},
 		{"newdir", "keep", "ERR destination folder does not exist"},
 		{"newdir", "new", "DST " + home + "/newdir\n"},
@@ -958,11 +973,11 @@ func TestXferDstClaimExisting(t *testing.T) {
 	}
 	// The scan's own bound, apart from the script deadline: a walk that
 	// does not finish refuses, it does not pass.
-	slow := strings.Replace(xferDstClaimScript, `timeout `+xferScanTimeout+` find "$d" -type l -print -quit`, `timeout 0.1 sleep 5`, 1)
+	slow := strings.Replace(xferDstClaimScript, `timeout `+xferScanTimeout+` find "$d" \( -type l -printf 'l\n' \) -o \( -type f -links +1 -printf '%D %i %n\n' \)`, `timeout 0.1 sleep 5`, 1)
 	if slow == xferDstClaimScript {
 		t.Fatal("scan command not found in the script")
 	}
-	if out := runClaim(t, home, xferVars("TOKEN", tok, "DST", "data", "MODE", "keep"), slow); !strings.Contains(out, "ERR could not finish checking the folder for symlinks within "+xferScanTimeout+" s") {
+	if out := runClaim(t, home, xferVars("TOKEN", tok, "DST", "data", "MODE", "keep"), slow); !strings.Contains(out, "ERR could not finish checking the folder for links within "+xferScanTimeout+" s") {
 		t.Errorf("timeout: %s", out)
 	}
 	// The key line names the existing directory, with the usual options.
@@ -1035,6 +1050,107 @@ func TestXferRrsyncHostilePreexistingLink(t *testing.T) {
 	}
 }
 
+// TestXferRrsyncHostileInplaceHardLink: a regular file in the destination
+// folder with a second name outside it (a hard link already there) is the
+// same file; rrsync -wo -no-del -munge does not stop a hostile source's
+// --inplace, which writes the shared inode and so the outside name
+// (reproduced against rsync/rrsync 3.5.0 by both 2026-11 audits; the
+// dashboard's own copy replaces by rename and never does). That is why the
+// claim refuses a file with a name outside the folder like a symlink.
+func TestXferRrsyncHostileInplaceHardLink(t *testing.T) {
+	needTools(t, "rrsync", "rsync")
+	home, bin, seed := t.TempDir(), t.TempDir(), t.TempDir()
+	dst := filepath.Join(home, "data")
+	os.MkdirAll(dst, 0o700)
+	outside := filepath.Join(home, "outside.txt")
+	os.WriteFile(outside, []byte("ORIGINAL\n"), 0o600)
+	if err := os.Link(outside, filepath.Join(dst, "notes.txt")); err != nil {
+		t.Skip("no hard links here:", err)
+	}
+	old := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC) // differs from the source's, so rsync's quick check transfers it
+	os.Chtimes(outside, old, old)
+	os.WriteFile(filepath.Join(bin, "ssh"), []byte(fakeSSH), 0o700)
+	env := append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_DST="+dst)
+	os.WriteFile(filepath.Join(seed, "notes.txt"), []byte("ATTACKER\n"), 0o600)
+	cmd := exec.Command("rsync", "-rt", "--inplace", "-e", "ssh", "--", seed+"/", "u@h:")
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Logf("rsync --inplace through rrsync: %v %s", err, out)
+	}
+	if got := readFile(t, outside); got != "ATTACKER\n" {
+		t.Logf("this rsync/rrsync did not write through the hard link (outside.txt %q); the refusal below is still required", got)
+	}
+	for _, mode := range []string{"keep", "replace"} {
+		out := runClaim(t, home, xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "DST", "data", "MODE", mode), xferDstClaimScript)
+		if !strings.Contains(out, "ERR a file in the folder has another name outside it") {
+			t.Errorf("claim (%s): %s", mode, out)
+		}
+	}
+	// The same file linked a second time inside the folder still has a
+	// name outside; moving the outside name in makes the folder whole.
+	os.Link(outside, filepath.Join(dst, "again.txt"))
+	if out := runClaim(t, home, xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "DST", "data", "MODE", "keep"), xferDstClaimScript); !strings.Contains(out, "ERR a file in the folder has another name outside it") {
+		t.Errorf("claim with two inside names of three: %s", out)
+	}
+	os.Rename(outside, filepath.Join(dst, "moved-in.txt"))
+	if out := runClaim(t, home, xferVars("TOKEN", "0123456789abcdef0123456789abcdef", "DST", "data", "MODE", "keep"), xferDstClaimScript); !strings.HasPrefix(out, "DIR ") {
+		t.Errorf("claim with all names inside: %s", out)
+	}
+}
+
+// TestXferScanStopsAtErrors: the status script copies the job's errors
+// file after "--errors"; a line there that starts with "ERR " is rsync's
+// stderr (the destination's transport can write it), not a refusal, and
+// the recorded rc still finishes the job. A refusal before the marker
+// still is one.
+func TestXferScanStopsAtErrors(t *testing.T) {
+	needTools(t, "flock")
+	home := t.TempDir()
+	tok := "0123456789abcdef0123456789abcdef"
+	j := filepath.Join(home, xferJobDir, tok)
+	os.MkdirAll(filepath.Join(j, "started"), 0o700)
+	os.WriteFile(filepath.Join(j, "pid"), []byte("2147483646\n"), 0o600) // no such process
+	os.WriteFile(filepath.Join(j, "rc"), []byte("0\n"), 0o600)
+	os.WriteFile(filepath.Join(j, "errors.count"), []byte("1\n"), 0o600)
+	os.WriteFile(filepath.Join(j, "errors"), []byte("ERR forged by destination transport\n"), 0o600)
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(xferVars("TOKEN", tok) + xferPrelude + xferStatusScript)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("status script: %v\n%s", err, out)
+	}
+	lines, err := xferScan(out, nil, nil)
+	if err != nil {
+		t.Fatalf("a copied ERR line became a refusal: %v\n%s", err, out)
+	}
+	l := parseXferStatus(strings.Join(lines, "\n"))
+	if l.rc != "0" || l.errors != "ERR forged by destination transport" || xferDecide(xferRunning, l, false) != xferFinished {
+		t.Errorf("status: %+v -> %s", l, xferDecide(xferRunning, l, false))
+	}
+	// The script's own refusal, which comes before any marker.
+	cmd = exec.Command("sh")
+	cmd.Stdin = strings.NewReader(xferVars("TOKEN", "nothex") + xferPrelude + xferStatusScript)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, _ = cmd.Output()
+	var ref *xferRefusal
+	if _, err := xferScan(out, nil, nil); !errors.As(err, &ref) {
+		t.Errorf("a bad token must refuse: %v\n%s", err, out)
+	}
+	// ERR after the marker in a hand-built answer, and the marker alone.
+	if _, err := xferScan([]byte("rc=1\n--errors\nERR x\n"), nil, nil); err != nil {
+		t.Errorf("got %v", err)
+	}
+	if _, err := xferScan([]byte("ERR real\n--errors\nERR x\n"), nil, nil); !errors.As(err, &ref) || ref.msg != "real" {
+		t.Errorf("got %v", err)
+	}
+	// Through xferRun itself: a client with no transport answers the
+	// error, not a refusal.
+	if _, err := xferRun(context.Background(), &sshx.Client{}, xferVars("TOKEN", tok), xferStatusScript); err == nil || errors.As(err, &ref) {
+		t.Errorf("no transport: %v", err)
+	}
+}
+
 func mtimeOf(t *testing.T, p string) time.Time {
 	t.Helper()
 	fi, err := os.Stat(p)
@@ -1104,26 +1220,22 @@ func TestXferRunnerKeepConflictsAndTimes(t *testing.T) {
 	}
 }
 
-// Mode replace: a file that differs is replaced by rename (a second name
-// of it keeps the old content: nothing is written through a link), one
-// that matches in size and time is left alone, destination-only files
-// stay, a file gives way to the source's directory of that name and an
-// empty directory to the source's file.
+// Mode replace: a file that differs is replaced, one that matches in
+// size and time is left alone, destination-only files stay, a file gives
+// way to the source's directory of that name and an empty directory to
+// the source's file. (A hard-linked destination file no longer reaches
+// the runner: the claim refuses the folder.)
 func TestXferRunnerReplace(t *testing.T) {
 	j := startLocalJobTo(t, xferModeReplace, "data", false, func(home string) {
-		// A second source file, hard-linked on the destination: the copy
-		// replaces data/shared, and other/shared must keep the old content.
 		os.MkdirAll(filepath.Join(home, "src dir"), 0o700)
 		os.WriteFile(filepath.Join(home, "src dir", "shared"), []byte("NEW SHARED"), 0o600)
 		os.MkdirAll(filepath.Join(home, "data", `it's "q".txt`), 0o700) // empty directory vs source file
 		os.WriteFile(filepath.Join(home, "data", "sub"), []byte("file vs source directory"), 0o600)
 		os.WriteFile(filepath.Join(home, "data", "extra.txt"), []byte("mine"), 0o600)
 		os.WriteFile(filepath.Join(home, "data", "link"), []byte("a file where the source has a symlink"), 0o600)
-		os.MkdirAll(filepath.Join(home, "other"), 0o700)
-		os.WriteFile(filepath.Join(home, "other", "shared"), []byte("OLD SHARED"), 0o600)
-		os.Link(filepath.Join(home, "other", "shared"), filepath.Join(home, "data", "shared"))
+		os.WriteFile(filepath.Join(home, "data", "shared"), []byte("OLD SHARED"), 0o600)
 		old := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC) // same size as the source's: the time must differ
-		os.Chtimes(filepath.Join(home, "other", "shared"), old, old)
+		os.Chtimes(filepath.Join(home, "data", "shared"), old, old)
 	})
 	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
 	if l.rc != "0" || l.kept != 0 || l.conflicts != 0 || l.skipped != 1 {
@@ -1133,9 +1245,6 @@ func TestXferRunnerReplace(t *testing.T) {
 		if got := readFile(t, filepath.Join(j.dst, name)); got != want {
 			t.Errorf("%s = %q", name, got)
 		}
-	}
-	if got := readFile(t, filepath.Join(j.home, "other", "shared")); got != "OLD SHARED" {
-		t.Errorf("written through the hard link: %q", got)
 	}
 	if fi, err := os.Stat(filepath.Join(j.dst, "sub", "big")); err != nil || fi.Size() != 3<<20 {
 		t.Errorf("sub did not become the source's directory: %v", err)
