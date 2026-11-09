@@ -1049,8 +1049,9 @@ These are the design decisions that came out of it.
   crontab" from a failed read before it ever pipes into `crontab -`, saves
   the previous crontab first, replaces only lines that run nothing but the
   helper, and prints what it replaced. Downloads use curl, which refuses a
-  redirect to plain HTTP; the wget fallback relies on the source not
-  redirecting to http.
+  redirect to plain HTTP and bounds the size; without curl the install is
+  refused (the wget fallback followed such a redirect, which the 2026-11
+  audits reproduced, and every PMSS box has curl).
 
 ## Development
 
@@ -1147,6 +1148,13 @@ Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
 **Unreleased**
+
+- **qBittorrent downloads need curl.** The wget fallback followed a
+  redirect from https to plain http (reproduced by the 2026-11 audits);
+  with a custom URL and no release digest that put an unauthenticated
+  download through the checks and into `~/bin`. The installer now refuses
+  without curl, which every PMSS box has. The container image's Dockerfile
+  frontend is pinned by digest like its base images.
 
 - **Input bounds from the 2026-11 security audits.** Container alerts are
   capped at twenty per box plus one alert counting the rest (an open alert

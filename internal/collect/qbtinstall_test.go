@@ -282,7 +282,7 @@ func TestReleaseDigest(t *testing.T) {
 // a fake wget record both.
 func TestDownloadShellKeepsURLOffArgv(t *testing.T) {
 	const token = "https://example.test/private/qbt?token=SECRET123"
-	for tool, line := range map[string]string{"curl": curlDownload, "wget": wgetDownload} {
+	for tool, line := range map[string]string{"curl": curlDownload} {
 		bin := t.TempDir()
 		fake := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + bin + "/argv\ncat > " + bin + "/stdin\n: > \"$OUT\"\n"
 		os.WriteFile(bin+"/"+tool, []byte(fake), 0o700)
@@ -300,6 +300,33 @@ func TestDownloadShellKeepsURLOffArgv(t *testing.T) {
 		if !strings.Contains(string(stdin), token) {
 			t.Fatalf("%s: the URL did not reach stdin: %q", tool, stdin)
 		}
+	}
+}
+
+// Without curl the download is refused outright: wget followed an
+// https-to-http redirect (2026-11 audits), and a download that is not kept
+// on https cannot be trusted with a token or, without a digest, executed.
+func TestDownloadShellRequiresCurl(t *testing.T) {
+	empty := t.TempDir() // a PATH with no curl and no wget
+	cmd := exec.Command("sh", "-c", "url=$1; tmp=$2; "+downloadShell+"exit $rc", "sh", "https://example.test/x", t.TempDir()+"/out")
+	cmd.Env = []string{"PATH=" + empty + ":/nonexistent", "HOME=" + t.TempDir()}
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "curl is required") {
+		t.Fatalf("without curl: %v %s", err, out)
+	}
+	if strings.Contains(downloadShell, "wget") {
+		t.Fatal("wget is back in the download shell")
+	}
+	// With a curl on PATH the shell uses it (the fake records its config).
+	bin := t.TempDir()
+	os.WriteFile(bin+"/curl", []byte("#!/bin/sh\ncat > \"$OUT\"\n"), 0o700)
+	cmd = exec.Command("sh", "-c", "url=$1; tmp=$2; "+downloadShell+"exit $rc", "sh", "https://example.test/x", bin+"/out")
+	cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "OUT=" + bin + "/cfg"}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("with curl: %v %s", err, out)
+	}
+	if cfg, _ := os.ReadFile(bin + "/cfg"); !strings.Contains(string(cfg), `url = "https://example.test/x"`) {
+		t.Fatalf("curl config: %q", cfg)
 	}
 }
 

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.28.0@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # Container image for pmss-fleet-manager. Two stages: compile the static
 # binary with the Go toolchain go.mod names, then copy it alone into
 # distroless/static, which carries CA roots and tzdata but no shell, package
@@ -16,7 +16,11 @@
 #
 # Base images are pinned by digest like the workflow actions are pinned by
 # SHA; Dependabot (docker ecosystem) refreshes them. Keep the tag in the
-# comment so the pin stays readable.
+# comment so the pin stays readable. The syntax line above pins the
+# Dockerfile frontend the same way (a bare "1" would fetch whatever the tag
+# points at when the release builds, 2026-11 audits); nothing here needs a
+# feature newer than BuildKit's built-in frontend, so refresh it with the
+# base images.
 #
 #   docker build --build-arg VERSION=$(git describe --tags) -t pmss-fleet-manager .
 #   docker run -d -p 127.0.0.1:8080:8080 -v pmss-data:/data pmss-fleet-manager
