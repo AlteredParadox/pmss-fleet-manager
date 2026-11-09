@@ -40,10 +40,18 @@ import (
 )
 
 const (
-	probeTimeout  = 45 * time.Second
-	apiTimeout    = 30 * time.Second
-	duTimeout     = 20 * time.Minute
-	defaultQbtCmd = `cd "$HOME" && ( "$HOME/bin/qbittorrent-nox" -d </dev/null >/dev/null 2>&1 )`
+	probeTimeout = 45 * time.Second
+	// probeOutputLimit bounds the probe's stdout in place of the
+	// transport's 16 MiB. The script's own caps add up to about 3.5 MiB
+	// at the very most (two traffic files and two live rings of 256 KiB,
+	// up to 4,096 processes with 400-byte command lines and their stat
+	// lines, the log listings); a real box sends a few KiB. A box that
+	// sends more is cut off and its poll fails, whatever was kept, so
+	// the parser never sees megabytes of one section (2026-11 audits).
+	probeOutputLimit = 6 << 20
+	apiTimeout       = 30 * time.Second
+	duTimeout        = 20 * time.Minute
+	defaultQbtCmd    = `cd "$HOME" && ( "$HOME/bin/qbittorrent-nox" -d </dev/null >/dev/null 2>&1 )`
 )
 
 type poller struct {
@@ -571,9 +579,9 @@ func (p *poller) poll(ctx context.Context) {
 	settings := p.m.Settings()
 	catalogue := inventory && settings.PMDBEnabled && settings.PMDBUsername != "" // the catalogue's two figures: only while it is on
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWith(tag, p.qbtBinStat, inventory, catalogue)))
+	out, stderr, err := cli.RunLimited(pctx, "sh", strings.NewReader(probe.ScriptWith(tag, p.qbtBinStat, inventory, catalogue)), probeOutputLimit)
 	cancel()
-	if err != nil && len(out) == 0 {
+	if err != nil && (len(out) == 0 || errors.Is(err, sshx.ErrOutputLimit)) {
 		p.mu.Lock()
 		if p.ssh != nil {
 			p.ssh.Close()
@@ -1499,10 +1507,13 @@ const (
 // and everything past the top maxDuEntries summed into one entry, or a
 // hostile home with millions of top-level entries makes a cache row of
 // 100 MB that every poll re-reads.
-func foldDu(ds []probe.DirUsage) []DirEntry {
+func foldDu(ds []probe.DirUsage, rest int64) []DirEntry {
 	out := make([]DirEntry, 0, min(len(ds), maxDuEntries+1))
 	for _, d := range ds {
 		out = append(out, DirEntry{Name: clip(d.Name, 255), Bytes: d.Bytes})
+	}
+	if rest > 0 { // what ParseDu already folded past its own cap joins the rest entry
+		out = append(out, DirEntry{Name: duRestName, Bytes: rest})
 	}
 	return capEntries(out)
 }
@@ -1790,8 +1801,8 @@ func (p *poller) rawProbe(ctx context.Context) (map[string]string, error) {
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	tag := probe.NewTag()
-	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)))
-	if err != nil && len(out) == 0 {
+	out, stderr, err := cli.RunLimited(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)), probeOutputLimit)
+	if err != nil && (len(out) == 0 || errors.Is(err, sshx.ErrOutputLimit)) {
 		return nil, fmt.Errorf("probe: %v %s", err, strings.TrimSpace(string(stderr)))
 	}
 	secs := probe.SectionsTagged(out, tag)

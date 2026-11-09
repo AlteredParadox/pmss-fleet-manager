@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -1689,5 +1690,53 @@ func TestMigrateAddsTransferDstMode(t *testing.T) {
 	}
 	if ts, err = s.ListTransfers(ctx); err != nil || ts[1].MoveState != "left 2" {
 		t.Fatalf("move_state after save: %+v %v", ts, err)
+	}
+}
+
+// Resolved alerts are bounded per box by count as well as by age: keys
+// built from box-reported names can be fresh every poll. Active alerts
+// and another box's rows are untouched.
+func TestPruneAlertsBoundsResolvedPerBox(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	a := &Box{Name: "a", Host: "h1", User: "u", Port: 22}
+	b := &Box{Name: "b", Host: "h2", User: "u", Port: 22}
+	for _, bx := range []*Box{a, b} {
+		if err := st.CreateBox(ctx, bx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < maxResolvedPerBox+100; i++ {
+		k := fmt.Sprintf("container:c%d", i)
+		st.RaiseAlert(ctx, a.ID, k, "warn", "x")
+		st.ResolveAlert(ctx, a.ID, k)
+	}
+	st.RaiseAlert(ctx, a.ID, "disk", "warn", "x")
+	st.RaiseAlert(ctx, b.ID, "container:x", "warn", "x")
+	st.ResolveAlert(ctx, b.ID, "container:x")
+	if err := st.PruneAlerts(ctx, 30*24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.ListAlerts(ctx, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aResolved, aActive, bRows int
+	for _, r := range rows {
+		switch {
+		case r.BoxID == b.ID:
+			bRows++
+		case r.Active:
+			aActive++
+		default:
+			aResolved++
+		}
+	}
+	if aResolved != maxResolvedPerBox || aActive != 1 || bRows != 1 {
+		t.Fatalf("after prune: a resolved %d active %d, b rows %d", aResolved, aActive, bRows)
 	}
 }

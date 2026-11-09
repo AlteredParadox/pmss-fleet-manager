@@ -80,9 +80,20 @@ func toInfo(s pmapi.Service, currency string) ServiceInfo {
 // host+user match wins, then a host-only match if unique, then a user-only
 // match if unique.
 func matchService(services []pmapi.Service, host, user string) (*pmapi.Service, string) {
+	return matchServiceWhere(services, host, user, nil)
+}
+
+// matchServiceWhere is matchService over the services whose status keep
+// accepts (all of them when keep is nil), without copying the list: the
+// feed is walked once per precedence level for every box, and its length
+// is the provider's to choose.
+func matchServiceWhere(services []pmapi.Service, host, user string, keep func(status string) bool) (*pmapi.Service, string) {
 	host, user = strings.ToLower(strings.TrimSpace(host)), strings.TrimSpace(user)
 	var hostOnly, userOnly []int
 	for i, s := range services {
+		if keep != nil && !keep(s.Status) {
+			continue
+		}
 		dh := strings.ToLower(strings.TrimSpace(s.Domain))
 		hm := dh != "" && dh == host
 		um := user != "" && s.Username() == user
@@ -155,9 +166,9 @@ func (m *Manager) decorate(s *BoxState) {
 	// An active service wins over a suspended one, and either over a
 	// cancelled one on the same host (a cancel-and-reorder); an inactive
 	// match is still shown, for history.
-	svc, how := matchService(servicesWith(feed.Services, isActiveStatus), s.Host, s.User)
+	svc, how := matchServiceWhere(feed.Services, s.Host, s.User, isActiveStatus)
 	if svc == nil {
-		svc, how = matchService(servicesWith(feed.Services, serviceActive), s.Host, s.User)
+		svc, how = matchServiceWhere(feed.Services, s.Host, s.User, serviceActive)
 	}
 	if svc == nil {
 		svc, how = matchService(feed.Services, s.Host, s.User)
@@ -170,16 +181,6 @@ func (m *Manager) decorate(s *BoxState) {
 }
 
 func isActiveStatus(status string) bool { return strings.EqualFold(status, "active") }
-
-func servicesWith(all []pmapi.Service, keep func(status string) bool) []pmapi.Service {
-	out := make([]pmapi.Service, 0, len(all))
-	for _, s := range all {
-		if keep(s.Status) {
-			out = append(out, s)
-		}
-	}
-	return out
-}
 
 // loadServicesCache restores the last feed from the database at startup,
 // only if it was fetched with the key that is configured now.

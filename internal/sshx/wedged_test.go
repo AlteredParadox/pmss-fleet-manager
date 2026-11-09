@@ -35,7 +35,7 @@ import (
 
 // testServer is an in-process SSH server: no client auth, "exec" of "echo"
 // answers hello and exits 0, "exec" of "hang" holds the session open until
-// the channel is closed. Global requests are discarded (keepalives get a
+// the channel is closed, "exec" of "flood" writes 200 KiB and then hangs. Global requests are discarded (keepalives get a
 // reply). Anything the server would not answer is simulated on the wire by
 // the proxy below, which is where a dead path or peer shows up.
 func testServer(t *testing.T) net.Addr {
@@ -109,6 +109,12 @@ func testServer(t *testing.T) net.Addr {
 							ssh.Unmarshal(r.Payload, &cmd)
 							if cmd.Cmd == "hang" {
 								continue // never exits; the client closes the channel
+							}
+							if cmd.Cmd == "flood" {
+								// Pours 200 KiB and then never exits: an
+								// overrun followed by a hang.
+								io.WriteString(ch, strings.Repeat("x", 200<<10))
+								continue
 							}
 							io.WriteString(ch, "hello\n")
 							ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
@@ -499,4 +505,40 @@ func TestForwardedStreamCloseIsBounded(t *testing.T) {
 		t.Fatal("reads racing Close were left hanging")
 	}
 	px3.frozen.Store(false)
+}
+
+// RunLimited cuts a command off at its own bound and reports the overrun
+// however the command then ends: by itself (echo under a 3-byte bound), or
+// not at all within the deadline (flood: 200 KiB, then a hang). The
+// second case used to read as a timeout with usable output.
+func TestRunLimitedReportsOverrunOnTimeout(t *testing.T) {
+	c := dialTest(t, testServer(t))
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, _, err := c.RunLimited(ctx, "echo", nil, 3)
+	if !errors.Is(err, ErrOutputLimit) || string(out) != "hel" {
+		t.Fatalf("echo under a 3-byte bound: %q %v", out, err)
+	}
+	fctx, fcancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer fcancel()
+	start := time.Now()
+	out, _, err = c.RunLimited(fctx, "flood", nil, 64<<10)
+	if !errors.Is(err, ErrOutputLimit) || len(out) != 64<<10 {
+		t.Fatalf("flood then hang: %d bytes, %v", len(out), err)
+	}
+	if !strings.Contains(err.Error(), "64 KiB kept") || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("error text: %v", err)
+	}
+	if time.Since(start) > 4*time.Second {
+		t.Fatalf("the cut-off command held Run for %v", time.Since(start))
+	}
+	// The default bound stays the transport's, and a command under it is unchanged.
+	out, _, err = c.Run(ctx, "echo", nil)
+	if err != nil || string(out) != "hello\n" {
+		t.Fatalf("echo after the overruns: %q %v", out, err)
+	}
+	if n := limitText(maxOutput); n != "16 MiB" {
+		t.Fatalf("limitText(maxOutput) = %q", n)
+	}
 }

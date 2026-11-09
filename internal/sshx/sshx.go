@@ -495,6 +495,19 @@ func (c *Client) settle(ctx context.Context, cli *ssh.Client, done <-chan struct
 // The session is torn down when ctx ends; a transport that does not let it
 // be torn down is closed (see await).
 func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
+	return c.RunLimited(ctx, cmd, stdin, maxOutput)
+}
+
+// RunLimited is Run with the caller's own stdout bound in place of
+// maxOutput, for a command whose answer is known to be small: the probe's
+// is a few KiB, and a box that sends megabytes in its place is cut off
+// before the parser pays for them (2026-11 audits). An overrun is
+// ErrOutputLimit however the command then ended: by itself, or stopped at
+// the deadline with the bound already passed.
+func (c *Client) RunLimited(ctx context.Context, cmd string, stdin io.Reader, limit int) ([]byte, []byte, error) {
+	if limit <= 0 || limit > maxOutput {
+		limit = maxOutput
+	}
 	cli := c.transport()
 	if cli == nil {
 		return nil, nil, errNotConnected
@@ -530,7 +543,7 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 	defer sess.Close()
 	// A compromised box could stream without end inside the deadline; the
 	// probe is a few KiB and even a du of a huge home is well under this.
-	out := &cappedWriter{left: maxOutput}
+	out := &cappedWriter{left: limit}
 	errb := &cappedWriter{left: 1 << 20}
 	sess.Stdout, sess.Stderr = out, errb
 	if stdin != nil {
@@ -544,7 +557,7 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 	}()
 	select {
 	case <-done:
-		return out.snapshot(), errb.snapshot(), runResult(runErr, out.overflowed())
+		return out.snapshot(), errb.snapshot(), runResult(runErr, out.overflowed(), limit)
 	case <-ctx.Done():
 	}
 	// Ask the command to stop. Both writes go to the peer and would block
@@ -557,6 +570,13 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 		sess.Close()
 	}()
 	err := c.settle(ctx, cli, done)
+	if out.overflowed() {
+		// Over the bound and then not ending within the deadline is still
+		// an overrun: the prefix is not the output, whatever stopped the
+		// command (2026-11 audits: an overflow followed by a hang read as
+		// a timeout with usable output).
+		err = fmt.Errorf("%w (%s kept; the command was then stopped: %v)", ErrOutputLimit, limitText(limit), err)
+	}
 	// snapshot() copies under the lock the copiers write under, so a late
 	// write cannot tear the result.
 	return out.snapshot(), errb.snapshot(), err
@@ -567,14 +587,22 @@ func (c *Client) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, 
 // also overran the cap is incomplete, not finished), and the exit error is
 // named in the message but not wrapped, so no errors.As finds an
 // ssh.ExitError in an incomplete result.
-func runResult(err error, overflowed bool) error {
+func runResult(err error, overflowed bool, limit int) error {
 	if !overflowed {
 		return err
 	}
 	if err != nil {
-		return fmt.Errorf("%w (%d MiB kept; the command then reported: %v)", ErrOutputLimit, maxOutput>>20, err)
+		return fmt.Errorf("%w (%s kept; the command then reported: %v)", ErrOutputLimit, limitText(limit), err)
 	}
-	return fmt.Errorf("%w (%d MiB kept)", ErrOutputLimit, maxOutput>>20)
+	return fmt.Errorf("%w (%s kept)", ErrOutputLimit, limitText(limit))
+}
+
+// limitText names an output bound in the unit it was set in.
+func limitText(n int) string {
+	if n >= 1<<20 && n%(1<<20) == 0 {
+		return fmt.Sprintf("%d MiB", n>>20)
+	}
+	return fmt.Sprintf("%d KiB", n>>10)
 }
 
 // DialUnix opens a stream to a unix socket on the remote host.

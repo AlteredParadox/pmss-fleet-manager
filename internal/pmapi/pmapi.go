@@ -20,6 +20,7 @@
 package pmapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -216,30 +217,92 @@ func (c *Client) Fetch(ctx context.Context, key string) (*Feed, []byte, error) {
 	return f, body, err
 }
 
-// maxFeedBytes bounds one feed response.
+// maxFeedBytes bounds one feed response, and anything Parse is given (the
+// cached copy included).
 const maxFeedBytes = 4 << 20
+
+// maxServices bounds the services one feed may list. An account has tens
+// of services, not thousands; the byte cap alone admits over a million
+// compact objects, each a 136-byte Service plus its strings, and every
+// box's decoration walks the whole list (2026-11 audits). The count is
+// taken from the raw array before the services are decoded, so an
+// oversized feed costs its bytes once and nothing per element.
+const maxServices = 1000
 
 // Parse decodes a feed body. A syntactically valid JSON object that is not
 // a feed (an error envelope, `{}` from a proxy) must not become an empty
 // account that replaces the last good feed and resolves its renewal
 // alerts: the services member has to be present (an explicit empty list or
-// null is the real "no services"), and an error member is an error.
+// null is the real "no services"), and an error member is an error. A
+// body over maxFeedBytes or listing more than maxServices is refused,
+// wherever it came from.
 func Parse(body []byte) (*Feed, error) {
-	var env map[string]json.RawMessage
+	if len(body) > maxFeedBytes {
+		return nil, fmt.Errorf("feed larger than %d MiB; refusing to parse it", maxFeedBytes>>20)
+	}
+	var env feedEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("parse feed: %w (%s)", err, firstLine(body))
 	}
-	if e, ok := env["error"]; ok && string(e) != "null" {
-		return nil, fmt.Errorf("feed reports an error: %s", firstLine(e))
+	if len(env.Error) > 0 && string(env.Error) != "null" {
+		return nil, fmt.Errorf("feed reports an error: %s", firstLine(env.Error))
 	}
-	if _, ok := env["services"]; !ok {
+	if env.Services == nil {
 		return nil, fmt.Errorf("feed has no services member (%s)", firstLine(body))
 	}
-	var f Feed
-	if err := json.Unmarshal(body, &f); err != nil {
-		return nil, fmt.Errorf("parse feed: %w (%s)", err, firstLine(body))
+	if n, err := countArray(env.Services, maxServices); err != nil {
+		return nil, fmt.Errorf("parse feed: services: %w", err)
+	} else if n > maxServices {
+		return nil, fmt.Errorf("feed lists more than %d services; refusing it", maxServices)
 	}
-	return &f, nil
+	f := &Feed{ClientID: env.ClientID, GeneratedAt: env.GeneratedAt, Currency: env.Currency}
+	if string(env.Services) != "null" {
+		if err := json.Unmarshal(env.Services, &f.Services); err != nil {
+			return nil, fmt.Errorf("parse feed: services: %w (%s)", err, firstLine(env.Services))
+		}
+	}
+	return f, nil
+}
+
+// feedEnvelope is Feed with its services left undecoded. The count is
+// taken from, and the services then decoded from, this one value: the
+// decoder matches member names without regard to case and keeps the last
+// of duplicate names, so a count read off one spelling of the member and
+// a decode of the whole body again could settle on different arrays (fred
+// on PR 176). Absent and null differ: nil, and the four bytes.
+type feedEnvelope struct {
+	ClientID    int64           `json:"client_id"`
+	GeneratedAt string          `json:"generated_at"`
+	Currency    string          `json:"currency"`
+	Services    json.RawMessage `json:"services"`
+	Error       json.RawMessage `json:"error"`
+}
+
+// countArray counts the elements of a JSON array (null counts as empty)
+// without decoding them into values, stopping at limit+1.
+func countArray(raw json.RawMessage, limit int) (int, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return 0, err
+	}
+	if tok == nil {
+		return 0, nil
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return 0, errors.New("not an array")
+	}
+	n := 0
+	for dec.More() {
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return n, err
+		}
+		if n++; n > limit {
+			return n, nil
+		}
+	}
+	return n, nil
 }
 
 func firstLine(b []byte) string {

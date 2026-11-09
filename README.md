@@ -110,7 +110,9 @@ quota, traffic at threshold, throttled, qBittorrent or Docker down,
 qBittorrent without incoming connectivity (firewalled or disconnected) for
 more than ten minutes (a client with no torrents is not timed: nothing can
 reach its port), container
-exited non-zero, a watched application not running, process memory near the
+exited non-zero (one alert per container up to twenty per box, then one
+alert counting the rest: the names are the box's to invent), a watched
+application not running, process memory near the
 slice limit, a kernel OOM kill in
 the slice, renewal within N days or overdue (counted in calendar days of the
 dashboard host's time zone; keep it the same as yours). Alerts
@@ -980,11 +982,19 @@ These are the design decisions that came out of it.
 - **Bounded everything.** SSH dials, handshakes (including the agent),
   sessions and remote commands are bounded by contexts; a hung `quota` is run
   through a detached helper so it cannot stall the probe; remote stdout is
-  capped at 16 MiB; error texts and alert titles are clipped; directory
-  listings keep the 500 largest entries. The Docker container list is
-  bounded by that body cap and a container count, not per container (names,
+  capped at 16 MiB, and the probe's at 6 MiB (its sections add up to about
+  3 MiB at the very most; a box that sends more fails its poll, whatever
+  was kept, and an overrun that then hangs is an overrun, not a timeout);
+  the probe's parsers bound their rows while reading, so a section filled
+  to the cap costs a small multiple of its size, not its row count's
+  (2026-11 audits); error texts and alert titles are clipped; directory
+  listings keep the 500 largest entries; the services feed may list a
+  thousand services, counted before they are decoded, and is refused
+  beyond that wherever it came from. The Docker container list is bounded
+  by that body cap and a container count, not per container (names,
   ports): only your own account's daemon writes it, and the cap keeps it
-  finite.
+  finite; the alerts it feeds are capped per box (above), and resolved
+  alerts are kept 30 days and at most 500 per box.
 - **Honest state across edits and restarts.** Failed polls are persisted too,
   so a box that is down comes back as down after a dashboard restart and its
   acknowledged alert stays acknowledged. An alert whose source could not be
@@ -1138,6 +1148,18 @@ Newest first; each release's full notes are on the
 
 **Unreleased**
 
+- **Input bounds from the 2026-11 security audits.** Container alerts are
+  capped at twenty per box plus one alert counting the rest (an open alert
+  whose container still fails is always kept, acknowledgement included),
+  and resolved alerts are bounded at 500 per box as well as by age, so a
+  box inventing two thousand container names a poll no longer adds two
+  thousand rows a poll or pushes other boxes' alerts out of the listing.
+  The probe's stdout is budgeted at 6 MiB instead of the transport's
+  16 MiB, an overrun fails the poll even when it ends in a hang, and the
+  process, log and directory parsers bound their rows while reading
+  instead of trimming afterwards. The Pulsed Media services feed is
+  refused beyond a thousand services, counted before decoding, and the
+  byte cap now applies to the cached copy too.
 - **Transfer hardening from the 2026-11 security audits.** An existing
   destination folder is also refused when a file in it has a name outside
   the folder (a hard link: with `--inplace` a source that turned hostile

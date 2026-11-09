@@ -18,6 +18,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -156,8 +157,8 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 	pctx, cancel2 := context.WithTimeout(ctx, probeTimeout)
 	defer cancel2()
 	tag := probe.NewTag()
-	out, stderr, err := cli.Run(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)))
-	if err != nil && len(out) == 0 {
+	out, stderr, err := cli.RunLimited(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)), probeOutputLimit)
+	if err != nil && (len(out) == 0 || errors.Is(err, sshx.ErrOutputLimit)) {
 		add("fail", "probe failed: %v %s", explainSessionError(err), strings.TrimSpace(string(stderr)))
 		res.Box = &b
 		return res

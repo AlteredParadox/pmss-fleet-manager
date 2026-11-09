@@ -20,6 +20,7 @@ package probe
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -221,11 +222,12 @@ func parseFinite(s string) float64 {
 
 // lastSection returns the name of the last section header in raw.
 func lastSection(raw []byte, tag string) string {
-	prefix := "@@" + tag
+	prefix := []byte("@@" + tag)
 	last := ""
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.HasPrefix(line, prefix) && len(line) > len(prefix) && !strings.ContainsAny(line, " \t") {
-			last = line[len(prefix):]
+	for line := range bytes.Lines(raw) { // no copy of raw, no slice of its lines: this runs on the path where the box sent too much
+		line = bytes.TrimRight(line, "\n")
+		if bytes.HasPrefix(line, prefix) && len(line) > len(prefix) && !bytes.ContainsAny(line, " \t") {
+			last = string(line[len(prefix):])
 		}
 	}
 	return last
@@ -613,8 +615,9 @@ func ValidLogPath(p string) bool {
 // NaN fails it: int64(NaN) is a time encoding/json refuses.
 func parseLogs(raw string) []LogFile {
 	var out []LogFile
-	for _, line := range strings.Split(raw, "\n") {
-		f := strings.SplitN(line, "\t", 3)
+	newestFirst := func() { sort.SliceStable(out, func(i, j int) bool { return out[i].MTime.After(out[j].MTime) }) }
+	for line := range strings.Lines(raw) {
+		f := strings.SplitN(strings.TrimRight(line, "\n"), "\t", 3)
 		if len(f) != 3 {
 			continue
 		}
@@ -625,8 +628,16 @@ func parseLogs(raw string) []LogFile {
 			continue
 		}
 		out = append(out, LogFile{Path: p, Size: size, MTime: time.Unix(int64(mt), 0)})
+		// The working set stays at twice the cap: a row cut here has
+		// maxLogFiles rows newer (or as new and listed earlier) above it,
+		// and those remain candidates, so the result is the one a sort
+		// of everything would give. The section is the box's to fill.
+		if len(out) >= 2*maxLogFiles {
+			newestFirst()
+			out = out[:maxLogFiles]
+		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].MTime.After(out[j].MTime) })
+	newestFirst()
 	if len(out) > maxLogFiles {
 		out = out[:maxLogFiles]
 	}
@@ -656,18 +667,20 @@ type procStat struct {
 }
 
 // parseProcStat reads the proc_stat section: CLK_TCK on the first line,
-// then "pid utime stime starttime" in ticks per process.
-func parseProcStat(raw string) map[int]procStat {
+// then "pid utime stime starttime" in ticks per process. Only the pids in
+// want are kept (all of them when want is nil): the section is as long as
+// the box makes it, the process list is already bounded.
+func parseProcStat(raw string, want map[int]bool) map[int]procStat {
 	out := map[int]procStat{}
-	lines := strings.Split(raw, "\n")
-	if len(lines) == 0 {
-		return out
-	}
-	hz, err := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
+	first, rest, _ := strings.Cut(raw, "\n")
+	hz, err := strconv.ParseFloat(strings.TrimSpace(first), 64)
 	if err != nil || !(hz >= 1 && hz <= 1e6) { // CLK_TCK is a small integer; a tiny or NaN rate would make the seconds infinite
 		return out // without the tick rate the numbers mean nothing
 	}
-	for _, line := range lines[1:] {
+	for line := range strings.Lines(rest) {
+		if pid, ok := leadingPID(line); ok && want != nil && !want[pid] {
+			continue // not a process we list: no fields, no entry
+		}
 		f := strings.Fields(line)
 		if len(f) != 4 {
 			continue
@@ -684,37 +697,39 @@ func parseProcStat(raw string) map[int]procStat {
 	return out
 }
 
+// leadingPID reads the pid that ps puts first on every row (right-aligned,
+// so after any blanks), without splitting the rest of the line.
+func leadingPID(line string) (int, bool) {
+	line = strings.TrimLeft(line, " \t")
+	end := strings.IndexAny(line, " \t\r\n")
+	if end < 0 {
+		end = len(line)
+	}
+	pid, err := strconv.Atoi(line[:end])
+	return pid, err == nil && pid > 0
+}
+
+// maxProcRows bounds the rows read from the procs section: the probe's
+// own few processes are dropped after reading, so a little more than
+// maxProcs is read, and whatever follows is the truncation the list
+// reports. The sections are the box's to fill; nothing here is sized by
+// what it sent (2026-11 audits: a 16 MiB section cost 26x its size in
+// live heap for 2,000 kept rows).
+const maxProcRows = maxProcs + 64
+
 // parseProcs reads the procs section ("pid ppid rss times etimes comm",
 // comm possibly containing spaces), the proc_args section ("pid args") and
 // the proc_stat section, dropping the probe's own shell and its children
-// (ps, cut, awk).
+// (ps, cut, awk). The process rows are read first, bounded; the other two
+// sections are read for those pids alone.
 func parseProcs(procs, args, stat string, probePID int) (out []ProcInfo, known, argsKnown, truncated bool) {
-	stats := parseProcStat(stat)
-	// The args listing is complete only when its "end" marker arrived
-	// (procArgsShell): a listing cut by the ps timeout is ignored whole,
-	// since nothing says which processes it missed. ps prefixes every
-	// row with a pid, so a process whose argv is "end" cannot forge it.
-	args = strings.TrimRight(args, "\n")
-	argsComplete := false
-	if i := strings.LastIndex(args, "\n"); strings.TrimSpace(args[i+1:]) == "end" {
-		argsComplete = true
-		args = args[:i+1]
-	}
-	argv := map[int]string{}
-	for _, line := range strings.Split(args, "\n") {
-		if !argsComplete {
+	var rows []ProcInfo
+	want := map[int]bool{}
+	for line := range strings.Lines(procs) {
+		if len(rows) >= maxProcRows {
+			truncated = true // the rest ran on the box too; only the list is cut
 			break
 		}
-		f := strings.Fields(line)
-		if len(f) < 2 {
-			continue
-		}
-		if pid, err := strconv.Atoi(f[0]); err == nil && pid > 0 {
-			argv[pid] = strings.Join(f[1:], " ")
-		}
-	}
-	var rows []ProcInfo
-	for _, line := range strings.Split(procs, "\n") {
 		f := strings.Fields(line)
 		if len(f) < 6 {
 			continue
@@ -737,12 +752,37 @@ func parseProcs(procs, args, stat string, probePID int) (out []ProcInfo, known, 
 		if el < 0 || el > 1e10 {
 			el = 0
 		}
-		pi := ProcInfo{PID: pid, PPID: ppid, RSS: rss * 1024, CPUSec: cpu, ElapsedSec: el,
-			Comm: strings.Join(f[5:], " "), Args: argv[pid]}
-		if ps, ok := stats[pid]; ok {
-			pi.CPUSec, pi.StartTick = ps.cpuSec, ps.start
+		rows = append(rows, ProcInfo{PID: pid, PPID: ppid, RSS: rss * 1024, CPUSec: cpu, ElapsedSec: el, Comm: strings.Join(f[5:], " ")})
+		want[pid] = true
+	}
+	// The args listing is complete only when its "end" marker arrived
+	// (procArgsShell): a listing cut by the ps timeout is ignored whole,
+	// since nothing says which processes it missed. ps prefixes every
+	// row with a pid, so a process whose argv is "end" cannot forge it.
+	args = strings.TrimRight(args, "\n")
+	argsComplete := false
+	if i := strings.LastIndex(args, "\n"); strings.TrimSpace(args[i+1:]) == "end" {
+		argsComplete = true
+		args = args[:i+1]
+	}
+	argv := map[int]string{}
+	if argsComplete {
+		for line := range strings.Lines(args) {
+			pid, ok := leadingPID(line)
+			if !ok || !want[pid] {
+				continue // a pid we do not list: the line is not split
+			}
+			if f := strings.Fields(line); len(f) >= 2 {
+				argv[pid] = strings.Join(f[1:], " ")
+			}
 		}
-		rows = append(rows, pi)
+	}
+	stats := parseProcStat(stat, want)
+	for i := range rows {
+		rows[i].Args = argv[rows[i].PID]
+		if ps, ok := stats[rows[i].PID]; ok {
+			rows[i].CPUSec, rows[i].StartTick = ps.cpuSec, ps.start
+		}
 	}
 	// Drop the probe's own process tree: its shell, the ps/awk/xargs it
 	// runs, and their children (timeout wraps ps, so ps is a grandchild).
@@ -1623,26 +1663,58 @@ type DirUsage struct {
 	Bytes int64
 }
 
-// ParseDu parses `du -xs -B1` output, largest first.
-func ParseDu(raw []byte) []DirUsage {
-	var out []DirUsage
-	for _, line := range strings.Split(string(raw), "\n") {
-		f := strings.SplitN(strings.TrimSpace(line), "\t", 2)
-		if len(f) != 2 {
-			f = strings.Fields(line)
+// maxDuRows bounds the rows ParseDu keeps: the home's top level has tens
+// of entries, the dashboard shows 500, and a box can print as many lines
+// as it likes.
+const maxDuRows = 2000
+
+// ParseDu parses `du -xs -B1` output, largest first: the largest maxDuRows
+// rows, and the summed bytes of the rows past them (saturating), so a
+// total over the whole listing is still right.
+func ParseDu(raw []byte) (rows []DirUsage, rest int64) {
+	largestFirst := func() { sort.Slice(rows, func(i, j int) bool { return rows[i].Bytes > rows[j].Bytes }) }
+	add := func(n int64) {
+		if rest > math.MaxInt64-n {
+			rest = math.MaxInt64
+			return
+		}
+		rest += n
+	}
+	for line := range bytes.Lines(raw) {
+		line = bytes.TrimSpace(line)
+		size, name, ok := bytes.Cut(line, []byte("\t"))
+		if !ok {
+			f := bytes.Fields(line)
 			if len(f) < 2 {
 				continue
 			}
-			f = []string{f[0], strings.Join(f[1:], " ")}
+			size, name = f[0], bytes.Join(f[1:], []byte(" "))
 		}
-		n, err := strconv.ParseInt(f[0], 10, 64)
+		n, err := strconv.ParseInt(string(size), 10, 64)
 		if err != nil || n < 0 || n > 1<<60 { // du never prints these; a forged line must not skew totals
 			continue
 		}
-		out = append(out, DirUsage{Name: f[1], Bytes: n})
+		rows = append(rows, DirUsage{Name: string(name), Bytes: n})
+		if len(rows) >= 2*maxDuRows {
+			// Keep the working set at twice the cap; a row cut here has
+			// maxDuRows larger ones above it, which remain candidates,
+			// so the kept rows are the ones a sort of everything would
+			// keep. Its bytes go to the remainder.
+			largestFirst()
+			for _, d := range rows[maxDuRows:] {
+				add(d.Bytes)
+			}
+			rows = rows[:maxDuRows]
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Bytes > out[j].Bytes })
-	return out
+	largestFirst()
+	if len(rows) > maxDuRows {
+		for _, d := range rows[maxDuRows:] {
+			add(d.Bytes)
+		}
+		rows = rows[:maxDuRows]
+	}
+	return rows, rest
 }
 
 // hostnameField accepts only a DNS-shaped host name. The UI builds https

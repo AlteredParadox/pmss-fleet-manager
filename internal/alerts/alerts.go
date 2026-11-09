@@ -42,6 +42,9 @@ func New(st *store.Store, settings func() store.Settings, log *slog.Logger, noti
 	return &Evaluator{st: st, settings: settings, log: log, notify: notify}
 }
 
+// msgListAlerts is the log message for a failed read of a box's open alerts.
+const msgListAlerts = "list alerts"
+
 type want struct {
 	key, sev, title string
 }
@@ -62,7 +65,7 @@ func recheckable(s *collect.BoxState, k string) bool {
 		return s.RAM.OK
 	case k == "suspended":
 		return s.Account.OK
-	case strings.HasPrefix(k, "container:"):
+	case strings.HasPrefix(k, containerKey), k == "containers":
 		// Monitoring switched off for the box is a deliberate "nothing to
 		// check", like a disabled box: the alert must not be stranded.
 		return s.Docker.Reachable || !s.Docker.Enabled
@@ -106,16 +109,23 @@ func (e *Evaluator) Evaluate(ctx context.Context, s *collect.BoxState) {
 	}
 	name := s.Name
 
+	// The open alerts, read once: the container cap keeps the ones that
+	// are still failing, and resolveStale works from the same list (what
+	// raise adds meanwhile is wanted, so it would be skipped anyway).
+	keys, kerr := e.st.ActiveAlertKeys(ctx, s.ID)
+	if kerr != nil {
+		e.log.Warn(msgListAlerts, "err", kerr)
+	}
 	if s.Status == "offline" {
 		active = append(active, want{"unreachable", "bad", fmt.Sprintf("%s unreachable — %s", name, s.LastError)})
 	}
 	probeOK := s.Status == "online" || s.Status == "degraded" && s.Failures == 0
 	if probeOK {
-		active = append(active, wantProbeRules(s, set)...)
+		active = append(active, wantProbeRules(s, set, keys)...)
 	}
 	active = append(active, wantRenewal(s, set)...)
 	active = append(active, wantRtRemove(s)...)
-	e.reconcile(ctx, s, active, probeOK)
+	e.reconcile(ctx, s, active, probeOK, keys, kerr)
 }
 
 // localKey reports whether an alert key is decided by the dashboard's own
@@ -135,7 +145,7 @@ func (e *Evaluator) reconcileLocal(ctx context.Context, s *collect.BoxState) {
 	if !wanted["rtorrent-remove"] {
 		keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
 		if err != nil {
-			e.log.Warn("list alerts", "err", err) // what raise changed is still notified
+			e.log.Warn(msgListAlerts, "err", err) // what raise changed is still notified
 		}
 		for _, k := range keys {
 			if k == "rtorrent-remove" {
@@ -180,7 +190,7 @@ func (e *Evaluator) resolveDisabled(ctx context.Context, s *collect.BoxState) {
 	wanted, changed := e.raise(ctx, s, wantRtRemove(s))
 	keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
 	if err != nil {
-		e.log.Warn("list alerts", "err", err) // what raise changed is still notified
+		e.log.Warn(msgListAlerts, "err", err) // what raise changed is still notified
 	}
 	for _, k := range keys {
 		if wanted[k] {
@@ -198,7 +208,7 @@ func (e *Evaluator) resolveDisabled(ctx context.Context, s *collect.BoxState) {
 // wantProbeRules collects the alerts that need a successful probe, in the
 // order the rules have always run: suspension, disk, traffic, qBittorrent,
 // docker and containers, memory.
-func wantProbeRules(s *collect.BoxState, set store.Settings) []want {
+func wantProbeRules(s *collect.BoxState, set store.Settings, open []string) []want {
 	var active []want
 	name := s.Name
 	if s.Account.Suspended {
@@ -208,7 +218,7 @@ func wantProbeRules(s *collect.BoxState, set store.Settings) []want {
 	active = append(active, wantTraffic(s, set)...)
 	active = append(active, wantQbt(s)...)
 	active = append(active, wantRt(s)...)
-	active = append(active, wantDocker(s)...)
+	active = append(active, wantDocker(s, open)...)
 	active = append(active, wantApps(s)...)
 	active = append(active, wantRAM(s)...)
 	return active
@@ -348,21 +358,64 @@ func humanSince(d time.Duration) string {
 
 // wantDocker raises the alerts for an unreachable rootless docker and for
 // containers that stopped with a non-zero exit.
-func wantDocker(s *collect.BoxState) []want {
+// maxContainerAlerts bounds the per-container alerts one box may hold
+// open. Container names come from the box, so without a bound a box
+// reporting two thousand freshly named exited containers per poll (the
+// parser's limit) would add two thousand rows per poll, crowd every other
+// box out of the alerts listing and hold the fleet-wide hook lock for the
+// duration (2026-11 audits). Past the bound, one "containers" alert counts
+// the rest.
+const maxContainerAlerts = 20
+
+// containerKey prefixes a per-container alert key with the container's name.
+const containerKey = "container:"
+
+// wantDocker raises the docker-down alert and one alert per exited or dead
+// container, up to maxContainerAlerts per box, then one aggregate for the
+// rest. open is the box's active alert keys: a per-container alert that
+// is open and still failing is always kept, whatever the count (its
+// acknowledgement and history stay with it), and it counts against the
+// bound; a container not open now, whether new or one whose alert was
+// resolved earlier, is admitted only while the count allows. A database
+// holding more open container alerts than the bound keeps them all and
+// admits no new one until it is under the bound again.
+func wantDocker(s *collect.BoxState, open []string) []want {
 	var active []want
-	name := s.Name
 	if s.Docker.Enabled && !s.Docker.Reachable {
-		active = append(active, want{"docker", "warn", fmt.Sprintf("%s — rootless docker not responding (%s)", name, s.Docker.Error)})
+		active = append(active, want{"docker", "warn", fmt.Sprintf("%s — rootless docker not responding (%s)", s.Name, s.Docker.Error)})
 	}
-	for _, c := range s.Docker.Containers {
-		if c.State == "exited" || c.State == "dead" {
-			if strings.HasPrefix(c.Status, "Exited (0)") {
-				continue // clean exit, probably on purpose
-			}
-			active = append(active, want{"container:" + c.Name, "warn", fmt.Sprintf("%s — container %s %s", name, c.Name, strings.ToLower(c.Status))})
-		}
+	kept, pending := containerWants(s, open)
+	active = append(active, kept...)
+	admit := min(len(pending), max(0, maxContainerAlerts-len(kept)))
+	active = append(active, pending[:admit]...)
+	if more := len(pending) - admit; more > 0 {
+		active = append(active, want{"containers", "warn", fmt.Sprintf("%s — %d more containers exited or dead (%d are listed; a box reporting this many is not healthy)", s.Name, more, len(kept)+admit)})
 	}
 	return active
+}
+
+// containerWants is one want per exited or dead container (a clean exit
+// is none), in the box's order, split into those whose alert is open now
+// and the rest.
+func containerWants(s *collect.BoxState, open []string) (kept, pending []want) {
+	isOpen := map[string]bool{}
+	for _, k := range open {
+		if strings.HasPrefix(k, containerKey) {
+			isOpen[k] = true
+		}
+	}
+	for _, c := range s.Docker.Containers {
+		if c.State != "exited" && c.State != "dead" || strings.HasPrefix(c.Status, "Exited (0)") {
+			continue // running, or a clean exit, probably on purpose
+		}
+		w := want{containerKey + c.Name, "warn", fmt.Sprintf("%s — container %s %s", s.Name, c.Name, strings.ToLower(c.Status))}
+		if isOpen[w.key] {
+			kept = append(kept, w)
+		} else {
+			pending = append(pending, w)
+		}
+	}
+	return kept, pending
 }
 
 // wantRAM raises the slice memory alert and the OOM-kill alert.
@@ -426,16 +479,14 @@ func daysUntilDate(ymd string, now time.Time) (int, bool) {
 	return int(due.Sub(today).Hours() / 24), true
 }
 
-// reconcile persists the wanted alerts, resolves the open ones this poll no
-// longer wants and could re-check, and notifies when anything changed:
-// an alert raise wrote is notified even when listing the open ones then
-// fails (daybreak blue audit of 7506bd4).
-func (e *Evaluator) reconcile(ctx context.Context, s *collect.BoxState, active []want, probeOK bool) {
+// reconcile persists the wanted alerts, resolves the open ones (keys, as
+// listed before the raise; kerr is that listing's error) this poll no
+// longer wants and could re-check, and notifies when anything changed: an
+// alert raise wrote is notified even when listing the open ones failed
+// (daybreak blue audit of 7506bd4).
+func (e *Evaluator) reconcile(ctx context.Context, s *collect.BoxState, active []want, probeOK bool, keys []string, kerr error) {
 	wanted, changed := e.raise(ctx, s, active)
-	keys, err := e.st.ActiveAlertKeys(ctx, s.ID)
-	if err != nil {
-		e.log.Warn("list alerts", "err", err)
-	} else if e.resolveStale(ctx, s, keys, wanted, probeOK) {
+	if kerr == nil && e.resolveStale(ctx, s, keys, wanted, probeOK) {
 		changed = true
 	}
 	if changed && e.notify != nil {
