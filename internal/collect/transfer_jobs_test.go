@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -682,5 +683,129 @@ func TestTransferUnreadableSourceRecovery(t *testing.T) {
 		if got := xferUnreadable(c.t, c.seen, c.err, now); got != c.want {
 			t.Errorf("case %d: %v, want %v", i, got, c.want)
 		}
+	}
+}
+
+// Over the in-process sshd: a running job whose runner has recorded exit
+// code 0 is read as finished and cleaned up end to end, the job directory
+// removed on the source and the key line removed from the destination,
+// through the manager's own paths (status read, decision, store, both
+// cleanup legs). Until now these stopped at a refused dial.
+func TestTransferFinishAndCleanupOverSSH(t *testing.T) {
+	needTools(t, "rrsync", "flock", "perl")
+	ctx := context.Background()
+	m, st, _ := genTestManager(t)
+	root := t.TempDir()
+	port, hostKey := testSSHServer(t, root)
+	src := sshTestBox(t, m, "src", "u", port, hostKey)
+	dst := sshTestBox(t, m, "dst", "v", port, hostKey)
+	tok := newTok(t)
+	// The source's finished runner: its job directory with the exit code
+	// and no pid (the runner is gone).
+	srcHome, dstHome := filepath.Join(root, "u"), filepath.Join(root, "v")
+	jdir := filepath.Join(srcHome, xferJobDir, tok)
+	os.MkdirAll(filepath.Join(jdir, "started"), 0o700)
+	os.WriteFile(filepath.Join(jdir, "rc"), []byte("0\n"), 0o600)
+	os.WriteFile(filepath.Join(jdir, "started_at"), []byte("x"), 0o600)
+	// The destination as the real claim leaves it: the folder and the key
+	// line in a fresh authorized_keys.
+	os.MkdirAll(dstHome, 0o700)
+	out := runJobScript(t, dstHome, xferVars("TOKEN", tok, "DST", "incoming", "BLOB", testBlob, "MODE", "new"), xferDstClaimScript+xferKeyAddScript)
+	if !strings.Contains(out, "KEYLINE") {
+		t.Fatalf("claim: %s", out)
+	}
+	ak := filepath.Join(dstHome, ".ssh", "authorized_keys")
+	if !strings.Contains(readFile(t, ak), "pfm-xfer-"+tok) {
+		t.Fatalf("key line missing: %s", readFile(t, ak))
+	}
+	tr := &store.Transfer{Token: tok, SrcBoxID: src.ID, SrcEndp: AuthEndpoint(src), SrcHostKey: hostKey,
+		DstBoxID: dst.ID, DstEndp: AuthEndpoint(dst), DstHostKey: hostKey, SrcPath: "data", DstPath: "incoming",
+		Phase: xferRunning, PubKey: testBlob, Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey}
+	if err := st.CreateTransfer(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	j := &xferJob{t: *tr}
+	m.xferMu.Lock()
+	m.xfers[tr.ID] = j
+	m.xferMu.Unlock()
+	j.op.Lock()
+	m.xferRefreshLocked(ctx, j, false)
+	j.op.Unlock()
+	v := m.xferView(tr.ID)
+	if v.Phase != xferFinished || v.RC != "0" || v.Pending != 0 || len(v.Cleanup) != 0 || v.StatusErr != "" {
+		t.Fatalf("after the read: %+v", v)
+	}
+	if _, err := os.Stat(jdir); !os.IsNotExist(err) {
+		t.Errorf("job directory still on the source: %v", err)
+	}
+	if _, err := os.Stat(ak); !os.IsNotExist(err) {
+		t.Errorf("authorized_keys (created by the job) still on the destination: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dstHome, "incoming")); err != nil {
+		t.Errorf("the copied-into folder must stay: %v", err)
+	}
+	ts, _ := st.ListTransfers(ctx)
+	if len(ts) != 1 || ts[0].Phase != xferFinished || ts[0].Pending != 0 {
+		t.Errorf("stored: %+v", ts)
+	}
+}
+
+// Over the in-process sshd: a running job whose source (a refusing port)
+// has stopped answering gets its key line revoked on the destination,
+// which is reachable; the job stays running and reserved, and the status
+// note is not cleared by the success.
+func TestTransferRevokeKeyOverSSH(t *testing.T) {
+	needTools(t, "rrsync", "flock", "perl")
+	ctx := context.Background()
+	m, st, b := genTestManager(t) // b: 127.0.0.1:1, connection refused
+	root := t.TempDir()
+	port, hostKey := testSSHServer(t, root)
+	dst := sshTestBox(t, m, "dst", "v", port, hostKey)
+	p := m.poller(b.ID)
+	p.mu.Lock()
+	p.box.HostKey = "ecdsa-sha2-nistp256 AAAA"
+	p.mu.Unlock()
+	tok := newTok(t)
+	dstHome := filepath.Join(root, "v")
+	os.MkdirAll(filepath.Join(dstHome, ".ssh"), 0o700)
+	ak := filepath.Join(dstHome, ".ssh", "authorized_keys")
+	os.WriteFile(ak, []byte("ssh-ed25519 AAAAOPERATOR operator\n"), 0o600) // an existing line stays
+	runJobScript(t, dstHome, xferVars("TOKEN", tok, "DST", "incoming", "BLOB", testBlob, "MODE", "new"), xferDstClaimScript+xferKeyAddScript)
+	if got := readFile(t, ak); !strings.Contains(got, "pfm-xfer-"+tok) {
+		t.Fatalf("key line missing: %s", got)
+	}
+	tr := &store.Transfer{Token: tok, SrcBoxID: b.ID, SrcEndp: AuthEndpoint(p.box), SrcHostKey: p.hostKey(),
+		DstBoxID: dst.ID, DstEndp: AuthEndpoint(dst), DstHostKey: hostKey, SrcPath: "data", DstPath: "incoming",
+		Phase: xferRunning, PubKey: testBlob, Pending: store.TransferPendingSrcJob | store.TransferPendingDstKey}
+	if err := st.CreateTransfer(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	j := &xferJob{t: *tr}
+	m.xferMu.Lock()
+	j.t.CreatedAt = time.Now().Add(-xferStale - time.Minute)
+	m.xfers[tr.ID] = j
+	m.xferMu.Unlock()
+	j.op.Lock()
+	m.xferRefreshLocked(ctx, j, false) // the source refuses: the read fails
+	j.op.Unlock()
+	if v := m.xferView(tr.ID); !v.SrcUnreadable || !v.KeyRevocable {
+		t.Fatalf("not offered: %+v", v)
+	}
+	if err := m.RevokeTransferKey(ctx, dst.ID, tr.ID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if got := readFile(t, ak); got != "ssh-ed25519 AAAAOPERATOR operator\n" {
+		t.Errorf("authorized_keys after the revocation: %q", got)
+	}
+	v := m.xferView(tr.ID)
+	if v.Phase != xferRunning || v.Pending != store.TransferPendingSrcJob || v.KeyRevocable || !v.SrcUnreadable || v.StatusErr == "" {
+		t.Fatalf("after the revocation: %+v", v)
+	}
+	if err := m.RevokeTransferKey(ctx, dst.ID, tr.ID); !errors.Is(err, ErrTransferBusy) || !strings.Contains(err.Error(), "no key line is owed") {
+		t.Errorf("a second revocation: %v", err)
+	}
+	ts, _ := st.ListTransfers(ctx)
+	if len(ts) != 1 || ts[0].Pending != store.TransferPendingSrcJob || ts[0].Phase != xferRunning {
+		t.Errorf("stored: %+v", ts)
 	}
 }
