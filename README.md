@@ -518,7 +518,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.18
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.19
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -1252,7 +1252,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.18.1 is the current release. The code was written against five real Pulsed
+1.19.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1263,6 +1263,23 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.19.0**
+
+- **Change an account's password from the box page.** Pulsed Media's setup
+  puts one provisioning password in three places and its client panel can
+  show it again. The new **password** button replaces it in the Linux
+  account (the box's own `passwd`), in `~/.lighttpd/.htpasswd` and in
+  qBittorrent's WebUI setting, then replaces the dashboard's own saved SSH
+  and WebUI logins where they used it. Only `passwd` receives the password
+  itself, on its input over SSH; the web panel and qBittorrent get a hash
+  computed on the dashboard, and qBittorrent is stopped for the edit and
+  started again. Nothing secret is put on a command line, in the
+  environment or in a file on the box. The account goes first, and a
+  refusal there leaves everything else untouched. Deluge and Transmission
+  keep their own credentials, and Pulsed Media's panel is not told. See
+  *Changing an account's password*. New API route
+  `POST /api/boxes/{id}/password`, refused in monitor-only mode.
 
 **1.18.1**
 
