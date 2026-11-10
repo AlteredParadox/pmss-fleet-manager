@@ -255,28 +255,38 @@ func newPwBox(t *testing.T) *pwBox {
 }
 
 // client starts the stand-in for a running qbittorrent-nox and reaps it
-// when it is stopped (a zombie would still be listed by pgrep).
+// when it is stopped (a zombie would still be listed by pgrep). It is a
+// shell script under the stand-in's name, which is then the process name
+// pgrep -x sees, blocked reading a pipe this test holds open: no copy of
+// another program (a multi-call coreutils refuses to run under a name it
+// does not know) and no child left behind.
 func (x *pwBox) client(t *testing.T) (gone <-chan struct{}) {
 	t.Helper()
-	sleep, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Skip("no sleep")
-	}
 	bin := filepath.Join(t.TempDir(), qbtProcName)
-	data, err := os.ReadFile(sleep)
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nread _\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin)
+	hold, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(bin, data, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(bin, "600")
 	if err := cmd.Start(); err != nil {
-		t.Skipf("cannot run a copy of sleep: %v", err)
+		t.Fatal(err)
 	}
 	done := make(chan struct{})
 	go func() { cmd.Wait(); close(done) }()
-	t.Cleanup(func() { cmd.Process.Kill(); <-done })
+	t.Cleanup(func() { hold.Close(); cmd.Process.Kill(); <-done })
+	// Listed under its own name before anything relies on it.
+	for i := 0; ; i++ {
+		if exec.Command("pgrep", "-x", qbtProcName).Run() == nil {
+			break
+		}
+		if i == 200 {
+			t.Fatalf("the stand-in client is not listed as %s", qbtProcName)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	return done
 }
 
