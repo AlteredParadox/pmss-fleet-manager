@@ -733,7 +733,10 @@ never part of a command line, an environment or a file on the box. A box
 whose `/bin/sh` is bash, zsh or ksh is refused, since those may write a
 here-document to a temporary file. The two hashes go the same way and are
 handled by shell builtins only. For the web panel and qBittorrent the
-password itself never leaves the dashboard.
+password itself never leaves the dashboard. Both files are replaced by a
+copy renamed over them, and only after every line of the copy was written
+and counted: an account that is out of space or over its disk quota keeps
+its old file and is told so.
 
 The account goes first. If `passwd` refuses (a wrong current password, a
 new one its rules reject: its own reason is shown), nothing else is

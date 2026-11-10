@@ -258,7 +258,10 @@ passwd 2>&1 ` + doc, nil
 // file's own mode, renamed over it, so a reader sees the old file or the
 // new one and an older root-owned file is replaced through the account's
 // own directory, as PMSS does it. Only shell builtins handle the entry
-// (read, case, printf): no command line carries the hash.
+// (read, case, printf): no command line carries the hash. The copy is
+// renamed only if every line was written and it counts as many lines as
+// were meant for it: an account at its disk quota keeps its old file
+// (Codex on PR 184).
 // Exit 3: no such file on this box. 4, 5: refused or failed, unchanged.
 const htpasswdScript = `d="$HOME/.lighttpd"; f="$d/.htpasswd"
 [ -d "$d" ] && [ ! -L "$d" ] || { echo "no ~/.lighttpd directory on this box"; exit 3; }
@@ -268,14 +271,21 @@ size=$(stat -c %s -- "$f") && mode=$(stat -c %a -- "$f") || { echo "cannot stat 
 [ "$size" -le 65536 ] || { echo "~/.lighttpd/.htpasswd is larger than 64 KiB"; exit 4; }
 tmp=$(mktemp -- "$d/.htpasswd.pfm.XXXXXXXX") || { echo "cannot create a file in ~/.lighttpd"; exit 5; }
 trap 'rm -f -- "$tmp"' EXIT
-n=0
+full() { echo "cannot write the new password file in ~/.lighttpd (out of space or over quota?); the old one is unchanged" >&2; exit 5; }
+# n: lines of this account seen (the first becomes the entry, any further
+# one is dropped); k: lines written. Every write is checked where it is
+# made: a failed one inside the loop would otherwise be hidden by the
+# commands after it, and a short copy renamed over the file.
+n=0; k=0
 while IFS= read -r line || [ -n "$line" ]; do
   case $line in
-    "$U:"*) [ "$n" -gt 0 ] || printf '%s\n' "$entry"; n=$((n+1)) ;;
-    *) printf '%s\n' "$line" ;;
+    "$U:"*) n=$((n+1)); [ "$n" -eq 1 ] || continue; line=$entry ;;
   esac
+  printf '%s\n' "$line" || full
+  k=$((k+1))
 done < "$f" > "$tmp" || { echo "cannot read ~/.lighttpd/.htpasswd"; exit 5; }
-[ "$n" -gt 0 ] || printf '%s\n' "$entry" >> "$tmp" || { echo "cannot write in ~/.lighttpd"; exit 5; }
+if [ "$n" -eq 0 ]; then printf '%s\n' "$entry" >> "$tmp" || full; k=$((k+1)); fi
+[ "$(wc -l < "$tmp")" -eq "$k" ] || full
 chmod "$mode" "$tmp" && mv -T -- "$tmp" "$f" || { echo "cannot replace ~/.lighttpd/.htpasswd"; exit 5; }
 trap - EXIT
 echo "replaced=$n"
@@ -321,16 +331,20 @@ running() {
   done
   return 1
 }
-# pass copies the file to $1 with the password lines replaced; n counts them.
+# pass copies the file to $1 with the password lines replaced; n counts
+# them, k the lines written. A write that fails ends it at once: hidden
+# by the next command, it would leave a short copy to be renamed over the
+# configuration.
 pass() {
-  n=0; sec=
+  n=0; k=0; sec=
   while IFS= read -r line || [ -n "$line" ]; do
     case $line in '['*']') sec=$line ;; esac
     case "$sec:$line" in
       '[Preferences]:WebUI\Password_PBKDF2='*) line='WebUI\Password_PBKDF2='$new; n=$((n+1)) ;;
       '[WebUI]:Password_PBKDF2='*) line="Password_PBKDF2=$new"; n=$((n+1)) ;;
     esac
-    printf '%s\n' "$line"
+    printf '%s\n' "$line" || return 1
+    k=$((k+1))
   done < "$conf" > "$1"
 }
 # check reads the file back: at least one password line, each the new one.
@@ -362,7 +376,8 @@ while :; do
   fi
   if [ -s "${conf%.conf}_new.conf" ]; then echo "an interrupted save is pending (qBittorrent_new.conf), which qBittorrent would load in place of the edited file; start and stop the client once, then try again"; exit 7; fi
   tmp=$(mktemp -- "$conf.pfm.XXXXXXXX") || { echo "cannot create a file in ~/.config/qBittorrent"; exit 5; }
-  pass "$tmp" && [ "$n" -gt 0 ] && chmod "$mode" "$tmp" && mv -T -- "$tmp" "$conf" || { echo "cannot rewrite qBittorrent.conf"; exit 5; }
+  pass "$tmp" && [ "$n" -gt 0 ] && [ "$(wc -l < "$tmp")" -eq "$k" ] || { echo "cannot write the new qBittorrent.conf (out of space or over quota?); the old one is unchanged" >&2; exit 5; }
+  chmod "$mode" "$tmp" && mv -T -- "$tmp" "$conf" || { echo "cannot replace qBittorrent.conf"; exit 5; }
   tmp=
   if ! running; then
     check || { echo "qBittorrent.conf does not hold the new hash after the write"; exit 8; }

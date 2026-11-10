@@ -214,6 +214,7 @@ type pwBox struct {
 	st   *store.Store
 	b    *store.Box
 	home string
+	bin  string // first on the box's PATH: the stand-in passwd lives here
 	ctx  context.Context
 }
 
@@ -249,7 +250,7 @@ func newPwBox(t *testing.T) *pwBox {
 		time.Sleep(10 * time.Millisecond)
 	}
 	seedRemote(m, b.ID)
-	x := &pwBox{m: m, st: st, b: b, home: home}
+	x := &pwBox{m: m, st: st, b: b, home: home, bin: bin}
 	x.ctx = WithBoxRevision(context.Background(), m.poller(b.ID).box.Revision)
 	return x
 }
@@ -674,5 +675,65 @@ func TestSavePasswordsRefusesMovedRecord(t *testing.T) {
 	}
 	if got, _ := x.st.GetBox(context.Background(), x.b.ID); got.Password != "" || got.QbtPass != "" {
 		t.Errorf("a login was added: ssh=%q webui=%q", got.Password, got.QbtPass)
+	}
+}
+
+// An account that cannot write (out of space, over its disk quota) keeps
+// both files as they were: a write that fails part-way must not end in a
+// short copy renamed over the original (Codex on PR 184). The stand-in
+// mktemp hands out a name that leads to /dev/full, where every write
+// fails the way a full disk fails it.
+func TestChangePasswordWriteFailureKeepsFiles(t *testing.T) {
+	x := newPwBox(t)
+	if _, err := os.Stat("/dev/full"); err != nil {
+		t.Skip("no /dev/full")
+	}
+	const fakeMktemp = `#!/bin/sh
+for a; do t=$a; done
+p="${t%XXXXXXXX}full"
+ln -s /dev/full "$p" && printf '%s\n' "$p"
+`
+	if err := os.WriteFile(filepath.Join(x.bin, "mktemp"), []byte(fakeMktemp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gone := x.client(t)
+	htBefore, confBefore := x.file(t, ".lighttpd/.htpasswd"), x.file(t, ".config/qBittorrent/qBittorrent.conf")
+	res, err := x.m.ChangePassword(x.ctx, x.b.ID, PasswordRequest{New: "N3w-pass word!", Targets: []string{PwWeb, PwQbt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := steps(res); got != "web=failed qbt=failed" {
+		t.Fatalf("steps: %s (%+v)", got, res)
+	}
+	for _, target := range []string{PwWeb, PwQbt} {
+		if d := stepOf(t, res, target).Detail; !strings.Contains(d, "out of space or over quota") || !strings.Contains(d, "unchanged") {
+			t.Errorf("%s: %q", target, d)
+		}
+	}
+	if x.file(t, ".lighttpd/.htpasswd") != htBefore {
+		t.Errorf(".htpasswd changed:\n%s", x.file(t, ".lighttpd/.htpasswd"))
+	}
+	if x.file(t, ".config/qBittorrent/qBittorrent.conf") != confBefore {
+		t.Errorf("qBittorrent.conf changed:\n%s", x.file(t, ".config/qBittorrent/qBittorrent.conf"))
+	}
+	for _, dir := range []string{".lighttpd", ".config/qBittorrent"} {
+		es, _ := os.ReadDir(filepath.Join(x.home, dir))
+		for _, e := range es {
+			if strings.Contains(e.Name(), ".pfm.") {
+				t.Errorf("left behind: %s/%s", dir, e.Name())
+			}
+		}
+	}
+	// The client was stopped for the edit that then failed: it is started again.
+	select {
+	case <-gone:
+	default:
+		t.Error("the client was not stopped (the write was not attempted with it down)")
+	}
+	if _, err := os.Stat(filepath.Join(x.home, "started")); err != nil {
+		t.Errorf("the stopped client was not started again: %v (%q)", err, stepOf(t, res, PwQbt).Detail)
+	}
+	if len(res.Saved) != 0 {
+		t.Errorf("saved %v", res.Saved)
 	}
 }
