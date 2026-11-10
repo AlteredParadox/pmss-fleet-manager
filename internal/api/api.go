@@ -264,7 +264,7 @@ func changesNoBox(route string) bool {
 }
 
 // errMonitorOnly is the answer to a box-changing request in monitor-only mode.
-var errMonitorOnly = errors.New("this dashboard runs in monitor-only mode: torrent, client, discovery, container and transfer actions are refused")
+var errMonitorOnly = errors.New("this dashboard runs in monitor-only mode: torrent, client, discovery, container, transfer and password actions are refused")
 
 // boxWrite refuses h in monitor-only mode, before it reads the request or
 // reaches a box, and otherwise requires ?rev=, the box record revision the
@@ -327,6 +327,7 @@ func (s *Server) routes() {
 	handle("POST "+bp+boxRoute+"/probe", s.handleProbe) // runs the probe over SSH: POST so the CSRF check applies
 	handle("POST "+bp+boxRoute+"/refresh", s.handleRefresh)
 	handle("POST "+bp+boxRoute+"/du", s.handleDu)
+	handle("POST "+bp+boxRoute+"/password", s.handleChangePassword)
 	handle("POST "+bp+boxRoute+"/qbt/{action}", s.handleQbtAction)
 	handle("POST "+bp+boxRoute+"/qbt/torrents/{hash}/{action}", s.handleTorrentAction)
 	handle("POST "+bp+boxRoute+"/qbt/torrents", s.handleAddTorrents) // literal segment wins over {action}
@@ -1225,6 +1226,43 @@ func clipStr(s string, n int) string {
 		cut--
 	}
 	return s[:cut] + "…"
+}
+
+// handleChangePassword takes {"current":"…","new":"…","targets":["account",
+// "web","qbt"]} and answers with what happened to each target (see
+// collect.ChangePassword). A request the dashboard refuses outright is a
+// 400; once the box was reached the answer is a 200 that says, per target,
+// changed, failed, skipped or unknown. Neither password is logged or
+// echoed.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	var in struct {
+		Current string   `json:"current"`
+		New     string   `json:"new"`
+		Targets []string `json:"targets"`
+	}
+	if err := decodeStrict(r, &in); err != nil {
+		writeErr(w, 400, errors.New("bad body")) // the decoder's own message could quote the input
+		return
+	}
+	// The change bounds itself, and finishes even if this request goes away
+	// (collect.ChangePassword): stopping qBittorrent can take a minute per
+	// attempt, the rest is seconds.
+	res, err := s.m.ChangePassword(r.Context(), id, collect.PasswordRequest{Current: in.Current, New: in.New, Targets: in.Targets})
+	switch {
+	case errors.Is(err, collect.ErrPasswordInput):
+		writeErr(w, 400, err)
+	case errors.Is(err, collect.ErrPasswordBusy):
+		writeErr(w, 409, err)
+	case err != nil:
+		writeErr(w, actionCode(err), err)
+	default:
+		writeJSON(w, 200, res)
+	}
 }
 
 // handleSetDiscovery takes {"dht":bool,"pex":bool,"lsd":bool} (any subset).

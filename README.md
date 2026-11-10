@@ -59,6 +59,10 @@ default order); the choice is remembered per table in the browser.
   SSH (see *Copying between boxes*), with bytes, rate, rsync's estimate of
   progress, and the result; a move removes the source only after rsync
   reports every file delivered and checked.
+- Password: set a new password for the account, in the places Pulsed
+  Media's setup put the first one (the Linux login, the web panel's password
+  file, qBittorrent's WebUI), so that it is no longer the one their client
+  panel can show (see *Changing an account's password*).
 - Services: every process the account runs on the shared host (PMSS hides
   the other tenants'), grouped into the applications the PMSS stack ships or
   that customers commonly install: qBittorrent, rTorrent, Deluge, Radarr /
@@ -230,7 +234,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-auth` | none | HTTP basic auth as `user:password`; set it if you bind to a non-loopback address |
 | `-auth-file` | none | file holding that login as `user:password` (a container secret, say); one trailing line ending is ignored and nothing else, so a password may end in a space. A configured file that is missing, empty or not `user:password` stops the start. Set this or `-auth` / `PMSS_AUTH`, not both |
 | `-ssh-key` | none | private key file tried for every box without a key path of its own, before `~/.ssh/id_*`; a box's own key path always wins |
-| `-monitor-only` | off | refuse the web UI's actions on the boxes (`PMSS_MONITOR_ONLY=1`): torrent, client, discovery, container and transfer actions answer 403 and their controls are hidden; monitoring runs as usual. Adding, editing and removing boxes, alerts, settings, refresh, du and log reads still work. It limits this interface, not the SSH keys it holds: see *Security and hardening* |
+| `-monitor-only` | off | refuse the web UI's actions on the boxes (`PMSS_MONITOR_ONLY=1`): torrent, client, discovery, container, transfer and password actions answer 403 and their controls are hidden; monitoring runs as usual. Adding, editing and removing boxes, alerts, settings, refresh, du and log reads still work. It limits this interface, not the SSH keys it holds: see *Security and hardening* |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
 | `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
@@ -580,8 +584,8 @@ removes the saved SSH password; a checkbox removes the saved WebUI password.
 Over the API, an edit (`PUT /api/boxes/{id}`) must carry the record's
 `revision` as `GET` returned it; a stale one is refused with 409 and the
 current record, which the edit form reloads into itself. Every request
-that acts on a box (torrent, client, discovery, container and transfer actions,
-adding torrents) must carry `?rev=` with the box's `box_rev` from
+that acts on a box (torrent, client, discovery, container, transfer and
+password actions, adding torrents) must carry `?rev=` with the box's `box_rev` from
 `GET /api/state`: 400 without it, 409 when the box was edited since.
 An edit that moves the box to another host, port or account, or forgets
 the pinned host key, starts it over as a new machine: nothing the old one
@@ -708,6 +712,85 @@ actions; enabling it again starts from a clean slate. An alert whose source
 could not be read on an otherwise good poll (quota command hung, traffic
 file missing, docker daemon down) is kept rather than resolved and re-raised;
 switching a source off for the box resolves its alerts.
+
+### Changing an account's password
+
+Pulsed Media sets one password when it creates an account and keeps it
+readable in its client panel. PMSS puts that password in three places on
+the box, and the *password* button on a box's page sets a new one in each
+you tick:
+
+| place | what uses it | how it is changed | what is sent to the box |
+|---|---|---|---|
+| Linux account | SSH, SFTP, FTP | the box's own `passwd`, the only way a tenant has; it asks for the current password | the current and the new password, as input to `passwd` |
+| `~/.lighttpd/.htpasswd` | ruTorrent, the file manager and the other pages under `/user-<name>/`, WebDAV | the account's line is replaced, every other line and the file's mode kept | a bcrypt hash made by the dashboard (`$2y$`, as PMSS writes it) |
+| `qBittorrent.conf` | the qBittorrent WebUI | the `Password_PBKDF2` line is replaced (in `[Preferences]`, and in `[WebUI]` where qBittorrent 5.3 moved it) | a PBKDF2 hash made by the dashboard |
+
+The two passwords `passwd` needs travel inside the script the dashboard
+sends on the SSH session's input, in a here-document that the box's
+`/bin/sh` (dash, on Debian) hands to `passwd` through a pipe: they are
+never part of a command line, an environment or a file on the box. A box
+whose `/bin/sh` is bash, zsh or ksh is refused, since those may write a
+here-document to a temporary file. The two hashes go the same way and are
+handled by shell builtins only. For the web panel and qBittorrent the
+password itself never leaves the dashboard.
+
+The account goes first. If `passwd` refuses (a wrong current password, a
+new one its rules reject: its own reason is shown), nothing else is
+touched, so the three do not drift apart by accident. Each place is then
+reported on its own: changed, not changed and why, skipped (the box has no
+such file, or qBittorrent has no WebUI password set), or outcome unknown.
+If the connection drops while `passwd` runs, one SSH login with the new
+password, on a fresh connection, settles whether it took; when even that
+cannot be tried, the result says that either password may be the valid
+one. What already changed is unticked in the form, so a second try covers
+only what is left.
+
+qBittorrent writes its whole configuration from memory when it exits, so
+the hash is written while no `qbittorrent-nox` of the account runs: a
+running client is asked to exit, waited for (up to a minute), the file is
+rewritten and read back, and the client is started again with the box's
+start command (a panel-managed one is left to Pulsed Media's watchdog).
+If something starts the client in the moment between its exit and the
+write, it is stopped and the file written once more. The edit is refused
+while an interrupted save (`qBittorrent_new.conf`) is pending, which
+qBittorrent would load in place of the edited file.
+
+Where the dashboard itself logs in with the password that changed (a
+saved SSH password, saved WebUI credentials), the saved one is replaced in
+the same step and the box reconnects with it. If that save fails, the
+result says so in red: the box then has a password the dashboard does not
+know, and its next connection is refused until you enter it on the edit
+page. A box that authenticates with a key keeps no copy of the new
+password at all, so type the current one from Pulsed Media's panel and
+keep the new one in your password manager; the *generate* button makes a
+20-character one and shows it for that purpose. With saved WebUI
+credentials the dashboard goes on sending that password to qBittorrent at
+each login, over the SSH tunnel, as it did before.
+
+Limits worth knowing:
+
+- Pulsed Media's panel is not told. It keeps showing the old password,
+  and a password reset from their side (or a reprovision) sets theirs
+  again in all three places.
+- The new password is 8 to 72 printable ASCII characters (bcrypt reads no
+  more than 72 bytes; HTTP, FTP and SSH clients disagree about how
+  anything else is encoded), and the box's `passwd` applies its own rules
+  on top.
+- Deluge and Transmission are not touched: PMSS gives Deluge a generated
+  service password of its own and runs Transmission without one. A
+  qBittorrent in a container, or one started with its own `--profile`,
+  keeps its configuration elsewhere and is not found.
+- `passwd` stores the new Linux password in the system's default scheme
+  (yescrypt on Debian 11 and later), not the bcrypt PMSS writes; logins do
+  not care.
+- Refused in monitor-only mode, like every other action on a box.
+
+Over the API: `POST /api/boxes/{id}/password?rev=<box_rev>` with
+`{"current":"…","new":"…","targets":["account","web","qbt"]}`; `current`
+may be blank when an SSH password is saved. The answer lists each target
+with `changed`, `failed`, `skipped` or `unknown` and a reason, the saved
+logins that were replaced, and a warning if one could not be.
 
 ### Copying between boxes
 
@@ -950,6 +1033,20 @@ These are the design decisions that came out of it.
   limits are under *Encrypting stored credentials*. Prefer SSH keys or the
   agent regardless. Neither key is ever sent to the browser and passwords
   are never serialised.
+
+- **A password change sends a hash wherever a hash will do.** Changing an
+  account's password writes a bcrypt hash to the web panel's password file
+  and a PBKDF2 hash to qBittorrent's configuration, both computed on the
+  dashboard; only the Linux account needs the password itself, because a
+  tenant can only change it through the box's `passwd`. That one travels
+  as `passwd`'s input inside the SSH session, never as a command-line
+  argument, an environment variable or a file, and a box whose `/bin/sh`
+  might spool a here-document to disk is refused. Neither password is
+  logged, echoed in an answer or kept in an error; text read back from the
+  box is scrubbed of both before it is shown. Root on the shared host can
+  still read a process's memory or wrap `passwd`: this keeps the password
+  out of the places other tenants and routine logging can see, and out of
+  Pulsed Media's panel, not out of reach of the host's administrator.
 - **The hardware catalogue is untrusted input.** With the pmdb.fyi
   integration on, the dashboard reads a third-party service that could be
   compromised or replaced. Its answers are bounded in size and read for a
@@ -1023,8 +1120,8 @@ These are the design decisions that came out of it.
   reaching the box is not locked out, which is accepted for a dashboard
   with one operator.
 - **Monitor-only mode.** `-monitor-only` refuses, server-side, every action
-  on a box's torrents, clients, discovery settings and containers, and the
-  UI leaves those controls out. It is deny-by-default: a mutating route counts as box-changing unless
+  on a box's torrents, clients, discovery settings, containers, transfers
+  and password, and the UI leaves those controls out. It is deny-by-default: a mutating route counts as box-changing unless
   it is listed as touching only the dashboard's own records or only reading
   from a box, so a route added later is refused until it is classified. It
   restricts what this web interface can do, not what the SSH accounts can

@@ -46,6 +46,7 @@ const S = {
   transfers: null, // box-to-box copies from /api/transfers, loaded on a box's transfers tab
   xferDraft: null, // the "copy to another box" form of the open box (see blankXferDraft)
   xferFocus: null, // a transfer just started: its card is scrolled to and highlighted once
+  pw: null, // the open "change password" panel of a box (see blankPw); dropped on leaving the box
   torSort: loadTorSort(), // column sort per torrent table ('qbt', 'rtorrent', 'all'): { key, dir } or null for the default order
 };
 // The torrent tables' sort is a per-browser convenience: kept in
@@ -221,6 +222,7 @@ function route() {
   S.torAdd = null;
   S.logView = null;
   S.logOpen = new Set();
+  if (S.pw && !S.pw.busy && (S.view !== 'box' || S.pw.box !== S.selId)) S.pw = null; // typed passwords do not outlive the page they were typed on
   render();
 }
 const go = (hash) => { location.hash = hash; };
@@ -510,7 +512,7 @@ function renderSide() {
       <div><span>storage</span><b>${fmtBytes(t.disk_quota || 0, 1)}</b></div>
       <div><span>last poll</span><b>${fmtAgo(t.last_poll)}</b></div>
       <div class="conn ${S.live ? 'live' : ''}"><span class="dot"></span>${S.live ? 'live updates' : 'reconnecting…'}</div>
-      ${S.monitorOnly ? '<div class="muted" title="started with -monitor-only: torrent, client, discovery, container and transfer actions are refused; monitoring runs as usual">monitor-only</div>' : ''}
+      ${S.monitorOnly ? '<div class="muted" title="started with -monitor-only: torrent, client, discovery, container, transfer and password actions are refused; monitoring runs as usual">monitor-only</div>' : ''}
     </div>`;
 }
 
@@ -520,6 +522,11 @@ function renderMain() {
   // event, a keystroke in the filter): keep where the reader was.
   const prevLog = $('#logview'), prevList = $('.loglist');
   const logTop = prevLog ? prevLog.scrollTop : null, listTop = prevList ? prevList.scrollTop : null;
+  // The password panel's fields too: a poll of the box lands every few
+  // seconds, and must not take the caret out of a half-typed password.
+  const ae = document.activeElement;
+  const pwKey = ae && m.contains(ae) && ae.dataset.pw && ae.type !== 'checkbox' ? ae.dataset.pw : '';
+  const pwSel = pwKey ? [ae.selectionStart, ae.selectionEnd] : null;
   switch (S.view) {
     case 'box': m.innerHTML = viewBox(); break;
     case 'torrents': m.innerHTML = viewTorrents(); break;
@@ -528,6 +535,8 @@ function renderMain() {
     case 'settings': m.innerHTML = viewSettings(); break;
     default: m.innerHTML = viewFleet();
   }
+  const pwEl = pwKey ? m.querySelector(`[data-pw="${pwKey}"]`) : null;
+  if (pwEl) { pwEl.focus(); pwEl.setSelectionRange(pwSel[0], pwSel[1]); }
   const ll = $('.loglist');
   if (ll && listTop !== null) ll.scrollTop = listTop;
   const lv = $('#logview');
@@ -539,7 +548,7 @@ function renderMain() {
     const b = curBox();
     if (b?.status === 'disabled') {
       // Polling is off: the server refuses every action, so say so up front.
-      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="disc:"], button[data-act^="ctr:"], button[data-act^="log:"], button[data-act="du"]').forEach((el) => {
+      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="disc:"], button[data-act^="ctr:"], button[data-act^="log:"], button[data-act="du"], button[data-act="pw:submit"]').forEach((el) => {
         el.disabled = true;
         el.title = 'polling is disabled for this box; enable it to run actions';
       });
@@ -547,7 +556,7 @@ function renderMain() {
       // No complete probe of this box since it was added, moved or the
       // dashboard started: the server refuses everything that would act
       // on facts read from it (its UID, container IDs, the log list).
-      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="disc:"], button[data-act^="ctr:"], button[data-act^="log:"]').forEach((el) => {
+      m.querySelectorAll('button[data-act^="qbt:"], button[data-act^="tor:"], button[data-act^="tor-add:"], button[data-act^="disc:"], button[data-act^="ctr:"], button[data-act^="log:"], button[data-act="pw:submit"]').forEach((el) => {
         el.disabled = true;
         el.title = 'waiting for the first poll of this box before running actions';
       });
@@ -700,6 +709,7 @@ function viewBox() {
   return `
     <button class="crumb" data-go="/fleet">← fleet</button>
     ${boxHeader(b)}
+    ${S.pw && S.pw.box === b.id && !S.monitorOnly ? passwordPanel(b) : ''}
     ${boxTabStrip(tabs)}
     ${body}`;
 }
@@ -722,9 +732,42 @@ function boxActions(b) {
         ${b.status === 'disabled' ? '' : `<button data-act="refresh" title="${b.failures ? 'reconnect and poll now, ignoring the backoff' : 'poll now'}">${b.failures ? 'retry now' : 'refresh'}</button>`}
         ${boxInstallBtn(b, b.qbt)}
         ${boxPowerBtn(b, b.qbt)}
+        ${S.monitorOnly || b.status === 'disabled' ? '' : '<button data-act="pw:open" title="set a new password for this account on the box: Linux login, web panel and qBittorrent WebUI">password</button>'}
         <button data-go="/edit/${b.id}">edit</button>
         <button class="danger" data-act="remove" data-confirm="Remove ${esc(b.name)} from the fleet? Its alerts are deleted. Nothing on the box is touched.">remove</button>
       </div>`;
+}
+// The password panel's state: the two typed passwords, the places ticked,
+// whether the dashboard holds an SSH password for the box (null until the
+// record is read) and the last result.
+function blankPw(boxId) {
+  return { box: boxId, cur: '', neu: '', show: false, t: { account: true, web: true, qbt: true }, saved: null, busy: false, err: '', result: null };
+}
+function passwordPanel(b) {
+  const d = S.pw, type = d.show ? 'text' : 'password', off = d.busy ? 'disabled' : '';
+  const tick = (k, text) => `<label class="check" style="align-items:flex-start"><input type="checkbox" data-pw="t_${k}" ${d.t[k] ? 'checked' : ''} ${off}><span>${text}</span></label>`;
+  const again = b.qbt?.pmss_managed ? 'Pulsed Media\'s watchdog starts it again' : 'started again with the box\'s start command';
+  const curHint = d.saved === null ? '' : d.saved ? '(blank uses the saved SSH password)' : '(the one Pulsed Media\'s panel shows, unless you changed it)';
+  return `<div class="panel" style="margin-bottom:20px"><div class="tile-label">change the password of ${esc(b.user)} on ${esc(b.name)}</div>
+    <div class="muted" style="margin:6px 0 12px">Sets a new password in the places Pulsed Media's setup put the first one. Their client panel is not told: it keeps showing the old password, and a password reset from their side replaces this one again. Save the new password in your password manager first; the dashboard keeps it only where it logs in with it itself.</div>
+    <div class="f2">
+      <label class="f">current password <span class="hint">${curHint}</span><input data-pw="cur" type="${type}" value="${esc(d.cur)}" autocomplete="off" spellcheck="false" ${d.t.account ? off : 'disabled'}></label>
+      <label class="f">new password <span class="hint">(8 to 72 printable ASCII characters)</span>
+        <span style="display:flex;gap:6px"><input data-pw="neu" type="${type}" value="${esc(d.neu)}" autocomplete="new-password" spellcheck="false" ${off}><button type="button" class="small" data-act="pw:generate" ${off}>generate</button><button type="button" class="small ghost" data-act="pw:show">${d.show ? 'hide' : 'show'}</button></span></label>
+    </div>
+    <div style="display:grid;gap:8px;margin-top:12px">
+      ${tick('account', 'Linux account: SSH, SFTP and FTP logins. The box\'s own passwd sets it and asks for the current password; both go to it over SSH, never on a command line or into a file.')}
+      ${tick('web', `web panel: ruTorrent, the file manager and the other pages under /user-${esc(b.user)}/ (~/.lighttpd/.htpasswd). Only a bcrypt hash is sent to the box.`)}
+      ${tick('qbt', `qBittorrent WebUI: the password hash in qBittorrent.conf. Only the hash is sent to the box. A running client is stopped for the edit (it would write the old hash back when it exits) and ${again}.`)}
+    </div>
+    <div class="hint" style="margin-top:10px">The account goes first: if the box refuses the new password, nothing else is touched. Deluge and Transmission keep their own credentials.</div>
+    ${d.err ? `<div class="meta"><span class="bad">${esc(d.err)}</span></div>` : ''}
+    ${d.result ? `<div style="display:grid;gap:4px;margin-top:12px">${pfmView.passwordResultLines(d.result).map((l) => `<div class="${l.cls}">${esc(l.text)}</div>`).join('')}</div>` : ''}
+    <div class="actions" style="margin-top:12px">
+      <button ${boxRef(b)} data-act="pw:submit" ${off}>${d.busy ? 'changing… (stopping qBittorrent can take a minute)' : 'change password'}</button>
+      <button class="ghost" data-act="pw:close" ${off}>close</button>
+    </div>
+  </div>`;
 }
 function boxStatusLine(b) {
   return b.status_reason ? `<div class="meta"><span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(statusLabel(b.status))} — ${esc(b.status_reason)}</span>${b.failures ? `<span class="muted" title="${b.backoff ? 'after repeated failures the dashboard retries less often, up to every 10 minutes; use retry now to reconnect immediately' : 'retrying at the normal interval'}">${retryNote(b) ? esc(retryNote(b)) + ' · ' : ''}${b.failures} failed</span>` : ''}</div>` : '';
@@ -973,7 +1016,7 @@ function tabTorrents(b) {
   const clients = boxClients(b);
   // rTorrent stopped on purpose (~/.rtorrentDisable) with monitoring off:
   // say so rather than hiding the client, since that is the useful fact.
-  const rtOffNote = !b.rtorrent?.enabled && b.rtorrent?.disabled ? `<div class="empty" style="margin-bottom:12px">rTorrent is stopped on purpose on this box (<code>~/.rtorrentDisable</code>); monitoring is off.</div>` : '';
+  const rtOffNote = !b.rtorrent?.enabled && b.rtorrent?.disabled ? `<div class="empty" style="margin-bottom:12px">rTorrent is stopped on purpose on this box (~/.rtorrentDisable); monitoring is off.</div>` : '';
   if (clients.length === 0) return `${rtOffNote}<div class="empty">no torrent client is monitored on this box — enable qBittorrent or rTorrent under <a href="#/edit/${b.id}">edit</a>.</div>`;
   const f = S.filter.trim().toLowerCase();
   // Each client gets a table of its own, with its own header, counts,
@@ -2040,7 +2083,7 @@ function viewSettings() {
     </div>
     <div class="form-foot" style="justify-content:flex-start"><button class="primary" data-act="settings:save">save settings</button></div>
     <div class="panel"><div class="tile-label">about &amp; licensing</div>
-      <div class="row"><span>version</span><span>${esc(S.version || 'dev')}${S.monitorOnly ? ' · <span class="muted" title="started with -monitor-only: torrent, client, discovery, container and transfer actions are refused; monitoring runs as usual">monitor-only</span>' : ''}</span></div>
+      <div class="row"><span>version</span><span>${esc(S.version || 'dev')}${S.monitorOnly ? ' · <span class="muted" title="started with -monitor-only: torrent, client, discovery, container, transfer and password actions are refused; monitoring runs as usual">monitor-only</span>' : ''}</span></div>
       <div class="hint">pmss-fleet-manager is free software under the GNU Affero General Public License v3 or later. Because you are using it over a network, you are entitled to its source code.</div>
       <div class="row" style="justify-content:flex-start;gap:16px"><a href="${esc(BASE)}/license" target="_blank" rel="noopener">license ↗</a><a href="${esc(BASE)}/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || BASE + '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
     </div>
@@ -2176,6 +2219,51 @@ async function boxAction(a) {
   else if (a === 'rescan-logs') { await api('POST', `${BASE}/api/boxes/${S.selId}/refresh`); toast('rescanning logs with the next poll'); }
   else if (a === 'du') { const id = S.selId; await api('POST', `${BASE}/api/boxes/${id}/du`); toast('measuring directories at low priority…'); if (S.detail && S.detail.id === id) { S.detail.dirs.running = true; render(); } }
   else if (a === 'remove') { S.removingId = S.selId; await api('DELETE', `${BASE}/api/boxes/${S.selId}`); toast('box removed'); await loadState(); go('/fleet'); }
+}
+// The password panel: open reads whether an SSH password is saved (the
+// current-password field may then stay blank); submit checks the form the
+// way the server will, asks once, and shows what happened to each place.
+async function passwordAction(a, act) {
+  if (a === 'pw:open') {
+    const id = S.selId;
+    if (S.pw?.box === id) return;
+    S.pw = blankPw(id);
+    render();
+    try {
+      const d = await api('GET', `${BASE}/api/boxes/${id}`);
+      if (S.pw?.box === id) { S.pw.saved = !!d.box.has_password; render(); }
+    } catch { /* the hint stays out; the server still uses a saved password */ }
+    return;
+  }
+  const d = S.pw;
+  if (!d) return;
+  if (a === 'pw:close') { S.pw = null; render(); }
+  else if (a === 'pw:show') { d.show = !d.show; render(); }
+  else if (a === 'pw:generate') {
+    d.neu = pfmView.genPassword((n) => window.crypto.getRandomValues(new Uint8Array(n)));
+    d.show = true; d.err = ''; // shown, so it can be copied to a password manager before it is set
+    render();
+  }
+  else if (a === 'pw:submit') {
+    const b = boxById(d.box);
+    d.err = pfmView.passwordFormError(d);
+    if (d.err) { render(); return; }
+    const places = ['account', 'web', 'qbt'].filter((k) => d.t[k]).map((k) => ({ account: 'the Linux account', web: 'the web panel', qbt: 'the qBittorrent WebUI' })[k]).join(', ');
+    if (!confirm(`Change the password of ${b?.user} on ${b?.name} for ${places}? Make sure the new password is saved somewhere first: it is not shown again.`)) return;
+    d.busy = true; d.result = null;
+    render();
+    try {
+      const r = await api('POST', boxURL(act.dataset, 'password'), pfmView.passwordRequest(d));
+      if (S.pw === d) S.pw = { ...pfmView.draftAfterPassword(d, r), busy: false };
+      const bad = r.warning || r.steps.some((s) => s.status === 'failed' || s.status === 'unknown');
+      toast(bad ? 'password: not everything changed, see the panel' : 'password changed', bad ? 'bad' : 'ok');
+    } catch (err) {
+      d.err = err.message;
+    }
+    d.busy = false;
+    if (S.pw && (S.view !== 'box' || S.pw.box !== S.selId)) S.pw = null; // the page was left while it ran
+    render();
+  }
 }
 // The box and revision a control was drawn from (see pfmView.boxRef).
 function boxRef(b) { return pfmView.boxRef(b); }
@@ -2340,6 +2428,7 @@ async function runAction(a, act) {
   else if (a === 'app:watch') await appWatchAction(act);
   else if (a.startsWith('log:')) await logAction(a, act);
   else if (a.startsWith('xfer:')) await transferAction(a, act);
+  else if (a.startsWith('pw:')) await passwordAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
   else if (a.startsWith('settings:')) await settingsAction(a);
   else if (a.startsWith('svc:')) await servicesAction(a, act);
@@ -2357,6 +2446,13 @@ document.addEventListener('change', (e) => {
   if (fi && S.torAdd) { S.torAdd.files = [...fi.files]; render(); }
 });
 document.addEventListener('input', (e) => {
+  const pw = e.target.closest('[data-pw]');
+  if (pw && S.pw) {
+    const k = pw.dataset.pw;
+    if (k.startsWith('t_')) { S.pw.t[k.slice(2)] = pw.checked; S.pw.err = ''; render(); } // the current-password field follows the account tick
+    else S.pw[k] = pw.value;
+    return;
+  }
   const xf = e.target.closest('[data-xf]');
   if (xf && S.xferDraft) {
     const d = S.xferDraft;
