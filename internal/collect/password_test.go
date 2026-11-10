@@ -682,18 +682,31 @@ func TestSavePasswordsRefusesMovedRecord(t *testing.T) {
 // both files as they were: a write that fails part-way must not end in a
 // short copy renamed over the original (Codex on PR 184). The stand-in
 // mktemp hands out a name that leads to /dev/full, where every write
-// fails the way a full disk fails it.
+// fails the way a full disk fails it, for the password scripts' own
+// templates only (".pfm."): every other caller gets the real mktemp. The
+// box's poll runs beside this test and calls mktemp too, and a probe
+// handed /dev/full would read it until its deadline.
 func TestChangePasswordWriteFailureKeepsFiles(t *testing.T) {
 	x := newPwBox(t)
 	if _, err := os.Stat("/dev/full"); err != nil {
 		t.Skip("no /dev/full")
 	}
-	const fakeMktemp = `#!/bin/sh
+	real, err := exec.LookPath("mktemp") // the stand-in passwd's directory holds none yet
+	if err != nil || filepath.Dir(real) == x.bin {
+		t.Fatalf("the real mktemp: %q, %v", real, err)
+	}
+	fakeMktemp := `#!/bin/sh
 for a; do t=$a; done
-p="${t%XXXXXXXX}full"
-ln -s /dev/full "$p" && printf '%s\n' "$p"
+case $t in
+  *.pfm.XXXXXXXX) p="${t%XXXXXXXX}full"; ln -s /dev/full "$p" && printf '%s\n' "$p" ;;
+  *) exec ` + shellQuote(real) + ` "$@" ;;
+esac
 `
-	if err := os.WriteFile(filepath.Join(x.bin, "mktemp"), []byte(fakeMktemp), 0o755); err != nil {
+	// Written beside and renamed in: a poll never finds half a script.
+	if err := os.WriteFile(filepath.Join(x.bin, "mktemp.new"), []byte(fakeMktemp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(x.bin, "mktemp.new"), filepath.Join(x.bin, "mktemp")); err != nil {
 		t.Fatal(err)
 	}
 	gone := x.client(t)
