@@ -1202,6 +1202,7 @@ func TestMonitorOnly(t *testing.T) {
 	srv, st := newTestServer(t)
 	hdr := map[string]string{"Origin": "http://dash.local:8080"}
 	want := []string{
+		"POST " + boxRoute + "/password",
 		"POST " + boxRoute + "/qbt/{action}",
 		"POST " + boxRoute + "/qbt/torrents/{hash}/{action}",
 		"POST " + boxRoute + "/qbt/torrents",
@@ -1231,6 +1232,7 @@ func TestMonitorOnly(t *testing.T) {
 		box + "/rtorrent/torrents/" + h + "/stop?rev=0", box + "/rtorrent/torrents", box + "/rtorrent/discovery",
 		box + "/containers/c1/restart",
 		box + "/transfers?rev=0", box + "/transfers/1/cancel?rev=0",
+		box + "/password?rev=0",
 	}
 	// Off: these reach their handlers (which then fail on the unprobed box,
 	// never with the monitor-only refusal).
@@ -1278,6 +1280,7 @@ func TestBoxWritesNeedRevision(t *testing.T) {
 		box + "/qbt/torrents/" + h + "/stop", box + "/qbt/torrents", box + "/qbt/discovery",
 		box + "/rtorrent/torrents/" + h + "/stop", box + "/rtorrent/torrents", box + "/rtorrent/discovery",
 		box + "/containers/" + cid + "/restart",
+		box + "/password",
 	} {
 		if code, body := do(t, srv, "POST", p, `{}`, hdr); code != 400 || !strings.Contains(body, "rev") {
 			t.Errorf("%s without rev: %d %s", p, code, body)
@@ -1401,5 +1404,42 @@ func TestPlanTiers(t *testing.T) {
 	}
 	if code, body = do(t, s, "GET", fmt.Sprintf("/api/boxes/%d", id), "", nil); code != 200 || !strings.Contains(body, `"io_weight":100,"io_tier":"Standard","io_source":"catalogue"`) {
 		t.Fatalf("state after clearing: %d %s", code, body)
+	}
+}
+
+// The password route refuses what it can without the box (400, never
+// quoting what was typed), and waits for the first probe like every action
+// that works on facts read from the box.
+func TestChangePasswordRoute(t *testing.T) {
+	srv, _ := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080"}
+	b := &store.Box{Name: "x", Host: "x.invalid", User: "u", Port: 22, Enabled: true}
+	if err := srv.m.AddBox(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	url := fmt.Sprintf("/api/boxes/%d/password?rev=%d", b.ID, b.Revision)
+	const cur, neu = "Curr3nt-secret", "N3w-secret-value"
+	for name, c := range map[string]struct {
+		body string
+		code int
+		say  string
+	}{
+		"short":          {`{"current":"` + cur + `","new":"short","targets":["account"]}`, 400, "at least 8"},
+		"non-ascii":      {`{"current":"` + cur + `","new":"pässwörd-lang","targets":["web"]}`, 400, "printable ASCII"},
+		"no targets":     {`{"current":"` + cur + `","new":"` + neu + `"}`, 400, "at least one"},
+		"unknown target": {`{"new":"` + neu + `","targets":["deluge"]}`, 400, "unknown target"},
+		"no current":     {`{"new":"` + neu + `","targets":["account"]}`, 400, "current password"},
+		"same":           {`{"current":"` + neu + `","new":"` + neu + `","targets":["account"]}`, 400, "is the current one"},
+		"unknown field":  {`{"current":"` + cur + `","new":"` + neu + `","targets":["web"],"note":"` + neu + `"}`, 400, "bad body"},
+		"two values":     {`{"new":"` + neu + `","targets":["web"]} {"new":"` + neu + `"}`, 400, "bad body"},
+		"not probed":     {`{"current":"` + cur + `","new":"` + neu + `","targets":["account","web","qbt"]}`, 409, "not been probed"},
+	} {
+		code, body := do(t, srv, "POST", url, c.body, hdr)
+		if code != c.code || !strings.Contains(body, c.say) {
+			t.Errorf("%s: %d %s", name, code, body)
+		}
+		if strings.Contains(body, cur) || strings.Contains(body, neu) {
+			t.Errorf("%s: the answer quotes a password: %s", name, body)
+		}
 	}
 }

@@ -656,6 +656,11 @@ func (m *Manager) AddBox(ctx context.Context, b *store.Box) error {
 func (m *Manager) UpdateBox(ctx context.Context, b *store.Box, clears store.Clears) error {
 	m.boxMu.Lock()
 	defer m.boxMu.Unlock()
+	return m.updateBoxLocked(ctx, b, clears)
+}
+
+// updateBoxLocked is UpdateBox for a caller that holds boxMu.
+func (m *Manager) updateBoxLocked(ctx context.Context, b *store.Box, clears store.Clears) error {
 	if err := m.st.UpdateBox(ctx, b, clears); err != nil {
 		return err
 	}

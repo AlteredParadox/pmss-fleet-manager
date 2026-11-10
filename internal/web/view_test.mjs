@@ -399,3 +399,54 @@ test('a start that answers late resets only its own draft (fred on PR 143)', () 
   assert.equal(V.draftAfterStart(b, a, blankA), b, 'another box\'s draft opened while the start ran survives');
   assert.equal(V.draftAfterStart(null, a, blankA), null);
 });
+
+test('a generated password is drawn evenly from the alphabet, edges alphanumeric', () => {
+  // A source that counts 0..255 over and over: bytes above the last whole
+  // multiple of the alphabet are dropped, so no character is favoured.
+  let i = 0;
+  const counting = (n) => Uint8Array.from({ length: n }, () => i++ % 256);
+  const pw = V.genPassword(counting, 2000);
+  assert.equal(pw.length, 2000);
+  assert.match(pw, /^[A-HJ-NP-Za-km-z2-9][A-HJ-NP-Za-km-z2-9_-]*[A-HJ-NP-Za-km-z2-9]$/);
+  assert.equal(V.passwordProblem(V.genPassword(counting)), '');
+  assert.equal(V.genPassword(counting).length, 20);
+  const seen = new Set(pw);
+  assert.equal(seen.size, 59, 'every character of the alphabet turns up');
+  assert.match(V.genPassword(() => Uint8Array.from([255, 255, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]), 4), /^ABCD$/, 'bytes past the last whole multiple are skipped');
+});
+
+test('the password form refuses what the server would, in its words', () => {
+  assert.match(V.passwordProblem('short'), /at least 8/);
+  assert.match(V.passwordProblem('x'.repeat(73)), /at most 72/);
+  assert.match(V.passwordProblem('pässwörd-lang'), /printable ASCII/);
+  assert.match(V.passwordProblem(' leading-space'), /start or end/);
+  assert.equal(V.passwordProblem('fine pass-word 1'), '');
+  const d = { cur: '', neu: 'N3w-pass word!', saved: false, t: { account: true, web: true, qbt: false } };
+  assert.match(V.passwordFormError(d), /current password/);
+  assert.equal(V.passwordFormError({ ...d, saved: true }), '', 'a saved SSH password stands in for a typed one');
+  assert.equal(V.passwordFormError({ ...d, t: { account: false, web: true, qbt: true } }), '', 'the hashes need no current password');
+  assert.match(V.passwordFormError({ ...d, cur: d.neu }), /is the current one/);
+  assert.match(V.passwordFormError({ ...d, t: {} }), /at least one/);
+  assert.deepEqual(V.passwordRequest({ ...d, cur: 'old' }), { current: 'old', new: 'N3w-pass word!', targets: ['account', 'web'] });
+  assert.deepEqual(V.passwordRequest({ ...d, cur: 'old', t: { web: true } }), { current: '', new: 'N3w-pass word!', targets: ['web'] }, 'the current password is not sent where it is not used');
+});
+
+test('a password result is spelled out per fixture, and the form keeps only what is left to retry', () => {
+  const r = { steps: [{ target: 'account', status: 'changed' }, { target: 'web', status: 'changed' }, { target: 'qbt', status: 'failed', detail: 'qBittorrent did not exit within 60 s' }], saved: ['ssh'] };
+  const lines = V.passwordResultLines(r);
+  assert.deepEqual(lines.map((l) => l.cls), ['ok', 'ok', 'bad', 'ok']);
+  assert.equal(lines[2].text, 'qBittorrent WebUI: not changed (qBittorrent did not exit within 60 s)');
+  assert.equal(lines[3].text, "the dashboard's saved SSH password now holds the new one");
+  assert.equal(V.passwordResultLines({ steps: [{ target: 'account', status: 'unknown', detail: 'x' }], warning: 'not saved' }).at(-1).cls, 'bad');
+  const d = { cur: 'old', neu: 'N3w-pass word!', show: true, t: { account: true, web: true, qbt: true } };
+  const next = V.draftAfterPassword(d, r);
+  assert.deepEqual(next.t, { account: false, web: false, qbt: true }, 'what changed is unticked');
+  assert.equal(next.cur, '', 'the old password is no longer the current one');
+  assert.equal(next.neu, 'N3w-pass word!', 'kept for the retry of what is left');
+  const done = V.draftAfterPassword(d, { steps: r.steps.map((s) => ({ ...s, status: 'changed' })) });
+  assert.equal(done.cur + done.neu, '', 'nothing left to retry: the passwords leave the page');
+  assert.equal(done.show, false);
+  const refused = V.draftAfterPassword(d, { steps: [{ target: 'account', status: 'failed' }, { target: 'web', status: 'skipped' }, { target: 'qbt', status: 'skipped' }] });
+  assert.equal(refused.cur, 'old');
+  assert.deepEqual(refused.t, d.t);
+});

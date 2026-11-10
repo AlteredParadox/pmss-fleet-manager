@@ -19,8 +19,8 @@
    the markup and wording they produce (internal/web/view_test.mjs): the
    overview's cpu / ram meters and host-share predicates, client
    availability and per-torrent controls, add summaries, table sorting,
-   the rTorrent DHT / PeX toggle wording and the box/revision a box control
-   carries. */
+   the rTorrent DHT / PeX toggle wording, the box/revision a box control
+   carries and the password panel's checks and result wording. */
 (() => {
 'use strict';
 
@@ -456,5 +456,73 @@ function resyncLoads(view, tab, selId) {
   return [];
 }
 
-globalThis.pfmView = { hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError };
+/* ----- changing an account's password (the box page's password panel) ----- */
+// The characters PMSS draws its own account passwords from: letters and
+// digits without the look-alikes, plus - and _ away from the ends.
+const PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_';
+// genPassword draws n characters from randomBytes(count) (the browser's
+// crypto.getRandomValues). A byte that would make the first characters of
+// the alphabet likelier than the rest is thrown away, not folded in.
+function genPassword(randomBytes, n = 20) {
+  let out = '';
+  while (out.length < n) {
+    for (const b of randomBytes(2 * n)) {
+      const size = out.length === 0 || out.length === n - 1 ? PW_ALPHABET.length - 2 : PW_ALPHABET.length;
+      if (b >= 256 - (256 % size)) continue;
+      out += PW_ALPHABET[b % size];
+      if (out.length === n) break;
+    }
+  }
+  return out;
+}
+// passwordProblem: why the server would refuse pw as a new password
+// (collect.ValidNewPassword), or ''.
+function passwordProblem(pw) {
+  pw = String(pw ?? '');
+  if (pw.length < 8) return 'the new password must be at least 8 characters';
+  if (pw.length > 72) return 'the new password must be at most 72 characters';
+  if (!/^[\x20-\x7e]*$/.test(pw)) return 'the new password may hold printable ASCII characters only: web, FTP and SSH clients do not agree on how any other character is sent';
+  if (pw.startsWith(' ') || pw.endsWith(' ')) return 'the new password must not start or end with a space';
+  return '';
+}
+const PW_TARGETS = ['account', 'web', 'qbt'];
+const PW_LABELS = { account: 'Linux account', web: 'web panel', qbt: 'qBittorrent WebUI' };
+// passwordFormError: what stops the form d ({cur, neu, t, saved}) from
+// being sent, or ''. saved: the dashboard holds an SSH password for the box.
+function passwordFormError(d) {
+  const targets = PW_TARGETS.filter((k) => d.t[k]);
+  if (!targets.length) return 'tick at least one place to change';
+  const p = passwordProblem(d.neu);
+  if (p) return p;
+  if (d.t.account && !d.cur && !d.saved) return 'enter the current password: the box asks for it before it sets a new one';
+  if (d.t.account && d.cur === d.neu) return 'the new password is the current one';
+  return '';
+}
+function passwordRequest(d) {
+  return { current: d.t.account ? d.cur : '', new: d.neu, targets: PW_TARGETS.filter((k) => d.t[k]) };
+}
+// passwordResultLines: one line per fixture of a result, then what the
+// dashboard did with its own saved logins. cls is the colour class.
+function passwordResultLines(r) {
+  const cls = { changed: 'ok', failed: 'bad', unknown: 'bad', skipped: 'muted' };
+  const word = { changed: 'changed', failed: 'not changed', unknown: 'outcome unknown', skipped: 'skipped' };
+  const lines = (r.steps || []).map((s) => ({ cls: cls[s.status] || 'warn', text: `${PW_LABELS[s.target] || s.target}: ${word[s.status] || s.status}${s.detail ? ` (${s.detail})` : ''}` }));
+  const saved = { ssh: 'SSH password', webui: 'WebUI password' };
+  if ((r.saved || []).length) lines.push({ cls: 'ok', text: `the dashboard's saved ${r.saved.map((k) => saved[k] || k).join(' and ')} now ${r.saved.length > 1 ? 'hold' : 'holds'} the new one` });
+  if (r.warning) lines.push({ cls: 'bad', text: r.warning });
+  return lines;
+}
+// draftAfterPassword: the form after a result. What changed is unticked,
+// so a second try covers only what is left (and no longer asks the box's
+// passwd to accept a current password that is now the old one); the typed
+// passwords leave the page once nothing is left to retry with them.
+function draftAfterPassword(d, r) {
+  const t = { ...d.t };
+  for (const s of r.steps || []) if (s.status === 'changed') t[s.target] = false;
+  const left = PW_TARGETS.some((k) => t[k]);
+  const accountDone = (r.steps || []).some((s) => s.target === 'account' && s.status === 'changed');
+  return { ...d, t, result: r, cur: accountDone || !left ? '' : d.cur, neu: left ? d.neu : '', show: left ? d.show : false };
+}
+
+globalThis.pfmView = { genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError };
 })();

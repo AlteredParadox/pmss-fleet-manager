@@ -127,6 +127,11 @@ type poller struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// pwMu admits one password change at a time (ChangePassword); pwProbe
+	// is the test hook for its login check after a lost connection.
+	pwMu    sync.Mutex
+	pwProbe func(ctx context.Context, pw string) (bool, error)
+
 	actionMu sync.Mutex
 	actionAt time.Time // last stop/restart, see QbtAction
 	// restartAt is when a stop/restart action last SUCCEEDED and has not
