@@ -1255,7 +1255,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.19.0 is the current release. The code was written against five real Pulsed
+1.19.1 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1266,6 +1266,16 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.19.1**
+
+- **Hide service statuses in the Services table.** The Services table on
+  the settings page has a toggle per status in the Pulsed Media feed, each
+  with its row count. Switch one off (Cancelled, say) and its rows are left
+  out; the count then reads "4 of 6 services". The choice is remembered by
+  the browser. It only chooses the rows listed: costs, renewal alerts and
+  box matching are unchanged. (#186, #189)
+- Go 1.27.4, for GO-2026-6859 in `net/http`. (#190)
 
 **1.19.0**
 
