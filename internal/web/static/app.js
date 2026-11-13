@@ -48,7 +48,11 @@ const S = {
   xferFocus: null, // a transfer just started: its card is scrolled to and highlighted once
   pw: null, // the open "change password" panel of a box (see blankPw); dropped on leaving the box
   torSort: loadTorSort(), // column sort per torrent table ('qbt', 'rtorrent', 'all'): { key, dir } or null for the default order
+  svcHidden: loadSvcHidden(), // service statuses (lower case) left out of the settings page's Services table
 };
+// The Services table's hidden statuses, kept the way the torrent sort is.
+function loadSvcHidden() { try { const v = JSON.parse(window.localStorage.getItem('pfm.svcHidden') || '[]'); return Array.isArray(v) ? v.filter((k) => typeof k === 'string') : []; } catch { return []; } }
+function saveSvcHidden() { try { window.localStorage.setItem('pfm.svcHidden', JSON.stringify(S.svcHidden)); } catch { /* storage unavailable: this tab only */ } }
 // The torrent tables' sort is a per-browser convenience: kept in
 // localStorage when it is available, per tab otherwise.
 function loadTorSort() { try { const v = JSON.parse(window.localStorage.getItem('pfm.torSort') || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -2127,12 +2131,15 @@ function viewServices() {
   const v = S.services;
   if (!v?.configured) return '';
   const status = v.error ? `<span class="bad">${esc(v.error)}</span>` : v.synced_at ? `synced ${fmtAgo(v.synced_at)}${v.generated_at ? ` · feed generated ${fmtAgo(v.generated_at)}` : ''}` : 'not synced yet';
+  // The status toggles only choose the rows listed: the monthly cost is the server's, over every current service.
+  const { statuses, shown } = pfmView.serviceStatusFilter(v.services, S.svcHidden);
+  const count = shown.length === v.services.length ? `${v.services.length}` : `${shown.length} of ${v.services.length}`;
   return `<div class="svc">
     <div class="head" style="margin:24px 0 10px"><div><div class="eyebrow">pulsedmedia.com${v.client_id ? ` · client ${v.client_id}` : ''}</div><h2 style="margin:0">Services</h2><div class="hint" style="margin-top:4px">${status}</div></div>
-      <div class="actions"><span class="muted" style="font-size:12px">${v.services.length} services${v.currency ? ` · ${fmtMoney(v.monthly_cost, v.currency)}/mo` : ''}</span><button data-act="svc:sync">sync now</button></div></div>
-    ${v.services.length ? `<div class="table svc-table">
+      <div class="actions">${pfmView.serviceStatusToggles(statuses)}<span class="muted" style="font-size:12px">${count} services${v.currency ? ` · ${fmtMoney(v.monthly_cost, v.currency)}/mo` : ''}</span><button data-act="svc:sync">sync now</button></div></div>
+    ${!v.services.length ? '<div class="empty">no services on this account</div>' : !shown.length ? '<div class="empty">every service has a hidden status</div>' : `<div class="table svc-table">
       <div class="trow head"><span>product</span><span>login</span><span>price</span><span>per month</span><span>next due</span><span>status</span><span>box</span></div>
-      ${v.services.map((sv) => { const b = sv.box_id ? boxById(sv.box_id) : null; const d = daysUntil(sv.next_due); return `
+      ${shown.map((sv) => { const b = sv.box_id ? boxById(sv.box_id) : null; const d = daysUntil(sv.next_due); return `
       <div class="trow">
         <div class="ellip"><div class="ellip" title="${esc(sv.product)}">${esc(sv.product)}</div><div class="sub">${esc(sv.group || '')}${sv.registered ? ` · since ${esc(sv.registered)}` : ''}</div></div>
         <div class="ellip"><div class="ellip">${esc(sv.username || '—')}@${esc(sv.domain)}</div><div class="sub">${sv.login_url ? `<a href="${esc(safeHref(sv.login_url))}" target="_blank" rel="noopener">web ui ↗</a>` : ''}${sv.permanent_address ? ` <a href="${esc(safeHref(sv.permanent_address))}" target="_blank" rel="noopener">permanent ↗</a>` : ''}</div></div>
@@ -2142,7 +2149,7 @@ function viewServices() {
         <span class="${sv.status === 'Active' ? 'ok' : 'warn'}">${esc(sv.status)}</span>
         <span>${b ? `<a href="#/box/${b.id}" title="matched by ${esc(sv.matched_by || '')}">${esc(b.name)}</a>` : sv.username ? `<button class="small" data-act="svc:add" data-id="${sv.id}">+ add box</button>` : '<span class="muted">—</span>'}</span>
       </div>`; }).join('')}
-    </div>` : '<div class="empty">no services on this account</div>'}
+    </div>`}
   </div>`;
 }
 
@@ -2396,6 +2403,7 @@ function settingsPatch(draft, touched) {
 }
 async function servicesAction(a, act) {
   if (a === 'svc:sync') { act.disabled = true; toast('syncing services from pulsedmedia.com…'); const synced = await api('POST', BASE + '/api/services/sync'); servicesSeq++; S.services = synced; await loadState(); toast(`synced ${S.services.services.length} services`, 'ok'); render(); }
+  else if (a === 'svc:status') { S.svcHidden = pfmView.toggleServiceStatus(S.svcHidden, act.dataset.status); saveSvcHidden(); render(); }
   else if (a === 'svc:add') {
     const sv = (S.services?.services || []).find((x) => String(x.id) === act.dataset.id);
     if (!sv) return;

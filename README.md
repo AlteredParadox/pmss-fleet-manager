@@ -135,7 +135,10 @@ on demand. Manual plan and renewal values on a box take precedence, and a
 typed renewal date does not follow the next billing cycle. Only Active and Suspended
 services count towards costs and renewal alerts; any other status (Cancelled,
 Terminated, Pending, Fraud, Completed) stays listed but counts towards
-neither.
+neither. The Services table in settings has a toggle per status in the feed:
+switch one off (Cancelled, say) and its rows are left out of the table. That
+is a view choice remembered by the browser; costs, alerts and box matching
+are unaffected.
 
 **Plan I/O and CPU priority.** Every Pulsed Media plan has an I/O priority
 and a CPU priority, weights on systemd's scale (Archive below 100, Standard
