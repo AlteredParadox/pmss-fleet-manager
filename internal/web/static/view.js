@@ -552,7 +552,8 @@ function serviceStatusFilter(services, hidden) {
    one: then the toggle is the only way back. */
 function serviceStatusToggles(statuses) {
   if (statuses.length < 2 && !statuses.some((c) => c.hidden)) return '';
-  return `<div class="seg" role="group" aria-label="statuses listed">${statuses.map((c) => `<button class="${c.hidden ? '' : 'on'}" aria-pressed="${!c.hidden}" data-act="svc:status" data-status="${esc(c.key)}" title="${c.hidden ? 'hidden: click to list' : 'listed: click to hide'}">${esc(c.label)} ${c.count}</button>`).join('')}</div>`;
+  const buttons = statuses.map((c) => `<button class="${c.hidden ? '' : 'on'}" aria-pressed="${!c.hidden}" data-act="svc:status" data-status="${esc(c.key)}" title="${c.hidden ? 'hidden: click to list' : 'listed: click to hide'}">${esc(c.label)} ${c.count}</button>`);
+  return `<div class="seg" role="group" aria-label="statuses listed">${buttons.join('')}</div>`;
 }
 function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
