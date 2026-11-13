@@ -1255,7 +1255,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.19.1 is the current release. The code was written against five real Pulsed
+1.19.2 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1266,6 +1266,12 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.19.2**
+
+- Dependency updates only: modernc.org/sqlite 1.62.0 (#187) with the
+  third-party notices regenerated to match (#192), and the release
+  workflow's docker/login-action 4.8.0 (#188). No behaviour changes.
 
 **1.19.1**
 
