@@ -20,7 +20,8 @@
    overview's cpu / ram meters and host-share predicates, client
    availability and per-torrent controls, add summaries, table sorting,
    the rTorrent DHT / PeX toggle wording, the box/revision a box control
-   carries and the password panel's checks and result wording. */
+   carries, the password panel's checks and result wording and the
+   Services table's status filter. */
 (() => {
 'use strict';
 
@@ -524,5 +525,39 @@ function draftAfterPassword(d, r) {
   return { ...d, t, result: r, cur: accountDone || !left ? '' : d.cur, neu: left ? d.neu : '', show: left ? d.show : false };
 }
 
-globalThis.pfmView = { genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError };
+/* The settings page's Services table can leave statuses out (a cancelled
+   service stays in the feed for good). serviceStatusFilter gives the
+   toggles, one per status in the feed with its row count, Active and
+   Suspended first and the rest by name, and the rows whose status is not
+   hidden. Statuses compare trimmed and case-insensitively; the text is the
+   API's, so it is a key here and escaped where it is printed. A hidden
+   status that has left the feed stays hidden for when it returns. */
+const SVC_CURRENT = ['active', 'suspended'];
+const svcStatusKey = (status) => String(status ?? '').trim().toLowerCase();
+function serviceStatusFilter(services, hidden) {
+  const hide = new Set(hidden);
+  const by = new Map();
+  for (const sv of services) {
+    const key = svcStatusKey(sv.status);
+    const c = by.get(key) || { key, label: String(sv.status ?? '').trim() || 'no status', count: 0, hidden: hide.has(key) };
+    c.count++;
+    by.set(key, c);
+  }
+  const rank = (c) => { const i = SVC_CURRENT.indexOf(c.key); return i < 0 ? SVC_CURRENT.length : i; };
+  const statuses = [...by.values()].sort((a, b) => rank(a) - rank(b) || (a.key < b.key ? -1 : 1));
+  return { statuses, shown: services.filter((sv) => !hide.has(svcStatusKey(sv.status))) };
+}
+/* serviceStatusToggles: the toggles' markup, lit while a status is listed.
+   Nothing to choose between with a single status, unless it is the hidden
+   one: then the toggle is the only way back. */
+function serviceStatusToggles(statuses) {
+  if (statuses.length < 2 && !statuses.some((c) => c.hidden)) return '';
+  const buttons = statuses.map((c) => `<button class="${c.hidden ? '' : 'on'}" aria-pressed="${!c.hidden}" data-act="svc:status" data-status="${esc(c.key)}" title="${c.hidden ? 'hidden: click to list' : 'listed: click to hide'}">${esc(c.label)} ${c.count}</button>`);
+  return `<div class="seg" role="group" aria-label="statuses listed">${buttons.join('')}</div>`;
+}
+function toggleServiceStatus(hidden, key) {
+  return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
+}
+
+globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError };
 })();

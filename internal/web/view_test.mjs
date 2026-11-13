@@ -450,3 +450,44 @@ test('a password result is spelled out per fixture, and the form keeps only what
   assert.equal(refused.cur, 'old');
   assert.deepEqual(refused.t, d.t);
 });
+
+test('the Services table hides the statuses switched off and counts every status in the feed', () => {
+  const feed = [
+    { id: 1, status: 'Cancelled' }, { id: 2, status: 'Active' }, { id: 3, status: 'cancelled ' },
+    { id: 4, status: 'Suspended' }, { id: 5, status: 'Terminated' }, { id: 6, status: 'Active' },
+  ];
+  const all = V.serviceStatusFilter(feed, []);
+  assert.deepEqual(all.statuses.map((c) => [c.key, c.label, c.count, c.hidden]), [
+    ['active', 'Active', 2, false], ['suspended', 'Suspended', 1, false], ['cancelled', 'Cancelled', 2, false], ['terminated', 'Terminated', 1, false],
+  ], 'current statuses first, then by name; spelling variants are one status');
+  assert.equal(all.shown.length, 6);
+  const some = V.serviceStatusFilter(feed, ['cancelled', 'fraud']);
+  assert.deepEqual(some.shown.map((sv) => sv.id), [2, 4, 5, 6], 'feed order is kept');
+  assert.deepEqual(some.statuses.filter((c) => c.hidden).map((c) => c.key), ['cancelled'], 'a hidden status not in the feed has no toggle');
+  assert.equal(some.statuses.find((c) => c.key === 'cancelled').count, 2, 'a hidden status still shows how many rows it holds');
+  assert.deepEqual(V.serviceStatusFilter([], ['cancelled']), { statuses: [], shown: [] });
+  const odd = V.serviceStatusFilter([{ id: 1 }, { id: 2, status: 'constructor' }], ['']);
+  assert.deepEqual(odd.statuses.map((c) => [c.key, c.label, c.hidden]), [['', 'no status', true], ['constructor', 'constructor', false]]);
+  assert.deepEqual(odd.shown.map((sv) => sv.id), [2]);
+});
+
+test('the status toggles are lit while listed, escaped, and absent when there is nothing to choose', () => {
+  const { statuses } = V.serviceStatusFilter([{ status: 'Active' }, { status: 'Cancelled' }, { status: 'Cancelled' }], ['cancelled']);
+  const html = V.serviceStatusToggles(statuses);
+  assert.match(html, /<button class="on" aria-pressed="true" data-act="svc:status" data-status="active"[^>]*>Active 1<\/button>/);
+  assert.match(html, /<button class="" aria-pressed="false" data-act="svc:status" data-status="cancelled"[^>]*>Cancelled 2<\/button>/);
+  assert.equal(V.serviceStatusToggles(V.serviceStatusFilter([{ status: 'Active' }], []).statuses), '', 'one status, listed');
+  assert.equal(V.serviceStatusToggles([]), '');
+  assert.match(V.serviceStatusToggles(V.serviceStatusFilter([{ status: 'Active' }], ['active']).statuses), /data-status="active"/, 'the only status is hidden: the toggle brings it back');
+  const hostile = V.serviceStatusToggles(V.serviceStatusFilter([{ status: 'A' }, { status: '"><img src=x onerror=1>' }], []).statuses);
+  assert.ok(!hostile.includes('<img'), 'the status text is the API\'s and is escaped');
+  assert.match(hostile, /data-status="&quot;&gt;&lt;img src=x onerror=1&gt;"/);
+});
+
+test('toggling a status hides it, toggling again lists it', () => {
+  assert.deepEqual(V.toggleServiceStatus([], 'cancelled'), ['cancelled']);
+  assert.deepEqual(V.toggleServiceStatus(['cancelled', 'fraud'], 'cancelled'), ['fraud']);
+  const before = ['fraud'];
+  V.toggleServiceStatus(before, 'cancelled');
+  assert.deepEqual(before, ['fraud'], 'the stored list is not edited in place');
+});
