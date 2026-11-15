@@ -840,7 +840,11 @@ How it is authenticated, per copy:
    the dashboard has pinned for it, written into the job's own
    `known_hosts` (an RSA pin is negotiated with SHA-2 signatures): no trust
    on first use on the box, no agent, no forwarding of the dashboard's
-   credentials.
+   credentials. When the source's CPU has AES instructions, the
+   connection prefers AES-GCM to OpenSSH's default ChaCha20, which
+   needs about twice the CPU per byte (between two boxes, one rsync went
+   from 108 to 131 MB/s); a destination that offers neither gets the
+   default choice.
 
 Prerequisites: `rsync`, `rrsync` (Debian's rsync 3.2.4 or later ships it as
 `/usr/bin/rrsync`) and OpenSSH 7.7 or later on the destination, and sshd
