@@ -464,7 +464,11 @@ else
   # Parallel streams: list the source once (NUL-separated, so any name
   # will do), split its files into n lists of about equal size, and run
   # one rsync per list. No -r: a directory in a list is then created, not
-  # copied whole (--files-from implies --dirs and --relative).
+  # copied whole (--files-from implies --dirs and --relative). Every folder
+  # a stream creates stays writable by its owner (--chmod=Du+w): rsync
+  # gives a new folder the source's mode, and one stream ending would
+  # otherwise make a read-only folder final while another still writes
+  # into it (Codex on PR 195; one rsync defers that to its own end).
   find "$SRC" -mindepth 1 \( -type d -printf 'd %P\0' \) -o \( -type f -printf 'f %s %P\0' \) -o -printf 'o\0' >"$J/listing" 2>&7 7>&- || fail "could not list the whole source folder"
   perl "$J/split.pl" "$n" "$J" <"$J/listing" 2>&7 7>&- || fail "could not split the file list"
   i=0
@@ -476,7 +480,7 @@ else
   while [ $i -lt "$n" ]; do
     if [ -s "$J/list.$i" ]; then
       perl "$J/cap.pl" progress "$J/s.$i" <"$J/s.$i/out" 7>&- &
-      rsync -t $ROPTS --from0 --files-from="$J/list.$i" -e "$xssh" -- "$SRC/" "$DEST" >"$J/s.$i/out" 2>&7 7>&- &
+      rsync -t $ROPTS --chmod=Du+w --from0 --files-from="$J/list.$i" -e "$xssh" -- "$SRC/" "$DEST" >"$J/s.$i/out" 2>&7 7>&- &
       rpids="$rpids $!"
     fi
     i=$((i + 1))

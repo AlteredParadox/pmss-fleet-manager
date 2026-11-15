@@ -829,7 +829,9 @@ when the boxes' disks keep up (between two boxes, one rsync managed
 data at 14 MB/s, where streams would not help). What one rsync does not
 do the same way: a single large file still goes in one stream; folder
 modification times may not match the source's (other streams keep writing
-into a folder after its time is set); and each stream is one more login,
+into a folder after its time is set); a read-only folder arrives writable
+by its owner (for the same reason; files keep their modes); and each
+stream is one more login,
 SSH connection and rrsync process on both boxes. A source that cannot be
 listed whole (an unreadable folder in it) is not copied at all. The
 job's exit code is 0 only if every stream's is, otherwise the gravest

@@ -1608,6 +1608,38 @@ func TestXferRunnerStreamsKeep(t *testing.T) {
 	}
 }
 
+// A read-only folder of the source arrives writable by its owner when
+// streams copy it: several streams write into it, and the first to end
+// must not make it final while another still writes (Codex on PR 195).
+// Its files arrive, whichever stream carried them.
+func TestXferRunnerStreamsReadOnlyFolder(t *testing.T) {
+	j := startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", streams: 4, noLink: true, fill: func(src string) {
+		ro := filepath.Join(src, "ro")
+		os.Mkdir(ro, 0o700)
+		for i := 0; i < 8; i++ {
+			os.WriteFile(filepath.Join(ro, fmt.Sprintf("f%d", i)), bytes.Repeat([]byte("r"), 1000*(i+1)), 0o600)
+		}
+		os.Chmod(ro, 0o555)
+	}})
+	t.Cleanup(func() {
+		os.Chmod(filepath.Join(j.src, "ro"), 0o700)
+		os.Chmod(filepath.Join(j.dst, "ro"), 0o700)
+	})
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	if l.rc != "0" {
+		t.Fatalf("status: %+v", l)
+	}
+	fi, err := os.Stat(filepath.Join(j.dst, "ro"))
+	if err != nil || fi.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("read-only folder not left writable by its owner: %v %v", fi.Mode(), err)
+	}
+	for i := 0; i < 8; i++ {
+		if got := readFileOr(filepath.Join(j.dst, "ro", fmt.Sprintf("f%d", i))); len(got) != 1000*(i+1) {
+			t.Errorf("ro/f%d: %d bytes", i, len(got))
+		}
+	}
+}
+
 // A move in streams removes the source only after every stream exited 0.
 func TestXferRunnerStreamsMove(t *testing.T) {
 	j := startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", streams: 3, move: true, noLink: true, fill: fillTree})
