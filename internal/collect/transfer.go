@@ -54,6 +54,15 @@ const xferJobDir = ".config/pmss-fleet-manager/transfers"
 // 142, reproduced against rrsync 3.2.7).
 const xferRrsyncOpts = "-wo -no-del -munge"
 
+// xferRrsyncNoLock goes on the key line of a copy in parallel streams
+// only: rrsync otherwise lets one session at a time into its directory
+// (an flock on it), and refuses the others. The lock is no confinement
+// (rrsync's own words: "a best-effort convenience ..., not a security
+// control"); with it off, rrsync 3.2.7 and 3.5.0 still check every path
+// and run rsync with the same options, 3.5.0 keeping its path pins open
+// across the exec.
+const xferRrsyncNoLock = "-no-lock"
+
 // xferRrsync is the rrsync the job key is forced into: the system's, at
 // a fixed path (Debian's rsync package; all PMSS boxes), never whatever
 // PATH finds first (daybreak review: a user-writable rrsync ahead in PATH
@@ -77,8 +86,9 @@ const (
 const xferScanTimeout = "60"
 
 // xferOutCap bounds what any job script may send back; the largest, a
-// status read, stays under 19 KiB (the job files are bounded by cap.pl and
-// read with head -c). More is not a job script's answer, and is refused
+// status read, stays under 24 KiB (19 KiB, plus 4.2 KiB for eight
+// streams' progress; the job files are bounded by cap.pl and read with
+// head -c). More is not a job script's answer, and is refused
 // before it is split: a box sending megabytes of bare newlines must not
 // cost the dashboard millions of strings (daybreak review B3).
 const xferOutCap = 32768
@@ -264,7 +274,7 @@ fi
 `
 
 // xferKeyAddScript appends the job's key line to authorized_keys under a
-// lock on ~/.ssh: copy, append, rename, so no other line is rewritten and
+// lock on ~/.ssh (NOLOCK=1 adds xferRrsyncNoLock to its command): copy, append, rename, so no other line is rewritten and
 // the file keeps its mode. The comment records what this step created
 // (+dir ~/.ssh, +new the file, +nl the newline before the line) so removal
 // can put the file back byte for byte. Needs $d and $rr from the claim.
@@ -285,7 +295,9 @@ else
   flags="$flags+new"
 fi
 exp=$(date -d '+30 minutes' +%Y%m%d%H%M) || die "date failed"
-line="restrict,expiry-time=\"$exp\",command=\"$rr ` + xferRrsyncOpts + ` '$d'\" ssh-ed25519 $BLOB pfm-xfer-$TOKEN$flags"
+ro="` + xferRrsyncOpts + `"
+[ "${NOLOCK:-0}" = 1 ] && ro="$ro ` + xferRrsyncNoLock + `"
+line="restrict,expiry-time=\"$exp\",command=\"$rr $ro '$d'\" ssh-ed25519 $BLOB pfm-xfer-$TOKEN$flags"
 printf '%s\n' "$line" >>"$tmp" && mv -f -- "$tmp" "$ak" || { rm -f -- "$tmp"; die "cannot write authorized_keys"; }
 printf 'KEYLINE %s\n' "$line"
 `
@@ -390,9 +402,10 @@ seg_end(); out();
 `
 
 // xferRunScript is the detached runner on the source, after the SRC,
-// DEST, PORT, HKALG, SSH, ROPTS and MOVE assignments the launch writes in
-// front of it (ROPTS: the mode's rsync options, see xferRsyncOpts; MOVE:
-// 1 to remove the source after a clean copy). mkdir "started" makes it
+// DEST, PORT, HKALG, SSH, ROPTS, MOVE and STREAMS assignments the launch
+// writes in front of it (ROPTS: the mode's rsync options, see
+// xferRsyncOpts; MOVE: 1 to remove the source after a clean copy;
+// STREAMS: how many rsyncs copy at once, 1 to 8, see xferSplitScript). mkdir "started" makes it
 // run at most once per job, whoever launches it how often. The key files
 // go when it ends, however it ends; rc is written last, atomically.
 //
@@ -419,32 +432,105 @@ J=$(cd "$(dirname -- "$0")" && pwd -P) || exit 1
 LC_ALL=C; export LC_ALL
 umask 077
 mkdir "$J/started" 2>/dev/null || exit 0
-rpid=""
+rpids=""
 copt=""
 grep -qw aes /proc/cpuinfo 2>/dev/null && copt="-o Ciphers=^` + xferCiphers + `"
-finish() { rm -f "$J/key" "$J/key.pub" "$J/out" "$J/err"; printf '%s\n' "$1" >"$J/rc.tmp" && mv -f "$J/rc.tmp" "$J/rc"; }
+n=${STREAMS:-1}
+case "$n" in [1-8]) ;; *) n=1;; esac
+finish() { rm -f "$J/key" "$J/key.pub" "$J/out" "$J/err" "$J/listing" "$J"/list.* "$J"/s.*/out; printf '%s\n' "$1" >"$J/rc.tmp" && mv -f "$J/rc.tmp" "$J/rc"; }
 trap 'rm -f "$J/key" "$J/key.pub"' EXIT
-trap '[ -n "$rpid" ] && kill "$rpid" 2>/dev/null; finish cancelled; exit 143' TERM INT HUP
+trap '[ -n "$rpids" ] && kill $rpids 2>/dev/null; finish cancelled; exit 143' TERM INT HUP
 # Without a pid the copy could not be cancelled: no pid, no copy. The
 # marker goes too, so a job whose rc cannot be written either is not left
 # looking started (the launch then stays unconfirmed, and cancel ends it).
 { echo $$ >"$J/pid.tmp" && mv -f "$J/pid.tmp" "$J/pid"; } 2>/dev/null || { finish "error: cannot write the pid file"; rmdir "$J/started"; exit 1; }
 date +%s >"$J/started_at"
-mkfifo "$J/out" "$J/err" || { finish "error: mkfifo failed"; exit 1; }
-perl "$J/cap.pl" progress "$J" <"$J/out" &
+# fail ends a job before any rsync started; the errors collector gets its
+# end of file first, so what went wrong is in the errors file.
+fail() { exec 7>&-; wait; finish "error: $1"; exit 1; }
+mkfifo "$J/err" || fail "mkfifo failed"
 perl "$J/cap.pl" errors "$J" <"$J/err" &
-rsync -rt --no-inc-recursive $ROPTS \
-  -e "$SSH -F /dev/null -p $PORT -i $J/key -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$J/known_hosts -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=$HKALG -o IdentitiesOnly=yes $copt -o BatchMode=yes -o PreferredAuthentications=publickey -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=30 -o ServerAliveInterval=60" \
-  -- "$SRC/" "$DEST" >"$J/out" 2>"$J/err" &
-rpid=$!
-wait "$rpid"; rc=$?
+# Every rsync writes its errors into this one pipe, which the runner holds
+# open until all of them have ended: the collector sees its end of file
+# only then, never between one stream closing and another opening.
+exec 7>"$J/err"
+xssh="$SSH -F /dev/null -p $PORT -i $J/key -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$J/known_hosts -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=$HKALG -o IdentitiesOnly=yes $copt -o BatchMode=yes -o PreferredAuthentications=publickey -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=30 -o ServerAliveInterval=60"
+if [ "$n" = 1 ]; then
+  mkfifo "$J/out" || fail "mkfifo failed"
+  perl "$J/cap.pl" progress "$J" <"$J/out" 7>&- &
+  rsync -rt --no-inc-recursive $ROPTS -e "$xssh" -- "$SRC/" "$DEST" >"$J/out" 2>&7 7>&- &
+  rpids=$!
+else
+  # Parallel streams: list the source once (NUL-separated, so any name
+  # will do), split its files into n lists of about equal size, and run
+  # one rsync per list. No -r: a directory in a list is then created, not
+  # copied whole (--files-from implies --dirs and --relative).
+  find "$SRC" -mindepth 1 \( -type d -printf 'd %P\0' \) -o \( -type f -printf 'f %s %P\0' \) -o -printf 'o\0' >"$J/listing" 2>&7 7>&- || fail "could not list the whole source folder"
+  perl "$J/split.pl" "$n" "$J" <"$J/listing" 2>&7 7>&- || fail "could not split the file list"
+  i=0
+  while [ $i -lt "$n" ]; do
+    { mkdir "$J/s.$i" && mkfifo "$J/s.$i/out"; } || fail "mkfifo failed"
+    i=$((i + 1))
+  done
+  i=0
+  while [ $i -lt "$n" ]; do
+    if [ -s "$J/list.$i" ]; then
+      perl "$J/cap.pl" progress "$J/s.$i" <"$J/s.$i/out" 7>&- &
+      rsync -t $ROPTS --from0 --files-from="$J/list.$i" -e "$xssh" -- "$SRC/" "$DEST" >"$J/s.$i/out" 2>&7 7>&- &
+      rpids="$rpids $!"
+    fi
+    i=$((i + 1))
+  done
+fi
+# One exit code for the job: 0 only if every stream exited 0, otherwise
+# the gravest a stream gave (any code but 23 and 24, then 23 some files
+# not transferred, then 24 some vanished).
+rc=0; worst=0
+for p in $rpids; do
+  wait "$p"; r=$?
+  case "$r" in 0) k=0;; 24) k=1;; 23) k=2;; *) k=3;; esac
+  [ "$k" -gt "$worst" ] && { worst=$k; rc=$r; }
+done
+exec 7>&-
 wait
-rpid=""
+rpids=""
 if [ "${MOVE:-0}" = 1 ] && [ "$rc" = 0 ]; then
   trap '' TERM INT HUP
   printf 'remove\n' >"$J/stage"
 ` + xferRemoveSnippet + `fi
 finish "$rc"
+`
+
+// xferSplitScript splits the runner's listing (NUL-terminated records:
+// "d <path>" a directory, "f <size> <path>" a regular file, "o" anything
+// else) into n NUL-separated lists, list.0 to list.<n-1>. Each file goes
+// to the list with the fewest bytes so far, in listing order, so memory
+// stays flat however many files there are; the directories all go to
+// list.0, so empty ones arrive too. Writes plan (each list's bytes) and
+// skipped (the "o" records: symlinks and special files, which rsync would
+// have skipped).
+const xferSplitScript = `use strict; use warnings;
+my ($n, $dir) = @ARGV;
+$/ = "\0";
+my (@fh, @tot, $other);
+for my $i (0 .. $n - 1) { open($fh[$i], ">", "$dir/list.$i") or die "list.$i: $!\n"; $tot[$i] = 0 }
+$other = 0;
+while (my $r = <STDIN>) {
+  chomp $r;
+  if ($r =~ /\Ad (.+)\z/s) { print { $fh[0] } "$1\0" or die "write: $!\n" }
+  elsif ($r =~ /\Af (\d+) (.+)\z/s) {
+    my $m = 0;
+    for my $i (1 .. $n - 1) { $m = $i if $tot[$i] < $tot[$m] }
+    $tot[$m] += $1;
+    print { $fh[$m] } "$2\0" or die "write: $!\n";
+  }
+  elsif ($r eq "o") { $other++ }
+  else { die "unexpected listing record\n" }
+}
+for my $f (@fh) { close $f or die "close: $!\n" }
+sub put { my ($name, $data) = @_; open(my $f, ">", "$dir/$name.tmp") or die "$name: $!\n"; print $f $data; close $f or die "$name: $!\n"; rename "$dir/$name.tmp", "$dir/$name" or die "$name: $!\n" }
+put("plan", join(" ", @tot) . "\n");
+put("skipped", "$other\n");
 `
 
 // xferRemoveSnippet is the move's removal step, within the runner after a
@@ -465,6 +551,10 @@ const xferRemoveSnippet = `  find "$SRC" -type f ! -newer "$J/started_at" -delet
   printf '%s\n' "$mv_res" >"$J/move.tmp" && mv -f "$J/move.tmp" "$J/move"
 `
 
+// xferMaxStreams is the most rsyncs one copy runs at once: each is one
+// more login and one more rrsync process on the destination.
+const xferMaxStreams = 8
+
 // xferCiphers are the ciphers a source with AES instructions puts first
 // (see xferRunScript).
 const xferCiphers = "aes128-gcm@openssh.com,aes256-gcm@openssh.com"
@@ -481,6 +571,8 @@ const xferLaunchScript = `[ -d "$J" ] || die "job directory missing"
 printf '%s\n' "$KNOWN" >"$J/known_hosts" || die "cannot write known_hosts"
 cat >"$J/cap.pl" <<'PFM_CAP_EOF'
 ` + xferCapScript + `PFM_CAP_EOF
+cat >"$J/split.pl" <<'PFM_SPLIT_EOF'
+` + xferSplitScript + `PFM_SPLIT_EOF
 { printf '%s\n' "$RUNVARS"; cat <<'PFM_RUN_EOF'
 ` + xferRunScript + `PFM_RUN_EOF
 } >"$J/run.sh" || die "cannot write run.sh"
@@ -492,13 +584,22 @@ if [ -f "$J/pid" ] || [ -f "$J/rc" ]; then echo "LAUNCHED"; else echo "UNCONFIRM
 // xferStatusScript reads a job's bounded files. Liveness is read before rc:
 // the runner writes rc before it exits, so "not alive" followed by "no rc"
 // means it ended without a result, never that rc was about to appear.
-// stage, move and remove_err belong to a move's removal step.
+// stage, move and remove_err belong to a move's removal step; plan and
+// sprogress (one per stream: its number, then its progress line) to a
+// copy in parallel streams.
 const xferStatusScript = `[ -d "$J" ] || { echo "NOJOB"; exit 0; }
 [ -d "$J/started" ] && echo "STARTED"
 [ -f "$J/pid" ] && echo "PIDFILE"
 alive && echo "ALIVE"
-for f in rc pid started_at skipped kept conflicts errors.count stage move; do [ -f "$J/$f" ] && printf '%s=%s\n' "$f" "$(head -c 64 "$J/$f" | tr -d '\n')"; done
+for f in rc pid started_at errors.count stage move; do [ -f "$J/$f" ] && printf '%s=%s\n' "$f" "$(head -c 64 "$J/$f" | tr -d '\n')"; done
+# Counts are summed over the job and its streams' directories (s.<i>).
+for f in skipped kept conflicts; do
+  v=$(cat -- "$J/$f" "$J"/s.*/"$f" 2>/dev/null | head -c 1024 | awk '$1 ~ /^[0-9]+$/ { s += $1; n++ } END { if (n) print s }')
+  [ -n "$v" ] && printf '%s=%s\n' "$f" "$v"
+done
 [ -f "$J/progress" ] && printf 'progress=%s\n' "$(head -c 512 "$J/progress" | tr -d '\r\n')"
+[ -f "$J/plan" ] && printf 'plan=%s\n' "$(head -c 200 "$J/plan" | tr -d '\n')"
+for d in "$J"/s.*; do [ -f "$d/progress" ] && printf 'sprogress=%s %s\n' "${d##*.}" "$(head -c 512 "$d/progress" | tr -d '\r\n')"; done
 [ -s "$J/remove_err" ] && printf 'remove_err=%s\n' "$(head -c 300 "$J/remove_err" | tr '\r\n' '  ')"
 [ -f "$J/errors" ] && { echo "--errors"; head -c 16384 "$J/errors"; }
 exit 0
@@ -640,7 +741,7 @@ func xferOnly(lines []string, key string) (string, bool) {
 // and adds the job's restricted key line. The resolved directory comes
 // back even on an error after the claim, with created telling whether
 // this job made it, so the caller can try to remove what it created.
-func xferDstPrepare(ctx context.Context, cli *sshx.Client, token, dst, blob, mode string) (dir string, created bool, err error) {
+func xferDstPrepare(ctx context.Context, cli *sshx.Client, token, dst, blob, mode string, streams int) (dir string, created bool, err error) {
 	if !xferBlobRe.MatchString(blob) {
 		return "", false, errors.New("bad key")
 	}
@@ -651,7 +752,11 @@ func xferDstPrepare(ctx context.Context, cli *sshx.Client, token, dst, blob, mod
 	if err := validXferPath(dst, true); err != nil {
 		return "", false, fmt.Errorf("destination: %w", err)
 	}
-	lines, err := xferRun(ctx, cli, xferVars("TOKEN", token, "DST", dst, "BLOB", blob, "MODE", mode), xferDstClaimScript+xferKeyAddScript)
+	nolock := "0"
+	if streams > 1 {
+		nolock = "1"
+	}
+	lines, err := xferRun(ctx, cli, xferVars("TOKEN", token, "DST", dst, "BLOB", blob, "MODE", mode, "NOLOCK", nolock), xferDstClaimScript+xferKeyAddScript)
 	dir, created, perr := parseDstClaim(lines)
 	if err != nil {
 		return dir, created, err
@@ -714,7 +819,7 @@ func xferHostKeyAlgs(keyType string) string {
 
 // xferLaunchVars renders the launch script's input: the job's known_hosts
 // line (the pinned key, exactly) and the runner's assignments.
-func xferLaunchVars(token, src string, d xferDest, mode string, move bool) (string, error) {
+func xferLaunchVars(token, src string, d xferDest, mode string, move bool, streams int) (string, error) {
 	kf := strings.Fields(d.HostKey)
 	if len(kf) < 2 || !xferAlgRe.MatchString(kf[0]) {
 		return "", errors.New("destination has no pinned host key")
@@ -728,13 +833,16 @@ func xferLaunchVars(token, src string, d xferDest, mode string, move bool) (stri
 	if move {
 		mv = "1"
 	}
-	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", xferHostKeyAlgs(kf[0]), "SSH", "/usr/bin/ssh", "ROPTS", xferRsyncOpts(mode), "MOVE", mv)
+	if streams < 1 || streams > xferMaxStreams {
+		return "", fmt.Errorf("streams must be 1-%d", xferMaxStreams)
+	}
+	run := xferVars("SRC", src, "DEST", d.User+"@"+host+":", "PORT", strconv.Itoa(d.Port), "HKALG", xferHostKeyAlgs(kf[0]), "SSH", "/usr/bin/ssh", "ROPTS", xferRsyncOpts(mode), "MOVE", mv, "STREAMS", strconv.Itoa(streams))
 	return xferVars("TOKEN", token, "KNOWN", name+" "+kf[0]+" "+kf[1], "RUNVARS", run), nil
 }
 
 // xferLaunch starts the runner on the source.
-func xferLaunch(ctx context.Context, cli *sshx.Client, token, src string, d xferDest, mode string, move bool) (confirmed bool, err error) {
-	vars, err := xferLaunchVars(token, src, d, mode, move)
+func xferLaunch(ctx context.Context, cli *sshx.Client, token, src string, d xferDest, mode string, move bool, streams int) (confirmed bool, err error) {
+	vars, err := xferLaunchVars(token, src, d, mode, move, streams)
 	if err != nil {
 		return false, err
 	}

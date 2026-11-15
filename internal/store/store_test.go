@@ -1659,7 +1659,7 @@ func TestMigrateAddsTransferDstMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := strings.Replace(createTransfersSQL, ",\n\tdst_mode TEXT NOT NULL DEFAULT '', move INTEGER NOT NULL DEFAULT 0, move_state TEXT NOT NULL DEFAULT ''", "", 1)
+	old := strings.Replace(createTransfersSQL, ",\n\tdst_mode TEXT NOT NULL DEFAULT '', move INTEGER NOT NULL DEFAULT 0, move_state TEXT NOT NULL DEFAULT '',\n\tstreams INTEGER NOT NULL DEFAULT 1", "", 1)
 	if old == createTransfersSQL {
 		t.Fatal("old schema not derived")
 	}
@@ -1676,11 +1676,11 @@ func TestMigrateAddsTransferDstMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.CreateTransfer(ctx, &Transfer{Token: "u", SrcBoxID: 1, DstBoxID: 2, SrcPath: "x", DstPath: "y", DstMode: "replace", Move: true, Phase: "preparing"}); err != nil {
+	if err := s.CreateTransfer(ctx, &Transfer{Token: "u", SrcBoxID: 1, DstBoxID: 2, SrcPath: "x", DstPath: "y", DstMode: "replace", Move: true, Streams: 4, Phase: "preparing"}); err != nil {
 		t.Fatal(err)
 	}
 	ts, err := s.ListTransfers(ctx)
-	if err != nil || len(ts) != 2 || ts[0].DstMode != "" || ts[0].Move || ts[0].MoveState != "" || ts[1].DstMode != "replace" || !ts[1].Move {
+	if err != nil || len(ts) != 2 || ts[0].DstMode != "" || ts[0].Move || ts[0].MoveState != "" || ts[1].DstMode != "replace" || !ts[1].Move || ts[0].Streams != 1 || ts[1].Streams != 4 {
 		t.Fatalf("transfers after migration: %+v %v", ts, err)
 	}
 	// The removal's outcome is part of what a job's life changes.

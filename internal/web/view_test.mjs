@@ -295,7 +295,7 @@ test('a move may not keep the destination\'s files, and the confirmation says wh
   const sl = { box_rev: 5, path: '/home/u/dl/x', rel: 'dl/x' }, dl = { box_rev: 3, path: '/home/v/in', rel: 'in', dirs: [] };
   const c = V.transferConfirmation(src, sl, dst, dl, 'x', 'new', true);
   assert.equal(c.move, true);
-  assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/dl/x', dst_path: '/home/v/in/x', dst_mode: 'new', move: true });
+  assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/dl/x', dst_path: '/home/v/in/x', dst_mode: 'new', move: true, streams: 1 });
   assert.match(c.lines[2], /^Then the source is removed: once rsync reports every file delivered and checked \(exit code 0\), the files in \/home\/u\/dl\/x on pm1 are deleted/);
   assert.match(c.lines[2], /Any other outcome, a cancel included, leaves the source as it is/);
   // Anything but true is a copy, as every confirmation before 1.17.0.
@@ -305,6 +305,17 @@ test('a move may not keep the destination\'s files, and the confirmation says wh
     assert.equal(V.transferRequest(k).move, false, String(move));
     assert.match(k.lines[2], /^The source stays untouched/);
   }
+});
+
+test('parallel streams: 1, 2, 4 or 8 reach the request (anything else is 1), and the confirmation says what more than one means', () => {
+  const src = { id: 2, name: 'pm1' }, dst = { id: 7, name: 'pmstor01' };
+  const sl = { box_rev: 5, path: '/home/u/dl/x', rel: 'dl/x' }, dl = { box_rev: 3, path: '/home/v/in', rel: 'in', dirs: [] };
+  for (const [given, want] of [['4', 4], [8, 8], [2, 2], [1, 1], [3, 1], [16, 1], ['x', 1], [undefined, 1]]) {
+    const c = V.transferConfirmation(src, sl, dst, dl, 'x', 'new', false, given);
+    assert.equal(V.transferRequest(c).streams, want, String(given));
+    assert.equal(c.lines.length, want > 1 ? 4 : 3, String(given));
+  }
+  assert.match(V.transferConfirmation(src, sl, dst, dl, 'x', 'new', false, 4).lines[3], /^in 4 parallel streams: .*folder modification times may not match/);
 });
 
 test('only a confirmed launch toasts "copy started" (daybreak review)', () => {
@@ -335,7 +346,7 @@ test('the start-copy body uses the confirmed paths and the revisions they were l
   // names rev 3, so the server refuses with 409 instead of copying to the
   // record's new target.
   dst.box_rev = 4;
-  assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/dl/x', dst_path: '/home/v/in/x copy', dst_mode: 'new', move: false });
+  assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/dl/x', dst_path: '/home/v/in/x copy', dst_mode: 'new', move: false, streams: 1 });
   assert.equal(c.srcRev, 5);
 });
 
@@ -344,7 +355,7 @@ test('an existing destination folder is sent as itself, with its mode; the name 
   const sl = { box_rev: 5, path: '/home/u/data', rel: 'data' }, dl = { box_rev: 3, path: '/home/v/data', rel: 'data', dirs: ['x'] };
   for (const mode of ['keep', 'replace']) {
     const c = V.transferConfirmation(src, sl, dst, dl, 'x', mode);
-    assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/data', dst_path: '/home/v/data', dst_mode: mode, move: false });
+    assert.deepEqual(V.transferRequest(c), { dst_box: 7, dst_rev: 3, src_path: '/home/u/data', dst_path: '/home/v/data', dst_mode: mode, move: false, streams: 1 });
     assert.equal(c.exists, false, mode);
     assert.match(c.lines[1], /^to pmstor01: \/home\/v\/data\/ \(an existing folder; /);
   }

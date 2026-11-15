@@ -387,6 +387,9 @@ function newFolderError(name) {
 // folder itself, with files already there kept or replaced when they
 // differ in size or time. A copy from before 1.15.0 carries '' (new).
 function transferMode(mode) { return mode === 'keep' || mode === 'replace' ? mode : 'new'; }
+// transferStreams: how many rsyncs a copy runs at once, as the form offers
+// them (1, 2, 4 or 8); anything else is 1, today's single rsync.
+function transferStreams(n) { n = Number(n); return [2, 4, 8].includes(n) ? n : 1; }
 // transferModeLabel: how a copy's destination reads on its card ('' for a
 // new folder, the usual case).
 function transferModeLabel(v) {
@@ -402,11 +405,12 @@ function transferModeLabel(v) {
 // under, never the boxes' state at submit time: a box edited since
 // (perhaps to another machine) is refused with 409 instead of being
 // copied from or to (fred on PR 142). move asks for the source to be
-// removed after a clean copy.
+// removed after a clean copy; streams is how many rsyncs copy at once.
 function transferRequest(c) {
   const mode = transferMode(c.mode);
   return { dst_box: Number(c.dstBox), dst_rev: Number(c.dstRev) || 0, src_path: String(c.srcPath),
-    dst_path: mode === 'new' ? joinPath(c.dstParent, c.name) : String(c.dstParent), dst_mode: mode, move: c.move === true };
+    dst_path: mode === 'new' ? joinPath(c.dstParent, c.name) : String(c.dstParent), dst_mode: mode, move: c.move === true,
+    streams: transferStreams(c.streams) };
 }
 // moveError: why a move cannot start with this mode ('' when it can): a
 // kept destination file may differ from the source's, whose only copy the
@@ -422,11 +426,12 @@ function draftAfterStart(current, started, blank) {
 }
 // transferConfirmation: what the confirmation step shows, from the two
 // resolved listings (source folder, destination folder), the name of the
-// new folder (mode new), the mode, and whether this is a move (the source
-// removed after a clean copy).
-function transferConfirmation(srcBox, srcList, dstBox, dstList, name, mode, move) {
+// new folder (mode new), the mode, whether this is a move (the source
+// removed after a clean copy), and the number of parallel streams.
+function transferConfirmation(srcBox, srcList, dstBox, dstList, name, mode, move, streams) {
   mode = transferMode(mode);
   move = move === true;
+  streams = transferStreams(streams);
   const dstPath = mode === 'new' ? joinPath(dstList.path, name) : dstList.path;
   const how = {
     new: 'a new folder, created for this copy',
@@ -438,12 +443,13 @@ function transferConfirmation(srcBox, srcList, dstBox, dstList, name, mode, move
     : `The source stays untouched: nothing in ${srcList.path} on ${srcBox.name} is moved, changed or deleted.`;
   return {
     srcBox: srcBox.id, srcRev: srcList.box_rev, srcPath: srcList.path,
-    dstBox: dstBox.id, dstRev: dstList.box_rev, dstParent: dstList.path, name, mode, move,
+    dstBox: dstBox.id, dstRev: dstList.box_rev, dstParent: dstList.path, name, mode, move, streams,
     exists: mode === 'new' && (dstList.dirs || []).includes(name),
     lines: [
       `from ${srcBox.name}: ${srcList.path}/ (its contents)`,
       `to ${dstBox.name}: ${dstPath}/ (${how})`,
       source,
+      ...(streams > 1 ? [`in ${streams} parallel streams: the files are split by size between ${streams} rsyncs, each with its own login; folder modification times may not match the source's.`] : []),
     ],
   };
 }
@@ -559,5 +565,5 @@ function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
 }
 
-globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError };
+globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams };
 })();
