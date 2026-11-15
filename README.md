@@ -521,7 +521,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.19
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.20
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -1280,7 +1280,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.19.2 is the current release. The code was written against five real Pulsed
+1.20.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1291,6 +1291,21 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.20.0**
+
+- **Parallel streams for box-to-box copies and moves.** The copy form has
+  a *parallel streams* choice (1, 2, 4 or 8; 1 by default, as before):
+  the source's files are split by size between that many rsyncs running
+  at once. One SSH connection is limited by the CPU it spends on
+  encryption, so several can be faster when the disks keep up; a single
+  large file still goes in one stream, folder modification times may not
+  match the source's, and a read-only folder arrives writable by its
+  owner. A move still removes its source only after every stream exited 0.
+  Multi-stream key lines add rrsync's `-no-lock`. (#195)
+- **Faster encryption for copies.** When the source's CPU has AES
+  instructions, the copy's SSH connection prefers AES-GCM to OpenSSH's
+  default ChaCha20 (one rsync between two boxes: 108 → 131 MB/s). (#194)
 
 **1.19.2**
 
