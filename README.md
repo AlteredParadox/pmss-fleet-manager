@@ -819,6 +819,24 @@ sets the copy up, starts it and reads its status. Ticking *move* removes
 the source afterwards (see *Moving*, below). There is no sync, no
 `--delete`, no queue and no retries.
 
+*Parallel streams* (1, 2, 4 or 8; 1 by default) splits the work between
+that many rsyncs running at once: the source's files are listed once and
+dealt out by size, each to the stream with the fewest bytes so far, and
+every stream logs in with the same job key at the start. One connection
+is limited by the CPU it spends on encryption, so several can be faster
+when the boxes' disks keep up (between two boxes, one rsync managed
+108 MB/s and four 227 MB/s on cached data; the same disks read uncached
+data at 14 MB/s, where streams would not help). What one rsync does not
+do the same way: a single large file still goes in one stream; folder
+modification times may not match the source's (other streams keep writing
+into a folder after its time is set); a read-only folder arrives writable
+by its owner (for the same reason; files keep their modes); and each
+stream is one more login,
+SSH connection and rrsync process on both boxes. A source that cannot be
+listed whole (an unreadable folder in it) is not copied at all. The
+job's exit code is 0 only if every stream's is, otherwise the gravest
+one, and a move removes its source only after a 0.
+
 How it is authenticated, per copy:
 
 1. The source box generates a fresh ed25519 key in
@@ -831,8 +849,11 @@ How it is authenticated, per copy:
    directory, cannot read anything and cannot use rsync's delete options;
    symlinks it sends are munged on arrival, so even a source that turned
    hostile (it holds the key) cannot use one to write outside the
-   directory; no new login with it after 30 minutes (rsync connects once,
-   so a long copy is not cut off).
+   directory; no new login with it after 30 minutes (each rsync connects
+   once, at the start, so a long copy is not cut off). A copy in parallel
+   streams adds `-no-lock`: rrsync otherwise lets one session at a time
+   into its directory, and that lock confines nothing (rrsync checks
+   every path either way).
    The file is edited under a lock by copy-and-rename; no other line is
    touched, and removal puts it back byte for byte (including `~/.ssh` and
    the file themselves if the copy created them).

@@ -51,6 +51,44 @@ func TestParseXferStatus(t *testing.T) {
 	}
 }
 
+// A copy in streams: the plan and each stream's line are read, a plan
+// that is not the runner's is dropped, and the progress adds up: bytes,
+// files and checks summed, the percentage weighted by each stream's
+// share (one not heard from yet counts 0%), rates added, the longest time.
+func TestXferProgressStreams(t *testing.T) {
+	l := parseXferStatus("STARTED\nPIDFILE\nALIVE\nplan=300 100 0\n" +
+		"sprogress=0      150   50%   10.00MB/s    0:01:40 (xfr#3, to-chk=7/10)\n" +
+		"sprogress=1      100  100%  512.00kB/s    0:00:05 (xfr#2, to-chk=0/2)\n" +
+		"sprogress=9 bogus\n--errors\nplan=1 1")
+	if len(l.plan) != 3 || l.plan[0] != 300 || len(l.sprogress) != 2 {
+		t.Fatalf("%+v", l)
+	}
+	p := xferProgress(l)
+	if p == nil || p.Bytes != 250 || p.Files != 5 || p.ToCheck != 7 || p.Total != 12 || p.Pct != 62 || p.Rate != "10.50MB/s" || p.Time != "0:01:40" {
+		t.Fatalf("%+v", p)
+	}
+	if l := parseXferStatus("plan=1 x 2"); l.plan != nil {
+		t.Errorf("bad plan kept: %v", l.plan)
+	}
+	if l := parseXferStatus("plan=1 2 3 4 5 6 7 8 9"); l.plan != nil {
+		t.Errorf("plan of nine streams kept: %v", l.plan)
+	}
+	if p := xferProgress(parseXferStatus("plan=10 10")); p != nil {
+		t.Errorf("progress before any stream spoke: %+v", p)
+	}
+	if p := xferProgress(parseXferStatus("plan=0\nsprogress=0      0  100%    0.00kB/s    0:00:00 (xfr#0, to-chk=0/1)")); p == nil || p.Pct != 100 {
+		t.Errorf("folders-only plan: %+v", p)
+	}
+	for in, want := range map[string]float64{"1.50GB/s": 1.5 * (1 << 30), "2.00kB/s": 2048, "3MB/s": 3 << 20, "fast": 0, "1.0 MB/s": 0} {
+		if got := parseRate(in); got != want {
+			t.Errorf("parseRate(%q) = %v", in, got)
+		}
+	}
+	if fmtRate(1.5*(1<<30)) != "1.50GB/s" || fmtRate(100) != "0.10kB/s" || hmsSeconds("1:02:03") != 3723 || hmsSeconds("x") != -1 {
+		t.Error("rate or time formatting")
+	}
+}
+
 // Only an exit code finishes a job and only a runner proven gone without
 // one interrupts it; a 99% (or 100%) progress line proves nothing, and a
 // read that shows nothing new leaves the phase alone.
@@ -322,6 +360,12 @@ func TestTransferOnePerSource(t *testing.T) {
 	_, err = m.StartTransfer(ctx, other.ID, TransferRequest{DstBox: b.ID, DstRev: m.poller(b.ID).box.Revision, SrcPath: "data", DstPath: "data", DstMode: "merge"})
 	if !errors.Is(err, ErrTransferInput) || !strings.Contains(err.Error(), "unknown destination mode") {
 		t.Errorf("bad mode: %v", err)
+	}
+	for _, n := range []int{-1, 9} {
+		_, err = m.StartTransfer(ctx, other.ID, TransferRequest{DstBox: b.ID, DstRev: m.poller(b.ID).box.Revision, SrcPath: "data", DstPath: "copy", Streams: n})
+		if !errors.Is(err, ErrTransferInput) || !strings.Contains(err.Error(), "streams must be 1 to 8") {
+			t.Errorf("streams %d: %v", n, err)
+		}
 	}
 	// A move may not keep the destination's files: a kept file may differ
 	// from the source's, whose only copy the removal would then discard.

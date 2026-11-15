@@ -51,6 +51,9 @@ type Transfer struct {
 	// source); "" until then, and for a copy. Stored with the final phase
 	// so it survives the source job's cleanup and a restart.
 	MoveState string `json:"move_state,omitempty"`
+	// Streams is how many rsyncs the copy runs at once (1 to 8; 1 on rows
+	// from before 1.20.0, which all ran one).
+	Streams int `json:"streams"`
 	// PubKey is the job key's base64 blob, saved before the key is added
 	// to the destination: removal matches this exact key.
 	PubKey string `json:"-"`
@@ -79,19 +82,22 @@ const createTransfersSQL = `CREATE TABLE IF NOT EXISTS transfers (
 	phase TEXT NOT NULL, rc TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '',
 	pending INTEGER NOT NULL DEFAULT 0,
 	created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '',
-	dst_mode TEXT NOT NULL DEFAULT '', move INTEGER NOT NULL DEFAULT 0, move_state TEXT NOT NULL DEFAULT '')`
+	dst_mode TEXT NOT NULL DEFAULT '', move INTEGER NOT NULL DEFAULT 0, move_state TEXT NOT NULL DEFAULT '',
+	streams INTEGER NOT NULL DEFAULT 1)`
 
 // Columns added to transfers after 1.13.0, for a database from before
-// they existed: dst_mode (1.15.0), move and move_state (1.17.0);
+// they existed: dst_mode (1.15.0), move and move_state (1.17.0), streams
+// (1.20.0);
 // constants like the others.
 const (
 	addTransferDstModeColSQL   = "ALTER TABLE transfers ADD COLUMN dst_mode TEXT NOT NULL DEFAULT ''"
 	addTransferMoveColSQL      = "ALTER TABLE transfers ADD COLUMN move INTEGER NOT NULL DEFAULT 0"
 	addTransferMoveStateColSQL = "ALTER TABLE transfers ADD COLUMN move_state TEXT NOT NULL DEFAULT ''"
+	addTransferStreamsColSQL   = "ALTER TABLE transfers ADD COLUMN streams INTEGER NOT NULL DEFAULT 1"
 )
 
 const transferCols = `id, token, src_box_id, src_endpoint, src_host_key, dst_box_id, dst_endpoint, dst_host_key,
-	src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at, dst_mode, move, move_state`
+	src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at, dst_mode, move, move_state, streams`
 
 // listTransfersSQL is a constant: nothing from a request is spliced in.
 const listTransfersSQL = "SELECT " + transferCols + " FROM transfers ORDER BY id"
@@ -100,9 +106,9 @@ const listTransfersSQL = "SELECT " + transferCols + " FROM transfers ORDER BY id
 func (s *Store) CreateTransfer(ctx context.Context, t *Transfer) error {
 	t.CreatedAt = time.Now().UTC().Truncate(time.Second)
 	res, err := s.db.ExecContext(ctx, `INSERT INTO transfers (token, src_box_id, src_endpoint, src_host_key, dst_box_id, dst_endpoint, dst_host_key,
-		src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at, dst_mode, move, move_state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		src_path, dst_path, pubkey, phase, rc, result, pending, created_at, finished_at, dst_mode, move, move_state, streams) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Token, t.SrcBoxID, t.SrcEndp, t.SrcHostKey, t.DstBoxID, t.DstEndp, t.DstHostKey,
-		t.SrcPath, t.DstPath, t.PubKey, t.Phase, t.RC, t.Result, t.Pending, t.CreatedAt.Format(time.RFC3339), fmtTime(t.FinishedAt), t.DstMode, t.Move, t.MoveState)
+		t.SrcPath, t.DstPath, t.PubKey, t.Phase, t.RC, t.Result, t.Pending, t.CreatedAt.Format(time.RFC3339), fmtTime(t.FinishedAt), t.DstMode, t.Move, t.MoveState, t.Streams)
 	if err != nil {
 		return err
 	}
@@ -135,7 +141,7 @@ func (s *Store) ListTransfers(ctx context.Context) ([]*Transfer, error) {
 		var t Transfer
 		var created, finished string
 		if err := rows.Scan(&t.ID, &t.Token, &t.SrcBoxID, &t.SrcEndp, &t.SrcHostKey, &t.DstBoxID, &t.DstEndp, &t.DstHostKey,
-			&t.SrcPath, &t.DstPath, &t.PubKey, &t.Phase, &t.RC, &t.Result, &t.Pending, &created, &finished, &t.DstMode, &t.Move, &t.MoveState); err != nil {
+			&t.SrcPath, &t.DstPath, &t.PubKey, &t.Phase, &t.RC, &t.Result, &t.Pending, &created, &finished, &t.DstMode, &t.Move, &t.MoveState, &t.Streams); err != nil {
 			return nil, err
 		}
 		t.CreatedAt, _ = time.Parse(time.RFC3339, created)

@@ -20,10 +20,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -547,16 +549,18 @@ func TestXferRunnerNoPidNoRc(t *testing.T) {
 
 // fakeSSH stands in for ssh in the local runner test: it drops the
 // options (all its arguments go to $FAKE_ARGSFILE when that is set), then
-// runs the remote command the way sshd runs a forced command, through
-// rrsync confined to $FAKE_DST.
+// runs the remote command the way sshd runs a forced command: the key
+// line's own command when $FAKE_FORCED holds it, otherwise rrsync
+// confined to $FAKE_DST.
 const fakeSSH = `#!/bin/sh
 [ -n "${FAKE_ARGSFILE:-}" ] && printf '%s\n' "$*" >"$FAKE_ARGSFILE"
 while [ $# -gt 0 ]; do
   case "$1" in -F|-p|-i|-o|-l) shift 2;; -*) shift;; *) break;; esac
 done
 shift
-[ -n "${FAKE_PIDFILE:-}" ] && echo $$ >"$FAKE_PIDFILE"
+[ -n "${FAKE_PIDFILE:-}" ] && echo $$ >>"$FAKE_PIDFILE"
 [ -n "${FAKE_SLEEP:-}" ] && sleep "$FAKE_SLEEP"
+[ -n "${FAKE_FORCED:-}" ] && SSH_ORIGINAL_COMMAND="$*" exec sh -c "$FAKE_FORCED"
 SSH_ORIGINAL_COMMAND="$*" exec rrsync ` + xferRrsyncOpts + ` "$FAKE_DST"
 `
 
@@ -590,6 +594,8 @@ type localOpts struct {
 	mode, dst    string
 	slow, move   bool
 	noLink       bool
+	streams      int              // rsyncs at once (0: 1)
+	fill         func(src string) // adds to the source before the copy
 	prepare      func(home string)
 	beforeLaunch []func(jobDir string)
 }
@@ -611,6 +617,9 @@ func startLocalJobOpts(t *testing.T, o localOpts) localJob {
 	if !o.noLink {
 		os.Symlink("/etc/passwd", filepath.Join(src, "link"))
 	}
+	if o.fill != nil {
+		o.fill(src)
+	}
 	tok := "0123456789abcdef0123456789abcdef"
 	env := []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "FAKE_ARGSFILE=" + filepath.Join(bin, "ssh.args")}
 	if slow {
@@ -622,12 +631,22 @@ func startLocalJobOpts(t *testing.T, o localOpts) localJob {
 		t.Fatalf("prepare: %s", out)
 	}
 	blob := strings.Fields(xferField(lines, "PUB"))[1]
-	out = runJobScript(t, home, xferVars("TOKEN", tok, "DST", dstPath, "BLOB", blob, "MODE", mode), xferDstClaimScript+xferKeyAddScript, env...)
+	streams := max(o.streams, 1)
+	nolock := "0"
+	if streams > 1 {
+		nolock = "1"
+	}
+	out = runJobScript(t, home, xferVars("TOKEN", tok, "DST", dstPath, "BLOB", blob, "MODE", mode, "NOLOCK", nolock), xferDstClaimScript+xferKeyAddScript, env...)
 	dst, created, err := parseDstClaim(strings.Split(out, "\n"))
 	if err != nil || created != (mode == xferModeNew) {
 		t.Fatalf("claim: %v created=%v\n%s", err, created, out)
 	}
-	env = append(env, "FAKE_DST="+dst)
+	// The stand-in runs exactly the command the key line forces.
+	forced := regexp.MustCompile(`command="([^"]*)"`).FindStringSubmatch(xferField(strings.Split(out, "\n"), "KEYLINE"))
+	if forced == nil {
+		t.Fatalf("no forced command in the key line:\n%s", out)
+	}
+	env = append(env, "FAKE_DST="+dst, "FAKE_FORCED="+forced[1])
 	for _, f := range beforeLaunch {
 		f(filepath.Join(home, xferJobDir, tok))
 	}
@@ -635,7 +654,7 @@ func startLocalJobOpts(t *testing.T, o localOpts) localJob {
 	if o.move {
 		mv = "1"
 	}
-	run := xferVars("SRC", src, "DEST", "u@example.invalid:", "PORT", "22", "HKALG", "ecdsa-sha2-nistp256", "SSH", filepath.Join(bin, "ssh"), "ROPTS", xferRsyncOpts(mode), "MOVE", mv)
+	run := xferVars("SRC", src, "DEST", "u@example.invalid:", "PORT", "22", "HKALG", "ecdsa-sha2-nistp256", "SSH", filepath.Join(bin, "ssh"), "ROPTS", xferRsyncOpts(mode), "MOVE", mv, "STREAMS", strconv.Itoa(streams))
 	out = runJobScript(t, home, xferVars("TOKEN", tok, "KNOWN", "example.invalid ecdsa-sha2-nistp256 AAAA", "RUNVARS", run), xferLaunchScript, env...)
 	if !strings.Contains(out, "LAUNCHED") && len(beforeLaunch) == 0 {
 		t.Fatalf("launch: %s", out)
@@ -708,6 +727,10 @@ func TestXferRunnerLocal(t *testing.T) {
 	}
 	if !j.keyGone(t) {
 		t.Error("key left on the source")
+	}
+	// One stream keeps rrsync's one-session lock.
+	if ak := readFile(t, filepath.Join(j.home, ".ssh", "authorized_keys")); strings.Contains(ak, xferRrsyncNoLock) {
+		t.Errorf("single-stream key line has %s: %s", xferRrsyncNoLock, ak)
 	}
 	// The transport prefers AES-GCM exactly when this CPU has AES.
 	cpu, _ := os.ReadFile("/proc/cpuinfo")
@@ -889,7 +912,7 @@ func TestXferLaunchVars(t *testing.T) {
 		// negotiated with SHA-2 signatures, never SHA-1 (fred on PR 142).
 		{"ssh-rsa AAAAB3", "h", 22, "h ssh-rsa AAAAB3", "rsa-sha2-512,rsa-sha2-256"},
 	} {
-		v, err := xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: c.host, Port: c.port, HostKey: c.key}, xferModeNew, false)
+		v, err := xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: c.host, Port: c.port, HostKey: c.key}, xferModeNew, false, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -897,10 +920,10 @@ func TestXferLaunchVars(t *testing.T) {
 			t.Errorf("%s: %s", c.key, v)
 		}
 	}
-	if _, err := xferLaunchVars("t", "s", xferDest{HostKey: ""}, xferModeNew, false); err == nil {
+	if _, err := xferLaunchVars("t", "s", xferDest{HostKey: ""}, xferModeNew, false, 1); err == nil {
 		t.Error("no pinned key accepted")
 	}
-	if _, err := xferLaunchVars("t", "s", xferDest{HostKey: "BAD;TYPE AAAA"}, xferModeNew, false); err == nil {
+	if _, err := xferLaunchVars("t", "s", xferDest{HostKey: "BAD;TYPE AAAA"}, xferModeNew, false, 1); err == nil {
 		t.Error("odd key type accepted")
 	}
 }
@@ -1421,11 +1444,241 @@ func TestXferRsyncOpts(t *testing.T) {
 			t.Errorf("%q: %q", mode, got)
 		}
 	}
-	v, err := xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: "h", Port: 22, HostKey: "ssh-ed25519 AAAAC3"}, xferModeKeep, false)
+	v, err := xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: "h", Port: 22, HostKey: "ssh-ed25519 AAAAC3"}, xferModeKeep, false, 1)
 	if err != nil || !strings.Contains(v, "ROPTS="+strings.ReplaceAll(shellQuote("-O --ignore-existing --info=progress2,skip2"), "'", `'\''`)) || !strings.Contains(v, "MOVE='\\''0'\\''") {
 		t.Errorf("launch vars: %v %s", err, v)
 	}
-	if v, err = xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: "h", Port: 22, HostKey: "ssh-ed25519 AAAAC3"}, xferModeNew, true); err != nil || !strings.Contains(v, "MOVE='\\''1'\\''") {
+	if v, err = xferLaunchVars(strings.Repeat("a", 32), "/home/u/src", xferDest{User: "u", Host: "h", Port: 22, HostKey: "ssh-ed25519 AAAAC3"}, xferModeNew, true, 1); err != nil || !strings.Contains(v, "MOVE='\\''1'\\''") {
 		t.Errorf("launch vars (move): %v %s", err, v)
+	}
+}
+
+// fillTree adds 20 files over nested folders to a source, names a copy
+// must carry byte for byte among them, and an empty folder.
+func fillTree(src string) {
+	for i := 0; i < 20; i++ {
+		d := filepath.Join(src, fmt.Sprintf("d%d", i%3), fmt.Sprintf("sub %d", i%4))
+		os.MkdirAll(d, 0o700)
+		os.WriteFile(filepath.Join(d, fmt.Sprintf("f%d", i)), bytes.Repeat([]byte{byte('a' + i)}, 1000*(i+1)), 0o600)
+	}
+	for _, n := range []string{"-dash", "new\nline", "sp ace", "tab\there"} {
+		os.WriteFile(filepath.Join(src, n), []byte(n), 0o600)
+	}
+	os.MkdirAll(filepath.Join(src, "empty", "inner"), 0o700)
+}
+
+// sameTree reports the first regular file or folder of src that dst does
+// not hold with the same content; symlinks are not expected in dst.
+func sameTree(t *testing.T, src, dst string) {
+	t.Helper()
+	filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, _ := filepath.Rel(src, p)
+		q := filepath.Join(dst, rel)
+		switch {
+		case d.Type()&os.ModeSymlink != 0:
+			if _, err := os.Lstat(q); !os.IsNotExist(err) {
+				t.Errorf("symlink %q copied", rel)
+			}
+		case d.IsDir():
+			if fi, err := os.Stat(q); err != nil || !fi.IsDir() {
+				t.Errorf("folder %q missing: %v", rel, err)
+			}
+		default:
+			if got, want := readFileOr(q), readFileOr(p); got != want {
+				t.Errorf("file %q: %d bytes, want %d", rel, len(got), len(want))
+			}
+		}
+		return nil
+	})
+}
+
+// TestXferRunnerStreams: four rsyncs copy one tree between them, folders
+// (empty ones too) and names of every shape included; the job's counts,
+// plan and progress add up over the streams, and the lists go at the end.
+func TestXferRunnerStreams(t *testing.T) {
+	j := startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", streams: 4, fill: fillTree})
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	if l.rc != "0" || l.skipped != 1 || len(l.plan) != 4 || len(l.sprogress) != 4 {
+		t.Fatalf("status: %+v", l)
+	}
+	var planned int64
+	for _, n := range l.plan {
+		planned += n
+	}
+	if planned != 3<<20+5+210000+5+8+6+8 {
+		t.Errorf("plan %v adds up to %d", l.plan, planned)
+	}
+	p := xferProgress(l)
+	if p == nil || p.Files != 26 || p.Pct != 100 {
+		t.Fatalf("progress %+v from %v", p, l.sprogress)
+	}
+	if res := xferResult(xferFinished, l, false); !strings.HasPrefix(res, "copied 3.2 MiB in 26 files; 1 symlinks or special files skipped") {
+		t.Errorf("result %q", res)
+	}
+	sameTree(t, j.src, j.dst)
+	if ak := readFile(t, filepath.Join(j.home, ".ssh", "authorized_keys")); !strings.Contains(ak, xferRrsyncOpts+" "+xferRrsyncNoLock+" '") {
+		t.Errorf("key line without %s: %s", xferRrsyncNoLock, ak)
+	}
+	jd := filepath.Join(j.home, xferJobDir, j.tok)
+	for _, f := range []string{"listing", "list.0", "list.3", "s.0/out"} {
+		if _, err := os.Stat(filepath.Join(jd, f)); !os.IsNotExist(err) {
+			t.Errorf("%s left in the job directory", f)
+		}
+	}
+	if !j.keyGone(t) {
+		t.Error("key left")
+	}
+}
+
+// One stream per non-empty list only: a source of one file uses one
+// login however many streams were asked for, and an empty one none.
+func TestXferRunnerStreamsFewFiles(t *testing.T) {
+	j := startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", streams: 8, noLink: true, slow: false, fill: func(src string) {
+		os.RemoveAll(filepath.Join(src, "sub"))
+	}})
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	if l.rc != "0" || len(l.sprogress) != 1 || readFile(t, filepath.Join(j.dst, `it's "q".txt`)) != "hello" {
+		t.Fatalf("one file: %+v", l)
+	}
+	j = startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", streams: 4, noLink: true, fill: func(src string) {
+		os.RemoveAll(filepath.Join(src, "sub"))
+		os.Remove(filepath.Join(src, `it's "q".txt`))
+	}})
+	l = j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	if l.rc != "0" || len(l.sprogress) != 0 || readFileOr(filepath.Join(j.bin, "ssh.pid")) != "" {
+		t.Fatalf("empty source: %+v", l)
+	}
+	if res := xferResult(xferFinished, l, false); res != "copied" {
+		t.Errorf("result %q", res)
+	}
+}
+
+// Cancel stops every stream: the trap records "cancelled" and no
+// transport process of any stream outlives it.
+func TestXferRunnerStreamsCancel(t *testing.T) {
+	j := startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", streams: 3, slow: true, fill: fillTree})
+	var pids []string
+	for i := 0; i < 100 && len(pids) < 3; i++ {
+		pids = strings.Fields(readFileOr(filepath.Join(j.bin, "ssh.pid")))
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(pids) != 3 {
+		t.Fatalf("%d transports connected, want 3", len(pids))
+	}
+	if out := runJobScript(t, j.home, xferVars("TOKEN", j.tok), xferCancelScript); !strings.Contains(out, "SIGNALLED") {
+		t.Fatalf("cancel: %s", out)
+	}
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" && !l.alive })
+	if l.rc != "cancelled" {
+		t.Fatalf("after cancel: %+v", l)
+	}
+	for _, pid := range pids {
+		for i := 0; i < 40 && !procGone(pid); i++ {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if !procGone(pid) {
+			t.Errorf("transport %s survived the cancel", pid)
+		}
+	}
+	if !j.keyGone(t) {
+		t.Error("key left after cancel")
+	}
+}
+
+// Mode keep across streams: a file already there is kept and counted
+// once, whichever stream met it.
+func TestXferRunnerStreamsKeep(t *testing.T) {
+	j := startLocalJobOpts(t, localOpts{mode: xferModeKeep, dst: "data", streams: 2, prepare: func(home string) {
+		os.MkdirAll(filepath.Join(home, "data", "d1", "sub 1"), 0o700)
+		os.WriteFile(filepath.Join(home, "data", `it's "q".txt`), []byte("OLD"), 0o600)
+		os.WriteFile(filepath.Join(home, "data", "d1", "sub 1", "f1"), []byte("OLD"), 0o600)
+	}, fill: fillTree})
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	if l.rc != "0" || l.kept != 2 || l.skipped != 1 {
+		t.Fatalf("status: %+v", l)
+	}
+	if got := readFile(t, filepath.Join(j.dst, `it's "q".txt`)) + readFile(t, filepath.Join(j.dst, "d1", "sub 1", "f1")); got != "OLDOLD" {
+		t.Errorf("kept files changed: %q", got)
+	}
+	if got := readFile(t, filepath.Join(j.dst, "d2", "sub 3", "f11")); len(got) != 12000 {
+		t.Errorf("missing file not copied: %d bytes", len(got))
+	}
+}
+
+// A read-only folder of the source arrives writable by its owner when
+// streams copy it: several streams write into it, and the first to end
+// must not make it final while another still writes (Codex on PR 195).
+// Its files arrive, whichever stream carried them.
+func TestXferRunnerStreamsReadOnlyFolder(t *testing.T) {
+	j := startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", streams: 4, noLink: true, fill: func(src string) {
+		ro := filepath.Join(src, "ro")
+		os.Mkdir(ro, 0o700)
+		for i := 0; i < 8; i++ {
+			os.WriteFile(filepath.Join(ro, fmt.Sprintf("f%d", i)), bytes.Repeat([]byte("r"), 1000*(i+1)), 0o600)
+		}
+		os.Chmod(ro, 0o555)
+	}})
+	t.Cleanup(func() {
+		os.Chmod(filepath.Join(j.src, "ro"), 0o700)
+		os.Chmod(filepath.Join(j.dst, "ro"), 0o700)
+	})
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	if l.rc != "0" {
+		t.Fatalf("status: %+v", l)
+	}
+	fi, err := os.Stat(filepath.Join(j.dst, "ro"))
+	if err != nil || fi.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("read-only folder not left writable by its owner: %v %v", fi.Mode(), err)
+	}
+	for i := 0; i < 8; i++ {
+		if got := readFileOr(filepath.Join(j.dst, "ro", fmt.Sprintf("f%d", i))); len(got) != 1000*(i+1) {
+			t.Errorf("ro/f%d: %d bytes", i, len(got))
+		}
+	}
+}
+
+// A move in streams removes the source only after every stream exited 0.
+func TestXferRunnerStreamsMove(t *testing.T) {
+	j := startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", streams: 3, move: true, noLink: true, fill: fillTree})
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" })
+	if l.rc != "0" || l.move != "moved" {
+		t.Fatalf("status: %+v", l)
+	}
+	if _, err := os.Lstat(j.src); !os.IsNotExist(err) {
+		t.Error("source folder left")
+	}
+	if got := readFile(t, filepath.Join(j.dst, "d0", "sub 0", "f0")); len(got) != 1000 {
+		t.Errorf("file not copied: %d bytes", len(got))
+	}
+}
+
+// A source that cannot be listed whole is not copied in part: the job
+// ends with the listing's error, no stream connects, and a move removes
+// nothing.
+func TestXferRunnerStreamsListingFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads an unreadable folder")
+	}
+	j := startLocalJobOpts(t, localOpts{mode: xferModeNew, dst: "copy", streams: 2, move: true, fill: func(src string) {
+		os.Mkdir(filepath.Join(src, "locked"), 0o700)
+		os.WriteFile(filepath.Join(src, "locked", "x"), []byte("x"), 0o600)
+		os.Chmod(filepath.Join(src, "locked"), 0)
+	}})
+	t.Cleanup(func() { os.Chmod(filepath.Join(j.src, "locked"), 0o700) })
+	l := j.waitStatus(t, func(l xferLive) bool { return l.rc != "" && !l.alive })
+	if l.rc != "error: could not list the whole source folder" || !strings.Contains(l.errors, "Permission denied") || l.stage != "" {
+		t.Fatalf("status: %+v", l)
+	}
+	if res := xferResult(xferFinished, l, true); !strings.HasPrefix(res, "failed on the source before or without copying: could not list the whole source folder; the source was left in place — find: ") {
+		t.Errorf("result %q", res)
+	}
+	if pid := readFileOr(filepath.Join(j.bin, "ssh.pid")); pid != "" {
+		t.Errorf("a stream connected (ssh stand-in pid %s)", pid)
+	}
+	if readFile(t, filepath.Join(j.src, `it's "q".txt`)) != "hello" {
+		t.Error("source touched")
 	}
 }

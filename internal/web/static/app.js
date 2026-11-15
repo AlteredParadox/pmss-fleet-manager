@@ -1496,7 +1496,7 @@ function tabTransfers(b) {
 // opens. dst_rev is the destination record the operator chose; picker is
 // the open folder list, confirm the reviewed copy waiting for its start.
 function blankXferDraft(boxId) {
-  return { box: boxId, src: '', dst_box: '', dst_rev: 0, dst_parent: '', dst_name: '', dst_mode: 'new', move: false, busy: false, picker: null, confirm: null, err: '' };
+  return { box: boxId, src: '', dst_box: '', dst_rev: 0, dst_parent: '', dst_name: '', dst_mode: 'new', move: false, streams: 1, busy: false, picker: null, confirm: null, err: '' };
 }
 function transferForm(b) {
   if (S.xferDraft?.box !== b.id) S.xferDraft = blankXferDraft(b.id);
@@ -1516,6 +1516,8 @@ function transferForm(b) {
         <span style="display:flex;gap:6px"><input data-xf="dst_parent" value="${esc(d.dst_parent)}" placeholder="~" spellcheck="false"><button type="button" class="small" data-act="xfer:browse" data-side="dst" ${dst?.ready ? '' : 'disabled title="choose a destination box first"'}>browse</button></span></label>
     </div>
     ${transferModeChoice(b, d)}
+    <label class="f" style="margin-top:10px;max-width:520px">parallel streams<select data-xf="streams">${[1, 2, 4, 8].map((n) => `<option value="${n}" ${pfmView.transferStreams(d.streams) === n ? 'selected' : ''}>${n === 1 ? '1 (one rsync)' : n}</option>`).join('')}</select>
+      <span class="hint">several rsyncs at once, the files split between them by size: faster when one connection is the limit, not the disks. Each is one more login and process on both boxes; a single large file still goes in one stream; folder modification times may not match the source's.</span></label>
     <div class="f" style="margin-top:10px;display:grid;gap:6px;font-size:11px;color:var(--muted)">afterwards
       <label class="check"><input type="checkbox" data-xf="move" ${d.move ? 'checked' : ''}> move: remove the folder from ${esc(b.name)} once rsync reports every file delivered and checked (its exit code 0). Files changed meanwhile, symlinks and special files stay behind; a copy that ends any other way leaves the source as it is. Not with “keeping files already there”.</label>
     </div>
@@ -1612,7 +1614,7 @@ function transferCard(v) {
   if (st.over) btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" ${v.cleanup?.length ? `data-force="1" data-confirm="Cleanup is still owed: ${esc(v.cleanup.join('; '))}. Forget this copy anyway? Those items would have to be removed by hand."` : ''}>dismiss</button>`);
   return `<div class="panel xfer" id="xfer-${Number(v.id)}">
     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
-      <div><span class="${st.kind}">${esc(st.label)}</span> <span class="muted">${name(v.src_name, v.src_box)}:</span>${esc(v.src_path)} <span class="muted">${v.move ? '⇢ move to' : '→'} ${name(v.dst_name, v.dst_box)}:</span>${esc(v.dst_path)}${modeLabel ? ` <span class="muted">(${esc(modeLabel)})</span>` : ''}</div>
+      <div><span class="${st.kind}">${esc(st.label)}</span> <span class="muted">${name(v.src_name, v.src_box)}:</span>${esc(v.src_path)} <span class="muted">${v.move ? '⇢ move to' : '→'} ${name(v.dst_name, v.dst_box)}:</span>${esc(v.dst_path)}${modeLabel ? ` <span class="muted">(${esc(modeLabel)})</span>` : ''}${v.streams > 1 ? ` <span class="muted">· ${Number(v.streams)} streams</span>` : ''}</div>
       <div class="actions">${btn.join('')}</div>
     </div>
     ${st.over ? '' : `<div class="meter thick" style="margin:10px 0 6px"><i style="width:${pfmView.transferMeter(v)}%"></i></div>`}
@@ -1659,7 +1661,7 @@ async function transferAction(a, act) {
       if (S.xferDraft !== d) return;
       if (!sl.rel) throw new Error('choose a folder inside the home, not the whole home');
       if (mode !== 'new' && !dl.rel) throw new Error('choose a folder inside the destination\'s home to copy into, not the whole home');
-      d.confirm = pfmView.transferConfirmation(src, sl, dst, dl, name, mode, move);
+      d.confirm = pfmView.transferConfirmation(src, sl, dst, dl, name, mode, move, d.streams);
     } catch (e) { d.err = e.message; }
     finally { d.busy = false; render(); }
     return;

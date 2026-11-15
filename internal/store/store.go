@@ -363,10 +363,10 @@ func (s *Store) migrate() error {
 	return s.ensureTransferColumns()
 }
 
-// ensureTransferColumns adds transfers.dst_mode, move and move_state to a
-// database from before they existed.
+// ensureTransferColumns adds transfers.dst_mode, move, move_state and
+// streams to a database from before they existed.
 func (s *Store) ensureTransferColumns() error {
-	for _, c := range []struct{ name, ddl string }{{"dst_mode", addTransferDstModeColSQL}, {"move", addTransferMoveColSQL}, {"move_state", addTransferMoveStateColSQL}} {
+	for _, c := range []struct{ name, ddl string }{{"dst_mode", addTransferDstModeColSQL}, {"move", addTransferMoveColSQL}, {"move_state", addTransferMoveStateColSQL}, {"streams", addTransferStreamsColSQL}} {
 		has, err := s.hasColumn(transfersColumnsSQL, c.name)
 		if err != nil {
 			return err
