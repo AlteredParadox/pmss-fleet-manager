@@ -406,6 +406,13 @@ seg_end(); out();
 // and stay, as does a folder holding any of these. The removal cannot be
 // cancelled: everything it removes is on the destination already, and a
 // source half removed under a "cancelled" label would only mislead.
+//
+// With AES instructions on the source's CPU, the transport prefers
+// AES-GCM to OpenSSH's default ChaCha20, which costs about twice the CPU
+// per byte: one connection between two boxes measured 304 MB/s against
+// 162 MB/s, one rsync 131 against 108 (2026-11-15). The "^" puts the two
+// ahead of the default list (OpenSSH 8.7 and later; the boxes run 9.2),
+// so a destination that offers neither still gets the default choice.
 const xferRunScript = `set -u
 PATH=/usr/bin:/bin; export PATH
 J=$(cd "$(dirname -- "$0")" && pwd -P) || exit 1
@@ -413,6 +420,8 @@ LC_ALL=C; export LC_ALL
 umask 077
 mkdir "$J/started" 2>/dev/null || exit 0
 rpid=""
+copt=""
+grep -qw aes /proc/cpuinfo 2>/dev/null && copt="-o Ciphers=^` + xferCiphers + `"
 finish() { rm -f "$J/key" "$J/key.pub" "$J/out" "$J/err"; printf '%s\n' "$1" >"$J/rc.tmp" && mv -f "$J/rc.tmp" "$J/rc"; }
 trap 'rm -f "$J/key" "$J/key.pub"' EXIT
 trap '[ -n "$rpid" ] && kill "$rpid" 2>/dev/null; finish cancelled; exit 143' TERM INT HUP
@@ -425,7 +434,7 @@ mkfifo "$J/out" "$J/err" || { finish "error: mkfifo failed"; exit 1; }
 perl "$J/cap.pl" progress "$J" <"$J/out" &
 perl "$J/cap.pl" errors "$J" <"$J/err" &
 rsync -rt --no-inc-recursive $ROPTS \
-  -e "$SSH -F /dev/null -p $PORT -i $J/key -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$J/known_hosts -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=$HKALG -o IdentitiesOnly=yes -o BatchMode=yes -o PreferredAuthentications=publickey -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=30 -o ServerAliveInterval=60" \
+  -e "$SSH -F /dev/null -p $PORT -i $J/key -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$J/known_hosts -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=$HKALG -o IdentitiesOnly=yes $copt -o BatchMode=yes -o PreferredAuthentications=publickey -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=30 -o ServerAliveInterval=60" \
   -- "$SRC/" "$DEST" >"$J/out" 2>"$J/err" &
 rpid=$!
 wait "$rpid"; rc=$?
@@ -455,6 +464,10 @@ const xferRemoveSnippet = `  find "$SRC" -type f ! -newer "$J/started_at" -delet
   fi
   printf '%s\n' "$mv_res" >"$J/move.tmp" && mv -f "$J/move.tmp" "$J/move"
 `
+
+// xferCiphers are the ciphers a source with AES instructions puts first
+// (see xferRunScript).
+const xferCiphers = "aes128-gcm@openssh.com,aes256-gcm@openssh.com"
 
 // xferLaunchScript writes the runner, the helper and the pinned
 // known_hosts into the job directory and starts the runner in its own

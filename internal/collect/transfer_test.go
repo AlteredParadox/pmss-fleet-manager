@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -545,9 +546,11 @@ func TestXferRunnerNoPidNoRc(t *testing.T) {
 }
 
 // fakeSSH stands in for ssh in the local runner test: it drops the
-// options, then runs the remote command the way sshd runs a forced
-// command, through rrsync confined to $FAKE_DST.
+// options (all its arguments go to $FAKE_ARGSFILE when that is set), then
+// runs the remote command the way sshd runs a forced command, through
+// rrsync confined to $FAKE_DST.
 const fakeSSH = `#!/bin/sh
+[ -n "${FAKE_ARGSFILE:-}" ] && printf '%s\n' "$*" >"$FAKE_ARGSFILE"
 while [ $# -gt 0 ]; do
   case "$1" in -F|-p|-i|-o|-l) shift 2;; -*) shift;; *) break;; esac
 done
@@ -609,7 +612,7 @@ func startLocalJobOpts(t *testing.T, o localOpts) localJob {
 		os.Symlink("/etc/passwd", filepath.Join(src, "link"))
 	}
 	tok := "0123456789abcdef0123456789abcdef"
-	env := []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH")}
+	env := []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "FAKE_ARGSFILE=" + filepath.Join(bin, "ssh.args")}
 	if slow {
 		env = append(env, "FAKE_SLEEP=30", "FAKE_PIDFILE="+filepath.Join(bin, "ssh.pid"))
 	}
@@ -705,6 +708,14 @@ func TestXferRunnerLocal(t *testing.T) {
 	}
 	if !j.keyGone(t) {
 		t.Error("key left on the source")
+	}
+	// The transport prefers AES-GCM exactly when this CPU has AES.
+	cpu, _ := os.ReadFile("/proc/cpuinfo")
+	aes := regexp.MustCompile(`(?m)^(flags|Features)\s*:.*\baes\b`).Match(cpu)
+	if args := readFileOr(filepath.Join(j.bin, "ssh.args")); args == "" {
+		t.Error("the ssh stand-in recorded no arguments")
+	} else if got := strings.Contains(args, "-o Ciphers=^"+xferCiphers+" "); got != aes {
+		t.Errorf("cipher preference = %v with aes %v: %s", got, aes, args)
 	}
 	if readFile(t, filepath.Join(j.dst, `it's "q".txt`)) != "hello" {
 		t.Error("file not copied")
