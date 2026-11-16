@@ -85,6 +85,13 @@ func TestHistoryHourlyRows(t *testing.T) {
 	if sm.Hours != 2 || *sm.DiskGrowth != 20 || *sm.IOWaitHourMax != 30 || sm.IOWaitBadHours != 1 || *sm.IOWaitAvg != (4+12+30)/3.0 {
 		t.Fatalf("summary %+v", sm)
 	}
+	fleet, err := m.HistorySummaries(ctx, 30)
+	if err != nil || fleet.Days != 30 || len(fleet.Boxes) != 1 || fleet.Boxes[b.ID].Hours != 2 {
+		t.Fatalf("fleet summaries %+v %v", fleet, err)
+	}
+	if _, err := m.HistorySummaries(ctx, 1); err == nil {
+		t.Fatal("a 1-day fleet window")
+	}
 	if _, err := m.BoxHistory(ctx, b.ID, 5); err == nil {
 		t.Fatal("a 5-day window")
 	}

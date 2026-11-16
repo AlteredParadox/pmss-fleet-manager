@@ -288,3 +288,38 @@ func summarize(pts []HistoryPoint) HistorySummary {
 	}
 	return s
 }
+
+// FleetHistory is the answer of GET /api/history/summary: each box's
+// summary over the window (keyed by box id), for the comparison view.
+type FleetHistory struct {
+	Days  int                      `json:"days"`
+	Boxes map[int64]HistorySummary `json:"boxes"`
+}
+
+// HistorySummaries condenses every box's last days of history. A box
+// whose rows cannot be read is left out (the view shows it as unknown),
+// so one bad read does not blank the comparison.
+func (m *Manager) HistorySummaries(ctx context.Context, days int) (FleetHistory, error) {
+	if !slices.Contains(HistoryDays, days) {
+		return FleetHistory{}, fmt.Errorf("history window of %d days: only 7 and 30 are kept", days)
+	}
+	m.mu.Lock()
+	ids := make([]int64, 0, len(m.pollers))
+	for id := range m.pollers {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+	out := FleetHistory{Days: days, Boxes: make(map[int64]HistorySummary, len(ids))}
+	for _, id := range ids {
+		h, err := m.BoxHistory(ctx, id, days)
+		if err != nil {
+			if ctx.Err() != nil {
+				return FleetHistory{}, ctx.Err()
+			}
+			m.log.Warn("history summary", "box", id, "err", err)
+			continue
+		}
+		out.Boxes[id] = h.Summary
+	}
+	return out, nil
+}

@@ -584,3 +584,35 @@ test('the open history tab reads again once its answer is five minutes old', () 
   assert.equal(V.historyDue({ box: 1, err: 'x' }, 1, now), true, 'a failed read is retried');
   assert.equal(V.historyDue(null, 1, now), false);
 });
+
+test('compare rows: unknown stays null, unlimited traffic is Infinity, prices per TB', () => {
+  const b = { id: 1, name: 'pm1', disk: { ok: true, used_bytes: 4e11, quota_bytes: 1e12, files_soft: 1000, files_used: 1200 },
+    traffic: { ok: true, limit_bytes: 5e12, out_month_bytes: 1e12 }, host_sys: { iowait: { avg60: 3.5, n60: 100 } },
+    tiers: { io_weight: 100, cpu_weight: 500, cores: 4 } };
+  const r = V.compareRow(b, { hours: 168, iowait_avg: 2.2, iowait_hour_max: 9, iowait_bad_hours: 0 }, 10, 'EUR');
+  assert.equal(r.free, 6e11);
+  assert.equal(r.free_pct, 60);
+  assert.equal(r.files_free, 0, 'over the file limit is none left, not negative');
+  assert.equal(r.traffic_left, 4e12);
+  assert.equal(r.io_now, 3.5);
+  assert.equal(r.io_avg, 2.2);
+  assert.equal(r.io_bad, 0, 'zero slow hours with hours recorded is a real zero');
+  assert.equal(r.per_tb, 10);
+  assert.equal(r.currency, 'EUR');
+
+  const u = V.compareRow({ id: 2, name: 'new', disk: { ok: false }, traffic: { ok: false }, host_sys: { iowait: { avg60: 0, n60: 0 } } }, undefined, null, 'EUR');
+  for (const k of ['free', 'free_pct', 'files_free', 'traffic_left', 'io_now', 'io_avg', 'io_worst', 'io_bad', 'io_weight', 'cpu_weight', 'monthly', 'per_tb']) {
+    assert.equal(u[k], null, `${k} unknown`);
+  }
+  assert.equal(u.currency, '');
+  assert.equal(V.compareRow({ ...b, traffic: { ok: true, limit_bytes: 0 } }, undefined, null).traffic_left, Infinity);
+  assert.equal(V.compareRow(b, { hours: 0, iowait_bad_hours: 0 }, null).io_bad, null, 'no hours recorded: unknown, not 0');
+});
+
+test('compare sort: unknown last in both directions, ties by name', () => {
+  const rows = [{ name: 'c', free: null }, { name: 'b', free: 5 }, { name: 'a', free: 5 }, { name: 'd', free: 9 }, { name: 'e', free: Infinity }];
+  assert.deepEqual(V.compareSort(rows, 'free', 'desc').map((r) => r.name), ['e', 'd', 'a', 'b', 'c']);
+  assert.deepEqual(V.compareSort(rows, 'free', 'asc').map((r) => r.name), ['a', 'b', 'd', 'e', 'c']);
+  assert.deepEqual(V.compareSort(rows, 'name', 'asc').map((r) => r.name), ['a', 'b', 'c', 'd', 'e']);
+  assert.equal(rows[0].name, 'c', 'the input is not reordered');
+});

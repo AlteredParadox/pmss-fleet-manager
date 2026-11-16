@@ -530,6 +530,45 @@ function historyTraffic(daily, days) {
   const out = list.reduce((a, d) => a + (Number(d.out_mib) || 0), 0), inn = list.reduce((a, d) => a + (Number(d.in_mib) || 0), 0);
   return { days: list, out_mib: out, in_mib: inn };
 }
+// compareRow: one box's figures for the comparison view, each null when
+// unknown (never 0: a box that has not been measured is not a full or an
+// idle one). monthly is the box's current monthly price (null: none
+// known), currency its currency; summary is its history summary over the
+// window (undefined: none). Traffic left is the rolling 30-day upload
+// limit minus the upload so far; Infinity for an account without a limit.
+function compareRow(b, summary, monthly, currency) {
+  const d = b?.disk || {}, tr = b?.traffic || {}, io = b?.host_sys?.iowait || {}, t = b?.tiers || {};
+  const num = (v) => v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v);
+  const diskOK = !!d.ok && Number(d.quota_bytes) > 0;
+  const free = diskOK ? Math.max(0, d.quota_bytes - d.used_bytes) : null;
+  const trafficLeft = !tr.ok ? null : Number(tr.limit_bytes) > 0 ? Math.max(0, tr.limit_bytes - (tr.out_month_bytes || 0)) : Infinity;
+  const price = num(monthly);
+  return {
+    id: b?.id, name: String(b?.name ?? ''),
+    free, free_pct: diskOK ? free / d.quota_bytes * 100 : null, quota: diskOK ? Number(d.quota_bytes) : null,
+    files_free: diskOK && Number(d.files_soft) > 0 ? Math.max(0, d.files_soft - (d.files_used || 0)) : null,
+    traffic_left: trafficLeft, throttled: !!tr.throttled,
+    io_now: Number(io.n60) > 0 ? Number(io.avg60) : null,
+    io_avg: num(summary?.iowait_avg), io_worst: num(summary?.iowait_hour_max),
+    io_bad: summary && summary.hours > 0 ? Number(summary.iowait_bad_hours) || 0 : null, hours: Number(summary?.hours) || 0,
+    io_weight: Number(t.io_weight) > 0 ? Number(t.io_weight) : null, cpu_weight: Number(t.cpu_weight) > 0 ? Number(t.cpu_weight) : null,
+    cores: Number(t.cores) > 0 ? Number(t.cores) : null,
+    monthly: price, currency: price === null ? '' : String(currency || ''),
+    per_tb: price !== null && diskOK ? price / (d.quota_bytes / 1e12) : null,
+  };
+}
+// compareSort: rows ordered by key, ascending or descending, unknown
+// values (null) always last whatever the direction; ties by name.
+function compareSort(rows, key, dir) {
+  const sign = dir === 'desc' ? -1 : 1;
+  return [...rows].sort((a, b) => {
+    const x = a[key], y = b[key];
+    if (x === null || x === undefined) return y === null || y === undefined ? a.name.localeCompare(b.name) : 1;
+    if (y === null || y === undefined) return -1;
+    if (x !== y) return (x < y ? -1 : 1) * sign;
+    return a.name.localeCompare(b.name);
+  });
+}
 // resyncLoads: what a reconnect reloads besides the box states. Events
 // missed while the stream was down are not repeated, and a finished copy
 // is no longer polled, so its card would stay stale (fred on PR 142).
@@ -642,5 +681,5 @@ function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
 }
 
-globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue };
+globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort };
 })();
