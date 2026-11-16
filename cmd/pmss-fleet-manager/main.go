@@ -56,6 +56,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		os.Exit(healthcheck(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "backup" {
+		os.Exit(backupCmd(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "restore" {
+		os.Exit(restoreCmd(os.Args[2:], os.Stderr))
+	}
 	listen := flag.String("listen", envOr("PMSS_LISTEN", "127.0.0.1:8080"), "address(es) to listen on, comma-separated")
 	allowedHosts := flag.String("allowed-hosts", os.Getenv("PMSS_ALLOWED_HOSTS"), "extra Host header names to serve (e.g. a reverse-proxy name), comma-separated; the listen addresses and localhost are always allowed")
 	dataDir := flag.String("data", envOr("PMSS_DATA", "./data"), "directory for the SQLite database")
@@ -125,7 +131,20 @@ func main() {
 		os.Exit(2)
 	}
 
-	st, err := store.Open(filepath.Join(*dataDir, "pmss-fleet-manager.db"), opts...)
+	// One server per data directory, and none while a restore replaces
+	// the database (restore takes the same lock).
+	release, err := lockDataDir(*dataDir)
+	if errors.Is(err, errDataDirInUse) {
+		log.Error("another pmss-fleet-manager (or a restore) is using this data directory", "dir", *dataDir)
+		os.Exit(1)
+	}
+	if err == nil {
+		defer release()
+	}
+	var st *store.Store
+	if err == nil {
+		st, err = store.Open(filepath.Join(*dataDir, dbName), opts...)
+	}
 	if err != nil {
 		if errors.Is(err, fs.ErrPermission) {
 			// The usual cause is a bind-mounted data directory owned by
