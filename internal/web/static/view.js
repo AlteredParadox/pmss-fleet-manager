@@ -537,25 +537,41 @@ function historyTraffic(daily, days) {
 // window (undefined: none). Traffic left is the rolling 30-day upload
 // limit minus the upload so far; Infinity for an account without a limit.
 function compareRow(b, summary, monthly, currency) {
-  const d = b?.disk || {}, tr = b?.traffic || {}, io = b?.host_sys?.iowait || {}, t = b?.tiers || {};
-  const num = (v) => v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v);
-  const diskOK = !!d.ok && Number(d.quota_bytes) > 0;
-  const free = diskOK ? Math.max(0, d.quota_bytes - d.used_bytes) : null;
-  const trafficLeft = !tr.ok ? null : Number(tr.limit_bytes) > 0 ? Math.max(0, tr.limit_bytes - (tr.out_month_bytes || 0)) : Infinity;
-  const price = num(monthly);
+  const t = b?.tiers || {}, io = b?.host_sys?.iowait || {};
+  const disk = compareDisk(b?.disk), price = finiteOrNull(monthly);
   return {
     id: b?.id, name: String(b?.name ?? ''),
-    free, free_pct: diskOK ? free / d.quota_bytes * 100 : null, quota: diskOK ? Number(d.quota_bytes) : null,
-    files_free: diskOK && Number(d.files_soft) > 0 ? Math.max(0, d.files_soft - (d.files_used || 0)) : null,
-    traffic_left: trafficLeft, throttled: !!tr.throttled,
+    ...disk,
+    traffic_left: trafficLeft(b?.traffic), throttled: !!b?.traffic?.throttled,
     io_now: Number(io.n60) > 0 ? Number(io.avg60) : null,
-    io_avg: num(summary?.iowait_avg), io_worst: num(summary?.iowait_hour_max),
-    io_bad: summary && summary.hours > 0 ? Number(summary.iowait_bad_hours) || 0 : null, hours: Number(summary?.hours) || 0,
-    io_weight: Number(t.io_weight) > 0 ? Number(t.io_weight) : null, cpu_weight: Number(t.cpu_weight) > 0 ? Number(t.cpu_weight) : null,
-    cores: Number(t.cores) > 0 ? Number(t.cores) : null,
+    ...compareHistory(summary),
+    io_weight: positiveOrNull(t.io_weight), cpu_weight: positiveOrNull(t.cpu_weight), cores: positiveOrNull(t.cores),
     monthly: price, currency: price === null ? '' : String(currency || ''),
-    per_tb: price !== null && diskOK ? price / (d.quota_bytes / 1e12) : null,
+    per_tb: price !== null && disk.quota !== null ? price / (disk.quota / 1e12) : null,
   };
+}
+function finiteOrNull(v) { return v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v); }
+function positiveOrNull(v) { return Number(v) > 0 ? Number(v) : null; }
+// compareDisk: free space, its share and the files left, from the last poll.
+function compareDisk(d) {
+  if (!d?.ok || !(Number(d.quota_bytes) > 0)) return { free: null, free_pct: null, quota: null, files_free: null };
+  const free = Math.max(0, d.quota_bytes - d.used_bytes);
+  return { free, free_pct: free / d.quota_bytes * 100, quota: Number(d.quota_bytes),
+    files_free: Number(d.files_soft) > 0 ? Math.max(0, d.files_soft - (d.files_used || 0)) : null };
+}
+// trafficLeft: the rolling 30-day upload limit minus the upload so far;
+// Infinity without a limit, null when PMSS's figures are not read yet.
+function trafficLeft(tr) {
+  if (!tr?.ok) return null;
+  if (!(Number(tr.limit_bytes) > 0)) return Infinity;
+  return Math.max(0, tr.limit_bytes - (tr.out_month_bytes || 0));
+}
+// compareHistory: the window's iowait figures; slow hours are unknown
+// (not 0) while no hour was recorded.
+function compareHistory(sm) {
+  const recorded = !!sm && sm.hours > 0;
+  return { io_avg: finiteOrNull(sm?.iowait_avg), io_worst: finiteOrNull(sm?.iowait_hour_max),
+    io_bad: recorded ? Number(sm.iowait_bad_hours) || 0 : null, hours: Number(sm?.hours) || 0 };
 }
 // compareSort: rows ordered by key, ascending or descending, unknown
 // values (null) always last whatever the direction; ties by name.

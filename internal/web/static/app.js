@@ -426,7 +426,11 @@ function connectEvents() {
       if (S.tab === 'history' && pfmView.historyDue(S.hist, e.box_id, Date.now())) void loadHistory(e.box_id);
     }
     else if (S.view === 'torrents') loadTorrentsSoon();
-    else if (S.view === 'fleet') renderSoon(); else renderSide();
+    else if (S.view === 'fleet') renderSoon();
+    else if (S.view === 'compare') {
+      renderSoon(); // free space, traffic and the last hour's iowait are the live state's
+      if (!S.cmp.busy && (!S.cmp.at || Date.now() - S.cmp.at >= 5 * 60e3)) void loadCompare(); // the history, as often as it is written
+    } else renderSide();
   });
   es.addEventListener('removed', (ev) => {
     const e = JSON.parse(ev.data);
@@ -1021,7 +1025,7 @@ async function loadCompare(days) {
   try {
     const d = await api('GET', `${BASE}/api/history/summary?days=${days}`);
     if (seq !== cmpSeq) return;
-    S.cmp = { ...S.cmp, data: d, busy: false };
+    S.cmp = { ...S.cmp, data: d, busy: false, at: Date.now() };
   } catch (e) {
     if (seq !== cmpSeq) return;
     S.cmp = { ...S.cmp, busy: false, err: e.message };

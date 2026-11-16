@@ -1332,12 +1332,7 @@ func (s *Server) handleHistorySummary(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("days must be 7 or 30"))
 		return
 	}
-	h, err := s.m.HistorySummaries(r.Context(), days)
-	if err != nil {
-		writeErr(w, 500, err)
-		return
-	}
-	writeJSON(w, 200, h)
+	writeJSON(w, 200, s.m.HistorySummaries(r.Context(), days))
 }
 
 // handleBoxHistory answers the box's longer-term history (?days=7 or 30).
