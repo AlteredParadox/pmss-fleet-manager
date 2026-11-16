@@ -20,7 +20,7 @@
    overview's cpu / ram meters and host-share predicates, client
    availability and per-torrent controls, add summaries, table sorting,
    the rTorrent DHT / PeX toggle wording, the box/revision a box control
-   carries, the password panel's checks and result wording and the
+   carries, the name — user@host[:port] a box is told apart by, the password panel's checks and result wording and the
    Services table's status filter. */
 (() => {
 'use strict';
@@ -424,6 +424,39 @@ function moveError(move, mode) {
 function draftAfterStart(current, started, blank) {
   return current === started ? blank : current;
 }
+// boxIdentity: the account and machine a box record names, as the operator
+// would type it for ssh: user@host, with :port unless it is 22 (an IPv6
+// address then in brackets). '' when the record carries neither.
+function boxIdentity(user, host, port) {
+  user = String(user ?? ''); host = String(host ?? '');
+  if (!user && !host) return '';
+  const p = Number(port), withPort = Number.isInteger(p) && p > 0 && p !== 22;
+  const h = withPort && host.includes(':') ? `[${host}]` : host;
+  return `${user}@${h}${withPort ? `:${p}` : ''}`;
+}
+// boxLabel: a box's name and the identity under it, so two boxes named
+// alike (often the same username on several machines, issue #197) still
+// read apart wherever one is chosen or confirmed.
+function boxLabel(b) {
+  const id = boxIdentity(b?.user, b?.host, b?.port), name = String(b?.name ?? '');
+  return id && id !== name ? `${name} — ${id}` : name;
+}
+// endpointIdentity: a transfer's recorded endpoint ("host:port/user", the
+// machine the job was set up against, which an edit of the box since does
+// not change) as boxIdentity reads it; '' for anything else.
+function endpointIdentity(ep) {
+  const m = /^(.+):(\d{1,5})\/([^/]+)$/.exec(String(ep ?? ''));
+  return m ? boxIdentity(m[3], m[1], m[2]) : '';
+}
+// boxChoices: the destination picker's options, one per box, labelled by
+// boxLabel; two records that would still read the same (one machine and
+// account added twice under one name) get their box number as well.
+function boxChoices(boxes) {
+  const rows = boxes.map((b) => ({ id: b.id, label: boxLabel(b) }));
+  const seen = new Map();
+  for (const r of rows) seen.set(r.label, (seen.get(r.label) || 0) + 1);
+  return rows.map((r) => (seen.get(r.label) > 1 ? { id: r.id, label: `${r.label} (box #${r.id})` } : r));
+}
 // transferConfirmation: what the confirmation step shows, from the two
 // resolved listings (source folder, destination folder), the name of the
 // new folder (mode new), the mode, whether this is a move (the source
@@ -438,16 +471,17 @@ function transferConfirmation(srcBox, srcList, dstBox, dstList, name, mode, move
     keep: 'an existing folder; files already there are kept, only what is missing is copied; nothing there is removed',
     replace: 'an existing folder; files that differ in size or time are replaced and the previous version is lost; files only there are kept',
   }[mode];
+  const srcName = boxLabel(srcBox), dstName = boxLabel(dstBox);
   const source = move
-    ? `Then the source is removed: once rsync reports every file delivered and checked (exit code 0), the files in ${srcList.path} on ${srcBox.name} are deleted and the folder with them. Files changed since the copy started, symlinks and special files (never copied) are left there, and so is the folder if anything stays. Any other outcome, a cancel included, leaves the source as it is.`
-    : `The source stays untouched: nothing in ${srcList.path} on ${srcBox.name} is moved, changed or deleted.`;
+    ? `Then the source is removed: once rsync reports every file delivered and checked (exit code 0), the files in ${srcList.path} on ${srcName} are deleted and the folder with them. Files changed since the copy started, symlinks and special files (never copied) are left there, and so is the folder if anything stays. Any other outcome, a cancel included, leaves the source as it is.`
+    : `The source stays untouched: nothing in ${srcList.path} on ${srcName} is moved, changed or deleted.`;
   return {
     srcBox: srcBox.id, srcRev: srcList.box_rev, srcPath: srcList.path,
     dstBox: dstBox.id, dstRev: dstList.box_rev, dstParent: dstList.path, name, mode, move, streams,
     exists: mode === 'new' && (dstList.dirs || []).includes(name),
     lines: [
-      `from ${srcBox.name}: ${srcList.path}/ (its contents)`,
-      `to ${dstBox.name}: ${dstPath}/ (${how})`,
+      `from ${srcName}: ${srcList.path}/ (its contents)`,
+      `to ${dstName}: ${dstPath}/ (${how})`,
       source,
       ...(streams > 1 ? [`in ${streams} parallel streams: the files are split by size between ${streams} rsyncs, each with its own login; folder modification times may not match the source's.`] : []),
     ],
@@ -565,5 +599,5 @@ function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
 }
 
-globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams };
+globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams };
 })();

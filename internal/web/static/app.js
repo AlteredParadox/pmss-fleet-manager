@@ -1510,7 +1510,8 @@ function transferForm(b) {
     <div style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
       <label class="f">folder to copy, on ${esc(b.name)} <span class="muted">(relative to home, or absolute)</span>
         <span style="display:flex;gap:6px"><input data-xf="src" value="${esc(d.src)}" placeholder="downloads/finished" spellcheck="false"><button type="button" class="small" ${boxRef(b)} data-act="xfer:browse" data-side="src" ${ready}>browse</button></span></label>
-      <label class="f">destination box<select data-xf="dst_box"><option value="">choose…</option>${others.map((x) => `<option value="${x.id}" ${String(x.id) === String(d.dst_box) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <label class="f">destination box<select data-xf="dst_box"><option value="">choose…</option>${pfmView.boxChoices(others).map((x) => `<option value="${x.id}" ${String(x.id) === String(d.dst_box) ? 'selected' : ''}>${esc(x.label)}</option>`).join('')}</select>
+        ${dst ? `<span class="hint">${esc(pfmView.boxIdentity(dst.user, dst.host, dst.port))}</span>` : ''}
         ${free !== null ? `<span class="hint">about ${esc(fmtBytes(free))} free in its quota (last poll; a copy that does not fit fails with “out of space”)</span>` : ''}</label>
       <label class="f">destination folder there <span class="muted">(existing; blank: its home)</span>
         <span style="display:flex;gap:6px"><input data-xf="dst_parent" value="${esc(d.dst_parent)}" placeholder="~" spellcheck="false"><button type="button" class="small" data-act="xfer:browse" data-side="dst" ${dst?.ready ? '' : 'disabled title="choose a destination box first"'}>browse</button></span></label>
@@ -1595,7 +1596,8 @@ async function pickerOpen(rel) {
 }
 function transferCard(v) {
   const st = pfmView.transferState(v), p = v.progress, src = boxById(v.src_box), dst = boxById(v.dst_box), modeLabel = pfmView.transferModeLabel(v);
-  const name = (n, id) => esc(n || `box ${id} (removed)`);
+  // The identity is the one the job was set up against, not the box's now.
+  const name = (n, id, ep) => { const who = pfmView.endpointIdentity(ep); return esc(`${n || `box ${id} (removed)`}${who && who !== n ? ` — ${who}` : ''}`); };
   const counts = [];
   if (v.kept) counts.push(`${v.kept} existing files kept`);
   if (v.conflicts) counts.push(`${v.conflicts} name conflicts (a file against a folder) skipped`);
@@ -1614,7 +1616,7 @@ function transferCard(v) {
   if (st.over) btn.push(`<button class="small ghost" data-act="xfer:dismiss" data-id="${v.id}" ${v.cleanup?.length ? `data-force="1" data-confirm="Cleanup is still owed: ${esc(v.cleanup.join('; '))}. Forget this copy anyway? Those items would have to be removed by hand."` : ''}>dismiss</button>`);
   return `<div class="panel xfer" id="xfer-${Number(v.id)}">
     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
-      <div><span class="${st.kind}">${esc(st.label)}</span> <span class="muted">${name(v.src_name, v.src_box)}:</span>${esc(v.src_path)} <span class="muted">${v.move ? '⇢ move to' : '→'} ${name(v.dst_name, v.dst_box)}:</span>${esc(v.dst_path)}${modeLabel ? ` <span class="muted">(${esc(modeLabel)})</span>` : ''}${v.streams > 1 ? ` <span class="muted">· ${Number(v.streams)} streams</span>` : ''}</div>
+      <div><span class="${st.kind}">${esc(st.label)}</span> <span class="muted">${name(v.src_name, v.src_box, v.src_endpoint)}:</span>${esc(v.src_path)} <span class="muted">${v.move ? '⇢ move to' : '→'} ${name(v.dst_name, v.dst_box, v.dst_endpoint)}:</span>${esc(v.dst_path)}${modeLabel ? ` <span class="muted">(${esc(modeLabel)})</span>` : ''}${v.streams > 1 ? ` <span class="muted">· ${Number(v.streams)} streams</span>` : ''}</div>
       <div class="actions">${btn.join('')}</div>
     </div>
     ${st.over ? '' : `<div class="meter thick" style="margin:10px 0 6px"><i style="width:${pfmView.transferMeter(v)}%"></i></div>`}
@@ -1636,7 +1638,7 @@ async function transferAction(a, act) {
   if (a === 'xfer:browse') {
     const side = act.dataset.side, b = boxById(side === 'src' ? d.box : Number(d.dst_box));
     if (!b) return;
-    d.picker = { side, box: b.id, boxName: b.name, rev: side === 'src' ? Number(act.dataset.rev) : d.dst_rev, listing: null, busy: false, err: '' };
+    d.picker = { side, box: b.id, boxName: pfmView.boxLabel(b), rev: side === 'src' ? Number(act.dataset.rev) : d.dst_rev, listing: null, busy: false, err: '' };
     await pickerOpen(side === 'src' ? d.src : d.dst_parent);
     return;
   }

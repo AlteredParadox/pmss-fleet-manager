@@ -502,3 +502,48 @@ test('toggling a status hides it, toggling again lists it', () => {
   V.toggleServiceStatus(before, 'cancelled');
   assert.deepEqual(before, ['fraud'], 'the stored list is not edited in place');
 });
+
+test('a box reads as name — user@host, with the port unless it is 22 (issue #197)', () => {
+  assert.equal(V.boxIdentity('stu', 'box-a.example.com', 22), 'stu@box-a.example.com');
+  assert.equal(V.boxIdentity('stu', 'box-a.example.com', 2222), 'stu@box-a.example.com:2222');
+  assert.equal(V.boxIdentity('stu', 'box-a.example.com', 0), 'stu@box-a.example.com', 'no port recorded: none shown');
+  assert.equal(V.boxIdentity('stu', '2001:db8::1', 2222), 'stu@[2001:db8::1]:2222', 'an IPv6 address with a port is bracketed');
+  assert.equal(V.boxIdentity('stu', '2001:db8::1', 22), 'stu@2001:db8::1');
+  assert.equal(V.boxIdentity('', '', 22), '');
+  assert.equal(V.boxLabel({ name: 'seedbox', user: 'stu', host: 'box-a.example.com', port: 22 }), 'seedbox — stu@box-a.example.com');
+  assert.equal(V.boxLabel({ name: 'stu@box-a.example.com', user: 'stu', host: 'box-a.example.com', port: 22 }), 'stu@box-a.example.com', 'a name that already is the identity is not doubled');
+  assert.equal(V.boxLabel({ name: 'pm1' }), 'pm1', 'no identity: the name alone');
+});
+
+test('boxes with the same name stay apart in the destination picker (issue #197)', () => {
+  const boxes = [
+    { id: 3, name: 'stu', user: 'stu', host: 'box-a.example.com', port: 22 },
+    { id: 4, name: 'stu', user: 'stu', host: 'box-b.example.com', port: 22 },
+    { id: 5, name: 'stu', user: 'stu', host: 'box-b.example.com', port: 2222 },
+  ];
+  const labels = V.boxChoices(boxes).map((c) => c.label);
+  assert.deepEqual(labels, ['stu — stu@box-a.example.com', 'stu — stu@box-b.example.com', 'stu — stu@box-b.example.com:2222']);
+  assert.equal(new Set(labels).size, 3);
+  const twice = V.boxChoices([boxes[0], { ...boxes[0], id: 9 }]);
+  assert.deepEqual(twice.map((c) => c.label), ['stu — stu@box-a.example.com (box #3)', 'stu — stu@box-a.example.com (box #9)'], 'one account added twice under one name: the box number tells them apart');
+  assert.deepEqual(twice.map((c) => c.id), [3, 9]);
+});
+
+test('the confirmation names both machines, not only the box names (issue #197)', () => {
+  const src = { id: 2, name: 'stu', user: 'stu', host: 'box-a.example.com', port: 22 };
+  const dst = { id: 7, name: 'stu', user: 'stu', host: 'box-b.example.com', port: 2222 };
+  const sl = { box_rev: 1, path: '/home/stu/dl/x' }, dl = { box_rev: 1, path: '/home/stu/in', dirs: [] };
+  for (const [mode, move] of [['new', true], ['replace', false]]) {
+    const c = V.transferConfirmation(src, sl, dst, dl, 'x', mode, move);
+    assert.match(c.lines[0], /^from stu — stu@box-a\.example\.com: \/home\/stu\/dl\/x\//);
+    assert.match(c.lines[1], /^to stu — stu@box-b\.example\.com:2222: \/home\/stu\/in/);
+    assert.match(c.lines[2], /\/home\/stu\/dl\/x on stu — stu@box-a\.example\.com /);
+  }
+});
+
+test('a transfer names the machine it was set up against (its recorded endpoint)', () => {
+  assert.equal(V.endpointIdentity('box-b.example.com:2222/stu'), 'stu@box-b.example.com:2222');
+  assert.equal(V.endpointIdentity('box-a.example.com:22/stu'), 'stu@box-a.example.com');
+  assert.equal(V.endpointIdentity('2001:db8::1:2222/stu'), 'stu@[2001:db8::1]:2222');
+  for (const bad of ['', 'box-a', 'box-a:22', 'box-a:22/', 'box-a:x/stu', undefined]) assert.equal(V.endpointIdentity(bad), '', String(bad));
+});
