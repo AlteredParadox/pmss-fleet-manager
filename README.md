@@ -336,6 +336,73 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
   `pmss1:`. The SSH key files a box points at are not touched: they are
   yours to protect, and the agent keeps them out of reach altogether.
 
+### Backing up the dashboard
+
+The dashboard's own state is one SQLite file, `pmss-fleet-manager.db` in
+the data directory: the boxes and their credentials, pinned host keys,
+settings, alerts and the transfer history. A backup of it is a backup of
+the dashboard's configuration, **not of anything on your boxes**.
+
+```sh
+./pmss-fleet-manager backup -data /var/lib/pmss-fleet-manager -out ~/fleet-$(date +%F).db
+```
+
+- **Take it while the dashboard runs**, no stop needed. The command copies
+  one consistent moment of the database and its write-ahead log into a
+  single file, owner-only (0600), with no free pages, so nothing deleted
+  earlier comes along. It refuses a target that already exists, then
+  checks the copy and prints what it holds: the number of boxes and
+  whether the credentials in it are encrypted. `-out -` writes it to
+  standard output, for a container where the command cannot see your
+  paths. Your shell then creates the file, with its umask, so set an
+  owner-only one for it:
+  `(umask 077; docker exec pmss-fleet-manager /pmss-fleet-manager backup -out - > fleet.db)`.
+- **The secret is not in the backup.** With credential encryption on
+  (*Encrypting stored credentials*), the passwords, WebUI passwords and API
+  key in the file are ciphertext, and restoring needs the same secret. Keep
+  the secret apart from the backups (a password manager, not the same
+  folder, archive or share), and keep a copy of it: a backup without its
+  secret restores everything except the credentials. Without encryption
+  the file holds every credential in plain text, so treat it as you would
+  the passwords themselves.
+- **SSH key files are not in it either.** A box set to a key path, or the
+  `-ssh-key` default, refers to a file outside the database: back those up
+  your own way.
+
+To restore, stop the dashboard and run:
+
+```sh
+./pmss-fleet-manager restore -data /var/lib/pmss-fleet-manager -secret-file ~/.config/pmss-fleet-manager/secret -in ~/fleet-2026-11-16.db
+```
+
+- **It refuses while a dashboard runs on that data directory.** From 1.22
+  the server holds a lock on the directory (`pmss-fleet-manager.lock`) and
+  restore takes the same lock; an older server holds none, so stop it
+  first. The lock also stops a second server from starting on the same
+  directory.
+- **It checks before it replaces anything:** that the file is an intact
+  database of this dashboard (not one still in use, with a write-ahead log
+  beside it), and that the dashboard would start with it and the
+  configured secret (`-secret-file`, or `PMSS_SECRET` / `PMSS_SECRET_FILE`
+  as for the server). A wrong or missing secret is refused with the
+  database untouched. If the secret is truly lost, `-skip-secret-check`
+  restores anyway, and the first start then needs
+  `-forget-encrypted-credentials` (the forms ask for the passwords again).
+  A plain-text backup restored with a secret configured is encrypted on
+  the spot.
+- **The database it replaces is kept** beside it as
+  `pmss-fleet-manager.db.before-restore-<UTC time>`, so a restore is
+  undone by restoring that file. Delete it when you no longer need it: it
+  holds the credentials too.
+- In a container, stop the dashboard's container and run the restore as a
+  one-off on the same data volume (`pmss-data` in the example below; use
+  yours) with the same secret and, if you set one, the same `--user`, so
+  the files keep their owner. `-in -` reads the backup from standard
+  input, so the container needs neither a mount of the file nor
+  permission to read it:
+  `docker run --rm -i -v pmss-data:/data -e PMSS_SECRET_FILE=/run/secrets/credkey -v /path/to/secret:/run/secrets/credkey:ro ghcr.io/alteredparadox/pmss-fleet-manager:latest restore -in - < fleet.db`,
+  then start the dashboard's container again.
+
 ### Running in a container
 
 Each release also publishes a multi-arch image (linux amd64 and arm64) built
@@ -461,10 +528,14 @@ and starting at boot were not exercised. CI tests the image with Docker.
   the database it protects, which *Encrypting stored credentials* says to
   avoid: back up the volume on its own and keep the secret in a password
   manager.
-- **Backup and restore.** Stop the service first: the database runs in
-  SQLite's WAL mode, and an archive taken while it writes can catch the
-  database and its write-ahead log at different moments. A clean stop
-  folds the log into the database, so the archive is that one file.
+- **Backup and restore.** `(umask 077; podman exec pmss-fleet-manager /pmss-fleet-manager backup -out - > fleet.db)`
+  takes a consistent copy while it runs, owner-only (see *Backing up the
+  dashboard*).
+  To archive the whole volume instead, stop the service first: the
+  database runs in SQLite's WAL mode, and an archive taken while it writes
+  can catch the database and its write-ahead log at different moments. A
+  clean stop folds the log into the database, so the archive is that one
+  file.
 
   ```sh
   systemctl --user stop pmss-fleet-manager

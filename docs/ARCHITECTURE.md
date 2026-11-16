@@ -43,7 +43,7 @@ PMSS "month" counters are a rolling 30-day window, not a billing cycle. The UI s
 ## Packages
 
 - `cmd/pmss-fleet-manager` flags, wiring, graceful shutdown
-- `internal/store` SQLite (modernc, pure Go): boxes, settings, alerts, per-box caches
+- `internal/store` SQLite (modernc, pure Go): boxes, settings, alerts, per-box caches; `backup` (VACUUM INTO, safe while running) and `restore` (stage, inspect, open with the configured secret, keep the replaced file, drop the old log, rename), under an flock on the data directory that the server also holds
 - `internal/secrets` optional encryption of the stored credentials (HKDF-SHA256 → AES-256-GCM, column name as additional data) under a secret from the environment or a file
 - `internal/sshx` SSH client (TOFU host keys, bounded dial/run), unix/tcp dialer; reconnects are the poller's job
 - `internal/phpserial` minimal PHP `unserialize`
