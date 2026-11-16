@@ -68,15 +68,15 @@ func vacuumInto(ctx context.Context, db *sql.DB, dst string) error {
 		return err
 	}
 	f.Close()
-	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, dst); err != nil {
+	_, err = db.ExecContext(ctx, `VACUUM INTO ?`, dst)
+	if err == nil {
+		err = os.Chmod(dst, 0o600) // SQLite keeps the mode; this is belt and braces
+	}
+	if err != nil {
 		os.Remove(dst)
 		return fmt.Errorf("copy the database: %w", err)
 	}
-	if err := os.Chmod(dst, 0o600); err != nil {
-		os.Remove(dst)
-		return err
-	}
-	return syncFile(dst)
+	return syncPath(dst)
 }
 
 // openExisting opens a database file that must already exist (mode=rw
@@ -113,26 +113,18 @@ func Inspect(ctx context.Context, path string) (Summary, error) {
 	if check != "ok" {
 		return sum, fmt.Errorf("the database is damaged: %s", check)
 	}
-	for _, t := range []string{"boxes", "settings"} {
-		var n int
-		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, t).Scan(&n); err != nil {
-			return sum, err
-		}
-		if n == 0 {
-			return sum, fmt.Errorf("not a pmss-fleet-manager database: it has no %s table", t)
-		}
+	var tables int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('boxes','settings')`).Scan(&tables); err != nil || tables != 2 {
+		return sum, fmt.Errorf("not a pmss-fleet-manager database: it has no boxes and settings tables (%v)", err)
 	}
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM boxes`).Scan(&sum.Boxes); err != nil {
 		return sum, err
 	}
 	var sealed string
-	switch err := db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?`, sealedKey).Scan(&sealed); {
-	case errors.Is(err, sql.ErrNoRows):
-	case err != nil:
+	if err := db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?`, sealedKey).Scan(&sealed); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return sum, err
-	default:
-		sum.Encrypted = sealed == "1"
 	}
+	sum.Encrypted = sealed == "1"
 	db.Close()
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -235,7 +227,7 @@ func replaceDB(ctx context.Context, dbPath, staged string) (prev string, err err
 	if err := os.Rename(staged, dbPath); err != nil {
 		return prev, err
 	}
-	return prev, syncDir(filepath.Dir(dbPath))
+	return prev, syncPath(filepath.Dir(dbPath))
 }
 
 // removeSidecars removes a database's write-ahead log and shared-memory
@@ -262,47 +254,29 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	fi, err := in.Stat()
-	if err != nil {
-		return err
-	}
-	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", src)
+	if fi, err := in.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file (%v)", src, err)
 	}
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
+	_, err = io.Copy(out, in)
+	return errors.Join(err, out.Sync(), out.Close())
 }
 
-func syncFile(path string) error {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+// syncPath flushes a file, or a directory after a rename, to disk. Some
+// filesystems cannot sync a directory; that is not worth failing a
+// finished restore over, so only a file's sync error counts.
+func syncPath(path string) error {
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
+	defer f.Close()
+	if fi, err := f.Stat(); err == nil && fi.IsDir() {
+		_ = f.Sync()
+		return nil
 	}
-	return f.Close()
-}
-
-// syncDir makes a rename durable. Some filesystems cannot sync a
-// directory; that is not worth failing a finished restore over.
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	_ = d.Sync()
-	return d.Close()
+	return f.Sync()
 }

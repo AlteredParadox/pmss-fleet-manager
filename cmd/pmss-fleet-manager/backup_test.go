@@ -155,3 +155,38 @@ func TestBackupUsage(t *testing.T) {
 		t.Fatalf("no -in: rc %d", rc)
 	}
 }
+
+func TestOpenStoreHoldsTheLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no lock on this platform")
+	}
+	dir := t.TempDir()
+	st, release, err := openStore(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := openStore(dir, nil); err != errDataDirInUse {
+		t.Fatalf("second server: %v", err)
+	}
+	var errOut bytes.Buffer
+	if rc := restoreCmd([]string{"-data", dir, "-in", filepath.Join(dir, dbName)}, &errOut); rc != 1 || !strings.Contains(errOut.String(), "stop the dashboard first") {
+		t.Fatalf("restore under the server: rc %d %q", rc, errOut.String())
+	}
+	st.Close()
+	release()
+	// A data directory that cannot be created, and a store that fails to
+	// open, both come back as errors with the lock released.
+	file := filepath.Join(dir, "file")
+	os.WriteFile(file, nil, 0o600)
+	if _, err := lockDataDir(filepath.Join(file, "sub")); err == nil {
+		t.Fatal("lock under a file")
+	}
+	bad := t.TempDir()
+	os.Mkdir(filepath.Join(bad, dbName), 0o700) // a directory where the database belongs
+	if _, _, err := openStore(bad, nil); err == nil {
+		t.Fatal("store open over a directory")
+	}
+	if _, release, err := openStore(bad, nil); err == nil || release != nil {
+		t.Fatalf("lock not released after a failed open: %v", err)
+	}
+}

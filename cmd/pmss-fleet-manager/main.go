@@ -29,7 +29,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	legal "pmss-fleet-manager"
 	"strings"
 	"sync/atomic"
@@ -131,19 +130,10 @@ func main() {
 		os.Exit(2)
 	}
 
-	// One server per data directory, and none while a restore replaces
-	// the database (restore takes the same lock).
-	release, err := lockDataDir(*dataDir)
+	st, release, err := openStore(*dataDir, opts)
 	if errors.Is(err, errDataDirInUse) {
 		log.Error("another pmss-fleet-manager (or a restore) is using this data directory", "dir", *dataDir)
 		os.Exit(1)
-	}
-	if err == nil {
-		defer release()
-	}
-	var st *store.Store
-	if err == nil {
-		st, err = store.Open(filepath.Join(*dataDir, dbName), opts...)
 	}
 	if err != nil {
 		if errors.Is(err, fs.ErrPermission) {
@@ -158,6 +148,7 @@ func main() {
 		log.Error("open store", "err", err)
 		os.Exit(1)
 	}
+	defer release() // after the close below: deferred calls run last first
 	defer st.Close()
 	if n := st.ResealedOnOpen(); n > 0 {
 		log.Info("rewrote stored credentials", "count", n, "encrypted", encrypted)

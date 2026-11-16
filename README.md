@@ -354,7 +354,9 @@ the dashboard's configuration, **not of anything on your boxes**.
   checks the copy and prints what it holds: the number of boxes and
   whether the credentials in it are encrypted. `-out -` writes it to
   standard output, for a container where the command cannot see your
-  paths: `docker exec pmss-fleet-manager /pmss-fleet-manager backup -out - > fleet.db`.
+  paths. Your shell then creates the file, with its umask, so set an
+  owner-only one for it:
+  `(umask 077; docker exec pmss-fleet-manager /pmss-fleet-manager backup -out - > fleet.db)`.
 - **The secret is not in the backup.** With credential encryption on
   (*Encrypting stored credentials*), the passwords, WebUI passwords and API
   key in the file are ciphertext, and restoring needs the same secret. Keep
@@ -522,8 +524,9 @@ and starting at boot were not exercised. CI tests the image with Docker.
   the database it protects, which *Encrypting stored credentials* says to
   avoid: back up the volume on its own and keep the secret in a password
   manager.
-- **Backup and restore.** `podman exec pmss-fleet-manager /pmss-fleet-manager backup -out - > fleet.db`
-  takes a consistent copy while it runs (see *Backing up the dashboard*).
+- **Backup and restore.** `(umask 077; podman exec pmss-fleet-manager /pmss-fleet-manager backup -out - > fleet.db)`
+  takes a consistent copy while it runs, owner-only (see *Backing up the
+  dashboard*).
   To archive the whole volume instead, stop the service first: the
   database runs in SQLite's WAL mode, and an archive taken while it writes
   can catch the database and its write-ahead log at different moments. A

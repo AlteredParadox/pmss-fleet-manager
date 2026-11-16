@@ -42,6 +42,22 @@ const (
 
 var errDataDirInUse = errors.New("another pmss-fleet-manager process is using this data directory")
 
+// openStore opens the server's database under the data directory's lock:
+// one server per directory, and none while a restore replaces the
+// database (restore takes the same lock). release frees the lock; call it
+// after closing the store.
+func openStore(dataDir string, opts []store.Option) (st *store.Store, release func(), err error) {
+	release, err = lockDataDir(dataDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if st, err = store.Open(filepath.Join(dataDir, dbName), opts...); err != nil {
+		release()
+		return nil, nil, err
+	}
+	return st, release, nil
+}
+
 // backupCmd is `pmss-fleet-manager backup -out FILE`: a consistent copy
 // of the database, taken while the dashboard runs or not. -out - writes
 // it to stdout (for `docker exec`, where the container cannot see the
