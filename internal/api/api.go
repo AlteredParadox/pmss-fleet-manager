@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -321,6 +322,7 @@ func (s *Server) routes() {
 	handle("GET "+bp+"/api/boxes", s.handleListBoxes)
 	handle("POST "+bp+"/api/boxes", s.handleCreateBox)
 	handle("GET "+bp+boxRoute, s.handleGetBox)
+	handle("GET "+bp+boxRoute+"/history", s.handleBoxHistory) // ?days=7|30: hourly disk, iowait and cpu rows, PMSS's daily traffic
 	handle("GET "+bp+"/api/torrents", s.handleTorrents)
 	handle("PUT "+bp+boxRoute, s.handleUpdateBox)
 	handle("DELETE "+bp+boxRoute, s.handleDeleteBox)
@@ -1320,6 +1322,26 @@ func (s *Server) handleStartTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, v)
+}
+
+// handleBoxHistory answers the box's longer-term history (?days=7 or 30).
+func (s *Server) handleBoxHistory(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	days, err := strconv.Atoi(r.URL.Query().Get("days"))
+	if err != nil || !slices.Contains(collect.HistoryDays, days) {
+		writeErr(w, 400, errors.New("days must be 7 or 30"))
+		return
+	}
+	h, err := s.m.BoxHistory(r.Context(), id, days)
+	if err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, h)
 }
 
 // handleTransferDirs lists one folder's subdirectories for the transfer

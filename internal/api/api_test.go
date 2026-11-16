@@ -1443,3 +1443,25 @@ func TestChangePasswordRoute(t *testing.T) {
 		}
 	}
 }
+
+// The history reads the stored hours only: 7 or 30 days, anything else
+// 400, an unknown box 404.
+func TestBoxHistoryRoute(t *testing.T) {
+	srv, _ := newTestServer(t)
+	b := &store.Box{Name: "x", Host: "x.invalid", User: "u", Port: 22, Enabled: true}
+	if err := srv.m.AddBox(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	p := fmt.Sprintf("/api/boxes/%d/history", b.ID)
+	if code, body := do(t, srv, "GET", p+"?days=7", "", nil); code != 200 || !strings.Contains(body, `"days":7`) || !strings.Contains(body, `"points":[]`) {
+		t.Errorf("7 days: %d %s", code, body)
+	}
+	for _, q := range []string{"", "?days=5", "?days=x"} {
+		if code, _ := do(t, srv, "GET", p+q, "", nil); code != 400 {
+			t.Errorf("%q: %d", q, code)
+		}
+	}
+	if code, _ := do(t, srv, "GET", "/api/boxes/9999/history?days=30", "", nil); code != 404 {
+		t.Errorf("unknown box: %d", code)
+	}
+}

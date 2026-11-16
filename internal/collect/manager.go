@@ -419,6 +419,9 @@ func (m *Manager) housekeeping() {
 			if err := m.st.PruneAlerts(ctx, 30*24*time.Hour); err != nil {
 				m.log.Warn("prune alerts", "err", err)
 			}
+			if err := m.st.PruneHistory(ctx, store.HistoryKeep); err != nil {
+				m.log.Warn("prune history", "err", err)
+			}
 			cancel()
 		}
 	}

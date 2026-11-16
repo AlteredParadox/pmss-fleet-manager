@@ -71,6 +71,7 @@ type poller struct {
 	prevTicks   probe.CPUTicks // last /proc/stat reading, for the host-wide busy figure
 	prevTicksAt time.Time
 	ioHist      []ioSample         // the last hour's iowait figures, oldest first (IOWaitState)
+	hist        historyAcc         // the open hour of the longer-term history (history.go)
 	procPrev    map[int]procSample // last poll's per-pid CPU readings, see appsFromSnapshot
 	// qbtBinStat/qbtBinVersion remember the installed binary's stat and the
 	// version it answered, so the probe can skip --version (which writes to
@@ -668,6 +669,7 @@ func (p *poller) poll(ctx context.Context) {
 
 	st.Sanitize() // before the cache write as well as the in-memory store
 	p.record(ctx, &st)
+	p.historyAdd(ctx, &st, snap.At)
 	p.m.setStateWith(&st, p.storeFix(start, false))
 	if snap.Inventory {
 		// Fresh host facts are in the stored state now: let the catalogue

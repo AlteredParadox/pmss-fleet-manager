@@ -342,6 +342,8 @@ func (s *Store) migrate() error {
 		// Box-to-box copies (see transfers.go). No foreign keys: a job and
 		// its cleanup obligations outlive the removal of either box.
 		createTransfersSQL,
+		// The hourly box history (history.go).
+		createHistorySQL,
 	}
 	for _, q := range stmts {
 		if _, err := s.db.Exec(q); err != nil {
