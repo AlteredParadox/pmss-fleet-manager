@@ -1309,8 +1309,8 @@ Newest first; each release's full notes are on the
   - qBittorrent config: PMSS now keeps the WebUI settings in both
     `[Preferences]` and `[WebUI]`. The section read is chosen as PMSS
     does (`[Preferences]` below 5.3, `[WebUI]` from `MigrationVersion`
-    11), following the running client's build while that process lives,
-    so a stale copy of the port or login settings is never used.
+    11), preferring the running client's reported build while the same
+    process can be identified, with the installed build as fallback.
 - **Transfers tell boxes apart.** The destination picker, the selected
   destination, the folder browser, the confirmation and the job cards
   show each box as *name — user@host* (with *:port* when it is not 22),
