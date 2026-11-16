@@ -521,7 +521,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.20
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.21
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -1282,7 +1282,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.20.0 is the current release. The code was written against five real Pulsed
+1.21.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1293,6 +1293,29 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.21.0**
+
+- **Follows recent PMSS changes** (from a check of PMSS upstream,
+  2026-10-20 → 2026-11-15). (#198)
+  - Bonus traffic: the effective upload limit is now limit + bonus, as
+    PMSS enforces it since its ADR 0213; the bonus is no longer capped at
+    the base limit.
+  - Disk usage on Docker accounts: PMSS's `~/.quota` now also counts
+    files the account's rootless containers own (its ADR 0285). The live
+    quota command still supplies the limits; usage and inode counts come
+    from a fresh snapshot when it shows more (source "live quota limits ·
+    usage from ~/.quota").
+  - qBittorrent config: PMSS now keeps the WebUI settings in both
+    `[Preferences]` and `[WebUI]`. The section read is chosen as PMSS
+    does (`[Preferences]` below 5.3, `[WebUI]` from `MigrationVersion`
+    11), preferring the running client's reported build while the same
+    process can be identified, with the installed build as fallback.
+- **Transfers tell boxes apart.** The destination picker, the selected
+  destination, the folder browser, the confirmation and the job cards
+  show each box as *name — user@host* (with *:port* when it is not 22),
+  so several boxes named after the same username no longer read alike.
+  (#197, #199, #200)
 
 **1.20.0**
 
