@@ -1035,6 +1035,26 @@ func TestSettingsDownloadURL(t *testing.T) {
 	}
 }
 
+// The slow-hour threshold defaults to 20 % and is saved within 1..100.
+func TestSettingsIOWaitSlowPct(t *testing.T) {
+	srv, _ := newTestServer(t)
+	if got := srv.m.Settings().IOWaitSlowPct; got != 20 {
+		t.Fatalf("default %d", got)
+	}
+	for body, want := range map[string]int{
+		`{"iowait_slow_pct":0}`:   400,
+		`{"iowait_slow_pct":101}`: 400,
+		`{"iowait_slow_pct":15}`:  200,
+	} {
+		if code, out := do(t, srv, "PUT", "/api/settings", body, nil); code != want {
+			t.Errorf("%s: %d %s", body, code, out)
+		}
+	}
+	if got := srv.m.Settings().IOWaitSlowPct; got != 15 {
+		t.Fatalf("stored %d", got)
+	}
+}
+
 // The pmdb upload key follows the PM API key's rules (kept on an empty
 // PUT, never echoed, cleared by its flag), and enabling the catalogue
 // without a key is refused rather than silently doing nothing.

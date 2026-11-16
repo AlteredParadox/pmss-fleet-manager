@@ -82,8 +82,18 @@ func TestHistoryHourlyRows(t *testing.T) {
 		t.Fatalf("second hour %+v", p1)
 	}
 	sm := h.Summary
-	if sm.Hours != 2 || sm.IOWaitHours != 2 || *sm.DiskGrowth != 20 || *sm.IOWaitHourMax != 30 || sm.IOWaitBadHours != 1 || *sm.IOWaitAvg != (4+12+30)/3.0 {
+	if sm.Hours != 2 || sm.IOWaitHours != 2 || *sm.DiskGrowth != 20 || *sm.IOWaitHourMax != 30 || sm.IOWaitBadHours != 1 || sm.IOWaitSlowPct != 20 || *sm.IOWaitAvg != (4+12+30)/3.0 {
 		t.Fatalf("summary %+v", sm)
+	}
+	// The slow-hour threshold is the setting's: at 5 % both hours count,
+	// at 30 % neither (exactly the threshold is not over it).
+	for pct, want := range map[int]int{5: 2, 30: 0} {
+		st := m.Settings()
+		st.IOWaitSlowPct = pct
+		m.SetSettings(st)
+		if h, err := m.BoxHistory(ctx, b.ID, 7); err != nil || h.Summary.IOWaitBadHours != want || h.Summary.IOWaitSlowPct != pct {
+			t.Fatalf("threshold %d %%: %+v %v", pct, h.Summary, err)
+		}
 	}
 	fleet := m.HistorySummaries(ctx, 30)
 	if fleet.Days != 30 || len(fleet.Boxes) != 1 || fleet.Boxes[b.ID].Hours != 2 {
@@ -101,15 +111,15 @@ func TestHistoryHourlyRows(t *testing.T) {
 }
 
 func TestSummarizeUnknowns(t *testing.T) {
-	s := summarize([]HistoryPoint{{Polls: 2}, {Polls: 1}})
+	s := summarize([]HistoryPoint{{Polls: 2}, {Polls: 1}}, 20)
 	if s.Hours != 2 || s.IOWaitHours != 0 || s.IOWaitAvg != nil || s.IOWaitHourMax != nil || s.DiskGrowth != nil || s.BusyAvg != nil {
 		t.Fatalf("nothing measured is not zero: %+v", s)
 	}
 	one := int64(5)
-	if s := summarize([]HistoryPoint{{Polls: 1, DiskUsed: &one}}); s.DiskGrowth != nil {
+	if s := summarize([]HistoryPoint{{Polls: 1, DiskUsed: &one}}, 20); s.DiskGrowth != nil {
 		t.Fatalf("one disk reading is no growth: %+v", s)
 	}
-	if s := summarize(nil); s.Hours != 0 {
+	if s := summarize(nil, 20); s.Hours != 0 {
 		t.Fatalf("empty %+v", s)
 	}
 }

@@ -2005,6 +2005,10 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if in.IOWaitSlowPct < 1 || in.IOWaitSlowPct > 100 {
+		writeErr(w, 400, errors.New("the slow-hour iowait threshold must be 1..100 %"))
+		return
+	}
 	if in.RenewalWarnDays < 0 || in.RenewalWarnDays > 365 || in.DuIntervalHours < 0 || in.DuIntervalHours > 720 {
 		writeErr(w, 400, errors.New("out of range"))
 		return

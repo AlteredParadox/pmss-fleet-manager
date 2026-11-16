@@ -102,6 +102,9 @@ type Settings struct {
 	ClientAreaURL    string `json:"client_area_url"`
 	QbtDownloadURL   string `json:"qbt_download_url"`
 	CardMinPx        int    `json:"card_min_px"` // fleet card minimum width
+	// IOWaitSlowPct is the hourly mean host iowait above which the box
+	// history and the comparison view count an hour as a slow one.
+	IOWaitSlowPct int `json:"iowait_slow_pct"`
 
 	// PMAPIKey is the Pulsed Media customer API key. It is never sent to the
 	// browser: Public() blanks it and sets HasPMAPIKey instead. On PUT an
@@ -130,6 +133,9 @@ func (s Settings) Public() Settings {
 // DefaultQbtDownloadURL is the userdocs static build for x86_64.
 const DefaultQbtDownloadURL = "https://github.com/userdocs/qbittorrent-nox-static/releases/latest/download/x86_64-qbittorrent-nox"
 
+// DefaultIOWaitSlowPct is the slow-hour threshold until one is chosen.
+const DefaultIOWaitSlowPct = 20
+
 // DefaultSettings are used when a key has never been written.
 func DefaultSettings() Settings {
 	return Settings{
@@ -143,6 +149,7 @@ func DefaultSettings() Settings {
 		ClientAreaURL:    "https://pulsedmedia.com/clients/",
 		QbtDownloadURL:   DefaultQbtDownloadURL,
 		CardMinPx:        340,
+		IOWaitSlowPct:    DefaultIOWaitSlowPct,
 	}
 }
 
@@ -748,6 +755,7 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 	geti("renewal_warn_days", &out.RenewalWarnDays)
 	geti("du_interval_hours", &out.DuIntervalHours)
 	geti("card_min_px", &out.CardMinPx)
+	geti("iowait_slow_pct", &out.IOWaitSlowPct)
 	gets("theme", &out.Theme)
 	gets("fleet_view", &out.FleetView)
 	gets("client_area_url", &out.ClientAreaURL)
@@ -783,6 +791,7 @@ func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
 		"client_area_url":       st.ClientAreaURL,
 		"qbt_download_url":      s.sealer.Seal(labelQbtDownloadURL, st.QbtDownloadURL),
 		"card_min_px":           strconv.Itoa(st.CardMinPx),
+		"iowait_slow_pct":       strconv.Itoa(st.IOWaitSlowPct),
 		"pm_api_key":            s.sealer.Seal(labelPMAPIKey, st.PMAPIKey),
 		"pmdb_username":         st.PMDBUsername,
 		"pmdb_enabled":          boolKV(st.PMDBEnabled),

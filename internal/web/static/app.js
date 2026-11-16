@@ -447,7 +447,12 @@ function connectEvents() {
     // Saved from another tab: refresh our copy. On the settings form, fields
     // the user has not touched follow the new values so a later save here
     // does not revert them; touched fields and the theme preview stay.
+    const slowWas = slowPct();
     void loadState().then(() => {
+      if (slowPct() !== slowWas) { // the slow hours are counted on the server: fetch them again
+        if (S.view === 'compare') void loadCompare();
+        if (S.view === 'box' && S.tab === 'history' && S.selId) void loadHistory(S.selId);
+      }
       if (S.view !== 'settings') { render(); return; }
       for (const k of Object.keys(S.settings)) if (!S.settingsTouched[k] && !SECRET_SETTINGS.has(k)) S.settingsDraft[k] = S.settings[k];
       applyTheme(S.settingsDraft.theme);
@@ -615,6 +620,8 @@ function viewFleet() {
     ${body}`;
 }
 const CARD_SIZES = [[280, 'S'], [340, 'M'], [420, 'L'], [520, 'XL']];
+// slowPct: the hourly iowait mean above which an hour counts as slow.
+function slowPct() { return Number(S.settings.iowait_slow_pct) || 20; }
 function cardMin() { return Number(S.settings.card_min_px) || 340; }
 function trafficLabel(b) {
   const tr = b.traffic;
@@ -1077,7 +1084,7 @@ function viewCompare() {
       ${th('traffic_left', 'traffic left', 'the upload limit of the rolling 30 days minus what was uploaded in them')}
       ${th('io_now', 'iowait 1 h', 'the host\'s iowait over this dashboard\'s polls of the last hour')}
       ${th('io_avg', `iowait ${days} d`, `mean host iowait over the last ${days} days of hourly history`)}
-      ${th('io_bad', 'slow hours', `hours in the last ${days} days that averaged over 10 % iowait, of the hours with an iowait reading`)}
+      ${th('io_bad', 'slow hours', `hours in the last ${days} days that averaged over ${slowPct()} % iowait, of the hours with an iowait reading (the threshold is in Settings)`)}
       ${th('io_weight', 'I/O prio', 'the plan\'s I/O priority weight (higher gets more of the disks when they are busy)')}
       ${th('cpu_weight', 'CPU prio', 'the plan\'s CPU priority weight')}
       ${th('monthly', 'per month', 'the matched service\'s monthly price (Pulsed Media API)')}
@@ -1135,7 +1142,7 @@ function tabHistory(b) {
       <div><div class="tile-label">disk growth</div><div class="v">${growth === null || growth === undefined ? '—' : (growth >= 0 ? '+' : '−') + fmtBytes(Math.abs(growth), 1)}</div></div>
       <div><div class="tile-label">host iowait, average</div><div class="v">${pct(sm.iowait_avg)}</div></div>
       <div><div class="tile-label">worst hour</div><div class="v">${pct(sm.iowait_hour_max)}</div></div>
-      <div><div class="tile-label">hours over ${10}% iowait</div><div class="v">${sm.iowait_bad_hours ?? 0} <small class="muted">of ${sm.hours ?? 0}</small></div></div>
+      <div><div class="tile-label">hours over ${sm.iowait_slow_pct || slowPct()}% iowait</div><div class="v">${sm.iowait_hours ? sm.iowait_bad_hours ?? 0 : '—'} <small class="muted">of ${sm.iowait_hours ?? 0}</small></div></div>
       <div><div class="tile-label">host cpu busy, average</div><div class="v">${pct(sm.busy_avg)}</div></div>
       <div><div class="tile-label">traffic (${tr.days.length} d)</div><div class="v"><span class="up">↑</span>${fmtBytes(tr.out_mib * MIB, 1)} <span class="muted" style="font-size:12px"><span class="down">↓</span>${fmtBytes(tr.in_mib * MIB, 1)}</span></div></div>
     </div>`;
@@ -2243,6 +2250,7 @@ function viewSettings() {
       <label class="row">refresh interval${sel('poll_interval_sec', [[10, '10 s'], [30, '30 s'], [60, '60 s'], [120, '2 min'], [300, '5 min']], s.poll_interval_sec)}</label>
       <label class="row">disk alert threshold${sel('disk_threshold_pct', [[80, '80%'], [90, '90%'], [95, '95%']], s.disk_threshold_pct)}</label>
       <label class="row">traffic alert threshold${sel('traffic_threshold_pct', [[75, '75%'], [90, '90%'], [100, '100%']], s.traffic_threshold_pct)}</label>
+      <label class="row">slow hour (host iowait)${sel('iowait_slow_pct', [[10, 'over 10%'], [15, 'over 15%'], [20, 'over 20%'], [30, 'over 30%'], [50, 'over 50%']], s.iowait_slow_pct)}</label>
       <label class="row">renewal warning${sel('renewal_warn_days', [[3, '3 days'], [7, '7 days'], [14, '14 days'], [30, '30 days']], s.renewal_warn_days)}</label>
       <label class="row">directory measurement${sel('du_interval_hours', [[0, 'manual only'], [6, 'every 6 h'], [12, 'every 12 h'], [24, 'daily'], [168, 'weekly']], s.du_interval_hours)}</label>
     </div>
@@ -2577,7 +2585,7 @@ async function settingsAction(a) {
 function settingsPatch(draft, touched) {
   const d = {};
   for (const k of Object.keys(touched)) if (k in draft) d[k] = draft[k];
-  for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px']) if (k in d) d[k] = Number(d[k]);
+  for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px', 'iowait_slow_pct']) if (k in d) d[k] = Number(d[k]);
   if (draft.pm_api_key) { d.pm_api_key = draft.pm_api_key; delete d.clear_pm_api_key; }
   else { delete d.pm_api_key; if (draft.clear_pm_api_key) d.clear_pm_api_key = true; else delete d.clear_pm_api_key; }
   if ('pmdb_enabled' in d) d.pmdb_enabled = !!d.pmdb_enabled;

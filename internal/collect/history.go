@@ -148,10 +148,13 @@ type HistorySummary struct {
 	Hours int `json:"hours"` // hours with at least one poll
 	// IOWaitAvg is the mean over every poll in the window with a CPU
 	// reading; IOWaitHourMax the worst hour's mean; IOWaitBadHours how
-	// many hours averaged above IOWaitBadPct.
+	// many hours averaged above IOWaitSlowPct, the threshold in the
+	// settings when the summary was made (sent so the page labels the
+	// count with the threshold it was counted at).
 	IOWaitAvg      *float64 `json:"iowait_avg"`
 	IOWaitHourMax  *float64 `json:"iowait_hour_max"`
 	IOWaitBadHours int      `json:"iowait_bad_hours"`
+	IOWaitSlowPct  int      `json:"iowait_slow_pct"`
 	// IOWaitHours counts the hours with an iowait reading, the base the
 	// slow hours are counted out of (Hours also counts hours of polls
 	// without a CPU reading, the first after a start).
@@ -161,10 +164,6 @@ type HistorySummary struct {
 	// hour to its last (nil with fewer than two).
 	DiskGrowth *int64 `json:"disk_growth"`
 }
-
-// IOWaitBadPct is the hourly iowait mean above which an hour counts as a
-// slow one in HistorySummary.
-const IOWaitBadPct = 10.0
 
 // BoxHistory is the answer of GET /api/boxes/{id}/history.
 type BoxHistory struct {
@@ -195,7 +194,7 @@ func (m *Manager) BoxHistory(ctx context.Context, id int64, days int) (BoxHistor
 		return BoxHistory{}, err
 	}
 	h := BoxHistory{Days: days, Since: since, Points: historyPoints(rows, p.sameGeneration), Traffic: []DayPoint{}}
-	h.Summary = summarize(h.Points)
+	h.Summary = summarize(h.Points, m.Settings().IOWaitSlowPct)
 	if st, ok := m.State(id); ok && st.Traffic.OK {
 		h.Traffic = st.Traffic.Daily
 	}
@@ -254,8 +253,8 @@ func historyPoints(rows []store.HistoryRow, same func(string) bool) []HistoryPoi
 }
 
 // summarize condenses points (oldest first).
-func summarize(pts []HistoryPoint) HistorySummary {
-	var s HistorySummary
+func summarize(pts []HistoryPoint, slowPct int) HistorySummary {
+	s := HistorySummary{IOWaitSlowPct: slowPct}
 	var ioSum, busySum float64
 	var n int
 	var first, last *int64
@@ -281,7 +280,7 @@ func summarize(pts []HistoryPoint) HistorySummary {
 		if s.IOWaitHourMax == nil || *pt.IOWaitAvg > *s.IOWaitHourMax {
 			s.IOWaitHourMax = new(*pt.IOWaitAvg)
 		}
-		if *pt.IOWaitAvg > IOWaitBadPct {
+		if *pt.IOWaitAvg > float64(slowPct) {
 			s.IOWaitBadHours++
 		}
 	}
