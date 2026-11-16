@@ -574,3 +574,13 @@ test('history traffic is the window\'s last days of PMSS\'s series', () => {
   assert.equal(t.in_mib, 14);
   assert.equal(V.historyTraffic(null, 7).days.length, 0);
 });
+
+test('the open history tab reads again once its answer is five minutes old', () => {
+  const now = 1e12;
+  assert.equal(V.historyDue({ box: 1, at: now - 299e3 }, 1, now), false);
+  assert.equal(V.historyDue({ box: 1, at: now - 300e3 }, 1, now), true);
+  assert.equal(V.historyDue({ box: 1, at: now - 900e3, busy: true }, 1, now), false, 'one read at a time');
+  assert.equal(V.historyDue({ box: 2, at: now - 900e3 }, 1, now), false, 'another box\'s answer');
+  assert.equal(V.historyDue({ box: 1, err: 'x' }, 1, now), true, 'a failed read is retried');
+  assert.equal(V.historyDue(null, 1, now), false);
+});

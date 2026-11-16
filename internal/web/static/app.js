@@ -418,7 +418,11 @@ function connectEvents() {
     pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
     if (!pfmRevisions.applyState(S, e)) { renderSide(); return; } // stale: a snapshot or a later event already covered it
     recomputeTotals();
-    if (S.view === 'box' && S.selId === e.box_id) void loadDetail(e.box_id);
+    if (S.view === 'box' && S.selId === e.box_id) {
+      void loadDetail(e.box_id);
+      // The history is written every five minutes: an open tab reads it again once it is that old.
+      if (S.tab === 'history' && pfmView.historyDue(S.hist, e.box_id, Date.now())) void loadHistory(e.box_id);
+    }
     else if (S.view === 'torrents') loadTorrentsSoon();
     else if (S.view === 'fleet') renderSoon(); else renderSide();
   });

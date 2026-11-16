@@ -516,6 +516,13 @@ function historyLines(points, get, from, to, max, w, h) {
   // A single measured hour still shows, as a short level stroke.
   return runs.map((r) => r.length === 1 ? `${r[0]} ${(Number(r[0].split(',')[0]) + 2).toFixed(1)},${r[0].split(',')[1]}` : r.join(' '));
 }
+// historyDue: whether the history tab's answer for box id should be read
+// again at now (ms): it is the same box's, not loading, and at least five
+// minutes old (the poller writes the hours that often), or it failed.
+function historyDue(hist, id, now) {
+  if (!hist || hist.box !== id || hist.busy) return false;
+  return !hist.at || now - hist.at >= 5 * 60e3;
+}
 // historyTraffic: PMSS's daily series cut to the window's days (the last
 // `days` entries, oldest first) and its totals, in MiB.
 function historyTraffic(daily, days) {
@@ -635,5 +642,5 @@ function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
 }
 
-globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic };
+globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue };
 })();

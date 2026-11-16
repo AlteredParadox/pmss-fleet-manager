@@ -18,6 +18,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -103,5 +104,50 @@ func TestSummarizeUnknowns(t *testing.T) {
 	}
 	if s := summarize(nil); s.Hours != 0 {
 		t.Fatalf("empty %+v", s)
+	}
+}
+
+// A write that fails keeps the hour: a closed hour waits in the backlog
+// (capped) and goes in with the next write that works, in order.
+func TestHistoryFailedWritesAreRetried(t *testing.T) {
+	ctx := context.Background()
+	m, st, b := genTestManager(t)
+	p := m.poller(b.ID)
+	failing := true
+	real := historyWrite
+	historyWrite = func(ctx context.Context, s *store.Store, id int64, d store.HistoryDelta) error {
+		if failing {
+			return errors.New("disk full")
+		}
+		return real(ctx, s, id, d)
+	}
+	t.Cleanup(func() { historyWrite = real })
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-30 * time.Hour)
+	poll := func(at time.Time) {
+		s := BoxState{Host: b.Host, Port: b.Port, User: b.User}
+		s.HostSys.CPUOK, s.HostSys.CPUIOWaitPct = true, 1
+		p.historyAdd(ctx, &s, at)
+	}
+	// 27 hours of one poll each, every write failing: the backlog keeps
+	// the latest historyBacklogMax closed hours.
+	for i := 0; i < 27; i++ {
+		poll(hour.Add(time.Duration(i) * time.Hour))
+	}
+	if n := len(p.hist.backlog); n != historyBacklogMax {
+		t.Fatalf("backlog %d", n)
+	}
+	failing = false
+	poll(hour.Add(27 * time.Hour)) // closes hour 26 and writes everything held
+	rows, err := st.History(ctx, b.ID, hour.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != historyBacklogMax+1 || !rows[0].Hour.Equal(hour.Add(2*time.Hour)) || p.hist.backlog != nil {
+		t.Fatalf("rows %d, first %v, backlog %d", len(rows), rows[0].Hour, len(p.hist.backlog))
+	}
+	for _, r := range rows {
+		if r.Polls != 1 || r.CPUN != 1 {
+			t.Fatalf("hour %v written twice or partly: %+v", r.Hour, r)
+		}
 	}
 }

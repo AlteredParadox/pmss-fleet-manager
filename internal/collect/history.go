@@ -33,26 +33,41 @@ import (
 // historyFlushEvery bounds what a restart loses of the open hour.
 const historyFlushEvery = 5 * time.Minute
 
-// historyAcc is the open hour of one poller, not yet written. Only the
-// poll goroutine touches it.
+// historyWrite adds one delta to the store; a test swaps it for a failing
+// write to exercise the backlog.
+var historyWrite = func(ctx context.Context, st *store.Store, boxID int64, d store.HistoryDelta) error {
+	return st.AddHistory(ctx, boxID, d)
+}
+
+// historyBacklogMax bounds the closed hours kept for a retry while the
+// database refuses writes (a day of them); older ones are dropped.
+const historyBacklogMax = 24
+
+// historyAcc is the open hour of one poller, not yet written, and the
+// closed hours whose write failed. Only the poll goroutine touches it.
 type historyAcc struct {
 	open    bool
 	d       store.HistoryDelta
 	flushed time.Time
+	backlog []store.HistoryDelta
 }
 
 // historyAdd counts one successful poll into its hour and writes the
 // hour when it is complete (the next poll is in another hour, or the box
 // moved to another generation) or historyFlushEvery after the last write.
+// A closed hour whose write fails waits in the backlog for the next one.
 func (p *poller) historyAdd(ctx context.Context, st *BoxState, at time.Time) {
 	hour, gen := at.UTC().Truncate(time.Hour), st.generation()
 	h := &p.hist
 	if h.open && (!h.d.Hour.Equal(hour) || h.d.Gen != gen) {
-		p.historyFlush(ctx)
+		if h.d.Polls > 0 {
+			h.backlog = append(h.backlog, h.d)
+		}
 		h.open = false
+		p.historyFlush(ctx)
 	}
 	if !h.open {
-		h.d = store.HistoryDelta{Hour: hour, Gen: gen, DiskUsed: -1, DiskQuota: -1, FilesUsed: -1}
+		h.d = emptyDelta(hour, gen)
 		h.open, h.flushed = true, at
 	}
 	addToDelta(&h.d, st)
@@ -60,6 +75,10 @@ func (p *poller) historyAdd(ctx context.Context, st *BoxState, at time.Time) {
 		p.historyFlush(ctx)
 		h.flushed = at
 	}
+}
+
+func emptyDelta(hour time.Time, gen string) store.HistoryDelta {
+	return store.HistoryDelta{Hour: hour, Gen: gen, DiskUsed: -1, DiskQuota: -1, FilesUsed: -1}
 }
 
 // addToDelta adds one poll's figures. Unknown ones are left out, never
@@ -81,21 +100,33 @@ func addToDelta(d *store.HistoryDelta, st *BoxState) {
 	d.Polls++
 }
 
-// historyFlush writes the open hour's sums and starts them over; the
-// row keeps them (store.AddHistory adds). A failed write keeps them for
-// the next attempt.
+// historyFlush writes the backlog, then the open hour's sums, and starts
+// those over; the row keeps them (store.AddHistory adds). A failed write
+// keeps what it could not write for the next attempt, the backlog capped
+// at historyBacklogMax hours (the oldest go first).
 func (p *poller) historyFlush(ctx context.Context) {
 	h := &p.hist
+	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	for len(h.backlog) > 0 {
+		if err := historyWrite(wctx, p.m.st, p.box.ID, h.backlog[0]); err != nil {
+			p.m.log.Warn("history", "box", p.box.Name, "err", err, "pending_hours", len(h.backlog))
+			if n := len(h.backlog) - historyBacklogMax; n > 0 {
+				h.backlog = h.backlog[n:]
+			}
+			return // the open hour waits too: hours are written in order
+		}
+		h.backlog = h.backlog[1:]
+	}
+	h.backlog = nil
 	if !h.open || h.d.Polls == 0 {
 		return
 	}
-	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if err := p.m.st.AddHistory(wctx, p.box.ID, h.d); err != nil {
+	if err := historyWrite(wctx, p.m.st, p.box.ID, h.d); err != nil {
 		p.m.log.Warn("history", "box", p.box.Name, "err", err)
 		return
 	}
-	h.d = store.HistoryDelta{Hour: h.d.Hour, Gen: h.d.Gen, DiskUsed: -1, DiskQuota: -1, FilesUsed: -1}
+	h.d = emptyDelta(h.d.Hour, h.d.Gen)
 }
 
 // HistoryPoint is one hour of a box's history. A nil field is unknown for
