@@ -547,3 +547,27 @@ test('a transfer names the machine it was set up against (its recorded endpoint)
   assert.equal(V.endpointIdentity('2001:db8::1:2222/stu'), 'stu@[2001:db8::1]:2222');
   for (const bad of ['', 'box-a', 'box-a:22', 'box-a:22/', 'box-a:x/stu', undefined]) assert.equal(V.endpointIdentity(bad), '', String(bad));
 });
+
+test('transfer preflight lines: figures, bounds and the server warnings', () => {
+  const fmt = (b) => `${b}B`;
+  const base = { bytes: 1234, files: 1500, dirs: 3, complete: true, seconds: 2.34, dst_known: true, dst_free_bytes: 9999, dst_free_files: 42, warnings: [] };
+  let l = V.estimateLines(base, fmt);
+  assert.equal(l[0].text, 'about 1234B in 1,500 files and 3 folders (scanned in 2.3 s)');
+  assert.equal(l[1].text, 'the destination had 9999B free in its quota and room for 42 more files at its last poll');
+  assert.deepEqual(l[2], { text: 'it should fit', kind: 'ok' });
+  assert.match(l.at(-1).text, /not a guarantee/);
+
+  l = V.estimateLines({ ...base, complete: false, incomplete: 'the scan stopped after 20 s', dst_free_files: -1 }, fmt);
+  assert.equal(l[0].text, 'at least 1234B in 1,500 files and 3 folders (the scan stopped after 20 s, so this is a lower bound)');
+  assert.equal(l[1].text, 'the destination had 9999B free in its quota at its last poll', 'no inode limit known: not mentioned');
+  assert.equal(l[2].kind, '', 'a partial count that fits is not called a fit');
+
+  l = V.estimateLines({ ...base, warnings: ['too big'] }, fmt);
+  assert.deepEqual(l.filter((x) => x.kind === 'warn'), [{ text: 'too big', kind: 'warn' }]);
+  assert.ok(!l.some((x) => x.kind === 'ok'), 'no "fits" beside a warning');
+
+  l = V.estimateLines({ ...base, dst_known: false, warnings: ['the destination\'s free space is unknown'] }, fmt);
+  assert.ok(!l.some((x) => /destination had/.test(x.text)), 'unknown room is not shown as a number');
+  assert.ok(!l.some((x) => x.kind === 'ok'));
+  assert.deepEqual(V.estimateLines(null, fmt), []);
+});
