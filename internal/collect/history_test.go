@@ -94,9 +94,15 @@ func TestHistoryHourlyRows(t *testing.T) {
 		if h, err := m.BoxHistory(ctx, b.ID, 7); err != nil || h.Summary.IOWaitBadHours != want || h.Summary.IOWaitSlowPct != pct {
 			t.Fatalf("threshold %d %%: %+v %v", pct, h.Summary, err)
 		}
+		if f := m.HistorySummaries(ctx, 7); f.IOWaitSlowPct != pct || f.Boxes[b.ID].IOWaitSlowPct != pct || f.Boxes[b.ID].IOWaitBadHours != want {
+			t.Fatalf("fleet at %d %%: %+v", pct, f)
+		}
 	}
+	def := m.Settings()
+	def.IOWaitSlowPct = 20
+	m.SetSettings(def)
 	fleet := m.HistorySummaries(ctx, 30)
-	if fleet.Days != 30 || len(fleet.Boxes) != 1 || fleet.Boxes[b.ID].Hours != 2 {
+	if fleet.Days != 30 || fleet.IOWaitSlowPct != 20 || len(fleet.Boxes) != 1 || fleet.Boxes[b.ID].Hours != 2 {
 		t.Fatalf("fleet summaries %+v", fleet)
 	}
 	if bad := m.HistorySummaries(ctx, 1); len(bad.Boxes) != 0 {

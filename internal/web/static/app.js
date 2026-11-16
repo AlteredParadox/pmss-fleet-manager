@@ -1043,6 +1043,7 @@ async function loadCompare(days) {
 const CMP_ASC = new Set(['name', 'io_now', 'io_avg', 'io_worst', 'io_bad', 'monthly', 'per_tb']);
 function viewCompare() {
   const C = S.cmp, days = C.days, sums = C.data?.days === days ? C.data.boxes || {} : {};
+  const slow = pfmView.compareSlowPct(C.data, days, slowPct());
   const boxes = S.boxes.filter((b) => b.status !== 'disabled');
   const rows = pfmView.compareSort(boxes.map((b) => {
     const sv = serviceActive(b.service) ? b.service : null;
@@ -1084,7 +1085,7 @@ function viewCompare() {
       ${th('traffic_left', 'traffic left', 'the upload limit of the rolling 30 days minus what was uploaded in them')}
       ${th('io_now', 'iowait 1 h', 'the host\'s iowait over this dashboard\'s polls of the last hour')}
       ${th('io_avg', `iowait ${days} d`, `mean host iowait over the last ${days} days of hourly history`)}
-      ${th('io_bad', 'slow hours', `hours in the last ${days} days that averaged over ${slowPct()} % iowait, of the hours with an iowait reading (the threshold is in Settings)`)}
+      ${th('io_bad', `slow hours (over ${slow.pct} %)`, `hours in the last ${days} days that averaged over ${slow.pct} % iowait, of the hours with an iowait reading (the threshold is in Settings)${slow.stale ? `; counted before the threshold became ${slowPct()} %, not yet refreshed` : ''}`)}
       ${th('io_weight', 'I/O prio', 'the plan\'s I/O priority weight (higher gets more of the disks when they are busy)')}
       ${th('cpu_weight', 'CPU prio', 'the plan\'s CPU priority weight')}
       ${th('monthly', 'per month', 'the matched service\'s monthly price (Pulsed Media API)')}

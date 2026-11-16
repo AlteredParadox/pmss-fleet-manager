@@ -662,3 +662,12 @@ test('transfer preflight lines: figures, bounds and the server warnings', () => 
   assert.ok(!l.some((x) => x.kind === 'ok'));
   assert.deepEqual(V.estimateLines(null, fmt), []);
 });
+
+test('compareSlowPct labels the counts with the threshold they were made at (fred on #207)', () => {
+  const data = { days: 7, iowait_slow_pct: 20, boxes: {} };
+  assert.deepEqual(V.compareSlowPct(data, 7, 20), { pct: 20, stale: false });
+  assert.deepEqual(V.compareSlowPct(data, 7, 50), { pct: 20, stale: true }, 'setting changed, refresh outstanding or failed: still the old answer\'s 20');
+  assert.deepEqual(V.compareSlowPct(data, 30, 50), { pct: 50, stale: false }, 'an answer for another window is not shown');
+  assert.deepEqual(V.compareSlowPct(null, 7, 50), { pct: 50, stale: false }, 'nothing loaded yet');
+  assert.deepEqual(V.compareSlowPct({ days: 7, boxes: {} }, 7, 50), { pct: 50, stale: false }, 'an answer without the field (older server)');
+});

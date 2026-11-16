@@ -181,6 +181,11 @@ var HistoryDays = []int{7, 30}
 // BoxHistory reads box id's last days of history, of its current
 // generation only.
 func (m *Manager) BoxHistory(ctx context.Context, id int64, days int) (BoxHistory, error) {
+	return m.boxHistory(ctx, id, days, m.Settings().IOWaitSlowPct)
+}
+
+// boxHistory is BoxHistory counting slow hours over slowPct.
+func (m *Manager) boxHistory(ctx context.Context, id int64, days, slowPct int) (BoxHistory, error) {
 	if !slices.Contains(HistoryDays, days) {
 		return BoxHistory{}, fmt.Errorf("history window of %d days: only 7 and 30 are kept", days)
 	}
@@ -194,7 +199,7 @@ func (m *Manager) BoxHistory(ctx context.Context, id int64, days int) (BoxHistor
 		return BoxHistory{}, err
 	}
 	h := BoxHistory{Days: days, Since: since, Points: historyPoints(rows, p.sameGeneration), Traffic: []DayPoint{}}
-	h.Summary = summarize(h.Points, m.Settings().IOWaitSlowPct)
+	h.Summary = summarize(h.Points, slowPct)
 	if st, ok := m.State(id); ok && st.Traffic.OK {
 		h.Traffic = st.Traffic.Daily
 	}
@@ -307,8 +312,12 @@ func (t *ioTotals) add(s *HistorySummary, pt HistoryPoint) {
 // FleetHistory is the answer of GET /api/history/summary: each box's
 // summary over the window (keyed by box id), for the comparison view.
 type FleetHistory struct {
-	Days  int                      `json:"days"`
-	Boxes map[int64]HistorySummary `json:"boxes"`
+	Days int `json:"days"`
+	// IOWaitSlowPct is the threshold every box's slow hours were counted
+	// at, so the page labels them with it even while a refresh after a
+	// change of the setting is outstanding or has failed.
+	IOWaitSlowPct int                      `json:"iowait_slow_pct"`
+	Boxes         map[int64]HistorySummary `json:"boxes"`
 }
 
 // HistorySummaries condenses every box's last days of history (days
@@ -322,9 +331,9 @@ func (m *Manager) HistorySummaries(ctx context.Context, days int) FleetHistory {
 		ids = append(ids, id)
 	}
 	m.mu.Unlock()
-	out := FleetHistory{Days: days, Boxes: make(map[int64]HistorySummary, len(ids))}
+	out := FleetHistory{Days: days, IOWaitSlowPct: m.Settings().IOWaitSlowPct, Boxes: make(map[int64]HistorySummary, len(ids))}
 	for _, id := range ids {
-		if h, err := m.BoxHistory(ctx, id, days); err == nil {
+		if h, err := m.boxHistory(ctx, id, days, out.IOWaitSlowPct); err == nil {
 			out.Boxes[id] = h.Summary
 		}
 	}
