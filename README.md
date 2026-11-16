@@ -617,7 +617,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.21
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.22
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -1396,7 +1396,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.21.0 is the current release. The code was written against five real Pulsed
+1.22.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1407,6 +1407,36 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.22.0**
+
+- **Backup and restore commands.** `pmss-fleet-manager backup -out FILE`
+  takes a consistent copy of the dashboard's database while it runs
+  (`-out -` for stdout, e.g. through `docker exec`); `restore -in FILE`
+  replaces it while the dashboard is stopped. Restore first checks that
+  the file is an intact database the dashboard would start with under the
+  configured secret, and keeps the database it replaces beside it. The
+  credential secret is not in a backup: keep it apart. The server now
+  holds a lock on its data directory, so a restore cannot run under it
+  and a second server cannot share the directory. See *Backing up the
+  dashboard*. (#202)
+- **Size check before a transfer.** The confirmation step has an optional
+  *estimate size* button: the source folder is counted on its box (at low
+  priority, up to 20 seconds) and compared with the destination's free
+  quota and file limit at its last poll. It warns; it never stops a copy.
+  (#203)
+- **History tab.** Each box shows the last 7 or 30 days hour by hour: disk
+  used against quota, the host's iowait (hourly mean and worst poll) and
+  CPU busy, with the window's disk growth, average iowait, worst hour and
+  hours over 10 %, next to PMSS's daily traffic. The hours come from the
+  dashboard's own polls and are kept 31 days, so the history starts with
+  this release. (#204)
+- **Compare page.** Every box side by side: free space, files left,
+  upload left in the rolling 30 days, host iowait over the last hour and
+  the history window, I/O and CPU priority, price per month and per TB.
+  Every column sorts, unknown values go last, and a box that is offline
+  or has not answered for ten minutes shows its last readings greyed and
+  sorts them as unknown. Nothing is ranked or chosen for you. (#205)
 
 **1.21.0**
 
