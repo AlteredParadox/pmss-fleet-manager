@@ -255,8 +255,7 @@ func historyPoints(rows []store.HistoryRow, same func(string) bool) []HistoryPoi
 // summarize condenses points (oldest first).
 func summarize(pts []HistoryPoint, slowPct int) HistorySummary {
 	s := HistorySummary{IOWaitSlowPct: slowPct}
-	var ioSum, busySum float64
-	var n int
+	var io ioTotals
 	var first, last *int64
 	for _, pt := range pts {
 		if pt.Polls > 0 {
@@ -268,29 +267,41 @@ func summarize(pts []HistoryPoint, slowPct int) HistorySummary {
 			}
 			last = pt.DiskUsed
 		}
-		if pt.IOWaitAvg == nil {
-			continue
-		}
-		// Weighted by the hour's readings: polls are evenly spaced.
-		w := float64(pt.cpuN)
-		ioSum += *pt.IOWaitAvg * w
-		busySum += *pt.BusyAvg * w
-		n += pt.cpuN
-		s.IOWaitHours++
-		if s.IOWaitHourMax == nil || *pt.IOWaitAvg > *s.IOWaitHourMax {
-			s.IOWaitHourMax = new(*pt.IOWaitAvg)
-		}
-		if *pt.IOWaitAvg > float64(slowPct) {
-			s.IOWaitBadHours++
-		}
+		io.add(&s, pt)
 	}
-	if n > 0 {
-		s.IOWaitAvg, s.BusyAvg = new(ioSum/float64(n)), new(busySum/float64(n))
+	if io.n > 0 {
+		s.IOWaitAvg, s.BusyAvg = new(io.ioSum/float64(io.n)), new(io.busySum/float64(io.n))
 	}
 	if first != nil && last != nil && first != last {
 		s.DiskGrowth = new(*last - *first)
 	}
 	return s
+}
+
+// ioTotals accumulates the window's iowait and busy readings for summarize.
+type ioTotals struct {
+	ioSum, busySum float64
+	n              int
+}
+
+// add counts one hour's CPU readings into t and s (hours without one are
+// skipped: unknown, not idle).
+func (t *ioTotals) add(s *HistorySummary, pt HistoryPoint) {
+	if pt.IOWaitAvg == nil {
+		return
+	}
+	// Weighted by the hour's readings: polls are evenly spaced.
+	w := float64(pt.cpuN)
+	t.ioSum += *pt.IOWaitAvg * w
+	t.busySum += *pt.BusyAvg * w
+	t.n += pt.cpuN
+	s.IOWaitHours++
+	if s.IOWaitHourMax == nil || *pt.IOWaitAvg > *s.IOWaitHourMax {
+		s.IOWaitHourMax = new(*pt.IOWaitAvg)
+	}
+	if *pt.IOWaitAvg > float64(s.IOWaitSlowPct) {
+		s.IOWaitBadHours++
+	}
 }
 
 // FleetHistory is the answer of GET /api/history/summary: each box's
