@@ -613,6 +613,7 @@ func (p *poller) poll(ctx context.Context) {
 		p.inv, p.invAt = snap.InventoryOnly(), start
 	}
 	p.qbtBinStat, p.qbtBinVersion, snap.Qbt.BinaryVersion = resolveQbtVersion(p.qbtBinStat, p.qbtBinVersion, snap.Qbt)
+	snap.Qbt.ApplyConf() // the conf section depends on the build: choose again with the cached version
 	p.apply(&st, snap)
 	if snap.UID > 0 {
 		st.Ready = true // the facts below are this generation's; actions may use them

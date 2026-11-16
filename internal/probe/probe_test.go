@@ -159,7 +159,8 @@ func TestParse(t *testing.T) {
 	if !tr.Out.OK || tr.Out.MonthMiB != 6963.25 || tr.Out.Daily["2026/10/16"] != 40 {
 		t.Fatalf("traffic out: %+v", tr.Out)
 	}
-	if tr.LimitGiB != 10240 || tr.BonusGiB != 10240 || tr.EffectiveLimitGiB != 20480 {
+	// No clamp: PMSS enforces limit + bonus since its ADR 0213.
+	if tr.LimitGiB != 10240 || tr.BonusGiB != 20000 || tr.EffectiveLimitGiB != 30240 {
 		t.Fatalf("traffic limit: %+v", tr)
 	}
 	if snap.Cgroup.MemLimit != 8589934592 || snap.Cgroup.CPUQuota != 4 || snap.Cgroup.Pids != 142 {
@@ -363,6 +364,71 @@ func TestParseProcsHostileAndMissing(t *testing.T) {
 	}
 	if got := parseListenPIDs("80 1\n70000 2\nabc 3\n80 1\n81"); len(got) != 1 || len(got[80]) != 1 {
 		t.Fatalf("listen pids: %v", got)
+	}
+}
+
+// TestQbtConfSection: the section follows the build first, then
+// MigrationVersion, and the section not chosen is never a fallback.
+func TestQbtConfSection(t *testing.T) {
+	both := "WebUI\\Port=8089\nWebUI\\Username=prefs\n[WebUI]Port=16209\n[WebUI]Username=webui\n"
+	for _, c := range []struct {
+		name, meta, version string
+		port                int
+		found               bool
+	}{
+		{"migration 11", "Meta\\MigrationVersion=11\n", "", 16209, true},
+		{"migration 10", "Meta\\MigrationVersion=10\n", "", 8089, true},
+		{"no meta", "", "", 8089, true},
+		{"malformed meta", "Meta\\MigrationVersion=12a\n", "", 8089, true},
+		{"5.3 build", "Meta\\MigrationVersion=12\n", "qBittorrent v5.3.0", 16209, true},
+		{"5.2 build", "Meta\\MigrationVersion=12\n", "qBittorrent v5.2.4", 8089, true},
+		{"4.x build", "Meta\\MigrationVersion=12\n", "qBittorrent v4.6.7", 8089, true},
+	} {
+		q := parseQbt(map[string]string{"qbt_conf": c.meta + both, "qbt_bin_version": c.version})
+		if q.ConfPort != c.port || q.ConfFound != c.found {
+			t.Errorf("%s: port %d found %v, want %d %v", c.name, q.ConfPort, q.ConfFound, c.port, c.found)
+		}
+	}
+	// Migration 12 with only the old section: nothing is read from it.
+	q := parseQbt(map[string]string{"qbt_conf": "Meta\\MigrationVersion=12\nWebUI\\Port=8089\n"})
+	if q.ConfFound || q.ConfPort != 0 {
+		t.Fatalf("stale section used: %+v", q)
+	}
+	// The poller fills a cached version in later and chooses again.
+	q = parseQbt(map[string]string{"qbt_conf": "Meta\\MigrationVersion=12\n" + both})
+	q.BinaryVersion = "v4.6.7"
+	q.ApplyConf()
+	if q.ConfPort != 8089 || q.Username != "prefs" {
+		t.Fatalf("re-apply with a cached version: %+v", q)
+	}
+}
+
+// TestQuotaContainerUsage: a fresh ~/.quota with the same limits and more
+// usage (PMSS adds the account's container subuids, ADR 0285) supplies the
+// usage; the live command keeps the limits.
+func TestQuotaContainerUsage(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	live := "Disk quotas for user u (uid 1001):\n     Filesystem  blocks   quota   limit   grace   files   quota   limit   grace\n      /dev/md2 1000000 2097152000 2621440000           100 1000000 1250000\n"
+	file := func(used string) string {
+		return "Disk quotas for user u (uid 1001):\n     Filesystem   space   quota   limit   grace   files   quota   limit   grace\n      /dev/md2 " + used + "   2000G   2500G           300   1000k   1250k\n"
+	}
+	mt := func(ago time.Duration) string { return strconv.FormatInt(now.Add(-ago).Unix(), 10) }
+	for _, c := range []struct {
+		name, file, mtime, source string
+		used, files               int64
+	}{
+		{"container usage", file("3000000K"), mt(time.Minute), "quota+file", 3000000 << 10, 300},
+		{"stale file", file("3000000K"), mt(10 * time.Minute), "quota", 1000000 << 10, 100},
+		{"file shows less", file("900000K"), mt(time.Minute), "quota", 1000000 << 10, 100},
+		{"rounded up only", file("977M"), mt(time.Minute), "quota", 1000000 << 10, 100},
+		{"no mtime", file("3000000K"), "", "quota", 1000000 << 10, 100},
+		{"PMSS fallback", "Disk quotas for user u (uid 0):\n     Filesystem   space   quota   limit   grace   files   quota   limit   grace\n       /dev/null      9K      0K      0K               0       0       0\n", mt(time.Minute), "quota", 1000000 << 10, 100},
+		{"other limits", strings.Replace(file("3000000K"), "2000G", "1000G", 1), mt(time.Minute), "quota", 1000000 << 10, 100},
+	} {
+		q := parseQuota(map[string]string{"quota": live, "quota_file": c.file, "quota_mtime": c.mtime}, now)
+		if !q.OK || q.Source != c.source || q.UsedBytes != c.used || q.FilesUsed != c.files || q.SoftBytes != 2097152000<<10 || q.HardBytes != 2621440000<<10 {
+			t.Errorf("%s: %+v", c.name, q)
+		}
 	}
 }
 
@@ -1487,13 +1553,16 @@ func TestQbtConfShell(t *testing.T) {
 		t.Skip("no sh")
 	}
 	v4 := "[Preferences]\nWebUI\\Port=8089\nWebUI\\LocalHostAuth=false\nWebUI\\Username=ragnar\nWebUI\\Password_PBKDF2=\"@ByteArray(secret)\"\nConnection\\ResolvePeerCountries=true\n"
-	v5 := "[BitTorrent]\nSession\\Port=15143\n\n[Preferences]\nConnection\\ResolvePeerCountries=true\n\n[WebUI]\r\nAddress=127.0.0.1\nAuthSubnetWhitelistEnabled=false\nLocalHostAuth=true\nPassword_PBKDF2=\"@ByteArray(secret)\"\nPort=16209\nUsername=rc5\n"
+	v5 := "[BitTorrent]\nSession\\Port=15143\n\n[Preferences]\nConnection\\ResolvePeerCountries=true\n\n[WebUI]\r\nAddress=127.0.0.1\nAuthSubnetWhitelistEnabled=false\nLocalHostAuth=true\nPassword_PBKDF2=\"@ByteArray(secret)\"\nPort=16209\nUsername=rc5\n[Meta]\nMigrationVersion=12\n"
+	// What PMSS leaves since its ADR 0182: both sections filled, the
+	// [Preferences] copy stale; the client reads [WebUI] at migration 12.
+	both := "[Meta]\nMigrationVersion=\"12\"\n\n[Preferences]\nWebUI\\Port=8089\nWebUI\\LocalHostAuth=false\nWebUI\\Username=old\n\n[WebUI]\nLocalHostAuth=true\nPort=16209\nUsername=rc5\n"
 	awks := []string{""}
 	if mawk, err := exec.LookPath("mawk"); err == nil {
 		awks = append(awks, mawk)
 	}
 	for _, awk := range awks {
-		for name, conf := range map[string]string{"v4": v4, "v5": v5} {
+		for name, conf := range map[string]string{"v4": v4, "v5": v5, "both": both} {
 			home := t.TempDir()
 			dir := home + "/.config/qBittorrent"
 			os.MkdirAll(dir, 0o700)
@@ -1518,9 +1587,16 @@ func TestQbtConfShell(t *testing.T) {
 				if !q.ConfFound || q.ConfPort != 8089 || !q.LocalHostAuth || q.Username != "ragnar" {
 					t.Fatalf("%s/v4: %+v from %q", awk, q, out)
 				}
-			case "v5":
+			case "v5", "both":
 				if !q.ConfFound || q.ConfPort != 16209 || q.LocalHostAuth || q.SubnetBypass || q.Username != "rc5" {
-					t.Fatalf("%s/v5: %+v from %q", awk, q, out)
+					t.Fatalf("%s/%s: %+v from %q", awk, name, q, out)
+				}
+			}
+			if name == "both" {
+				// A build below 5.3 run on that file reads [Preferences].
+				old := parseQbt(map[string]string{"qbt_conf": string(out), "qbt_bin_version": "qBittorrent v4.6.7"})
+				if old.ConfPort != 8089 || !old.LocalHostAuth || old.Username != "old" {
+					t.Fatalf("%s/both, 4.6.7: %+v", awk, old)
 				}
 			}
 		}

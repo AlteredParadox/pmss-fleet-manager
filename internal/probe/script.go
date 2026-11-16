@@ -367,14 +367,17 @@ const (
 )
 
 // qbtConfShell prints the WebUI settings parseQbt reads, one `WebUI\Key=value`
-// line each whatever the file's layout: qBittorrent 4.x keeps them as
-// `WebUI\Key` under [Preferences]; 5.x (conf MigrationVersion 12) moved them
-// to a [WebUI] section with bare keys, which the old grep for `^WebUI\` never
-// matched, so every 5.x box read as "no port in the config" and fell back to
-// 8080. Only the listed keys are printed: the password hash stays on the box.
+// line each from both layouts: qBittorrent below 5.3 keeps them as
+// `WebUI\Key` under [Preferences] (printed as is); 5.3 moves them to bare
+// keys under [WebUI] at migration 11 (printed as `[WebUI]Key=value`), plus
+// [Meta]'s MigrationVersion (`Meta\MigrationVersion=n`). PMSS now keeps
+// both sections filled, so parseQbt chooses one (QbtInfo.ApplyConf) instead
+// of taking the last line. Only the listed keys are printed: the password
+// hash stays on the box.
 const qbtConfShell = `awk '/^\[/{s=$0; sub(/[ \r]+$/,"",s); next}
 s=="[Preferences]" && /^WebUI\\(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=/{print; next}
-s=="[WebUI]" && /^(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=/{print "WebUI\\" $0}' "$home/.config/qBittorrent/qBittorrent.conf" 2>/dev/null
+s=="[WebUI]" && /^(Port|LocalHostAuth|AuthSubnetWhitelistEnabled|AuthSubnetWhitelist|Username)=/{print "[WebUI]" $0; next}
+s=="[Meta]" && /^MigrationVersion=/{print "Meta\\" $0}' "$home/.config/qBittorrent/qBittorrent.conf" 2>/dev/null
 `
 
 // rtConfShell prints the SCGI endpoint lines from the tenant's rTorrent
