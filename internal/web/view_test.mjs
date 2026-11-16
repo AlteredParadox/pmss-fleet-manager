@@ -585,6 +585,60 @@ test('the open history tab reads again once its answer is five minutes old', () 
   assert.equal(V.historyDue(null, 1, now), false);
 });
 
+test('compare rows: unknown stays null, unlimited traffic is Infinity, prices per TB', () => {
+  const b = { id: 1, name: 'pm1', disk: { ok: true, used_bytes: 4e11, quota_bytes: 1e12, files_soft: 1000, files_used: 1200 },
+    traffic: { ok: true, limit_bytes: 5e12, out_month_bytes: 1e12 }, host_sys: { iowait: { avg60: 3.5, n60: 100 } },
+    tiers: { io_weight: 100, cpu_weight: 500, cores: 4 } };
+  const r = V.compareRow(b, { hours: 168, iowait_hours: 160, iowait_avg: 2.2, iowait_hour_max: 9, iowait_bad_hours: 0 }, 10, 'EUR');
+  assert.equal(r.free, 6e11);
+  assert.equal(r.free_pct, 60);
+  assert.equal(r.files_free, 0, 'over the file limit is none left, not negative');
+  assert.equal(r.traffic_left, 4e12);
+  assert.equal(r.io_now, 3.5);
+  assert.equal(r.io_avg, 2.2);
+  assert.equal(r.io_bad, 0, 'zero slow hours with hours recorded is a real zero');
+  assert.equal(r.hours, 160, 'counted out of the hours with an iowait reading');
+  assert.equal(r.per_tb, 10);
+  assert.equal(r.currency, 'EUR');
+
+  const u = V.compareRow({ id: 2, name: 'new', disk: { ok: false }, traffic: { ok: false }, host_sys: { iowait: { avg60: 0, n60: 0 } } }, undefined, null, 'EUR');
+  for (const k of ['free', 'free_pct', 'files_free', 'traffic_left', 'io_now', 'io_avg', 'io_worst', 'io_bad', 'io_weight', 'cpu_weight', 'monthly', 'per_tb']) {
+    assert.equal(u[k], null, `${k} unknown`);
+  }
+  assert.equal(u.currency, '');
+  assert.equal(V.compareRow({ ...b, traffic: { ok: true, limit_bytes: 0 } }, undefined, null).traffic_left, Infinity);
+  assert.equal(V.compareRow(b, { hours: 0, iowait_bad_hours: 0 }, null).io_bad, null, 'no hours recorded: unknown, not 0');
+  assert.equal(V.compareRow(b, { hours: 3, iowait_avg: null, iowait_bad_hours: 0 }, null).io_bad, null, 'hours of polls without an iowait reading: unknown, not 0 (fred on #205)');
+});
+
+test('compare rows: an offline or long-silent box keeps its readings aside and sorts as unknown (Codex on #205)', () => {
+  const now = Date.parse('2026-11-16T15:00:00Z');
+  const b = { id: 1, name: 'pm1', status: 'online', last_ok: '2026-11-16T14:59:30Z', disk: { ok: true, used_bytes: 1, quota_bytes: 1e12 },
+    traffic: { ok: true, limit_bytes: 0 }, host_sys: { iowait: { avg60: 1, n60: 10 } } };
+  const fresh = V.compareRow(b, undefined, null, '', now);
+  assert.equal(fresh.stale, false);
+  assert.equal(fresh.last, null);
+  assert.equal(fresh.free, 1e12 - 1);
+  for (const st of [{ status: 'offline' }, { status: 'degraded', last_ok: '2026-11-16T14:40:00Z' }]) {
+    const r = V.compareRow({ ...b, ...st }, { hours: 5, iowait_hours: 5, iowait_avg: 2, iowait_bad_hours: 1 }, 7, 'EUR', now);
+    assert.equal(r.stale, true, JSON.stringify(st));
+    for (const k of ['free', 'free_pct', 'files_free', 'traffic_left', 'io_now']) assert.equal(r[k], null, `${k} of a stale box`);
+    assert.equal(r.last.free, 1e12 - 1, 'the last reading is kept for display');
+    assert.equal(r.io_avg, 2, 'the history is still the history');
+    assert.equal(r.monthly, 7);
+  }
+  assert.equal(V.compareRow({ ...b, status: 'degraded', last_ok: '2026-11-16T14:55:00Z' }, undefined, null, '', now).stale, false, 'one failed poll a few minutes after the last good one is not stale yet');
+  assert.equal(V.compareRow({ ...b, status: 'pending', last_ok: '0001-01-01T00:00:00Z', disk: { ok: false } }, undefined, null, '', now).stale, false, 'never polled: unknown, not stale');
+});
+
+test('compare sort: unknown last in both directions, ties by name', () => {
+  const rows = [{ name: 'c', free: null }, { name: 'b', free: 5 }, { name: 'a', free: 5 }, { name: 'd', free: 9 }, { name: 'e', free: Infinity }];
+  assert.deepEqual(V.compareSort(rows, 'free', 'desc').map((r) => r.name), ['e', 'd', 'a', 'b', 'c']);
+  assert.deepEqual(V.compareSort(rows, 'free', 'asc').map((r) => r.name), ['a', 'b', 'd', 'e', 'c']);
+  assert.deepEqual(V.compareSort(rows, 'name', 'asc').map((r) => r.name), ['a', 'b', 'c', 'd', 'e']);
+  assert.equal(rows[0].name, 'c', 'the input is not reordered');
+});
+
 test('transfer preflight lines: figures, bounds and the server warnings', () => {
   const fmt = (b) => `${b}B`;
   const base = { bytes: 1234, files: 1500, dirs: 3, complete: true, seconds: 2.34, dst_known: true, dst_free_bytes: 9999, dst_free_files: 42, warnings: [] };

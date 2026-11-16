@@ -1464,6 +1464,12 @@ func TestBoxHistoryRoute(t *testing.T) {
 	if code, _ := do(t, srv, "GET", "/api/boxes/9999/history?days=30", "", nil); code != 404 {
 		t.Errorf("unknown box: %d", code)
 	}
+	if code, body := do(t, srv, "GET", "/api/history/summary?days=30", "", nil); code != 200 || !strings.Contains(body, fmt.Sprintf(`"%d":{"hours":0`, b.ID)) {
+		t.Errorf("fleet summary: %d %s", code, body)
+	}
+	if code, _ := do(t, srv, "GET", "/api/history/summary?days=3", "", nil); code != 400 {
+		t.Errorf("fleet summary of 3 days: %d", code)
+	}
 }
 
 // The transfer preflight reads only, so monitor-only serves it, and like

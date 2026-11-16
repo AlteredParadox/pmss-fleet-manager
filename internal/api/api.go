@@ -323,7 +323,8 @@ func (s *Server) routes() {
 	handle("GET "+bp+"/api/boxes", s.handleListBoxes)
 	handle("POST "+bp+"/api/boxes", s.handleCreateBox)
 	handle("GET "+bp+boxRoute, s.handleGetBox)
-	handle("GET "+bp+boxRoute+"/history", s.handleBoxHistory) // ?days=7|30: hourly disk, iowait and cpu rows, PMSS's daily traffic
+	handle("GET "+bp+"/api/history/summary", s.handleHistorySummary) // ?days=7|30: every box's history summary, for the comparison view
+	handle("GET "+bp+boxRoute+"/history", s.handleBoxHistory)        // ?days=7|30: hourly disk, iowait and cpu rows, PMSS's daily traffic
 	handle("GET "+bp+"/api/torrents", s.handleTorrents)
 	handle("PUT "+bp+boxRoute, s.handleUpdateBox)
 	handle("DELETE "+bp+boxRoute, s.handleDeleteBox)
@@ -1324,6 +1325,16 @@ func (s *Server) handleStartTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, v)
+}
+
+// handleHistorySummary answers every box's history summary (?days=7 or 30).
+func (s *Server) handleHistorySummary(w http.ResponseWriter, r *http.Request) {
+	days, err := strconv.Atoi(r.URL.Query().Get("days"))
+	if err != nil || !slices.Contains(collect.HistoryDays, days) {
+		writeErr(w, 400, errors.New("days must be 7 or 30"))
+		return
+	}
+	writeJSON(w, 200, s.m.HistorySummaries(r.Context(), days))
 }
 
 // handleBoxHistory answers the box's longer-term history (?days=7 or 30).

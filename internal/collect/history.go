@@ -152,7 +152,11 @@ type HistorySummary struct {
 	IOWaitAvg      *float64 `json:"iowait_avg"`
 	IOWaitHourMax  *float64 `json:"iowait_hour_max"`
 	IOWaitBadHours int      `json:"iowait_bad_hours"`
-	BusyAvg        *float64 `json:"busy_avg"`
+	// IOWaitHours counts the hours with an iowait reading, the base the
+	// slow hours are counted out of (Hours also counts hours of polls
+	// without a CPU reading, the first after a start).
+	IOWaitHours int      `json:"iowait_hours"`
+	BusyAvg     *float64 `json:"busy_avg"`
 	// DiskGrowth is the change in disk used from the window's first known
 	// hour to its last (nil with fewer than two).
 	DiskGrowth *int64 `json:"disk_growth"`
@@ -273,6 +277,7 @@ func summarize(pts []HistoryPoint) HistorySummary {
 		ioSum += *pt.IOWaitAvg * w
 		busySum += *pt.BusyAvg * w
 		n += pt.cpuN
+		s.IOWaitHours++
 		if s.IOWaitHourMax == nil || *pt.IOWaitAvg > *s.IOWaitHourMax {
 			s.IOWaitHourMax = new(*pt.IOWaitAvg)
 		}
@@ -287,4 +292,31 @@ func summarize(pts []HistoryPoint) HistorySummary {
 		s.DiskGrowth = new(*last - *first)
 	}
 	return s
+}
+
+// FleetHistory is the answer of GET /api/history/summary: each box's
+// summary over the window (keyed by box id), for the comparison view.
+type FleetHistory struct {
+	Days  int                      `json:"days"`
+	Boxes map[int64]HistorySummary `json:"boxes"`
+}
+
+// HistorySummaries condenses every box's last days of history (days
+// one of HistoryDays). A box whose rows cannot be read, or that was
+// removed meanwhile, is left out: the view shows it as unknown, and one
+// bad read does not blank the comparison.
+func (m *Manager) HistorySummaries(ctx context.Context, days int) FleetHistory {
+	m.mu.Lock()
+	ids := make([]int64, 0, len(m.pollers))
+	for id := range m.pollers {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+	out := FleetHistory{Days: days, Boxes: make(map[int64]HistorySummary, len(ids))}
+	for _, id := range ids {
+		if h, err := m.BoxHistory(ctx, id, days); err == nil {
+			out.Boxes[id] = h.Summary
+		}
+	}
+	return out
 }

@@ -129,6 +129,7 @@ button.disc:hover{color:var(--text)}
 .lvbar{height:8px;background:var(--line);border-radius:4px;overflow:hidden}.lvbar>i{display:block;height:100%;background:var(--dim)}.lvbar>i>i{display:block;height:100%;background:var(--accent)}
 .lvsvg{width:100%;height:40px;display:block}.lvsvg polyline{fill:none;stroke-width:1.5}.lvsvg .n{stroke:var(--dim)}.lvsvg .y{stroke:var(--accent);stroke-width:2}
 .histsvg{width:100%;height:120px;display:block;background:var(--bg);border-radius:4px}.histsvg polyline{fill:none;stroke-width:1.5;vector-effect:non-scaling-stroke}.histsvg .y{stroke:var(--accent);stroke-width:2}.histsvg .q{stroke:var(--dim);stroke-dasharray:4 3}.histsvg .pk{stroke:var(--dim)}.histsvg .grid{stroke:var(--line);stroke-width:1;vector-effect:non-scaling-stroke}
+.cmptable{width:100%;border-collapse:collapse;font-size:12px}.cmptable th{text-align:left;font-weight:500;padding:6px 8px;white-space:nowrap;border-bottom:1px solid var(--line)}.cmptable th .link{color:var(--muted)}.cmptable td{padding:6px 8px;vertical-align:top;border-bottom:1px solid var(--line)}.cmptable td.num{white-space:nowrap}
 .lvnode{color:var(--dim)}.lvyou{color:var(--accent);font-weight:600}
 .kv{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:4px}
 .kv b{font-weight:400;color:var(--text)}

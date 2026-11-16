@@ -82,8 +82,15 @@ func TestHistoryHourlyRows(t *testing.T) {
 		t.Fatalf("second hour %+v", p1)
 	}
 	sm := h.Summary
-	if sm.Hours != 2 || *sm.DiskGrowth != 20 || *sm.IOWaitHourMax != 30 || sm.IOWaitBadHours != 1 || *sm.IOWaitAvg != (4+12+30)/3.0 {
+	if sm.Hours != 2 || sm.IOWaitHours != 2 || *sm.DiskGrowth != 20 || *sm.IOWaitHourMax != 30 || sm.IOWaitBadHours != 1 || *sm.IOWaitAvg != (4+12+30)/3.0 {
 		t.Fatalf("summary %+v", sm)
+	}
+	fleet := m.HistorySummaries(ctx, 30)
+	if fleet.Days != 30 || len(fleet.Boxes) != 1 || fleet.Boxes[b.ID].Hours != 2 {
+		t.Fatalf("fleet summaries %+v", fleet)
+	}
+	if bad := m.HistorySummaries(ctx, 1); len(bad.Boxes) != 0 {
+		t.Fatalf("a window that is not kept summarizes nothing: %+v", bad)
 	}
 	if _, err := m.BoxHistory(ctx, b.ID, 5); err == nil {
 		t.Fatal("a 5-day window")
@@ -95,7 +102,7 @@ func TestHistoryHourlyRows(t *testing.T) {
 
 func TestSummarizeUnknowns(t *testing.T) {
 	s := summarize([]HistoryPoint{{Polls: 2}, {Polls: 1}})
-	if s.Hours != 2 || s.IOWaitAvg != nil || s.IOWaitHourMax != nil || s.DiskGrowth != nil || s.BusyAvg != nil {
+	if s.Hours != 2 || s.IOWaitHours != 0 || s.IOWaitAvg != nil || s.IOWaitHourMax != nil || s.DiskGrowth != nil || s.BusyAvg != nil {
 		t.Fatalf("nothing measured is not zero: %+v", s)
 	}
 	one := int64(5)

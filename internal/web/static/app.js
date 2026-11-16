@@ -44,6 +44,7 @@ const S = {
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
   transfers: null, // box-to-box copies from /api/transfers, loaded on a box's transfers tab
+  cmp: { days: 7, data: null, busy: false, err: '', sort: { key: 'free', dir: 'desc' } }, // the comparison view
   hist: null, // the history tab's last answer: { box, days, data, busy, err, at }
   xferDraft: null, // the "copy to another box" form of the open box (see blankXferDraft)
   xferFocus: null, // a transfer just started: its card is scrolled to and highlighted once
@@ -206,7 +207,8 @@ function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const parts = h.split('/').filter(Boolean);
   const view = parts[0] || 'fleet';
-  S.view = ['fleet', 'torrents', 'box', 'add', 'alerts', 'settings', 'edit'].includes(view) ? view : 'fleet';
+  S.view = ['fleet', 'torrents', 'compare', 'box', 'add', 'alerts', 'settings', 'edit'].includes(view) ? view : 'fleet';
+  if (S.view === 'compare') void loadCompare();
   if (S.view === 'box') {
     S.selId = Number(parts[1]) || null;
     S.tab = parts[2] || 'overview';
@@ -424,7 +426,11 @@ function connectEvents() {
       if (S.tab === 'history' && pfmView.historyDue(S.hist, e.box_id, Date.now())) void loadHistory(e.box_id);
     }
     else if (S.view === 'torrents') loadTorrentsSoon();
-    else if (S.view === 'fleet') renderSoon(); else renderSide();
+    else if (S.view === 'fleet') renderSoon();
+    else if (S.view === 'compare') {
+      renderSoon(); // free space, traffic and the last hour's iowait are the live state's
+      if (!S.cmp.busy && (!S.cmp.at || Date.now() - S.cmp.at >= 5 * 60e3)) void loadCompare(); // the history, as often as it is written
+    } else renderSide();
   });
   es.addEventListener('removed', (ev) => {
     const e = JSON.parse(ev.data);
@@ -512,6 +518,7 @@ function renderSide() {
     <div class="brand"><div class="led"></div><div class="name">FLEET<span>.ctl</span></div></div>
     <button class="nav ${navActive('fleet')}" data-go="/fleet"><span>fleet</span></button>
     <button class="nav ${navActive('torrents')}" data-go="/torrents"><span>torrents</span></button>
+    <button class="nav ${navActive('compare')}" data-go="/compare"><span>compare</span></button>
     <button class="nav ${navActive('add')}" data-go="/add"><span>add box</span></button>
     <button class="nav ${navActive('alerts')}" data-go="/alerts"><span>alerts</span>${S.unacked ? `<span class="badge">${S.unacked}</span>` : ''}</button>
     <button class="nav ${navActive('settings')}" data-go="/settings"><span>settings</span></button>
@@ -540,6 +547,7 @@ function renderMain() {
   switch (S.view) {
     case 'box': m.innerHTML = viewBox(); break;
     case 'torrents': m.innerHTML = viewTorrents(); break;
+    case 'compare': m.innerHTML = viewCompare(); break;
     case 'add': case 'edit': m.innerHTML = viewAdd(); break;
     case 'alerts': m.innerHTML = viewAlerts(); break;
     case 'settings': m.innerHTML = viewSettings(); break;
@@ -1005,6 +1013,77 @@ function tabTraffic(b) {
       <div><div class="tile-label">limit</div><div class="v">${tr.limit_bytes > 0 ? fmtBytes(tr.limit_bytes, 1) : 'unlimited'}${tr.bonus_bytes ? `<div class="hint">${fmtBytes(tr.base_limit_bytes, 0)} base + ${fmtBytes(tr.bonus_bytes, 0)} bonus</div>` : ''}</div></div>
     </div>
     <div class="hint" style="margin-top:12px">PMSS counts a rolling 30-day window, not a billing cycle. Upload is what counts toward the limit.</div>
+  </div>`;
+}
+/* ----- compare: the boxes side by side, to decide where something goes ----- */
+let cmpSeq = 0;
+async function loadCompare(days) {
+  days = days || S.cmp.days;
+  const seq = ++cmpSeq;
+  S.cmp = { ...S.cmp, days, busy: true, err: '', data: S.cmp.days === days ? S.cmp.data : null };
+  render();
+  try {
+    const d = await api('GET', `${BASE}/api/history/summary?days=${days}`);
+    if (seq !== cmpSeq) return;
+    S.cmp = { ...S.cmp, data: d, busy: false, at: Date.now() };
+  } catch (e) {
+    if (seq !== cmpSeq) return;
+    S.cmp = { ...S.cmp, busy: false, err: e.message };
+  }
+  render();
+}
+// Columns where the smaller value is the better one sort ascending first.
+const CMP_ASC = new Set(['name', 'io_now', 'io_avg', 'io_worst', 'io_bad', 'monthly', 'per_tb']);
+function viewCompare() {
+  const C = S.cmp, days = C.days, sums = C.data?.days === days ? C.data.boxes || {} : {};
+  const boxes = S.boxes.filter((b) => b.status !== 'disabled');
+  const rows = pfmView.compareSort(boxes.map((b) => {
+    const sv = serviceActive(b.service) ? b.service : null;
+    return pfmView.compareRow(b, sums[b.id], sv ? sv.monthly : null, sv?.currency, Date.now());
+  }), C.sort.key, C.sort.dir);
+  const dash = '<span class="muted">—</span>';
+  const pct = (v) => v === null ? dash : fmtPctFine(v);
+  const th = (key, label, tip) => `<th><button class="link" data-act="cmp:sort" data-key="${key}" title="${esc(tip)}">${label}${C.sort.key === key ? (C.sort.dir === 'desc' ? ' ↓' : ' ↑') : ''}</button></th>`;
+  const seg = `<div class="seg" role="group" aria-label="history window">${[7, 30].map((n) => `<button class="${days === n ? 'on' : ''}" aria-pressed="${days === n}" data-act="cmp:days" data-days="${n}">${n} days</button>`).join('')}</div>`;
+  const body = rows.map((r) => {
+    const b = boxById(r.id);
+    const id = pfmView.boxIdentity(b?.user, b?.host, b?.port);
+    // A stale row shows its last readings greyed, with their age; they sort as unknown.
+    const L = r.stale ? r.last : r, old = (html) => r.stale && html !== dash ? `<span class="muted" title="last read ${esc(fmtAgo(b?.last_ok))}, the box is not answering">${html}</span>` : html;
+    const tl = L.traffic_left === null ? dash : L.traffic_left === Infinity ? 'unlimited' : fmtBytes(L.traffic_left, 1);
+    const state = r.stale ? `<div class="note bad">${esc(statusLabel(r.status) || 'not answering')} · readings from ${esc(fmtAgo(b?.last_ok))}</div>`
+      : r.status !== 'online' ? `<div class="note warn">${esc(statusLabel(r.status))}</div>` : '';
+    return `<tr>
+      <td><span class="led ${esc(r.status)}" title="${esc(statusLabel(r.status))}${b?.status_reason ? ' — ' + esc(b.status_reason) : ''}"></span> <button class="link" data-go="/box/${r.id}/history">${esc(r.name)}</button><div class="note">${esc(id)}</div>${state}</td>
+      <td class="num">${old(L.free === null ? dash : fmtBytes(L.free, 1))}${L.free_pct === null ? '' : `<div class="note">${fmtPctFine(L.free_pct)} of ${fmtBytes(L.quota, 1)}</div>`}</td>
+      <td class="num">${old(L.files_free === null ? dash : L.files_free.toLocaleString('en-US'))}</td>
+      <td class="num">${old(tl)}${L.throttled ? '<div class="note warn">throttled</div>' : ''}</td>
+      <td class="num">${old(pct(L.io_now))}</td>
+      <td class="num">${pct(r.io_avg)}${r.io_worst === null ? '' : `<div class="note">worst hour ${fmtPctFine(r.io_worst)}</div>`}</td>
+      <td class="num">${r.io_bad === null ? dash : `${r.io_bad} <span class="muted">/ ${r.hours} h</span>`}</td>
+      <td class="num">${r.io_weight ?? dash}</td>
+      <td class="num">${r.cpu_weight ?? dash}${r.cores ? `<div class="note">${r.cores} cores</div>` : ''}</td>
+      <td class="num">${r.monthly === null ? dash : fmtMoney(r.monthly, r.currency)}</td>
+      <td class="num">${r.per_tb === null ? dash : fmtMoney(r.per_tb, r.currency)}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="chart"><div class="chart-head"><div><div class="tile-label">compare boxes</div>
+      <div class="note">the figures side by side to help decide where to put something; nothing is ranked or chosen for you. Click a heading to sort; unknown values go last. Free space and traffic are from the last poll; a box that is offline or has not answered for ten minutes shows its last readings greyed, and they sort as unknown. Iowait is the host's, the last hour and over the window from this dashboard's history.</div></div>${seg}</div>
+    ${C.err ? `<div class="meta"><span class="bad">history: ${esc(C.err)}</span></div>` : ''}
+    ${!rows.length ? '<div class="empty">no boxes yet</div>' : `<div class="lvwrap"><table class="cmptable"><thead><tr>
+      ${th('name', 'box', 'name')}
+      ${th('free', 'free space', 'quota minus used, at the last poll')}
+      ${th('files_free', 'files left', 'the file (inode) limit minus files used, where the box reports one')}
+      ${th('traffic_left', 'traffic left', 'the upload limit of the rolling 30 days minus what was uploaded in them')}
+      ${th('io_now', 'iowait 1 h', 'the host\'s iowait over this dashboard\'s polls of the last hour')}
+      ${th('io_avg', `iowait ${days} d`, `mean host iowait over the last ${days} days of hourly history`)}
+      ${th('io_bad', 'slow hours', `hours in the last ${days} days that averaged over 10 % iowait, of the hours with an iowait reading`)}
+      ${th('io_weight', 'I/O prio', 'the plan\'s I/O priority weight (higher gets more of the disks when they are busy)')}
+      ${th('cpu_weight', 'CPU prio', 'the plan\'s CPU priority weight')}
+      ${th('monthly', 'per month', 'the matched service\'s monthly price (Pulsed Media API)')}
+      ${th('per_tb', 'per TB', 'monthly price per TB of quota')}
+    </tr></thead><tbody>${body}</tbody></table></div>`}
+    ${C.busy && !C.data ? '<div class="note pulse">loading history…</div>' : ''}
   </div>`;
 }
 /* ----- history: hourly disk, iowait and cpu for 7 or 30 days ----- */
@@ -2539,6 +2618,8 @@ async function runAction(a, act) {
   else if (a === 'app:watch') await appWatchAction(act);
   else if (a.startsWith('log:')) await logAction(a, act);
   else if (a.startsWith('xfer:')) await transferAction(a, act);
+  else if (a === 'cmp:days') await loadCompare(Number(act.dataset.days) === 30 ? 30 : 7);
+  else if (a === 'cmp:sort') { const k = act.dataset.key, c = S.cmp.sort; S.cmp.sort = { key: k, dir: c.key === k ? (c.dir === 'desc' ? 'asc' : 'desc') : (CMP_ASC.has(k) ? 'asc' : 'desc') }; render(); }
   else if (a === 'hist:days') await loadHistory(S.selId, Number(act.dataset.days) === 30 ? 30 : 7);
   else if (a.startsWith('pw:')) await passwordAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);

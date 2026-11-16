@@ -530,6 +530,76 @@ function historyTraffic(daily, days) {
   const out = list.reduce((a, d) => a + (Number(d.out_mib) || 0), 0), inn = list.reduce((a, d) => a + (Number(d.in_mib) || 0), 0);
   return { days: list, out_mib: out, in_mib: inn };
 }
+// compareRow: one box's figures for the comparison view, each null when
+// unknown (never 0: a box that has not been measured is not a full or an
+// idle one). monthly is the box's current monthly price (null: none
+// known), currency its currency; summary is its history summary over the
+// window (undefined: none). Traffic left is the rolling 30-day upload
+// limit minus the upload so far; Infinity for an account without a limit.
+//
+// A stale box (compareStale) keeps its last readings under `last`, for
+// showing greyed with their age, but its live columns are null: an
+// unreachable box must not sort as the roomiest or quietest destination.
+function compareRow(b, summary, monthly, currency, now) {
+  const t = b?.tiers || {}, io = b?.host_sys?.iowait || {};
+  const disk = compareDisk(b?.disk), price = finiteOrNull(monthly);
+  const live = { ...disk, traffic_left: trafficLeft(b?.traffic), throttled: !!b?.traffic?.throttled,
+    io_now: Number(io.n60) > 0 ? Number(io.avg60) : null };
+  const stale = compareStale(b, now ?? Date.now());
+  const unknown = { free: null, free_pct: null, quota: disk.quota, files_free: null, traffic_left: null, throttled: false, io_now: null };
+  return {
+    id: b?.id, name: String(b?.name ?? ''), status: String(b?.status ?? ''), stale, last: stale ? live : null,
+    ...(stale ? unknown : live),
+    ...compareHistory(summary),
+    io_weight: positiveOrNull(t.io_weight), cpu_weight: positiveOrNull(t.cpu_weight), cores: positiveOrNull(t.cores),
+    monthly: price, currency: price === null ? '' : String(currency || ''),
+    per_tb: price !== null && disk.quota !== null ? price / (disk.quota / 1e12) : null,
+  };
+}
+// compareStale: the live readings no longer describe the box: it is
+// offline, or its last successful poll is more than ten minutes old (a
+// box never polled has no readings to go stale).
+function compareStale(b, now) {
+  if (b?.status === 'offline') return true;
+  const ok = Date.parse(b?.last_ok || '');
+  return Number.isFinite(ok) && ok > 86400e3 * 365 && now - ok > 10 * 60e3;
+}
+function finiteOrNull(v) { return v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v); }
+function positiveOrNull(v) { return Number(v) > 0 ? Number(v) : null; }
+// compareDisk: free space, its share and the files left, from the last poll.
+function compareDisk(d) {
+  if (!d?.ok || !(Number(d.quota_bytes) > 0)) return { free: null, free_pct: null, quota: null, files_free: null };
+  const free = Math.max(0, d.quota_bytes - d.used_bytes);
+  return { free, free_pct: free / d.quota_bytes * 100, quota: Number(d.quota_bytes),
+    files_free: Number(d.files_soft) > 0 ? Math.max(0, d.files_soft - (d.files_used || 0)) : null };
+}
+// trafficLeft: the rolling 30-day upload limit minus the upload so far;
+// Infinity without a limit, null when PMSS's figures are not read yet.
+function trafficLeft(tr) {
+  if (!tr?.ok) return null;
+  if (!(Number(tr.limit_bytes) > 0)) return Infinity;
+  return Math.max(0, tr.limit_bytes - (tr.out_month_bytes || 0));
+}
+// compareHistory: the window's iowait figures; slow hours are unknown
+// (not 0) until an hour carries an iowait reading: an hour of polls
+// without one (the first after a start) proves nothing about the disks.
+function compareHistory(sm) {
+  const recorded = finiteOrNull(sm?.iowait_avg) !== null;
+  return { io_avg: finiteOrNull(sm?.iowait_avg), io_worst: finiteOrNull(sm?.iowait_hour_max),
+    io_bad: recorded ? Number(sm.iowait_bad_hours) || 0 : null, hours: recorded ? Number(sm.iowait_hours) || 0 : 0 };
+}
+// compareSort: rows ordered by key, ascending or descending, unknown
+// values (null) always last whatever the direction; ties by name.
+function compareSort(rows, key, dir) {
+  const sign = dir === 'desc' ? -1 : 1;
+  return [...rows].sort((a, b) => {
+    const x = a[key], y = b[key];
+    if (x === null || x === undefined) return y === null || y === undefined ? a.name.localeCompare(b.name) : 1;
+    if (y === null || y === undefined) return -1;
+    if (x !== y) return (x < y ? -1 : 1) * sign;
+    return a.name.localeCompare(b.name);
+  });
+}
 // estimateLines: the transfer preflight's answer as lines to show, each
 // { text, kind } with kind '', 'ok' or 'warn'. The server decides the
 // warnings; this only words the figures. fmt formats a byte count. An
@@ -663,5 +733,5 @@ function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
 }
 
-globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, estimateLines };
+globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, estimateLines };
 })();
