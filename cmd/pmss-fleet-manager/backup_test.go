@@ -91,6 +91,20 @@ func TestBackupRestoreCommands(t *testing.T) {
 		release()
 	}
 
+	// To a file, and the lost-secret path.
+	errOut.Reset()
+	file2 := filepath.Join(dir, "backup2.db")
+	if rc := backupCmd([]string{"-data", src, "-out", file2}, &out, &errOut); rc != 0 || !strings.Contains(errOut.String(), "wrote "+file2) {
+		t.Fatalf("file backup rc %d: %s", rc, errOut.String())
+	}
+	errOut.Reset()
+	if rc := restoreCmd([]string{"-data", filepath.Join(dir, "lost"), "-skip-secret-check", "-in", file2}, &errOut); rc != 0 || !strings.Contains(errOut.String(), "the secret was not checked") {
+		t.Fatalf("skip-secret-check rc %d: %s", rc, errOut.String())
+	}
+	if rc := restoreCmd([]string{"-bogus"}, &errOut); rc != 2 {
+		t.Fatalf("bad flag: rc %d", rc)
+	}
+
 	errOut.Reset()
 	if rc := restoreCmd([]string{"-data", dst, "-secret-file", secretFile, "-in", file}, &errOut); rc != 0 {
 		t.Fatalf("restore rc %d: %s", rc, errOut.String())

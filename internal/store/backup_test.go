@@ -261,3 +261,48 @@ func TestBackupRestoreErrors(t *testing.T) {
 		t.Fatalf("restored %v", got)
 	}
 }
+
+func TestRestoreKeepsAnUnsavableDatabase(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.db")
+	liveStore(t, good, "a").Close()
+	// The current database is damaged: it cannot be saved, so it is not
+	// replaced, and the error says to move it aside by hand.
+	live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
+	os.MkdirAll(filepath.Dir(live), 0o700)
+	junk := []byte(strings.Repeat("damaged ", 512))
+	os.WriteFile(live, junk, 0o600)
+	if _, err := Restore(ctx, live, good, true); err == nil || !strings.Contains(err.Error(), "move") {
+		t.Fatalf("restore over a damaged database: %v", err)
+	}
+	if b, _ := os.ReadFile(live); string(b) != string(junk) {
+		t.Fatal("the damaged database was replaced")
+	}
+	if left, _ := filepath.Glob(live + ".*"); len(left) != 0 {
+		t.Fatalf("left behind: %v", left)
+	}
+}
+
+func TestInspectDamaged(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "d.db")
+	s := liveStore(t, path, "a")
+	for i := 0; i < 50; i++ {
+		s.CreateBox(ctx, &Box{Name: strings.Repeat("n", 500), Host: "h", User: "u", Enabled: true})
+	}
+	s.Close()
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) < 8192 {
+		t.Fatalf("db too small: %d %v", len(b), err)
+	}
+	// Overwrite every page after the first with noise: the header still
+	// says SQLite, the schema and rows do not read.
+	for i := 4096; i < len(b); i++ {
+		b[i] = byte(i * 7)
+	}
+	os.WriteFile(path, b, 0o600)
+	if _, err := Inspect(ctx, path); err == nil {
+		t.Fatal("a damaged database passed")
+	}
+}
