@@ -1718,12 +1718,23 @@ function transferConfirmPanel(b, d) {
   return `<div class="panel"><div class="tile-label">confirm the ${c.move ? 'move' : 'copy'}</div>
     <div style="display:grid;gap:6px;margin:10px 0">${c.lines.map((l, i) => `<div class="${i === 2 ? (c.move ? 'warn' : 'ok') : ''}">${esc(l)}</div>`).join('')}</div>
     ${c.exists ? `<div class="meta"><span class="bad">${esc(c.name)} already exists in that folder: the copy will be refused. Go back and choose another name.</span></div>` : ''}
+    ${transferEstimatePanel(c, d)}
     <div class="muted">Symlinks and special files are skipped. Progress shows below once it starts; cancel keeps what arrived complete${c.move ? ' and leaves the source as it is; the removal itself, once it begins, cannot be stopped' : ''}.</div>
     <div class="actions" style="margin-top:12px">
       <button data-act="xfer:start" ${d.busy || c.exists ? 'disabled' : ''}>${d.busy ? 'setting up…' : c.move ? 'start move' : 'start copy'}</button>
       <button class="ghost" data-act="xfer:back" ${d.busy ? 'disabled' : ''}>back</button>
     </div>
   </div>`;
+}
+// The optional size check of the reviewed copy: a bounded scan of the
+// source folder on its box, compared with the destination's last poll.
+function transferEstimatePanel(c, d) {
+  const E = c.estimate;
+  const btn = `<button type="button" class="small" data-act="xfer:estimate" ${E?.busy || d.busy ? 'disabled' : ''}>${E?.busy ? 'measuring…' : E?.result ? 'measure again' : 'estimate size'}</button>`;
+  const body = E?.err ? `<div class="bad">${esc(E.err)}</div>`
+    : E?.result ? pfmView.estimateLines(E.result, (b) => fmtBytes(b)).map((l) => `<div class="${l.kind}">${esc(l.text)}</div>`).join('')
+    : `<div class="muted">Optional: count the source folder's files and size on ${esc(boxById(c.srcBox)?.name || 'the source')} (at low priority, up to ${20} s) and compare with the destination's free quota.</div>`;
+  return `<div class="panel" style="margin:0 0 10px;background:var(--bg)"><div style="display:flex;gap:8px;align-items:center;justify-content:space-between"><span class="tile-label">size check</span>${btn}</div><div style="display:grid;gap:4px;margin-top:6px">${body}</div></div>`;
 }
 // listDirs reads one folder of box (id, rev): the listing is refused (409)
 // if the box record is no longer the revision the form holds.
@@ -1820,6 +1831,18 @@ async function transferAction(a, act) {
       d.confirm = pfmView.transferConfirmation(src, sl, dst, dl, name, mode, move, d.streams);
     } catch (e) { d.err = e.message; }
     finally { d.busy = false; render(); }
+    return;
+  }
+  if (a === 'xfer:estimate') {
+    const c = d?.confirm;
+    if (!c || c.estimate?.busy) return;
+    const E = c.estimate = { busy: true }; render();
+    try {
+      E.result = await api('POST', `${BASE}/api/boxes/${encodeURIComponent(c.srcBox)}/transfers/estimate?rev=${encodeURIComponent(c.srcRev)}`,
+        { path: String(c.srcPath), dst_box: Number(c.dstBox), dst_rev: Number(c.dstRev) || 0, dst_mode: pfmView.transferMode(c.mode) });
+    } catch (e) { E.err = e.message; }
+    E.busy = false;
+    if (S.xferDraft === d && d.confirm === c) render(); // the answer belongs to this confirmation only
     return;
   }
   if (a === 'xfer:start') {

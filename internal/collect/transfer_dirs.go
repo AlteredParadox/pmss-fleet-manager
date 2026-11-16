@@ -45,7 +45,16 @@ const xferDirsOutCap = 2*4096 + (xferDirsMax+1)*256 + 64
 // HOME) and prints the directory, HOME, then the names of its immediate
 // subdirectories, NUL-separated and capped. find -type d without -L skips
 // symlinks, which a copy would not follow either.
-const xferDirsScript = `set -u
+const xferDirsScript = xferResolveDirScript + `printf 'DIR %s\nHOME %s\n' "$d" "$home"
+find "$d" -mindepth 1 -maxdepth 1 -type d -printf '%f\0' 2>/dev/null | head -z -n ` + "1001" + `
+exit 0
+`
+
+// xferResolveDirScript is the part of a folder script that resolves $P
+// (relative to HOME, absolute, or empty for HOME) to $d, a readable
+// directory inside the home, and $home; it refuses anything else with an
+// ERR line. The picker's listing and the size estimate both start with it.
+const xferResolveDirScript = `set -u
 # System tools only: an ambient PATH could put a folder of the account's
 # (perhaps filled by an earlier copy) ahead of them (daybreak review).
 PATH=/usr/bin:/bin; export PATH
@@ -63,9 +72,6 @@ case "$d/" in "$home"/*) ;; *) die "that folder is outside your home directory";
 [ -d "$d" ] || die "not a directory"
 [ -r "$d" ] && [ -x "$d" ] || die "cannot read that directory"
 case "$d$home" in *[[:cntrl:]]*) die "that folder's path contains a control character";; esac
-printf 'DIR %s\nHOME %s\n' "$d" "$home"
-find "$d" -mindepth 1 -maxdepth 1 -type d -printf '%f\0' 2>/dev/null | head -z -n ` + "1001" + `
-exit 0
 `
 
 // xferInputError is the box's own refusal of a path (outside the home, no

@@ -257,6 +257,7 @@ func changesNoBox(route string) bool {
 		"POST " + boxRoute + "/rtorrent/remove-failure/dismiss", "POST " + boxRoute + "/apps/watch",
 		"POST " + boxRoute + "/logs/read", "POST " + boxRoute + "/containers/{cid}/logs",
 		"POST /api/detect", "POST /api/transfers/{tid}/dismiss", "POST " + boxRoute + "/transfers/dirs",
+		"POST " + boxRoute + "/transfers/estimate",
 		"POST /api/alerts/ack-all", "POST /api/alerts/{id}/ack", "DELETE /api/alerts/{id}", "POST /api/alerts/clear-resolved",
 		"PUT /api/settings", "POST /api/services/sync", "POST /api/pmdb/sync", "POST /api/plans/sync":
 		return true
@@ -346,6 +347,7 @@ func (s *Server) routes() {
 	handle("GET "+bp+"/api/transfers", s.handleTransfers)
 	handle("POST "+bp+boxRoute+"/transfers", s.handleStartTransfer)
 	handle("POST "+bp+boxRoute+"/transfers/dirs", s.handleTransferDirs)             // lists one folder over SSH (reads only): POST so the CSRF check applies; literal segment wins over {tid}
+	handle("POST "+bp+boxRoute+"/transfers/estimate", s.handleTransferEstimate)     // sizes one folder over SSH (reads only), against the destination's last poll
 	handle("POST "+bp+boxRoute+"/transfers/{tid}/{action}", s.handleTransferAction) // cancel and cleanup under the source box; revoke-key under the destination
 	handle("POST "+bp+"/api/transfers/{tid}/dismiss", s.handleDismissTransfer)      // forgets a finished job: changes no box
 	handle("POST "+bp+"/api/detect", s.handleDetect)
@@ -1385,6 +1387,41 @@ func (s *Server) handleTransferDirs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, l)
+}
+
+// handleTransferEstimate is the transfer preflight: it sizes the source
+// folder on the route's box (?rev= as for the picker) and compares it with
+// the destination record {dst_box, dst_rev}'s room at its last poll. It
+// reads only; the scan is bounded on the box, so the request is too.
+func (s *Server) handleTransferEstimate(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	rev, err := boxRevParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	var in struct {
+		Path    string `json:"path"`
+		DstBox  int64  `json:"dst_box"`
+		DstRev  int64  `json:"dst_rev"`
+		DstMode string `json:"dst_mode"`
+	}
+	if err := decodeStrict(r, &in); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(collect.WithBoxRevision(r.Context(), rev), 90*time.Second)
+	defer cancel()
+	e, err := s.m.EstimateTransfer(ctx, id, in.Path, in.DstBox, in.DstRev, in.DstMode)
+	if err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, e)
 }
 
 func (s *Server) handleTransferAction(w http.ResponseWriter, r *http.Request) {
