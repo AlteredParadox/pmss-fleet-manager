@@ -432,7 +432,8 @@ function boxIdentity(user, host, port) {
   if (!user && !host) return '';
   const p = Number(port), withPort = Number.isInteger(p) && p > 0 && p !== 22;
   const h = withPort && host.includes(':') ? `[${host}]` : host;
-  return `${user}@${h}${withPort ? `:${p}` : ''}`;
+  const suffix = withPort ? ':' + p : '';
+  return `${user}@${h}${suffix}`;
 }
 // boxLabel: a box's name and the identity under it, so two boxes named
 // alike (often the same username on several machines, issue #197) still
