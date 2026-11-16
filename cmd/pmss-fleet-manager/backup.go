@@ -117,19 +117,22 @@ func streamFile(path string, w io.Writer) error {
 // restoreCmd is `pmss-fleet-manager restore -in FILE`: it replaces the
 // database with a backup while the dashboard is stopped, after checking
 // that the dashboard would start with it and the configured secret, and
-// keeps the database it replaces beside it.
-func restoreCmd(args []string, stderr io.Writer) int {
+// keeps the database it replaces beside it. -in - reads the backup from
+// stdin (for a one-off container, which then needs no mount of the file
+// and no access to its owner-only mode), staged in a private directory
+// under the data directory.
+func restoreCmd(args []string, stdin io.Reader, stderr io.Writer) int {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dataDir := fs.String("data", envOr("PMSS_DATA", "./data"), "the server's -data directory")
-	in := fs.String("in", "", "the backup file to restore")
+	in := fs.String("in", "", "the backup file to restore, or - for stdin")
 	secretFile := fs.String("secret-file", os.Getenv("PMSS_SECRET_FILE"), "the secret the server will start with (or set PMSS_SECRET); needed when the backup's credentials are encrypted")
 	skipCheck := fs.Bool("skip-secret-check", false, "restore without checking that the configured secret decrypts the backup's credentials (the secret is lost: start once with -forget-encrypted-credentials afterwards)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *in == "" || fs.NArg() > 0 {
-		fmt.Fprintln(stderr, "usage: pmss-fleet-manager restore [-data DIR] [-secret-file FILE] -in FILE")
+		fmt.Fprintln(stderr, "usage: pmss-fleet-manager restore [-data DIR] [-secret-file FILE] -in FILE|-")
 		return 2
 	}
 	creds, err := secrets.Resolve(os.Getenv("PMSS_SECRET"), *secretFile, "", "")
@@ -149,7 +152,20 @@ func restoreCmd(args []string, stderr io.Writer) int {
 		return 1
 	}
 	defer release()
-	res, err := store.Restore(context.Background(), filepath.Join(*dataDir, dbName), *in, !*skipCheck, store.WithSealer(creds.Current))
+	src := *in
+	if src == "-" {
+		tmp, err := os.MkdirTemp(*dataDir, ".restore-")
+		if err != nil {
+			fmt.Fprintln(stderr, restoreTag, err)
+			return 1
+		}
+		defer os.RemoveAll(tmp)
+		if src, err = saveStream(stdin, filepath.Join(tmp, dbName)); err != nil {
+			fmt.Fprintln(stderr, restoreTag, "read the backup from stdin:", err)
+			return 1
+		}
+	}
+	res, err := store.Restore(context.Background(), filepath.Join(*dataDir, dbName), src, !*skipCheck, store.WithSealer(creds.Current))
 	if err != nil {
 		fmt.Fprintln(stderr, restoreTag, err)
 		if errors.Is(err, secrets.ErrNoKey) || errors.Is(err, secrets.ErrWrongKey) {
@@ -168,6 +184,16 @@ func restoreCmd(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "restore: start the dashboard with the same secret")
 	}
 	return 0
+}
+
+// saveStream writes r to the new owner-only file path.
+func saveStream(r io.Reader, path string) (string, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	_, err = io.Copy(f, r)
+	return path, errors.Join(err, f.Close())
 }
 
 func describe(s store.Summary) string {

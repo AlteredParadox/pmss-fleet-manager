@@ -75,7 +75,7 @@ func TestBackupRestoreCommands(t *testing.T) {
 	}
 
 	errOut.Reset()
-	if rc := restoreCmd([]string{"-data", dst, "-in", file}, &errOut); rc != 1 || !strings.Contains(errOut.String(), "give the secret it was made with") {
+	if rc := restoreCmd([]string{"-data", dst, "-in", file}, nil, &errOut); rc != 1 || !strings.Contains(errOut.String(), "give the secret it was made with") {
 		t.Fatalf("restore without the secret: rc %d %q", rc, errOut.String())
 	}
 
@@ -85,7 +85,7 @@ func TestBackupRestoreCommands(t *testing.T) {
 			t.Fatal(err)
 		}
 		errOut.Reset()
-		if rc := restoreCmd([]string{"-data", dst, "-secret-file", secretFile, "-in", file}, &errOut); rc != 1 || !strings.Contains(errOut.String(), "stop the dashboard first") {
+		if rc := restoreCmd([]string{"-data", dst, "-secret-file", secretFile, "-in", file}, nil, &errOut); rc != 1 || !strings.Contains(errOut.String(), "stop the dashboard first") {
 			t.Fatalf("restore under a running dashboard: rc %d %q", rc, errOut.String())
 		}
 		release()
@@ -98,19 +98,22 @@ func TestBackupRestoreCommands(t *testing.T) {
 		t.Fatalf("file backup rc %d: %s", rc, errOut.String())
 	}
 	errOut.Reset()
-	if rc := restoreCmd([]string{"-data", filepath.Join(dir, "lost"), "-skip-secret-check", "-in", file2}, &errOut); rc != 0 || !strings.Contains(errOut.String(), "the secret was not checked") {
+	if rc := restoreCmd([]string{"-data", filepath.Join(dir, "lost"), "-skip-secret-check", "-in", file2}, nil, &errOut); rc != 0 || !strings.Contains(errOut.String(), "the secret was not checked") {
 		t.Fatalf("skip-secret-check rc %d: %s", rc, errOut.String())
 	}
-	if rc := restoreCmd([]string{"-bogus"}, &errOut); rc != 2 {
+	if rc := restoreCmd([]string{"-bogus"}, nil, &errOut); rc != 2 {
 		t.Fatalf("bad flag: rc %d", rc)
 	}
 
 	errOut.Reset()
-	if rc := restoreCmd([]string{"-data", dst, "-secret-file", secretFile, "-in", file}, &errOut); rc != 0 {
+	if rc := restoreCmd([]string{"-data", dst, "-secret-file", secretFile, "-in", "-"}, bytes.NewReader(out.Bytes()), &errOut); rc != 0 {
 		t.Fatalf("restore rc %d: %s", rc, errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "saved as") || !strings.Contains(errOut.String(), "same secret") {
 		t.Fatalf("restore output %q", errOut.String())
+	}
+	if left, _ := filepath.Glob(filepath.Join(dst, ".restore-*")); len(left) != 0 {
+		t.Fatalf("stdin staging left: %v", left)
 	}
 	sl, _ := secrets.New([]byte(secret))
 	s, err := store.Open(filepath.Join(dst, dbName), store.WithSealer(sl))
@@ -153,10 +156,10 @@ func TestBackupUsage(t *testing.T) {
 	if rc := backupCmd([]string{"-data", filepath.Join(dir, "none"), "-out", "-"}, &out, &errOut); rc != 1 {
 		t.Fatalf("stdout backup without a data directory: rc %d", rc)
 	}
-	if rc := restoreCmd([]string{"-data", dir, "-in", filepath.Join(dir, "missing.db")}, &errOut); rc != 1 {
+	if rc := restoreCmd([]string{"-data", dir, "-in", filepath.Join(dir, "missing.db")}, nil, &errOut); rc != 1 {
 		t.Fatalf("restore of a missing file: rc %d", rc)
 	}
-	if rc := restoreCmd([]string{"-data", dir, "-secret-file", filepath.Join(dir, "nosecret"), "-in", "x"}, &errOut); rc != 2 {
+	if rc := restoreCmd([]string{"-data", dir, "-secret-file", filepath.Join(dir, "nosecret"), "-in", "x"}, nil, &errOut); rc != 2 {
 		t.Fatalf("restore with a missing secret file: rc %d", rc)
 	}
 	if rc := backupCmd([]string{"-bogus"}, &out, &errOut); rc != 2 {
@@ -165,7 +168,7 @@ func TestBackupUsage(t *testing.T) {
 	if rc := backupCmd(nil, &out, &errOut); rc != 2 {
 		t.Fatalf("no -out: rc %d", rc)
 	}
-	if rc := restoreCmd(nil, &errOut); rc != 2 {
+	if rc := restoreCmd(nil, nil, &errOut); rc != 2 {
 		t.Fatalf("no -in: rc %d", rc)
 	}
 }
@@ -183,7 +186,7 @@ func TestOpenStoreHoldsTheLock(t *testing.T) {
 		t.Fatalf("second server: %v", err)
 	}
 	var errOut bytes.Buffer
-	if rc := restoreCmd([]string{"-data", dir, "-in", filepath.Join(dir, dbName)}, &errOut); rc != 1 || !strings.Contains(errOut.String(), "stop the dashboard first") {
+	if rc := restoreCmd([]string{"-data", dir, "-in", filepath.Join(dir, dbName)}, nil, &errOut); rc != 1 || !strings.Contains(errOut.String(), "stop the dashboard first") {
 		t.Fatalf("restore under the server: rc %d %q", rc, errOut.String())
 	}
 	st.Close()

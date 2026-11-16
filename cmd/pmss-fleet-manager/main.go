@@ -59,7 +59,7 @@ func main() {
 		os.Exit(backupCmd(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "restore" {
-		os.Exit(restoreCmd(os.Args[2:], os.Stderr))
+		os.Exit(restoreCmd(os.Args[2:], os.Stdin, os.Stderr))
 	}
 	listen := flag.String("listen", envOr("PMSS_LISTEN", "127.0.0.1:8080"), "address(es) to listen on, comma-separated")
 	allowedHosts := flag.String("allowed-hosts", os.Getenv("PMSS_ALLOWED_HOSTS"), "extra Host header names to serve (e.g. a reverse-proxy name), comma-separated; the listen addresses and localhost are always allowed")

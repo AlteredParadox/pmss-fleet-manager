@@ -394,10 +394,14 @@ To restore, stop the dashboard and run:
   `pmss-fleet-manager.db.before-restore-<UTC time>`, so a restore is
   undone by restoring that file. Delete it when you no longer need it: it
   holds the credentials too.
-- In a container, run the restore as a one-off with the data volume and the
-  backup mounted while the dashboard's container is stopped, with the same
-  `--user` as that container if you set one, so the files keep their owner:
-  `docker run --rm -v pmss-fleet-data:/data -v "$PWD":/backup:ro -e PMSS_SECRET_FILE=/run/secrets/credkey -v /path/to/secret:/run/secrets/credkey:ro <image> restore -in /backup/fleet.db`.
+- In a container, stop the dashboard's container and run the restore as a
+  one-off on the same data volume (`pmss-data` in the example below; use
+  yours) with the same secret and, if you set one, the same `--user`, so
+  the files keep their owner. `-in -` reads the backup from standard
+  input, so the container needs neither a mount of the file nor
+  permission to read it:
+  `docker run --rm -i -v pmss-data:/data -e PMSS_SECRET_FILE=/run/secrets/credkey -v /path/to/secret:/run/secrets/credkey:ro ghcr.io/alteredparadox/pmss-fleet-manager:latest restore -in - < fleet.db`,
+  then start the dashboard's container again.
 
 ### Running in a container
 
