@@ -1301,12 +1301,23 @@ func parseQuota(s map[string]string, now time.Time) QuotaInfo {
 		// shows more is that usage: take its counts and keep the live
 		// limits. Only when the snapshot shows the same limits (it prints them
 		// rounded, quota -s), so PMSS's 0K fallback or a stale file never
-		// mixes in, and by more than 0.5 % (at least 1 MiB): a snapshot from
-		// before that change prints its usage rounded up as well.
+		// mixes in. Bytes and inodes are taken each on its own when the
+		// snapshot shows more by over 0.5 % (bytes: at least 1 MiB; inodes:
+		// at least 1): a snapshot from before that change prints both
+		// rounded up, and a container of small files adds inodes alone.
 		if fileOK && ageOK && age >= -time.Minute && age <= quotaFileFresh &&
-			sameLimit(file[1], v[1]) && sameLimit(file[2], v[2]) && file[0]-v[0] > max(v[0]/200, 1<<20) {
-			q.Source = "quota+file"
-			q.UsedBytes, q.FilesUsed, q.Age = file[0], max(v[3], file[3]), age
+			sameLimit(file[1], v[1]) && sameLimit(file[2], v[2]) {
+			moreBytes := file[0]-v[0] > max(v[0]/200, 1<<20)
+			moreFiles := file[3]-v[3] > max(v[3]/200, 1)
+			if moreBytes {
+				q.UsedBytes = file[0]
+			}
+			if moreFiles {
+				q.FilesUsed = file[3]
+			}
+			if moreBytes || moreFiles {
+				q.Source, q.Age = "quota+file", age
+			}
 		}
 		return q
 	}
@@ -1539,11 +1550,16 @@ func migrationVersion(v string) int {
 // keys under [WebUI] only once migration 11 has moved them there, and
 // [Preferences] before that. The other section is never a fallback: PMSS
 // keeps both, so the one not read can hold a stale port. Called by
-// parseQbt and again by the poller after it filled in a cached
-// BinaryVersion.
-func (q *QbtInfo) ApplyConf() {
+// parseQbt with the installed binary's version.
+func (q *QbtInfo) ApplyConf() { q.ApplyConfFor(q.BinaryVersion) }
+
+// ApplyConfFor is ApplyConf for the given build ("v5.3.0"; "" unknown): the
+// poller passes the version the running client reported while that same
+// process is still up, since the binary on disk may already be another
+// build (PMSS also gives the running executable precedence).
+func (q *QbtInfo) ApplyConfFor(version string) {
 	w := q.conf.prefs
-	if !qbtBelow53(q.BinaryVersion) && q.conf.migration >= 11 {
+	if !qbtBelow53(version) && q.conf.migration >= 11 {
 		w = q.conf.webui
 	}
 	q.ConfFound, q.ConfPort, q.LocalHostAuth = w.found, w.port, w.localHostAuth

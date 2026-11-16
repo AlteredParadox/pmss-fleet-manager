@@ -282,6 +282,30 @@ func TestTakeRestartBefore(t *testing.T) {
 	}
 }
 
+// The conf section follows the running build while the process the WebUI
+// reported it for is still up; a new process, an unreadable list or no
+// report yet falls back to the installed binary.
+func TestQbtConfVersion(t *testing.T) {
+	snap := func(tick int64, known bool) *probe.Snapshot {
+		return &probe.Snapshot{ProcsKnown: known, Procs: []probe.ProcInfo{{PID: 42, StartTick: tick, Comm: "qbittorrent-nox"}},
+			Qbt: probe.QbtInfo{BinaryVersion: "v4.6.7"}}
+	}
+	p := &poller{}
+	if v := p.qbtConfVersion(snap(900, true)); v != "v4.6.7" {
+		t.Fatalf("no report yet: %q", v)
+	}
+	p.qbtRunKey, p.qbtRunVersion = "42:900", "v5.3.0"
+	if v := p.qbtConfVersion(snap(900, true)); v != "v5.3.0" {
+		t.Fatalf("same process, binary replaced underneath: %q", v)
+	}
+	if v := p.qbtConfVersion(snap(901, true)); v != "v4.6.7" {
+		t.Fatalf("restarted process: %q", v)
+	}
+	if v := p.qbtConfVersion(snap(900, false)); v != "v4.6.7" {
+		t.Fatalf("unreadable process list: %q", v)
+	}
+}
+
 func TestQbtProcKey(t *testing.T) {
 	procs := []probe.ProcInfo{{PID: 20, Comm: "sshd"}, {PID: 42, StartTick: 900, Comm: "qbittorrent-nox"}, {PID: 7, StartTick: 100, Comm: "qbittorrent-nox"}}
 	if k, known := qbtProcKey(procs); k != "42:900,7:100" || !known {

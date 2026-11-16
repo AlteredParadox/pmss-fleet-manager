@@ -394,6 +394,21 @@ func TestQbtConfSection(t *testing.T) {
 	if q.ConfFound || q.ConfPort != 0 {
 		t.Fatalf("stale section used: %+v", q)
 	}
+	// Installed and running builds on opposite sides of 5.3: the running
+	// one the poller passes decides, whatever the binary on disk is.
+	q = parseQbt(map[string]string{"qbt_conf": "Meta\\MigrationVersion=12\n" + both, "qbt_bin_version": "qBittorrent v4.6.7"})
+	if q.ConfPort != 8089 {
+		t.Fatalf("installed 4.6.7: %+v", q)
+	}
+	q.ApplyConfFor("v5.3.1")
+	if q.ConfPort != 16209 || q.Username != "webui" {
+		t.Fatalf("running 5.3.1 over installed 4.6.7: %+v", q)
+	}
+	q.BinaryVersion = "v5.3.1"
+	q.ApplyConfFor("v5.2.4")
+	if q.ConfPort != 8089 || q.Username != "prefs" {
+		t.Fatalf("running 5.2.4 over installed 5.3.1: %+v", q)
+	}
 	// The poller fills a cached version in later and chooses again.
 	q = parseQbt(map[string]string{"qbt_conf": "Meta\\MigrationVersion=12\n" + both})
 	q.BinaryVersion = "v4.6.7"
@@ -409,21 +424,23 @@ func TestQbtConfSection(t *testing.T) {
 func TestQuotaContainerUsage(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	live := "Disk quotas for user u (uid 1001):\n     Filesystem  blocks   quota   limit   grace   files   quota   limit   grace\n      /dev/md2 1000000 2097152000 2621440000           100 1000000 1250000\n"
-	file := func(used string) string {
-		return "Disk quotas for user u (uid 1001):\n     Filesystem   space   quota   limit   grace   files   quota   limit   grace\n      /dev/md2 " + used + "   2000G   2500G           300   1000k   1250k\n"
+	file := func(used, files string) string {
+		return "Disk quotas for user u (uid 1001):\n     Filesystem   space   quota   limit   grace   files   quota   limit   grace\n      /dev/md2 " + used + "   2000G   2500G           " + files + "   1000k   1250k\n"
 	}
 	mt := func(ago time.Duration) string { return strconv.FormatInt(now.Add(-ago).Unix(), 10) }
 	for _, c := range []struct {
 		name, file, mtime, source string
 		used, files               int64
 	}{
-		{"container usage", file("3000000K"), mt(time.Minute), "quota+file", 3000000 << 10, 300},
-		{"stale file", file("3000000K"), mt(10 * time.Minute), "quota", 1000000 << 10, 100},
-		{"file shows less", file("900000K"), mt(time.Minute), "quota", 1000000 << 10, 100},
-		{"rounded up only", file("977M"), mt(time.Minute), "quota", 1000000 << 10, 100},
-		{"no mtime", file("3000000K"), "", "quota", 1000000 << 10, 100},
+		{"container usage", file("3000000K", "300"), mt(time.Minute), "quota+file", 3000000 << 10, 300},
+		{"stale file", file("3000000K", "300"), mt(10 * time.Minute), "quota", 1000000 << 10, 100},
+		{"file shows less", file("900000K", "90"), mt(time.Minute), "quota", 1000000 << 10, 100},
+		{"rounded up only", file("977M", "100"), mt(time.Minute), "quota", 1000000 << 10, 100},
+		{"bytes only", file("3000000K", "100"), mt(time.Minute), "quota+file", 3000000 << 10, 100},
+		{"inodes only", file("1000500K", "10100"), mt(time.Minute), "quota+file", 1000000 << 10, 10100},
+		{"no mtime", file("3000000K", "300"), "", "quota", 1000000 << 10, 100},
 		{"PMSS fallback", "Disk quotas for user u (uid 0):\n     Filesystem   space   quota   limit   grace   files   quota   limit   grace\n       /dev/null      9K      0K      0K               0       0       0\n", mt(time.Minute), "quota", 1000000 << 10, 100},
-		{"other limits", strings.Replace(file("3000000K"), "2000G", "1000G", 1), mt(time.Minute), "quota", 1000000 << 10, 100},
+		{"other limits", strings.Replace(file("3000000K", "300"), "2000G", "1000G", 1), mt(time.Minute), "quota", 1000000 << 10, 100},
 	} {
 		q := parseQuota(map[string]string{"quota": live, "quota_file": c.file, "quota_mtime": c.mtime}, now)
 		if !q.OK || q.Source != c.source || q.UsedBytes != c.used || q.FilesUsed != c.files || q.SoftBytes != 2097152000<<10 || q.HardBytes != 2621440000<<10 {

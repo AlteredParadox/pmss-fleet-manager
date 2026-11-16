@@ -89,7 +89,11 @@ type poller struct {
 	// client up is noticed (see carriedFirewalledSince).
 	qbtProcKey   string
 	qbtRestarted bool
-	pollStart    time.Time // when the current poll began (dashboard clock), for takeRestartBefore
+	// qbtRunKey/qbtRunVersion: the version the WebUI reported and the
+	// process it came from, so the conf section follows the running build
+	// while that process lives (see qbtConfVersion).
+	qbtRunKey, qbtRunVersion string
+	pollStart                time.Time // when the current poll began (dashboard clock), for takeRestartBefore
 	// dialTCP builds the dialer the WebUI client uses; nil means the SSH
 	// tunnel (sshDialTCP). Tests point it at a fake WebUI so the real
 	// pollQbt orchestration runs without a box.
@@ -613,7 +617,7 @@ func (p *poller) poll(ctx context.Context) {
 		p.inv, p.invAt = snap.InventoryOnly(), start
 	}
 	p.qbtBinStat, p.qbtBinVersion, snap.Qbt.BinaryVersion = resolveQbtVersion(p.qbtBinStat, p.qbtBinVersion, snap.Qbt)
-	snap.Qbt.ApplyConf() // the conf section depends on the build: choose again with the cached version
+	snap.Qbt.ApplyConfFor(p.qbtConfVersion(snap)) // the conf section depends on the build: choose again
 	p.apply(&st, snap)
 	if snap.UID > 0 {
 		st.Ready = true // the facts below are this generation's; actions may use them
@@ -1170,6 +1174,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	if v, err := cli.Version(actx); err == nil {
 		qs.Version = clip(v, 64)
 		versionOK = true
+		p.qbtRunKey, p.qbtRunVersion = p.qbtProcKey, qs.Version
 	}
 	// Peer discovery settings decide where private-tracker torrents may go,
 	// so they are shown per box; another small request per poll.
@@ -1327,6 +1332,19 @@ func resolveQbtVersion(seenStat, seenVersion string, q probe.QbtInfo) (stat, ver
 		return seenStat, seenVersion, seenVersion
 	}
 	return "", "", ""
+}
+
+// qbtConfVersion is the build whose qBittorrent.conf section to read: the
+// version the WebUI reported while the process it came from is the one
+// running now (the binary on disk may already be another build, read only
+// at the next start), else the installed binary's.
+func (p *poller) qbtConfVersion(snap *probe.Snapshot) string {
+	if p.qbtRunVersion != "" && p.qbtRunKey != "" && snap.ProcsKnown {
+		if key, known := qbtProcKey(snap.Procs); known && key == p.qbtRunKey {
+			return p.qbtRunVersion
+		}
+	}
+	return snap.Qbt.BinaryVersion
 }
 
 // qbtNeedsCreds returns a reason to skip the Web API when the config shows
