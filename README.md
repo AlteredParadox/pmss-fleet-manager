@@ -803,7 +803,9 @@ logins that were replaced, and a warning if one could not be.
 The transfers tab copies, or moves, one directory from this box to another
 box. Pick
 the folder to copy with *browse* (or type its path), choose the
-destination box, browse to an existing folder there (or type it), and say
+destination box (listed as *name — user@host*, with *:port* when it is not
+22, so boxes with the same name stay apart; the confirmation and the job
+card name both machines the same way), browse to an existing folder there (or type it), and say
 where the copy goes: into a **new folder** inside it, which you name and
 which must not exist yet; or **straight into that folder**, either
 **keeping** the files already there (only what is missing is copied) or
