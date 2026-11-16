@@ -1597,7 +1597,10 @@ async function pickerOpen(rel) {
 function transferCard(v) {
   const st = pfmView.transferState(v), p = v.progress, src = boxById(v.src_box), dst = boxById(v.dst_box), modeLabel = pfmView.transferModeLabel(v);
   // The identity is the one the job was set up against, not the box's now.
-  const name = (n, id, ep) => { const who = pfmView.endpointIdentity(ep); return esc(`${n || `box ${id} (removed)`}${who && who !== n ? ` — ${who}` : ''}`); };
+  const name = (n, id, ep) => {
+    const who = pfmView.endpointIdentity(ep), label = n || `box ${id} (removed)`;
+    return esc(who && who !== n ? `${label} — ${who}` : label);
+  };
   const counts = [];
   if (v.kept) counts.push(`${v.kept} existing files kept`);
   if (v.conflicts) counts.push(`${v.conflicts} name conflicts (a file against a folder) skipped`);
