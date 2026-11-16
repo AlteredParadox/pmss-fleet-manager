@@ -507,7 +507,7 @@ type QuotaInfo struct {
 	HardBytes int64
 	FilesUsed int64
 	FilesSoft int64
-	Source    string // "quota" or "file"
+	Source    string // "quota", "file", or "quota+file" (live limits, the fresher ~/.quota's usage)
 	Age       time.Duration
 }
 
@@ -570,8 +570,9 @@ type QbtInfo struct {
 	// is empty under cron, so every cron run starts another copy. Fixed by
 	// running autostart again (the helper is rewritten).
 	StartHelperStale bool
-	CronEntries      int  // crontab lines that run only bin/qbt-start (QbtCronPattern)
-	PMSSManaged      bool // ~/.qbittorrentEnable: the PMSS panel runs and configures qBittorrent
+	CronEntries      int     // crontab lines that run only bin/qbt-start (QbtCronPattern)
+	PMSSManaged      bool    // ~/.qbittorrentEnable: the PMSS panel runs and configures qBittorrent
+	conf             qbtConf // both conf sections; ApplyConf picks the one the client reads
 }
 
 // DockerInfo reports the rootless daemon's presence.
@@ -1265,20 +1266,67 @@ func quotaValue(m []string, col int) (int64, bool) {
 	return int64(b), true
 }
 
+// quotaFileFresh is how old ~/.quota may be for its usage to replace the
+// live command's: PMSS rewrites it every minute.
+const quotaFileFresh = 5 * time.Minute
+
+// sameLimit compares a quota limit from ~/.quota (quota -s, rounded to its
+// unit) with the live command's exact one: within 1 %, and never zero.
+func sameLimit(file, live int64) bool {
+	if file <= 0 || live <= 0 {
+		return false
+	}
+	d := file - live
+	if d < 0 {
+		d = -d
+	}
+	return d <= live/100
+}
+
 func parseQuota(s map[string]string, now time.Time) QuotaInfo {
 	q := QuotaInfo{}
+	file, fileOK := parseQuotaLine(s["quota_file"])
+	var age time.Duration
+	ageOK := false
+	if mt, err := strconv.ParseInt(strings.TrimSpace(s["quota_mtime"]), 10, 64); err == nil && mt > 0 {
+		age, ageOK = now.Sub(time.Unix(mt, 0)), true
+	}
 	if v, ok := parseQuotaLine(s["quota"]); ok {
 		q.OK, q.Source = true, "quota"
 		q.UsedBytes, q.SoftBytes, q.HardBytes = v[0], v[1], v[2]
 		q.FilesUsed, q.FilesSoft = v[3], v[4]
+		// Since PMSS's ADR 0285 (2026-11-14) ~/.quota also counts what the
+		// account's rootless containers own under its subordinate UIDs; the
+		// live command counts the primary UID only. A fresh snapshot that
+		// shows more is that usage: take its counts and keep the live
+		// limits. Only when the snapshot shows the same limits (it prints them
+		// rounded, quota -s), so PMSS's 0K fallback or a stale file never
+		// mixes in. Bytes and inodes are taken each on its own when the
+		// snapshot shows more by over 0.5 % (bytes: at least 1 MiB; inodes:
+		// at least 1): a snapshot from before that change prints both
+		// rounded up, and a container of small files adds inodes alone.
+		if fileOK && ageOK && age >= -time.Minute && age <= quotaFileFresh &&
+			sameLimit(file[1], v[1]) && sameLimit(file[2], v[2]) {
+			moreBytes := file[0]-v[0] > max(v[0]/200, 1<<20)
+			moreFiles := file[3]-v[3] > max(v[3]/200, 1)
+			if moreBytes {
+				q.UsedBytes = file[0]
+			}
+			if moreFiles {
+				q.FilesUsed = file[3]
+			}
+			if moreBytes || moreFiles {
+				q.Source, q.Age = "quota+file", age
+			}
+		}
 		return q
 	}
-	if v, ok := parseQuotaLine(s["quota_file"]); ok {
+	if fileOK {
 		q.OK, q.Source = true, "file"
-		q.UsedBytes, q.SoftBytes, q.HardBytes = v[0], v[1], v[2]
-		q.FilesUsed, q.FilesSoft = v[3], v[4]
-		if mt, err := strconv.ParseInt(strings.TrimSpace(s["quota_mtime"]), 10, 64); err == nil && mt > 0 {
-			q.Age = now.Sub(time.Unix(mt, 0))
+		q.UsedBytes, q.SoftBytes, q.HardBytes = file[0], file[1], file[2]
+		q.FilesUsed, q.FilesSoft = file[3], file[4]
+		if ageOK {
+			q.Age = age
 		}
 	}
 	return q
@@ -1344,11 +1392,11 @@ func parseTraffic(s map[string]string) TrafficInfo {
 		BonusGiB:  parseGiB(s["bonus_traffic"]),
 		Throttled: strings.TrimSpace(s["throttle"]) == "1",
 	}
-	// Same clamp PMSS applies: bonus never exceeds the base limit.
+	// What PMSS enforces since its ADR 0213 (2026-11-01): limit + bonus, no
+	// clamp. The bonus root reads is in its own user store, and
+	// ~/.bonusTraffic is that value's display copy (the customer panel
+	// still clamps the bonus to the limit, enforcement no longer does).
 	if t.LimitGiB > 0 {
-		if t.BonusGiB > t.LimitGiB {
-			t.BonusGiB = t.LimitGiB
-		}
 		t.EffectiveLimitGiB = t.LimitGiB + t.BonusGiB
 	}
 	return t
@@ -1433,21 +1481,105 @@ func parseQbt(s map[string]string) QbtInfo {
 		if !ok {
 			continue
 		}
-		q.ConfFound = true
-		switch k {
-		case `WebUI\Port`:
-			q.ConfPort, _ = strconv.Atoi(v)
-		case `WebUI\LocalHostAuth`:
-			q.LocalHostAuth = strings.EqualFold(v, "false")
-		case `WebUI\AuthSubnetWhitelistEnabled`:
-			q.SubnetBypass = strings.EqualFold(v, "true")
-		case `WebUI\AuthSubnetWhitelist`:
-			q.SubnetList = v
-		case `WebUI\Username`:
-			q.Username = v
+		if k == `Meta\MigrationVersion` {
+			q.conf.migration = migrationVersion(v)
+			continue
 		}
+		sec := &q.conf.prefs
+		if key, ok := strings.CutPrefix(k, "[WebUI]"); ok {
+			sec, k = &q.conf.webui, `WebUI\`+key
+		}
+		sec.set(k, v)
 	}
+	q.ApplyConf()
 	return q
+}
+
+// qbtWebUI is the WebUI settings one section of qBittorrent.conf holds.
+type qbtWebUI struct {
+	found         bool
+	port          int
+	localHostAuth bool
+	subnetBypass  bool
+	subnetList    string
+	username      string
+}
+
+func (w *qbtWebUI) set(k, v string) {
+	switch k {
+	case `WebUI\Port`:
+		w.port, _ = strconv.Atoi(v)
+	case `WebUI\LocalHostAuth`:
+		w.localHostAuth = strings.EqualFold(v, "false")
+	case `WebUI\AuthSubnetWhitelistEnabled`:
+		w.subnetBypass = strings.EqualFold(v, "true")
+	case `WebUI\AuthSubnetWhitelist`:
+		w.subnetList = v
+	case `WebUI\Username`:
+		w.username = v
+	default:
+		return
+	}
+	w.found = true
+}
+
+// qbtConf keeps both sections as the probe read them, so the choice can be
+// made again once the poller knows the binary's version.
+type qbtConf struct {
+	prefs, webui qbtWebUI
+	migration    int // Meta\MigrationVersion; -1 when absent or malformed
+}
+
+// migrationVersion reads Meta\MigrationVersion (bare or quoted digits); -1
+// for anything else.
+func migrationVersion(v string) int {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		v = v[1 : len(v)-1]
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 || strings.ContainsAny(v, "+-") {
+		return -1
+	}
+	return n
+}
+
+// ApplyConf fills the exported WebUI fields from the section the client
+// reads, the way PMSS decides it (its ADR 0182): a build below 5.3 reads
+// `WebUI\Key` under [Preferences]; a newer or unknown build reads the bare
+// keys under [WebUI] only once migration 11 has moved them there, and
+// [Preferences] before that. The other section is never a fallback: PMSS
+// keeps both, so the one not read can hold a stale port. Called by
+// parseQbt with the installed binary's version.
+func (q *QbtInfo) ApplyConf() { q.ApplyConfFor(q.BinaryVersion) }
+
+// ApplyConfFor is ApplyConf for the given build ("v5.3.0"; "" unknown): the
+// poller passes the version the running client reported while that same
+// process is still up, since the binary on disk may already be another
+// build (PMSS also gives the running executable precedence).
+func (q *QbtInfo) ApplyConfFor(version string) {
+	w := q.conf.prefs
+	if !qbtBelow53(version) && q.conf.migration >= 11 {
+		w = q.conf.webui
+	}
+	q.ConfFound, q.ConfPort, q.LocalHostAuth = w.found, w.port, w.localHostAuth
+	q.SubnetBypass, q.SubnetList, q.Username = w.subnetBypass, w.subnetList, w.username
+}
+
+// qbtBelow53 reports whether a "v5.2.3"-style version is below 5.3; false
+// when the version is unknown or unreadable.
+func qbtBelow53(v string) bool {
+	major, rest, _ := strings.Cut(strings.TrimPrefix(v, "v"), ".")
+	minorDigits := rest
+	if i := strings.IndexFunc(rest, func(r rune) bool { return r < '0' || r > '9' }); i >= 0 {
+		minorDigits = rest[:i]
+	}
+	ma, err1 := strconv.Atoi(major)
+	mi, err2 := strconv.Atoi(minorDigits)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return ma < 5 || ma == 5 && mi < 3
 }
 
 // RtInfo is what the probe saw of the tenant's rTorrent.

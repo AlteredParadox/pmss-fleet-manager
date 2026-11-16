@@ -1469,7 +1469,7 @@ function tabStorage(b) {
         <div><span>files</span><span>${b.disk.files_used ? `${b.disk.files_used.toLocaleString()} / ${b.disk.files_soft.toLocaleString()}` : '—'}</span></div>
         <div><span>home fs</span><span>${esc(b.host_sys.home_fs_type || '—')} · ${fmtBytes(b.host_sys.home_size, 0)} shared</span></div>
         <div><span>host free</span><span>${fmtBytes(b.host_sys.home_avail, 1)}</span></div>
-        <div><span>source</span><span class="muted">${b.disk.source === 'quota' ? 'live quota command' : b.disk.source === 'file' ? '~/.quota snapshot' : '—'}</span></div>
+        <div><span>source</span><span class="muted">${b.disk.source === 'quota' ? 'live quota command' : b.disk.source === 'file' ? '~/.quota snapshot' : b.disk.source === 'quota+file' ? 'live quota limits · usage from ~/.quota (includes container files)' : '—'}</span></div>
       </div>
       <div class="panel rows"><div class="tile-label">access</div>
         <div><span>sftp</span><span>${esc(b.user)}@${esc(b.hostname || b.host)}:${b.port}</span></div>
