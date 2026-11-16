@@ -40,6 +40,18 @@ default order); the choice is remembered per table in the browser.
   (your slice against its quota and as a share of the whole host), client,
   incoming connectivity and listen port, autostart status, plan and billing.
 - Traffic: daily upload/download bars for the rolling 30 days PMSS tracks.
+- History: the last 7 or 30 days, hour by hour, to tell a box that is
+  always slow from one having a bad hour: disk used against the quota,
+  the host's iowait (each hour's mean and its worst poll) and cpu busy,
+  with the window's disk growth, average iowait, worst hour and the number
+  of hours above 10 % iowait, next to PMSS's daily traffic for the same
+  days. The hours come from the dashboard's own polls (summed per UTC
+  hour, written every five minutes, kept 31 days in the database), so an
+  hour the dashboard was not running stays empty rather than being drawn
+  across, and a restart loses at most the last five minutes. Hours
+  measured under another endpoint or host key (a record edited to point
+  elsewhere) are not shown. Traffic needs no store of its own: PMSS keeps
+  the daily series for 30 days.
 - Host: the shared machine's cpu (busy, iowait, steal), memory and `/home`,
   and PMSS's own 24-hour "node vs. you" statistics (15 min / 1 h / 24 h
   averages and a trend, computed as its panel computes them).

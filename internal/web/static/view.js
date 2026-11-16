@@ -488,6 +488,48 @@ function transferConfirmation(srcBox, srcList, dstBox, dstList, name, mode, move
     ],
   };
 }
+// historyLines: the polylines of one hourly series over a window, as SVG
+// point lists in a w x h box. points are the history's hours (oldest
+// first), get reads a value (null or undefined: not measured). x follows
+// the hour's time between from and to (ms), so a gap in polling stays a
+// gap; a run is broken wherever an hour is missing or unmeasured, never
+// drawn across as if the value had held. max scales y (0 at the bottom).
+function historyLines(points, get, from, to, max, w, h) {
+  const span = Math.max(1, to - from), top = Math.max(Number(max) || 0, 1e-9);
+  const runs = [];
+  let run = [], prevT = null;
+  for (const p of points || []) {
+    const t = Date.parse(p.t), v = get(p);
+    const gap = prevT !== null && t - prevT > 3600e3;
+    if (v === null || v === undefined || !Number.isFinite(Number(v)) || gap) {
+      if (run.length) runs.push(run);
+      run = [];
+    }
+    if (v !== null && v !== undefined && Number.isFinite(Number(v))) {
+      const x = Math.min(w, Math.max(0, (t - from) / span * w));
+      const y = h - Math.min(1, Math.max(0, Number(v) / top)) * h;
+      run.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    prevT = t;
+  }
+  if (run.length) runs.push(run);
+  // A single measured hour still shows, as a short level stroke.
+  return runs.map((r) => r.length === 1 ? `${r[0]} ${(Number(r[0].split(',')[0]) + 2).toFixed(1)},${r[0].split(',')[1]}` : r.join(' '));
+}
+// historyDue: whether the history tab's answer for box id should be read
+// again at now (ms): it is the same box's, not loading, and at least five
+// minutes old (the poller writes the hours that often), or it failed.
+function historyDue(hist, id, now) {
+  if (!hist || hist.box !== id || hist.busy) return false;
+  return !hist.at || now - hist.at >= 5 * 60e3;
+}
+// historyTraffic: PMSS's daily series cut to the window's days (the last
+// `days` entries, oldest first) and its totals, in MiB.
+function historyTraffic(daily, days) {
+  const list = (Array.isArray(daily) ? daily : []).slice(-Math.max(0, days));
+  const out = list.reduce((a, d) => a + (Number(d.out_mib) || 0), 0), inn = list.reduce((a, d) => a + (Number(d.in_mib) || 0), 0);
+  return { days: list, out_mib: out, in_mib: inn };
+}
 // estimateLines: the transfer preflight's answer as lines to show, each
 // { text, kind } with kind '', 'ok' or 'warn'. The server decides the
 // warnings; this only words the figures. fmt formats a byte count. An
@@ -621,5 +663,5 @@ function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
 }
 
-globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, estimateLines };
+globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, estimateLines };
 })();

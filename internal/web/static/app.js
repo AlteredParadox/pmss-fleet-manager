@@ -44,6 +44,7 @@ const S = {
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
   transfers: null, // box-to-box copies from /api/transfers, loaded on a box's transfers tab
+  hist: null, // the history tab's last answer: { box, days, data, busy, err, at }
   xferDraft: null, // the "copy to another box" form of the open box (see blankXferDraft)
   xferFocus: null, // a transfer just started: its card is scrolled to and highlighted once
   pw: null, // the open "change password" panel of a box (see blankPw); dropped on leaving the box
@@ -213,6 +214,7 @@ function route() {
     void loadDetail(S.selId);
     if (S.tab === 'logs') rescanLogsIfStale(); // a direct or reloaded #/box/<id>/logs never passes the tab click
     if (S.tab === 'transfers') void loadTransfers();
+    if (S.tab === 'history') void loadHistory(S.selId);
   } else if (S.view === 'edit') {
     S.selId = Number(parts[1]) || null;
     void startEdit(S.selId);
@@ -416,7 +418,11 @@ function connectEvents() {
     pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
     if (!pfmRevisions.applyState(S, e)) { renderSide(); return; } // stale: a snapshot or a later event already covered it
     recomputeTotals();
-    if (S.view === 'box' && S.selId === e.box_id) void loadDetail(e.box_id);
+    if (S.view === 'box' && S.selId === e.box_id) {
+      void loadDetail(e.box_id);
+      // The history is written every five minutes: an open tab reads it again once it is that old.
+      if (S.tab === 'history' && pfmView.historyDue(S.hist, e.box_id, Date.now())) void loadHistory(e.box_id);
+    }
     else if (S.view === 'torrents') loadTorrentsSoon();
     else if (S.view === 'fleet') renderSoon(); else renderSide();
   });
@@ -695,12 +701,13 @@ function viewBox() {
   const tabs = [['overview', 'overview'], ['traffic', 'traffic']];
   if (pfmView.torrentsTab(b)) tabs.push(['torrents', 'torrents']); // the stopped-on-purpose note and a removal notice live there too
   if (b.docker.enabled || b.docker.socket_up) tabs.push(['containers', 'containers']);
-  tabs.push(['services', 'services'], ['logs', 'logs'], ['storage', 'storage'], ['transfers', 'transfers'], ['host', 'host']);
+  tabs.push(['history', 'history'], ['services', 'services'], ['logs', 'logs'], ['storage', 'storage'], ['transfers', 'transfers'], ['host', 'host']);
   if (!tabs.some(([k]) => k === S.tab)) S.tab = 'overview';
   const renewDays = daysUntil(renewalOf(b));
   let body = '';
   switch (S.tab) {
     case 'traffic': body = tabTraffic(b); break;
+    case 'history': body = tabHistory(b); break;
     case 'torrents': body = tabTorrents(b); break;
     case 'containers': body = tabContainers(b); break;
     case 'services': body = tabServices(b); break;
@@ -998,6 +1005,71 @@ function tabTraffic(b) {
       <div><div class="tile-label">limit</div><div class="v">${tr.limit_bytes > 0 ? fmtBytes(tr.limit_bytes, 1) : 'unlimited'}${tr.bonus_bytes ? `<div class="hint">${fmtBytes(tr.base_limit_bytes, 0)} base + ${fmtBytes(tr.bonus_bytes, 0)} bonus</div>` : ''}</div></div>
     </div>
     <div class="hint" style="margin-top:12px">PMSS counts a rolling 30-day window, not a billing cycle. Upload is what counts toward the limit.</div>
+  </div>`;
+}
+/* ----- history: hourly disk, iowait and cpu for 7 or 30 days ----- */
+let histSeq = 0;
+async function loadHistory(id, days) {
+  days = days || (S.hist?.box === id ? S.hist.days : 7);
+  const seq = ++histSeq;
+  S.hist = { ...(S.hist?.box === id && S.hist.days === days ? S.hist : { data: null }), box: id, days, busy: true, err: '' };
+  render();
+  try {
+    const d = await api('GET', `${BASE}/api/boxes/${encodeURIComponent(id)}/history?days=${days}`);
+    if (seq !== histSeq) return;
+    S.hist = { box: id, days, data: d, busy: false, err: '', at: Date.now() };
+  } catch (e) {
+    if (seq !== histSeq) return;
+    S.hist = { ...S.hist, busy: false, err: e.message };
+  }
+  render();
+}
+function histChart(title, sub, lines, yMax, yFmt, from, to, legend) {
+  const W = 600, H = 120;
+  const polys = lines.map(([cls, pts]) => pts.map((p) => `<polyline class="${cls}" points="${p}"/>`).join('')).join('');
+  return `<div class="panel" style="margin-top:14px"><div class="chart-head" style="margin-bottom:6px"><div><div class="tile-label">${title}</div><div class="note">${sub}</div></div>${legend || ''}</div>
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:stretch">
+      <div class="note" style="display:flex;flex-direction:column;justify-content:space-between;text-align:right">${[1, 0.5, 0].map((f) => `<span>${esc(yFmt(yMax * f))}</span>`).join('')}</div>
+      <svg class="histsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(title)}">
+        <line class="grid" x1="0" y1="${H / 2}" x2="${W}" y2="${H / 2}"/>${polys}</svg>
+    </div>
+    <div class="note" style="display:flex;justify-content:space-between;margin-left:40px"><span>${esc(new Date(from).toLocaleDateString())}</span><span>now</span></div></div>`;
+}
+function tabHistory(b) {
+  const H = S.hist?.box === b.id ? S.hist : null, days = H?.days || 7;
+  const seg = `<div class="seg" role="group" aria-label="window">${[7, 30].map((n) => `<button class="${days === n ? 'on' : ''}" aria-pressed="${days === n}" data-act="hist:days" data-days="${n}">${n} days</button>`).join('')}</div>`;
+  const head = `<div class="chart-head"><div><div class="tile-label">history · last ${days} days</div>
+    <div class="note">hourly, from this dashboard's own polls (kept 31 days; an hour the dashboard was not running stays empty) · traffic is PMSS's daily accounting</div></div>${seg}</div>`;
+  if (!H || (!H.data && H.busy)) return `<div class="chart">${head}<div class="empty pulse">loading…</div></div>`;
+  if (!H.data) return `<div class="chart">${head}<div class="empty"><span class="bad">${esc(H.err)}</span></div></div>`;
+  const d = H.data, P = d.points || [], sm = d.summary || {};
+  const from = Date.parse(d.since), to = Date.now();
+  if (!P.length) return `<div class="chart">${head}<div class="empty">nothing recorded yet: the first hour is written five minutes after this version starts polling the box</div></div>`;
+  const pct = (v) => v === null || v === undefined ? '—' : fmtPctFine(v);
+  const quota = Math.max(0, ...P.map((p) => p.disk_quota || 0)), usedMax = Math.max(0, ...P.map((p) => p.disk_used || 0));
+  const diskMax = Math.max(quota, usedMax, 1);
+  const ioMax = niceMax(Math.max(5, ...P.map((p) => p.iowait_peak || 0)));
+  const L = (get, max) => pfmView.historyLines(P, get, from, to, max, 600, 120);
+  const tr = pfmView.historyTraffic(d.traffic, days), MIB = KIB * KIB;
+  const growth = sm.disk_growth;
+  const strip = `<div class="ministrip">
+      <div><div class="tile-label">disk growth</div><div class="v">${growth === null || growth === undefined ? '—' : (growth >= 0 ? '+' : '−') + fmtBytes(Math.abs(growth), 1)}</div></div>
+      <div><div class="tile-label">host iowait, average</div><div class="v">${pct(sm.iowait_avg)}</div></div>
+      <div><div class="tile-label">worst hour</div><div class="v">${pct(sm.iowait_hour_max)}</div></div>
+      <div><div class="tile-label">hours over ${10}% iowait</div><div class="v">${sm.iowait_bad_hours ?? 0} <small class="muted">of ${sm.hours ?? 0}</small></div></div>
+      <div><div class="tile-label">host cpu busy, average</div><div class="v">${pct(sm.busy_avg)}</div></div>
+      <div><div class="tile-label">traffic (${tr.days.length} d)</div><div class="v"><span class="up">↑</span>${fmtBytes(tr.out_mib * MIB, 1)} <span class="muted" style="font-size:12px"><span class="down">↓</span>${fmtBytes(tr.in_mib * MIB, 1)}</span></div></div>
+    </div>`;
+  const legend = (items) => `<div class="legend">${items.map(([c, t]) => `<span><i style="background:${c}"></i>${t}</span>`).join('')}</div>`;
+  const trMax = niceMax(Math.max(1, ...tr.days.map((x) => (x.out_mib || 0) + (x.in_mib || 0))));
+  const bars = tr.days.map((x) => `<div class="bar" data-tip="${esc(`${x.date}  ↑ ${fmtBytes(x.out_mib * MIB, 1)}  ↓ ${fmtBytes(x.in_mib * MIB, 1)}`)}" style="height:100%">${x.out_mib > 0 ? `<div class="seg up" style="height:${x.out_mib / trMax * 100}%"></div>` : ''}${x.in_mib > 0 ? `<div class="seg down" style="height:${x.in_mib / trMax * 100}%"></div>` : ''}</div>`).join('');
+  return `<div class="chart">${head}${strip}
+    ${histChart('disk used', quota ? `quota ${fmtBytes(quota, 1)} · the hour's last reading` : 'the hour\'s last reading', [['q', L((p) => p.disk_quota, diskMax)], ['y', L((p) => p.disk_used, diskMax)]], diskMax, (v) => fmtBytes(v, 0), from, to, legend([['var(--accent)', 'used'], ['var(--dim)', 'quota']]))}
+    ${histChart('host iowait', 'share of the host\'s cpu time waiting on its disks: the hour\'s mean, and its worst poll', [['pk', L((p) => p.iowait_peak, ioMax)], ['y', L((p) => p.iowait_avg, ioMax)]], ioMax, (v) => fmtPct(v), from, to, legend([['var(--accent)', 'hourly mean'], ['var(--dim)', 'worst poll']]))}
+    ${histChart('host cpu busy', 'every tenant\'s cpu time on the host, hourly mean', [['y', L((p) => p.busy_avg, 100)]], 100, (v) => fmtPct(v), from, to)}
+    <div class="panel" style="margin-top:14px"><div class="chart-head" style="margin-bottom:6px"><div><div class="tile-label">daily traffic</div><div class="note">PMSS's accounting, the same as the traffic tab</div></div>${legend([['var(--s-up)', 'upload'], ['var(--s-down)', 'download']])}</div>
+      ${tr.days.length ? `<div class="plot" style="height:110px"><div class="bars">${bars}</div></div>` : '<div class="empty">no traffic data from PMSS yet</div>'}</div>
+    ${H.err ? `<div class="meta"><span class="bad">reload failed: ${esc(H.err)}</span></div>` : ''}
   </div>`;
 }
 function niceMax(v) {
@@ -2221,6 +2293,7 @@ document.addEventListener('click', async (e) => {
     history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`);
     if (S.tab === 'logs') rescanLogsIfStale();
     if (S.tab === 'transfers') void loadTransfers();
+    if (S.tab === 'history') void loadHistory(S.selId);
     render();
     return;
   }
@@ -2466,6 +2539,7 @@ async function runAction(a, act) {
   else if (a === 'app:watch') await appWatchAction(act);
   else if (a.startsWith('log:')) await logAction(a, act);
   else if (a.startsWith('xfer:')) await transferAction(a, act);
+  else if (a === 'hist:days') await loadHistory(S.selId, Number(act.dataset.days) === 30 ? 30 : 7);
   else if (a.startsWith('pw:')) await passwordAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
   else if (a.startsWith('settings:')) await settingsAction(a);

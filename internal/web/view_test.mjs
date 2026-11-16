@@ -548,6 +548,43 @@ test('a transfer names the machine it was set up against (its recorded endpoint)
   for (const bad of ['', 'box-a', 'box-a:22', 'box-a:22/', 'box-a:x/stu', undefined]) assert.equal(V.endpointIdentity(bad), '', String(bad));
 });
 
+test('history lines break at unmeasured and missing hours, never bridging them', () => {
+  const from = Date.parse('2026-11-10T00:00:00Z'), to = from + 4 * 3600e3;
+  const at = (h, v) => ({ t: new Date(from + h * 3600e3).toISOString(), v });
+  const get = (p) => p.v;
+  // hours 0,1 measured; 2 unmeasured; 3 missing altogether; 4 measured
+  const lines = V.historyLines([at(0, 0), at(1, 50), at(2, null), at(4, 100)], get, from, to, 100, 400, 100);
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0], '0.0,100.0 100.0,50.0');
+  assert.equal(lines[1], '400.0,0.0 402.0,0.0', 'a lone hour is a short level stroke');
+  // a hole in polling with values on both sides is still a gap
+  assert.equal(V.historyLines([at(0, 10), at(3, 10)], get, from, to, 100, 400, 100).length, 2);
+  // values clamp into the box
+  assert.equal(V.historyLines([at(0, 500), at(1, -5)], get, from, to, 100, 400, 100)[0], '0.0,0.0 100.0,100.0');
+  assert.deepEqual(V.historyLines([], get, from, to, 100, 400, 100), []);
+  assert.deepEqual(V.historyLines(undefined, get, from, to, 0, 400, 100), []);
+});
+
+test('history traffic is the window\'s last days of PMSS\'s series', () => {
+  const daily = Array.from({ length: 30 }, (_, i) => ({ date: `d${i}`, out_mib: 1, in_mib: 2 }));
+  const t = V.historyTraffic(daily, 7);
+  assert.equal(t.days.length, 7);
+  assert.equal(t.days[0].date, 'd23');
+  assert.equal(t.out_mib, 7);
+  assert.equal(t.in_mib, 14);
+  assert.equal(V.historyTraffic(null, 7).days.length, 0);
+});
+
+test('the open history tab reads again once its answer is five minutes old', () => {
+  const now = 1e12;
+  assert.equal(V.historyDue({ box: 1, at: now - 299e3 }, 1, now), false);
+  assert.equal(V.historyDue({ box: 1, at: now - 300e3 }, 1, now), true);
+  assert.equal(V.historyDue({ box: 1, at: now - 900e3, busy: true }, 1, now), false, 'one read at a time');
+  assert.equal(V.historyDue({ box: 2, at: now - 900e3 }, 1, now), false, 'another box\'s answer');
+  assert.equal(V.historyDue({ box: 1, err: 'x' }, 1, now), true, 'a failed read is retried');
+  assert.equal(V.historyDue(null, 1, now), false);
+});
+
 test('transfer preflight lines: figures, bounds and the server warnings', () => {
   const fmt = (b) => `${b}B`;
   const base = { bytes: 1234, files: 1500, dirs: 3, complete: true, seconds: 2.34, dst_known: true, dst_free_bytes: 9999, dst_free_files: 42, warnings: [] };
