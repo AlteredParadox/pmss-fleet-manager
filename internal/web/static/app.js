@@ -1039,7 +1039,7 @@ function viewCompare() {
   const boxes = S.boxes.filter((b) => b.status !== 'disabled');
   const rows = pfmView.compareSort(boxes.map((b) => {
     const sv = serviceActive(b.service) ? b.service : null;
-    return pfmView.compareRow(b, sums[b.id], sv ? sv.monthly : null, sv?.currency);
+    return pfmView.compareRow(b, sums[b.id], sv ? sv.monthly : null, sv?.currency, Date.now());
   }), C.sort.key, C.sort.dir);
   const dash = '<span class="muted">—</span>';
   const pct = (v) => v === null ? dash : fmtPctFine(v);
@@ -1048,13 +1048,17 @@ function viewCompare() {
   const body = rows.map((r) => {
     const b = boxById(r.id);
     const id = pfmView.boxIdentity(b?.user, b?.host, b?.port);
-    const tl = r.traffic_left === null ? dash : r.traffic_left === Infinity ? 'unlimited' : fmtBytes(r.traffic_left, 1);
+    // A stale row shows its last readings greyed, with their age; they sort as unknown.
+    const L = r.stale ? r.last : r, old = (html) => r.stale && html !== dash ? `<span class="muted" title="last read ${esc(fmtAgo(b?.last_ok))}, the box is not answering">${html}</span>` : html;
+    const tl = L.traffic_left === null ? dash : L.traffic_left === Infinity ? 'unlimited' : fmtBytes(L.traffic_left, 1);
+    const state = r.stale ? `<div class="note bad">${esc(statusLabel(r.status) || 'not answering')} · readings from ${esc(fmtAgo(b?.last_ok))}</div>`
+      : r.status !== 'online' ? `<div class="note warn">${esc(statusLabel(r.status))}</div>` : '';
     return `<tr>
-      <td><button class="link" data-go="/box/${r.id}/history">${esc(r.name)}</button><div class="note">${esc(id)}</div></td>
-      <td class="num">${r.free === null ? dash : fmtBytes(r.free, 1)}${r.free_pct === null ? '' : `<div class="note">${fmtPctFine(r.free_pct)} of ${fmtBytes(r.quota, 1)}</div>`}</td>
-      <td class="num">${r.files_free === null ? dash : r.files_free.toLocaleString('en-US')}</td>
-      <td class="num">${tl}${r.throttled ? '<div class="note warn">throttled</div>' : ''}</td>
-      <td class="num">${pct(r.io_now)}</td>
+      <td><span class="led ${esc(r.status)}" title="${esc(statusLabel(r.status))}${b?.status_reason ? ' — ' + esc(b.status_reason) : ''}"></span> <button class="link" data-go="/box/${r.id}/history">${esc(r.name)}</button><div class="note">${esc(id)}</div>${state}</td>
+      <td class="num">${old(L.free === null ? dash : fmtBytes(L.free, 1))}${L.free_pct === null ? '' : `<div class="note">${fmtPctFine(L.free_pct)} of ${fmtBytes(L.quota, 1)}</div>`}</td>
+      <td class="num">${old(L.files_free === null ? dash : L.files_free.toLocaleString('en-US'))}</td>
+      <td class="num">${old(tl)}${L.throttled ? '<div class="note warn">throttled</div>' : ''}</td>
+      <td class="num">${old(pct(L.io_now))}</td>
       <td class="num">${pct(r.io_avg)}${r.io_worst === null ? '' : `<div class="note">worst hour ${fmtPctFine(r.io_worst)}</div>`}</td>
       <td class="num">${r.io_bad === null ? dash : `${r.io_bad} <span class="muted">/ ${r.hours} h</span>`}</td>
       <td class="num">${r.io_weight ?? dash}</td>
@@ -1064,7 +1068,7 @@ function viewCompare() {
     </tr>`;
   }).join('');
   return `<div class="chart"><div class="chart-head"><div><div class="tile-label">compare boxes</div>
-      <div class="note">the figures side by side to help decide where to put something; nothing is ranked or chosen for you. Click a heading to sort; unknown values go last. Free space and traffic are from the last poll; iowait is the host's, the last hour and over the window from this dashboard's history.</div></div>${seg}</div>
+      <div class="note">the figures side by side to help decide where to put something; nothing is ranked or chosen for you. Click a heading to sort; unknown values go last. Free space and traffic are from the last poll; a box that is offline or has not answered for ten minutes shows its last readings greyed, and they sort as unknown. Iowait is the host's, the last hour and over the window from this dashboard's history.</div></div>${seg}</div>
     ${C.err ? `<div class="meta"><span class="bad">history: ${esc(C.err)}</span></div>` : ''}
     ${!rows.length ? '<div class="empty">no boxes yet</div>' : `<div class="lvwrap"><table class="cmptable"><thead><tr>
       ${th('name', 'box', 'name')}

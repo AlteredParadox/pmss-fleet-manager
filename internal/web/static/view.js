@@ -536,19 +536,33 @@ function historyTraffic(daily, days) {
 // known), currency its currency; summary is its history summary over the
 // window (undefined: none). Traffic left is the rolling 30-day upload
 // limit minus the upload so far; Infinity for an account without a limit.
-function compareRow(b, summary, monthly, currency) {
+//
+// A stale box (compareStale) keeps its last readings under `last`, for
+// showing greyed with their age, but its live columns are null: an
+// unreachable box must not sort as the roomiest or quietest destination.
+function compareRow(b, summary, monthly, currency, now) {
   const t = b?.tiers || {}, io = b?.host_sys?.iowait || {};
   const disk = compareDisk(b?.disk), price = finiteOrNull(monthly);
+  const live = { ...disk, traffic_left: trafficLeft(b?.traffic), throttled: !!b?.traffic?.throttled,
+    io_now: Number(io.n60) > 0 ? Number(io.avg60) : null };
+  const stale = compareStale(b, now ?? Date.now());
+  const unknown = { free: null, free_pct: null, quota: disk.quota, files_free: null, traffic_left: null, throttled: false, io_now: null };
   return {
-    id: b?.id, name: String(b?.name ?? ''),
-    ...disk,
-    traffic_left: trafficLeft(b?.traffic), throttled: !!b?.traffic?.throttled,
-    io_now: Number(io.n60) > 0 ? Number(io.avg60) : null,
+    id: b?.id, name: String(b?.name ?? ''), status: String(b?.status ?? ''), stale, last: stale ? live : null,
+    ...(stale ? unknown : live),
     ...compareHistory(summary),
     io_weight: positiveOrNull(t.io_weight), cpu_weight: positiveOrNull(t.cpu_weight), cores: positiveOrNull(t.cores),
     monthly: price, currency: price === null ? '' : String(currency || ''),
     per_tb: price !== null && disk.quota !== null ? price / (disk.quota / 1e12) : null,
   };
+}
+// compareStale: the live readings no longer describe the box: it is
+// offline, or its last successful poll is more than ten minutes old (a
+// box never polled has no readings to go stale).
+function compareStale(b, now) {
+  if (b?.status === 'offline') return true;
+  const ok = Date.parse(b?.last_ok || '');
+  return Number.isFinite(ok) && ok > 86400e3 * 365 && now - ok > 10 * 60e3;
 }
 function finiteOrNull(v) { return v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v); }
 function positiveOrNull(v) { return Number(v) > 0 ? Number(v) : null; }

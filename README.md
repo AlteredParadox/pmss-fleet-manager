@@ -40,8 +40,12 @@ file limit, upload left in the rolling 30 days, the host's iowait over the
 last hour and over the last 7 or 30 days of history (with its worst hour
 and the hours that averaged over 10 %), the plan's I/O and CPU priority,
 the monthly price and the price per TB of quota. Click a heading to sort;
-unknown values always go last. Nothing is ranked, scored or chosen for
-you, and nothing is moved.
+unknown values always go last. Each row shows the box's status; a box
+that is offline, or whose last successful poll is more than ten minutes
+old, keeps its last free space, traffic and iowait on show, greyed and
+with their age, but they sort as unknown, so an unreachable box never
+looks like the roomiest destination. Nothing is ranked, scored or chosen
+for you, and nothing is moved.
 
 **Per box.**
 

@@ -611,6 +611,26 @@ test('compare rows: unknown stays null, unlimited traffic is Infinity, prices pe
   assert.equal(V.compareRow(b, { hours: 3, iowait_avg: null, iowait_bad_hours: 0 }, null).io_bad, null, 'hours of polls without an iowait reading: unknown, not 0 (fred on #205)');
 });
 
+test('compare rows: an offline or long-silent box keeps its readings aside and sorts as unknown (Codex on #205)', () => {
+  const now = Date.parse('2026-11-16T15:00:00Z');
+  const b = { id: 1, name: 'pm1', status: 'online', last_ok: '2026-11-16T14:59:30Z', disk: { ok: true, used_bytes: 1, quota_bytes: 1e12 },
+    traffic: { ok: true, limit_bytes: 0 }, host_sys: { iowait: { avg60: 1, n60: 10 } } };
+  const fresh = V.compareRow(b, undefined, null, '', now);
+  assert.equal(fresh.stale, false);
+  assert.equal(fresh.last, null);
+  assert.equal(fresh.free, 1e12 - 1);
+  for (const st of [{ status: 'offline' }, { status: 'degraded', last_ok: '2026-11-16T14:40:00Z' }]) {
+    const r = V.compareRow({ ...b, ...st }, { hours: 5, iowait_hours: 5, iowait_avg: 2, iowait_bad_hours: 1 }, 7, 'EUR', now);
+    assert.equal(r.stale, true, JSON.stringify(st));
+    for (const k of ['free', 'free_pct', 'files_free', 'traffic_left', 'io_now']) assert.equal(r[k], null, `${k} of a stale box`);
+    assert.equal(r.last.free, 1e12 - 1, 'the last reading is kept for display');
+    assert.equal(r.io_avg, 2, 'the history is still the history');
+    assert.equal(r.monthly, 7);
+  }
+  assert.equal(V.compareRow({ ...b, status: 'degraded', last_ok: '2026-11-16T14:55:00Z' }, undefined, null, '', now).stale, false, 'one failed poll a few minutes after the last good one is not stale yet');
+  assert.equal(V.compareRow({ ...b, status: 'pending', last_ok: '0001-01-01T00:00:00Z', disk: { ok: false } }, undefined, null, '', now).stale, false, 'never polled: unknown, not stale');
+});
+
 test('compare sort: unknown last in both directions, ties by name', () => {
   const rows = [{ name: 'c', free: null }, { name: 'b', free: 5 }, { name: 'a', free: 5 }, { name: 'd', free: 9 }, { name: 'e', free: Infinity }];
   assert.deepEqual(V.compareSort(rows, 'free', 'desc').map((r) => r.name), ['e', 'd', 'a', 'b', 'c']);
