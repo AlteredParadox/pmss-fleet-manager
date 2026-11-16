@@ -488,6 +488,27 @@ function transferConfirmation(srcBox, srcList, dstBox, dstList, name, mode, move
     ],
   };
 }
+// estimateLines: the transfer preflight's answer as lines to show, each
+// { text, kind } with kind '', 'ok' or 'warn'. The server decides the
+// warnings; this only words the figures. fmt formats a byte count. An
+// incomplete scan is a lower bound and says so; unknown room is said, not
+// read as plenty or none. It is advice: the start never depends on it.
+function estimateLines(e, fmt) {
+  if (!e) return [];
+  const n = (x) => Number(x || 0).toLocaleString('en-US');
+  const size = `${e.complete ? 'about' : 'at least'} ${fmt(Number(e.bytes) || 0)} in ${n(e.files)} files and ${n(e.dirs)} folders`;
+  const how = e.complete ? `scanned in ${Number(e.seconds || 0).toFixed(1)} s` : `${e.incomplete || 'the scan did not finish'}, so this is a lower bound`;
+  const out = [{ text: `${size} (${how})`, kind: '' }];
+  if (e.dst_known) {
+    const files = Number(e.dst_free_files) >= 0 ? ` and room for ${n(e.dst_free_files)} more files` : '';
+    out.push({ text: `the destination had ${fmt(Number(e.dst_free_bytes) || 0)} free in its quota${files} at its last poll`, kind: '' });
+  }
+  const warnings = Array.isArray(e.warnings) ? e.warnings : [];
+  for (const w of warnings) out.push({ text: String(w), kind: 'warn' });
+  if (e.dst_known && !warnings.length) out.push({ text: e.complete ? 'it should fit' : 'what was counted fits; the rest was not measured', kind: e.complete ? 'ok' : '' });
+  out.push({ text: 'An estimate, not a guarantee: files and free space can change before and during the copy.', kind: '' });
+  return out;
+}
 // resyncLoads: what a reconnect reloads besides the box states. Events
 // missed while the stream was down are not repeated, and a finished copy
 // is no longer polled, so its card would stay stale (fred on PR 142).
@@ -600,5 +621,5 @@ function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
 }
 
-globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams };
+globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, estimateLines };
 })();

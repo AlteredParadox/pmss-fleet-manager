@@ -892,6 +892,24 @@ sets the copy up, starts it and reads its status. Ticking *move* removes
 the source afterwards (see *Moving*, below). There is no sync, no
 `--delete`, no queue and no retries.
 
+**Size check.** The confirmation step has an optional *estimate size*
+button. It counts the source folder on its box (regular files by size,
+and folders; symlinks and special files are not copied, so they are not
+counted) with `find` at idle I/O and lowest CPU priority, stopping after
+20 seconds, one scan per box at a time. It then compares the total with
+the room in the destination's quota at its last poll (quota minus used,
+and the file limit where the box reports one), and warns when the copy
+looks too big, or would leave less than a tenth of that room. A scan cut
+short (a large tree, an unreadable folder) shows *at least* what it
+counted. Into an existing folder the files already there are not taken
+into account, so the copy may need less. It is a warning, never a gate:
+the copy starts the same way whatever it says, and files and free space
+can change between the check and the copy. File sizes are what is
+counted; on the destination, very many small files take somewhat more
+than their sizes add up to, and a sparse file (a torrent client's
+preallocated download, say) takes its full size there, which can make a
+folder count for more than the source's own quota shows used.
+
 *Parallel streams* (1, 2, 4 or 8; 1 by default) splits the work between
 that many rsyncs running at once: the source's files are listed once and
 dealt out by size, each to the stream with the fewest bytes so far, and

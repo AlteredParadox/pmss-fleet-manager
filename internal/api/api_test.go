@@ -1443,3 +1443,33 @@ func TestChangePasswordRoute(t *testing.T) {
 		}
 	}
 }
+
+// The transfer preflight reads only, so monitor-only serves it, and like
+// the picker it names the source revision (none 400, another 409) and the
+// destination's (another 409), before any SSH.
+func TestTransferEstimateNeedsRevisions(t *testing.T) {
+	srv, _ := newTestServer(t)
+	hdr := map[string]string{"Origin": "http://dash.local:8080"}
+	b := &store.Box{Name: "x", Host: "x.invalid", User: "u", Port: 22, Enabled: true}
+	d := &store.Box{Name: "y", Host: "y.invalid", User: "u", Port: 22, Enabled: true}
+	for _, x := range []*store.Box{b, d} {
+		if err := srv.m.AddBox(context.Background(), x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := fmt.Sprintf("/api/boxes/%d/transfers/estimate", b.ID)
+	body := fmt.Sprintf(`{"path":"dl","dst_box":%d,"dst_rev":0}`, d.ID)
+	srv.SetMonitorOnly(true)
+	if code, out := do(t, srv, "POST", p, body, hdr); code != 400 || !strings.Contains(out, "rev") {
+		t.Errorf("without rev: %d %s", code, out)
+	}
+	if code, out := do(t, srv, "POST", p+"?rev=99", body, hdr); code != 409 {
+		t.Errorf("stale rev: %d %s", code, out)
+	}
+	if code, out := do(t, srv, "POST", p+"?rev=0", fmt.Sprintf(`{"path":"dl","dst_box":%d,"dst_rev":7}`, d.ID), hdr); code == 403 || code == 200 {
+		t.Errorf("stale destination: %d %s", code, out)
+	}
+	if code, out := do(t, srv, "POST", p+"?rev=0", `{"path":"dl","bogus":1}`, hdr); code != 400 {
+		t.Errorf("unknown field: %d %s", code, out)
+	}
+}
