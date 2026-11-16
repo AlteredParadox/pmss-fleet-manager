@@ -152,7 +152,11 @@ type HistorySummary struct {
 	IOWaitAvg      *float64 `json:"iowait_avg"`
 	IOWaitHourMax  *float64 `json:"iowait_hour_max"`
 	IOWaitBadHours int      `json:"iowait_bad_hours"`
-	BusyAvg        *float64 `json:"busy_avg"`
+	// IOWaitHours counts the hours with an iowait reading, the base the
+	// slow hours are counted out of (Hours also counts hours of polls
+	// without a CPU reading, the first after a start).
+	IOWaitHours int      `json:"iowait_hours"`
+	BusyAvg     *float64 `json:"busy_avg"`
 	// DiskGrowth is the change in disk used from the window's first known
 	// hour to its last (nil with fewer than two).
 	DiskGrowth *int64 `json:"disk_growth"`
@@ -273,6 +277,7 @@ func summarize(pts []HistoryPoint) HistorySummary {
 		ioSum += *pt.IOWaitAvg * w
 		busySum += *pt.BusyAvg * w
 		n += pt.cpuN
+		s.IOWaitHours++
 		if s.IOWaitHourMax == nil || *pt.IOWaitAvg > *s.IOWaitHourMax {
 			s.IOWaitHourMax = new(*pt.IOWaitAvg)
 		}

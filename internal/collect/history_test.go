@@ -82,7 +82,7 @@ func TestHistoryHourlyRows(t *testing.T) {
 		t.Fatalf("second hour %+v", p1)
 	}
 	sm := h.Summary
-	if sm.Hours != 2 || *sm.DiskGrowth != 20 || *sm.IOWaitHourMax != 30 || sm.IOWaitBadHours != 1 || *sm.IOWaitAvg != (4+12+30)/3.0 {
+	if sm.Hours != 2 || sm.IOWaitHours != 2 || *sm.DiskGrowth != 20 || *sm.IOWaitHourMax != 30 || sm.IOWaitBadHours != 1 || *sm.IOWaitAvg != (4+12+30)/3.0 {
 		t.Fatalf("summary %+v", sm)
 	}
 	fleet := m.HistorySummaries(ctx, 30)
@@ -102,7 +102,7 @@ func TestHistoryHourlyRows(t *testing.T) {
 
 func TestSummarizeUnknowns(t *testing.T) {
 	s := summarize([]HistoryPoint{{Polls: 2}, {Polls: 1}})
-	if s.Hours != 2 || s.IOWaitAvg != nil || s.IOWaitHourMax != nil || s.DiskGrowth != nil || s.BusyAvg != nil {
+	if s.Hours != 2 || s.IOWaitHours != 0 || s.IOWaitAvg != nil || s.IOWaitHourMax != nil || s.DiskGrowth != nil || s.BusyAvg != nil {
 		t.Fatalf("nothing measured is not zero: %+v", s)
 	}
 	one := int64(5)

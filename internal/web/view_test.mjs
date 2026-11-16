@@ -589,7 +589,7 @@ test('compare rows: unknown stays null, unlimited traffic is Infinity, prices pe
   const b = { id: 1, name: 'pm1', disk: { ok: true, used_bytes: 4e11, quota_bytes: 1e12, files_soft: 1000, files_used: 1200 },
     traffic: { ok: true, limit_bytes: 5e12, out_month_bytes: 1e12 }, host_sys: { iowait: { avg60: 3.5, n60: 100 } },
     tiers: { io_weight: 100, cpu_weight: 500, cores: 4 } };
-  const r = V.compareRow(b, { hours: 168, iowait_avg: 2.2, iowait_hour_max: 9, iowait_bad_hours: 0 }, 10, 'EUR');
+  const r = V.compareRow(b, { hours: 168, iowait_hours: 160, iowait_avg: 2.2, iowait_hour_max: 9, iowait_bad_hours: 0 }, 10, 'EUR');
   assert.equal(r.free, 6e11);
   assert.equal(r.free_pct, 60);
   assert.equal(r.files_free, 0, 'over the file limit is none left, not negative');
@@ -597,6 +597,7 @@ test('compare rows: unknown stays null, unlimited traffic is Infinity, prices pe
   assert.equal(r.io_now, 3.5);
   assert.equal(r.io_avg, 2.2);
   assert.equal(r.io_bad, 0, 'zero slow hours with hours recorded is a real zero');
+  assert.equal(r.hours, 160, 'counted out of the hours with an iowait reading');
   assert.equal(r.per_tb, 10);
   assert.equal(r.currency, 'EUR');
 
@@ -607,6 +608,7 @@ test('compare rows: unknown stays null, unlimited traffic is Infinity, prices pe
   assert.equal(u.currency, '');
   assert.equal(V.compareRow({ ...b, traffic: { ok: true, limit_bytes: 0 } }, undefined, null).traffic_left, Infinity);
   assert.equal(V.compareRow(b, { hours: 0, iowait_bad_hours: 0 }, null).io_bad, null, 'no hours recorded: unknown, not 0');
+  assert.equal(V.compareRow(b, { hours: 3, iowait_avg: null, iowait_bad_hours: 0 }, null).io_bad, null, 'hours of polls without an iowait reading: unknown, not 0 (fred on #205)');
 });
 
 test('compare sort: unknown last in both directions, ties by name', () => {

@@ -1073,7 +1073,7 @@ function viewCompare() {
       ${th('traffic_left', 'traffic left', 'the upload limit of the rolling 30 days minus what was uploaded in them')}
       ${th('io_now', 'iowait 1 h', 'the host\'s iowait over this dashboard\'s polls of the last hour')}
       ${th('io_avg', `iowait ${days} d`, `mean host iowait over the last ${days} days of hourly history`)}
-      ${th('io_bad', 'slow hours', `hours in the last ${days} days that averaged over 10 % iowait, of the hours recorded`)}
+      ${th('io_bad', 'slow hours', `hours in the last ${days} days that averaged over 10 % iowait, of the hours with an iowait reading`)}
       ${th('io_weight', 'I/O prio', 'the plan\'s I/O priority weight (higher gets more of the disks when they are busy)')}
       ${th('cpu_weight', 'CPU prio', 'the plan\'s CPU priority weight')}
       ${th('monthly', 'per month', 'the matched service\'s monthly price (Pulsed Media API)')}

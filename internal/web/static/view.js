@@ -567,11 +567,12 @@ function trafficLeft(tr) {
   return Math.max(0, tr.limit_bytes - (tr.out_month_bytes || 0));
 }
 // compareHistory: the window's iowait figures; slow hours are unknown
-// (not 0) while no hour was recorded.
+// (not 0) until an hour carries an iowait reading: an hour of polls
+// without one (the first after a start) proves nothing about the disks.
 function compareHistory(sm) {
-  const recorded = !!sm && sm.hours > 0;
+  const recorded = finiteOrNull(sm?.iowait_avg) !== null;
   return { io_avg: finiteOrNull(sm?.iowait_avg), io_worst: finiteOrNull(sm?.iowait_hour_max),
-    io_bad: recorded ? Number(sm.iowait_bad_hours) || 0 : null, hours: Number(sm?.hours) || 0 };
+    io_bad: recorded ? Number(sm.iowait_bad_hours) || 0 : null, hours: recorded ? Number(sm.iowait_hours) || 0 : 0 };
 }
 // compareSort: rows ordered by key, ascending or descending, unknown
 // values (null) always last whatever the direction; ties by name.
