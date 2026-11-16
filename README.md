@@ -38,7 +38,8 @@ default order); the choice is remembered per table in the browser.
 something: free space (and the share of the quota), files left under the
 file limit, upload left in the rolling 30 days, the host's iowait over the
 last hour and over the last 7 or 30 days of history (with its worst hour
-and the hours that averaged over 10 %), the plan's I/O and CPU priority,
+and the slow hours, those that averaged over the threshold in Settings,
+20 % by default), the plan's I/O and CPU priority,
 the monthly price and the price per TB of quota. Click a heading to sort;
 unknown values always go last. Each row shows the box's status; a box
 that is offline, or whose last successful poll is more than ten minutes
@@ -57,7 +58,10 @@ for you, and nothing is moved.
   always slow from one having a bad hour: disk used against the quota,
   the host's iowait (each hour's mean and its worst poll) and cpu busy,
   with the window's disk growth, average iowait, worst hour and the number
-  of hours above 10 % iowait, next to PMSS's daily traffic for the same
+  of slow hours (hours whose mean iowait was over the threshold set under
+  Settings → polling & alerts, 20 % by default; 10 to 50 % can be picked,
+  and the counts follow a change at once since they are worked out from
+  the stored hours), next to PMSS's daily traffic for the same
   days. The hours come from the dashboard's own polls (summed per UTC
   hour, written every five minutes, kept 31 days in the database), so an
   hour the dashboard was not running stays empty rather than being drawn

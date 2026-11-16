@@ -733,5 +733,15 @@ function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
 }
 
-globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, estimateLines };
+/* compareSlowPct: the threshold the shown slow-hour counts were made at.
+   The comparison keeps its last answer on show while a refresh is
+   outstanding or after one failed, so after a change of the setting the
+   label must come from that answer, not from the setting (fred on #207);
+   stale says the counts are not yet at the current setting. */
+function compareSlowPct(data, days, current) {
+  const counted = data?.days === days && Number(data.iowait_slow_pct) > 0 ? Number(data.iowait_slow_pct) : null;
+  return counted === null ? { pct: current, stale: false } : { pct: counted, stale: counted !== current };
+}
+
+globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, compareSlowPct, estimateLines };
 })();

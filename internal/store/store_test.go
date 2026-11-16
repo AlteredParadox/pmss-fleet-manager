@@ -71,17 +71,18 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	st, _ := s.GetSettings(ctx)
-	if st.PollIntervalSec != 30 {
+	if st.PollIntervalSec != 30 || st.IOWaitSlowPct != DefaultIOWaitSlowPct {
 		t.Fatalf("defaults: %+v", st)
 	}
 	st.PollIntervalSec = 60
+	st.IOWaitSlowPct = 25
 	st.Theme = "light"
 	st.PMDBEnabled, st.PMDBUsername = true, "someone"
 	if err := s.SaveSettings(ctx, st); err != nil {
 		t.Fatal(err)
 	}
 	st, _ = s.GetSettings(ctx)
-	if st.PollIntervalSec != 60 || st.Theme != "light" || st.DiskThresholdPct != 90 || !st.PMDBEnabled || st.PMDBUsername != "someone" {
+	if st.PollIntervalSec != 60 || st.IOWaitSlowPct != 25 || st.Theme != "light" || st.DiskThresholdPct != 90 || !st.PMDBEnabled || st.PMDBUsername != "someone" {
 		t.Fatalf("settings: %+v", st)
 	}
 	if pub := st.Public(); pub.PMDBUsername != "someone" || pub.PMAPIKey != "" {

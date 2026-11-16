@@ -148,10 +148,13 @@ type HistorySummary struct {
 	Hours int `json:"hours"` // hours with at least one poll
 	// IOWaitAvg is the mean over every poll in the window with a CPU
 	// reading; IOWaitHourMax the worst hour's mean; IOWaitBadHours how
-	// many hours averaged above IOWaitBadPct.
+	// many hours averaged above IOWaitSlowPct, the threshold in the
+	// settings when the summary was made (sent so the page labels the
+	// count with the threshold it was counted at).
 	IOWaitAvg      *float64 `json:"iowait_avg"`
 	IOWaitHourMax  *float64 `json:"iowait_hour_max"`
 	IOWaitBadHours int      `json:"iowait_bad_hours"`
+	IOWaitSlowPct  int      `json:"iowait_slow_pct"`
 	// IOWaitHours counts the hours with an iowait reading, the base the
 	// slow hours are counted out of (Hours also counts hours of polls
 	// without a CPU reading, the first after a start).
@@ -161,10 +164,6 @@ type HistorySummary struct {
 	// hour to its last (nil with fewer than two).
 	DiskGrowth *int64 `json:"disk_growth"`
 }
-
-// IOWaitBadPct is the hourly iowait mean above which an hour counts as a
-// slow one in HistorySummary.
-const IOWaitBadPct = 10.0
 
 // BoxHistory is the answer of GET /api/boxes/{id}/history.
 type BoxHistory struct {
@@ -182,6 +181,11 @@ var HistoryDays = []int{7, 30}
 // BoxHistory reads box id's last days of history, of its current
 // generation only.
 func (m *Manager) BoxHistory(ctx context.Context, id int64, days int) (BoxHistory, error) {
+	return m.boxHistory(ctx, id, days, m.Settings().IOWaitSlowPct)
+}
+
+// boxHistory is BoxHistory counting slow hours over slowPct.
+func (m *Manager) boxHistory(ctx context.Context, id int64, days, slowPct int) (BoxHistory, error) {
 	if !slices.Contains(HistoryDays, days) {
 		return BoxHistory{}, fmt.Errorf("history window of %d days: only 7 and 30 are kept", days)
 	}
@@ -195,7 +199,7 @@ func (m *Manager) BoxHistory(ctx context.Context, id int64, days int) (BoxHistor
 		return BoxHistory{}, err
 	}
 	h := BoxHistory{Days: days, Since: since, Points: historyPoints(rows, p.sameGeneration), Traffic: []DayPoint{}}
-	h.Summary = summarize(h.Points)
+	h.Summary = summarize(h.Points, slowPct)
 	if st, ok := m.State(id); ok && st.Traffic.OK {
 		h.Traffic = st.Traffic.Daily
 	}
@@ -254,10 +258,9 @@ func historyPoints(rows []store.HistoryRow, same func(string) bool) []HistoryPoi
 }
 
 // summarize condenses points (oldest first).
-func summarize(pts []HistoryPoint) HistorySummary {
-	var s HistorySummary
-	var ioSum, busySum float64
-	var n int
+func summarize(pts []HistoryPoint, slowPct int) HistorySummary {
+	s := HistorySummary{IOWaitSlowPct: slowPct}
+	var io ioTotals
 	var first, last *int64
 	for _, pt := range pts {
 		if pt.Polls > 0 {
@@ -269,24 +272,10 @@ func summarize(pts []HistoryPoint) HistorySummary {
 			}
 			last = pt.DiskUsed
 		}
-		if pt.IOWaitAvg == nil {
-			continue
-		}
-		// Weighted by the hour's readings: polls are evenly spaced.
-		w := float64(pt.cpuN)
-		ioSum += *pt.IOWaitAvg * w
-		busySum += *pt.BusyAvg * w
-		n += pt.cpuN
-		s.IOWaitHours++
-		if s.IOWaitHourMax == nil || *pt.IOWaitAvg > *s.IOWaitHourMax {
-			s.IOWaitHourMax = new(*pt.IOWaitAvg)
-		}
-		if *pt.IOWaitAvg > IOWaitBadPct {
-			s.IOWaitBadHours++
-		}
+		io.add(&s, pt)
 	}
-	if n > 0 {
-		s.IOWaitAvg, s.BusyAvg = new(ioSum/float64(n)), new(busySum/float64(n))
+	if io.n > 0 {
+		s.IOWaitAvg, s.BusyAvg = new(io.ioSum/float64(io.n)), new(io.busySum/float64(io.n))
 	}
 	if first != nil && last != nil && first != last {
 		s.DiskGrowth = new(*last - *first)
@@ -294,11 +283,41 @@ func summarize(pts []HistoryPoint) HistorySummary {
 	return s
 }
 
+// ioTotals accumulates the window's iowait and busy readings for summarize.
+type ioTotals struct {
+	ioSum, busySum float64
+	n              int
+}
+
+// add counts one hour's CPU readings into t and s (hours without one are
+// skipped: unknown, not idle).
+func (t *ioTotals) add(s *HistorySummary, pt HistoryPoint) {
+	if pt.IOWaitAvg == nil {
+		return
+	}
+	// Weighted by the hour's readings: polls are evenly spaced.
+	w := float64(pt.cpuN)
+	t.ioSum += *pt.IOWaitAvg * w
+	t.busySum += *pt.BusyAvg * w
+	t.n += pt.cpuN
+	s.IOWaitHours++
+	if s.IOWaitHourMax == nil || *pt.IOWaitAvg > *s.IOWaitHourMax {
+		s.IOWaitHourMax = new(*pt.IOWaitAvg)
+	}
+	if *pt.IOWaitAvg > float64(s.IOWaitSlowPct) {
+		s.IOWaitBadHours++
+	}
+}
+
 // FleetHistory is the answer of GET /api/history/summary: each box's
 // summary over the window (keyed by box id), for the comparison view.
 type FleetHistory struct {
-	Days  int                      `json:"days"`
-	Boxes map[int64]HistorySummary `json:"boxes"`
+	Days int `json:"days"`
+	// IOWaitSlowPct is the threshold every box's slow hours were counted
+	// at, so the page labels them with it even while a refresh after a
+	// change of the setting is outstanding or has failed.
+	IOWaitSlowPct int                      `json:"iowait_slow_pct"`
+	Boxes         map[int64]HistorySummary `json:"boxes"`
 }
 
 // HistorySummaries condenses every box's last days of history (days
@@ -312,9 +331,9 @@ func (m *Manager) HistorySummaries(ctx context.Context, days int) FleetHistory {
 		ids = append(ids, id)
 	}
 	m.mu.Unlock()
-	out := FleetHistory{Days: days, Boxes: make(map[int64]HistorySummary, len(ids))}
+	out := FleetHistory{Days: days, IOWaitSlowPct: m.Settings().IOWaitSlowPct, Boxes: make(map[int64]HistorySummary, len(ids))}
 	for _, id := range ids {
-		if h, err := m.BoxHistory(ctx, id, days); err == nil {
+		if h, err := m.boxHistory(ctx, id, days, out.IOWaitSlowPct); err == nil {
 			out.Boxes[id] = h.Summary
 		}
 	}
