@@ -23,5 +23,7 @@ import "os"
 // lockDataDir has no lock to take on this platform: restore then relies
 // on the operator having stopped the dashboard, as its help says.
 func lockDataDir(dir string) (release func(), err error) {
-	return func() {}, os.MkdirAll(dir, 0o700)
+	return func() {
+		// Nothing was locked, so there is nothing to release.
+	}, os.MkdirAll(dir, 0o700)
 }

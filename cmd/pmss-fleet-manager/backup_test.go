@@ -132,6 +132,22 @@ func TestDataDirLock(t *testing.T) {
 
 func TestBackupUsage(t *testing.T) {
 	var out, errOut bytes.Buffer
+	dir := t.TempDir()
+	if rc := backupCmd([]string{"-data", dir, "-out", filepath.Join(dir, "b.db")}, &out, &errOut); rc != 1 {
+		t.Fatalf("backup of a missing database: rc %d", rc)
+	}
+	if rc := backupCmd([]string{"-data", filepath.Join(dir, "none"), "-out", "-"}, &out, &errOut); rc != 1 {
+		t.Fatalf("stdout backup without a data directory: rc %d", rc)
+	}
+	if rc := restoreCmd([]string{"-data", dir, "-in", filepath.Join(dir, "missing.db")}, &errOut); rc != 1 {
+		t.Fatalf("restore of a missing file: rc %d", rc)
+	}
+	if rc := restoreCmd([]string{"-data", dir, "-secret-file", filepath.Join(dir, "nosecret"), "-in", "x"}, &errOut); rc != 2 {
+		t.Fatalf("restore with a missing secret file: rc %d", rc)
+	}
+	if rc := backupCmd([]string{"-bogus"}, &out, &errOut); rc != 2 {
+		t.Fatalf("bad flag: rc %d", rc)
+	}
 	if rc := backupCmd(nil, &out, &errOut); rc != 2 {
 		t.Fatalf("no -out: rc %d", rc)
 	}

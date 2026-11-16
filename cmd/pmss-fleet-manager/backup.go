@@ -34,6 +34,12 @@ const (
 	lockName = "pmss-fleet-manager.lock"
 )
 
+// Message prefixes of the two commands.
+const (
+	backupTag  = "backup:"
+	restoreTag = "restore:"
+)
+
 var errDataDirInUse = errors.New("another pmss-fleet-manager process is using this data directory")
 
 // backupCmd is `pmss-fleet-manager backup -out FILE`: a consistent copy
@@ -57,7 +63,7 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 	if *out != "-" {
 		sum, err := store.Backup(ctx, src, *out)
 		if err != nil {
-			fmt.Fprintln(stderr, "backup:", err)
+			fmt.Fprintln(stderr, backupTag, err)
 			return 1
 		}
 		fmt.Fprintf(stderr, "backup: wrote %s (%s)\n", *out, describe(sum))
@@ -65,7 +71,7 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	tmp, err := os.MkdirTemp(*dataDir, ".backup-")
 	if err != nil {
-		fmt.Fprintln(stderr, "backup:", err)
+		fmt.Fprintln(stderr, backupTag, err)
 		return 1
 	}
 	defer os.RemoveAll(tmp)
@@ -75,7 +81,7 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 		err = streamFile(staged, stdout)
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "backup:", err)
+		fmt.Fprintln(stderr, backupTag, err)
 		return 1
 	}
 	fmt.Fprintf(stderr, "backup: wrote %d bytes to stdout (%s)\n", sum.Bytes, describe(sum))
@@ -112,7 +118,7 @@ func restoreCmd(args []string, stderr io.Writer) int {
 	}
 	creds, err := secrets.Resolve(os.Getenv("PMSS_SECRET"), *secretFile, "", "")
 	if err != nil {
-		fmt.Fprintln(stderr, "restore:", err)
+		fmt.Fprintln(stderr, restoreTag, err)
 		return 2
 	}
 	for _, w := range creds.Warnings {
@@ -123,13 +129,13 @@ func restoreCmd(args []string, stderr io.Writer) int {
 		if errors.Is(err, errDataDirInUse) {
 			err = fmt.Errorf("%w (%s): stop the dashboard first", err, *dataDir)
 		}
-		fmt.Fprintln(stderr, "restore:", err)
+		fmt.Fprintln(stderr, restoreTag, err)
 		return 1
 	}
 	defer release()
 	res, err := store.Restore(context.Background(), filepath.Join(*dataDir, dbName), *in, !*skipCheck, store.WithSealer(creds.Current))
 	if err != nil {
-		fmt.Fprintln(stderr, "restore:", err)
+		fmt.Fprintln(stderr, restoreTag, err)
 		if errors.Is(err, secrets.ErrNoKey) || errors.Is(err, secrets.ErrWrongKey) {
 			fmt.Fprintln(stderr, "restore: the backup's credentials are encrypted: give the secret it was made with (-secret-file or PMSS_SECRET); if that secret is lost, -skip-secret-check restores it anyway, and the first start then needs -forget-encrypted-credentials")
 		}

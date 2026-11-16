@@ -221,3 +221,43 @@ func TestRestoreRefusesBadInput(t *testing.T) {
 		t.Fatalf("a refused restore left files: %v", matches)
 	}
 }
+
+func TestBackupRestoreErrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	live := filepath.Join(dir, "pmss-fleet-manager.db")
+	liveStore(t, live, "keep").Close()
+
+	if _, err := Backup(ctx, live, filepath.Join(dir, "no", "such", "dir.db")); err == nil {
+		t.Fatal("backup into a missing directory")
+	}
+	if _, err := Backup(ctx, dir, filepath.Join(dir, "x.db")); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("backup of a directory: %v", err)
+	}
+	if _, err := Inspect(ctx, filepath.Join(dir, "missing.db")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("inspect of a missing file: %v", err)
+	}
+	if _, err := Restore(ctx, live, filepath.Join(dir, "missing.db"), true); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("restore of a missing file: %v", err)
+	}
+	if _, err := Restore(ctx, live, dir, true); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("restore of a directory: %v", err)
+	}
+	// A plain-text backup restored without verifying is taken as it is.
+	plain := filepath.Join(dir, "plain.db")
+	if _, err := Backup(ctx, live, plain); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Restore(ctx, live, plain, false)
+	if err != nil || res.Encrypted || res.Boxes != 1 || res.Previous == "" {
+		t.Fatalf("unverified plain restore %+v %v", res, err)
+	}
+	// With a secret configured, a verified restore encrypts it.
+	res, err = Restore(ctx, live, plain, true, WithSealer(mustSealer(t, backupKeyA)))
+	if err != nil || !res.Encrypted {
+		t.Fatalf("plain restore under a secret %+v %v", res, err)
+	}
+	if got := boxNames(t, live, WithSealer(mustSealer(t, backupKeyA))); len(got) != 1 || got[0] != "keep/pw-keep" {
+		t.Fatalf("restored %v", got)
+	}
+}

@@ -177,51 +177,76 @@ func Restore(ctx context.Context, dbPath, in string, verify bool, opts ...Option
 	}
 	staged := dbPath + ".restore-tmp"
 	removeDB(staged)
-	if err := copyFile(in, staged); err != nil {
-		removeDB(staged)
-		return res, err
-	}
 	defer removeDB(staged) // a no-op after the rename
-	if _, err := Inspect(ctx, staged); err != nil {
-		return res, err
-	}
-	if verify {
-		s, err := Open(staged, opts...)
-		if err != nil {
-			return res, fmt.Errorf("the dashboard would not start with this backup: %w", err)
-		}
-		if err := s.Close(); err != nil {
-			return res, err
-		}
-		for _, side := range []string{"-wal", "-shm"} {
-			if err := os.Remove(staged + side); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return res, err
-			}
-		}
-	}
-	sum, err := Inspect(ctx, staged)
+	sum, err := stage(ctx, in, staged, verify, opts)
 	if err != nil {
 		return res, err
 	}
 	res.Summary = sum
-	if _, err := os.Stat(dbPath); err == nil {
-		prev := dbPath + ".before-restore-" + time.Now().UTC().Format("20060102T150405Z")
-		if _, err := Backup(ctx, dbPath, prev); err != nil {
-			return res, fmt.Errorf("save the current database before replacing it (nothing was changed; move %s aside by hand if it is damaged): %w", dbPath, err)
-		}
-		res.Previous = prev
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return res, err
+	res.Previous, err = replaceDB(ctx, dbPath, staged)
+	return res, err
+}
+
+// stage copies in to staged, checks it, and with verify opens it as the
+// dashboard would (steps 1 and 2 of Restore).
+func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (Summary, error) {
+	if err := copyFile(in, staged); err != nil {
+		return Summary{}, err
 	}
-	for _, side := range []string{"-wal", "-shm"} {
-		if err := os.Remove(dbPath + side); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return res, err
+	if _, err := Inspect(ctx, staged); err != nil {
+		return Summary{}, err
+	}
+	if verify {
+		s, err := Open(staged, opts...)
+		if err != nil {
+			return Summary{}, fmt.Errorf("the dashboard would not start with this backup: %w", err)
 		}
+		if err := s.Close(); err != nil {
+			return Summary{}, err
+		}
+		if err := removeSidecars(staged); err != nil {
+			return Summary{}, err
+		}
+	}
+	return Inspect(ctx, staged)
+}
+
+// replaceDB saves the database at dbPath, if there is one, and puts
+// staged in its place (steps 3 and 4 of Restore).
+func replaceDB(ctx context.Context, dbPath, staged string) (prev string, err error) {
+	if _, err := os.Stat(dbPath); err == nil {
+		base := dbPath + ".before-restore-" + time.Now().UTC().Format("20060102T150405Z")
+		prev = base
+		_, err := Backup(ctx, dbPath, prev)
+		// Two restores within one second: number the later saves.
+		for n := 2; errors.Is(err, fs.ErrExist) && n < 100; n++ {
+			prev = fmt.Sprintf("%s-%d", base, n)
+			_, err = Backup(ctx, dbPath, prev)
+		}
+		if err != nil {
+			return "", fmt.Errorf("save the current database before replacing it (nothing was changed; move %s aside by hand if it is damaged): %w", dbPath, err)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	if err := removeSidecars(dbPath); err != nil {
+		return prev, err
 	}
 	if err := os.Rename(staged, dbPath); err != nil {
-		return res, err
+		return prev, err
 	}
-	return res, syncDir(filepath.Dir(dbPath))
+	return prev, syncDir(filepath.Dir(dbPath))
+}
+
+// removeSidecars removes a database's write-ahead log and shared-memory
+// file: next to a different main file, SQLite would replay the log into it.
+func removeSidecars(path string) error {
+	for _, side := range []string{"-wal", "-shm"} {
+		if err := os.Remove(path + side); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 // removeDB removes a database file and its sidecars, ignoring absence.
