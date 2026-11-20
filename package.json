@@ -4,7 +4,7 @@
   "description": "Pins the linter `make jscheck` runs on the embedded frontend; the dashboard itself has no JavaScript build or dependencies.",
   "license": "AGPL-3.0-or-later",
   "devDependencies": {
-    "eslint": "10.14.0"
+    "eslint": "10.15.0"
   },
   "overrides": {
     "minimatch": "^11.0.5"
