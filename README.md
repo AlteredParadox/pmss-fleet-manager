@@ -1400,7 +1400,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.22.1 is the current release. The code was written against five real Pulsed
+1.22.2 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1411,6 +1411,15 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.22.2**
+
+- Dependency updates only: golang.org/x/crypto 0.59.0 (#211) with the
+  third-party notices regenerated to match (#213), a refreshed
+  golang:1.27-alpine build image (#209), ESLint 10.15.0 for the frontend
+  lint (#210, and the `minimatch` override it made unnecessary is gone,
+  #213), and the workflows' actions/setup-go 7.1.0 and
+  sonarqube-scan-action 8.5.0 (#212). No behaviour changes.
 
 **1.22.1**
 
