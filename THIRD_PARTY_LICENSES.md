@@ -176,7 +176,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ---
 
-## golang.org/x/crypto@v0.58.0
+## golang.org/x/crypto@v0.59.0
 
 ### LICENSE
 
@@ -239,7 +239,7 @@ shall terminate as of the date such litigation is filed.
 
 ---
 
-## golang.org/x/sys@v0.49.0
+## golang.org/x/sys@v0.50.0
 
 ### LICENSE
 
