@@ -278,9 +278,10 @@ echo "uid $uid"
 // on ESTABLISHED would miss it; a missing accepting row refuses too.
 //
 // Lines: "base hex|dec", then "c <localport> <uid> <state> <peeraddr>" for
-// client sides and "s <peerport> <uid> <state> <localaddr>" for accepting
-// sides, from /proc/net/tcp{,6} (hex) or, where those are root-only, from
-// ss -Htnp (dec; uid is ours for our own processes' sockets, else x).
+// client sides and "s <peerport> <uid> <state> <localaddr> [<inode>]" for
+// accepting sides, from /proc/net/tcp{,6} (hex, with the inode) or, where
+// those are root-only, from ss -Htnp (dec, no inode; uid is ours for our
+// own processes' sockets, else x).
 // "privacy" marks a box that hides non-listening sockets by policy
 // (Pulsed Media's socket-table privacy, ADR 0068): the caller falls back
 // to the listener check there. The policy is recognised by its opt-in
@@ -297,7 +298,7 @@ echo "uid $uid"
 hp=$(printf '%04X' "$port")
 tables="${PMSS_TCP_TABLES:-/proc/net/tcp /proc/net/tcp6}"
 marker="${PMSS_PRIVACY_MARKER:-/etc/seedbox/config/socket-table-privacy.enabled}"
-rows=$(awk -v hp="$hp" '$4!="0A"{n++; l=$2; r=$3; lp=l; sub(/.*:/,"",lp); rp=r; sub(/.*:/,"",rp); la=l; sub(/:.*/,"",la); ra=r; sub(/:.*/,"",ra); if (rp==hp) print "c", lp, $8, $4, ra; if (lp==hp) print "s", rp, $8, $4, la} END{print "seen", n+0}' $tables 2>/dev/null)
+rows=$(awk -v hp="$hp" '$4!="0A"{n++; l=$2; r=$3; lp=l; sub(/.*:/,"",lp); rp=r; sub(/.*:/,"",rp); la=l; sub(/:.*/,"",la); ra=r; sub(/:.*/,"",ra); if (rp==hp) print "c", lp, $8, $4, ra; if (lp==hp) print "s", rp, $8, $4, la, $10} END{print "seen", n+0}' $tables 2>/dev/null)
 if [ -n "$rows" ] && [ "${rows##*seen }" != "0" ]; then
   echo "base hex"; printf '%s\n' "$rows"
 else

@@ -1247,10 +1247,43 @@ func TestEstablishedOwner(t *testing.T) {
 	if ok, _, reason := EstablishedOwner(mk(noise), port); ok || !strings.Contains(reason, "not in the box's socket table") {
 		t.Fatalf("absent connection: %v %s", ok, reason)
 	}
+	// An orphaned acceptor (inode 0, listed as uid 0 in FIN-WAIT-2 or
+	// TIME-WAIT): qBittorrent closed an idle connection of ours, whose side
+	// waits in CLOSE-WAIT. These are the rows read on pm3 on 2026-11-21,
+	// which refused every new connection for up to a minute.
+	pm3 := fmt.Sprintf("s 9472 0 05 0100007F 0\nc 9472 %d 08 0100007F\ns 9474 0 06 0100007F 0\ns 9D12 0 06 0100007F 0\n", uid)
+	ownIno := fmt.Sprintf("c BEEF %d 01 0100007F\ns BEEF %d 01 0100007F 50272357\n", uid, uid)
+	if ok, _, reason := EstablishedOwner(mk(ownIno+pm3), port); !ok {
+		t.Fatalf("an orphaned acceptor of a closed leftover refused: %s", reason)
+	}
+	if ok, _, reason := EstablishedOwner(mk(pm3), port); ok || !strings.Contains(reason, "not visible") {
+		t.Fatalf("the leftover alone vouches for nothing: %v %s", ok, reason)
+	}
+	// A live socket has an inode: root's, or another account's half-closed
+	// one, still refuses; so does a connection we still send on whose
+	// acceptor is an orphan.
+	for _, row := range []string{
+		"s 05D2 0 01 0100007F 4242",
+		"s 05D2 0 05 0100007F 4242",
+		fmt.Sprintf("s 05D2 %d 05 0100007F 4242", uid+1),
+	} {
+		rows := ownIno + fmt.Sprintf("c 05D2 %d 08 0100007F\n%s\n", uid, row)
+		if ok, _, reason := EstablishedOwner(mk(rows), port); ok || !strings.Contains(reason, "another account") {
+			t.Fatalf("live acceptor %q must refuse: %v %s", row, ok, reason)
+		}
+	}
+	if ok, _, reason := EstablishedOwner(mk(ownIno+fmt.Sprintf("c 05D2 %d 01 0100007F\ns 05D2 0 05 0100007F 0\n", uid)), port); ok || !strings.Contains(reason, "not visible") {
+		t.Fatalf("an open connection with an orphaned acceptor: %v %s", ok, reason)
+	}
 	// ss fallback: decimal ports, an unattributable acceptor refuses.
 	dec := []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d ESTAB 127.0.0.1\ns 51234 x ESTAB 127.0.0.1\nend\n", uid, uid))
 	if ok, _, _ := EstablishedOwner(dec, port); ok {
 		t.Fatal("an unattributable acceptor must refuse")
+	}
+	// ss prints no inode: a trailing 0 there is not the orphan sign.
+	dec = []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d CLOSE-WAIT 127.0.0.1\ns 51234 x FIN-WAIT-2 127.0.0.1 0\nc 51235 %d ESTAB 127.0.0.1\ns 51235 %d ESTAB 127.0.0.1\nend\n", uid, uid, uid, uid))
+	if ok, _, _ := EstablishedOwner(dec, port); ok {
+		t.Fatal("an unattributable ss acceptor must refuse, trailing 0 or not")
 	}
 	dec = []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d ESTAB 127.0.0.1\ns 51234 %d FIN-WAIT-2 127.0.0.1\nend\n", uid, uid, uid))
 	if ok, _, reason := EstablishedOwner(dec, port); !ok {
@@ -1333,6 +1366,38 @@ func TestEstablishedScriptFallbacks(t *testing.T) {
 	}
 	if ok, known, reason := EstablishedOwner([]byte(out), 8089); ok || !known || !strings.Contains(reason, "another account") {
 		t.Fatalf("half-closed foreign acceptor via ss must refuse: %v %v %s", ok, known, reason)
+	}
+}
+
+// The script's hex path on a table holding the pm3 rows of 2026-11-21:
+// it prints each acceptor's inode, and the orphaned acceptor (inode 0)
+// of a connection qBittorrent closed no longer refuses ours.
+func TestEstablishedScriptOrphanAcceptor(t *testing.T) {
+	dir := t.TempDir()
+	u := os.Getuid()
+	row := func(sl int, local, rem, st string, uid, ino int) string {
+		return fmt.Sprintf("%4d: %s %s %s 00000000:00000000 00:00000000 00000000 %5d        0 %d 1 0000000000000000 20 4 0 10 -1\n", sl, local, rem, st, uid, ino)
+	}
+	table := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+		row(0, "0100007F:0EBC", "00000000:0000", "0A", u, 305902) +
+		row(1, "0100007F:0EBC", "0100007F:9472", "05", 0, 0) +
+		row(2, "0100007F:0EBC", "0100007F:9474", "06", 0, 0) +
+		row(3, "0100007F:9472", "0100007F:0EBC", "08", u, 50272357) +
+		row(4, "0100007F:0EBC", "0100007F:DFC0", "01", u, 50272400) +
+		row(5, "0100007F:DFC0", "0100007F:0EBC", "01", u, 50272401)
+	os.WriteFile(dir+"/tcp", []byte(table), 0o600)
+	cmd := exec.Command("sh")
+	cmd.Stdin = strings.NewReader(EstablishedScript(3772))
+	cmd.Env = append(os.Environ(), "PMSS_TCP_TABLES="+dir+"/tcp")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "s 9472 0 05 0100007F 0\n") || !strings.Contains(string(out), fmt.Sprintf("s DFC0 %d 01 0100007F 50272400\n", u)) {
+		t.Fatalf("acceptor rows without their inode: %q", out)
+	}
+	if ok, known, reason := EstablishedOwner(out, 3772); !ok || !known {
+		t.Fatalf("pm3's rows refused: %v %v %s\n%s", ok, known, reason, out)
 	}
 }
 
