@@ -21,10 +21,13 @@ import (
 	"time"
 )
 
-// defaultSSHTimeout bounds one SSH connection's setup, the detection probe and
-// each poll's SSH steps. A box that is busy enough to answer slowly (a shared
-// Pulsed Media host under load) fails every step at once when this is too
-// short, so the operator can raise it with -ssh-timeout / PMSS_SSH_TIMEOUT.
+// defaultSSHTimeout bounds what this package dials and runs over a new
+// connection: connection setup, the detection probe and the poll's probe. It
+// does not cover every SSH-backed step: the liveness check on an already open
+// connection keeps its own short deadline, and rTorrent's detached transport
+// has its own. A box busy enough to answer slowly (a shared Pulsed Media host
+// under load) fails the covered steps with "context deadline exceeded", so
+// the operator can raise it with -ssh-timeout / PMSS_SSH_TIMEOUT.
 const defaultSSHTimeout = 45 * time.Second
 
 // sshTimeoutNanos holds an override set by SetSSHTimeout; zero means the
