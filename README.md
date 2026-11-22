@@ -335,7 +335,12 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
   sending the password to that server. Editing a box in the dashboard
   re-encrypts what it keeps for the new endpoint. The pinned host key is
   not part of it. The first start of 1.24 converts the existing
-  credentials in place.
+  credentials in place. This keeps saved passwords from being redirected;
+  it does not make a copy tamper-proof. Someone who can write the file
+  can still replace an encrypted value with plain text of their own (a
+  start command, the download link), which the dashboard takes as one
+  written by a build without the secret. So keep backups where only you
+  can write them, as well as read them.
 - **Starting without the secret, or with a different one, is refused** with
   a log line saying so, or naming the first credential it could not read.
   The pollers would otherwise present ciphertext to your boxes as the
@@ -448,7 +453,9 @@ To restore, stop the dashboard and run:
   that has been where nobody else could change it); `drop` restores
   everything except those box credentials, and the edit forms ask for
   them again. The check needs no secret, so `-skip-secret-check` does
-  not skip it. Backups taken with 1.24 or later need neither.
+  not skip it. Backups taken with 1.24 or later need neither, and never
+  hold such credentials: refused on one of those, the file was altered.
+  Changing the secret retires every older backup's ciphertext for good.
 - **The database it replaces is kept** beside it as
   `pmss-fleet-manager.db.before-restore-<UTC time>`, so a restore is
   undone by restoring that file. Delete it when you no longer need it: it

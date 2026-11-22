@@ -329,3 +329,66 @@ func TestUpdateBoxPlainStoreMove(t *testing.T) {
 		t.Fatalf("stored %q", pw)
 	}
 }
+
+// A plain-text password that only looks like the old envelope is a
+// password: the scan leaves it to the marker, and drop does not touch it.
+func TestRestorePlainPasswordShapedLikeEnvelope(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.db")
+	s, err := Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateBox(ctx, &Box{Name: "a", Host: "odin.example", User: "ragnar", Password: "pmss1:hunter2", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	backup := filepath.Join(dir, "backup.db")
+	if _, err := Backup(ctx, src, backup); err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
+	if _, err := Restore(ctx, live, backup, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := boxNames(t, live); len(got) != 1 || got[0] != "a/pmss1:hunter2" {
+		t.Fatalf("restored %v", got)
+	}
+}
+
+// Stripping every encryption row as well as moving the box makes the file
+// look like one from before encryption support: its ciphertext still has
+// to open, bound, and does not.
+func TestRestoreReboundWithoutMarkers(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sealA := WithSealer(mustSealer(t, backupKeyA))
+	backup, a, _ := boundBackup(t, dir)
+	rawExec(t, backup, `DELETE FROM settings WHERE key LIKE 'secrets_%'`)
+	rawExec(t, backup, `UPDATE boxes SET host='127.0.0.1', host_key='' WHERE id=?`, a)
+	live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
+	if _, err := Restore(ctx, live, backup, true, sealA); !errors.Is(err, secrets.ErrWrongKey) {
+		t.Fatalf("restore: %v", err)
+	}
+}
+
+// A secret change while a credential is still unbound: the previous
+// secret opens it by its label, and it is stored bound under the new one.
+func TestRotationBindsUnboundCredentials(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path, id := unboundFixture(t, dir)
+	s, err := Open(path, WithSealer(mustSealer(t, backupKeyB)), WithPreviousSealer(mustSealer(t, backupKeyA)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.GetBox(ctx, id)
+	if err != nil || got.Password != "pw-a" || got.QbtPass != "qp-a" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if v, _ := secrets.Envelope(rawCell(t, path, "password", id)); v != 2 {
+		t.Fatalf("stored as envelope v%d", v)
+	}
+}

@@ -245,6 +245,19 @@ func TestRestoreOldCredentials(t *testing.T) {
 		t.Fatalf("bad -old-credentials: rc %d", rc)
 	}
 	errOut.Reset()
+	dropped := filepath.Join(dir, "dropped")
+	if rc := restoreCmd([]string{"-data", dropped, "-secret-file", secretFile, "-old-credentials", "drop", "-in", file}, nil, &errOut); rc != 0 {
+		t.Fatalf("drop: rc %d %q", rc, errOut.String())
+	}
+	sd, err := store.Open(filepath.Join(dropped, dbName), store.WithSealer(sl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boxes, err := sd.ListBoxes(context.Background()); err != nil || len(boxes) != 1 || boxes[0].Password != "" {
+		t.Fatalf("dropped %+v %v", boxes, err)
+	}
+	sd.Close()
+	errOut.Reset()
 	if rc := restoreCmd([]string{"-data", dst, "-secret-file", secretFile, "-old-credentials", "keep", "-in", file}, nil, &errOut); rc != 0 {
 		t.Fatalf("keep: rc %d %q", rc, errOut.String())
 	}

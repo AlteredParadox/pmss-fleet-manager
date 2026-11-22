@@ -58,7 +58,7 @@ const (
 )
 
 // ErrOldCredentials is the refusal of a backup holding Unbound credentials.
-var ErrOldCredentials = errors.New("the backup holds box credentials encrypted before 1.24, which are not bound to their box: anyone who could change the file without the secret could have pointed a box at their own server")
+var ErrOldCredentials = errors.New("the backup holds box credentials encrypted before 1.24, which are not bound to their box: anyone who could change the file without the secret could have pointed a box at their own server (a backup taken by 1.24 or later never holds them, so in one of those this means the file was altered)")
 
 // WithOldCredentials sets what Restore does with credentials encrypted
 // before they were bound to their box. Only Restore reads it.
@@ -254,9 +254,11 @@ func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (
 	return Inspect(ctx, staged)
 }
 
-// unboundCells counts the box credentials in a version-1 envelope (any
-// value that the store would read as one, well-formed or not), clearing
-// them with drop. It reads only the columns the file has: an old file is
+// unboundCells counts the box credentials in a well-formed version-1
+// envelope, clearing them with drop. A malformed one never decrypts, in
+// any reading of the metadata, so it cannot carry a password anywhere;
+// and a plain-text password that merely starts with "pmss1:" is left to
+// the marker, as everywhere else. It reads only the columns the file has: an old file is
 // not migrated before it is checked.
 func unboundCells(ctx context.Context, db *sql.DB, drop bool) (int, error) {
 	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('boxes') WHERE name IN ('password','qbt_pass','qbt_start_cmd')`)
@@ -290,7 +292,7 @@ func unboundCells(ctx context.Context, db *sql.DB, drop bool) (int, error) {
 				rows.Close()
 				return 0, err
 			}
-			if version, _ := secrets.Envelope(v); version == 1 {
+			if version, ok := secrets.Envelope(v); version == 1 && ok {
 				ids = append(ids, id)
 			}
 		}
