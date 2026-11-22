@@ -390,6 +390,14 @@ func TestValidDownloadURL(t *testing.T) {
 		"https:example.com/b":                                 false,
 		"https://example.com/" + strings.Repeat("a", 2048-20): true,
 		"https://example.com/" + strings.Repeat("a", 2048-19): false,
+		// The only fragment is a sha256 pin.
+		"https://example.com/b#sha256=" + strings.Repeat("ab", 32): true,
+		"https://example.com/b#sha256=" + strings.Repeat("AB", 32): true,
+		"https://example.com/b#sha256=" + strings.Repeat("a", 63):  false,
+		"https://example.com/b#sha256=" + strings.Repeat("g", 64):  false,
+		"https://example.com/b#md5=" + strings.Repeat("a", 32):     false,
+		"https://example.com/b#top":                                false,
+		"https://example.com/b#":                                   false,
 	} {
 		if got := ValidDownloadURL(u); got != want {
 			t.Errorf("%.60q: %v, want %v", u, got, want)
@@ -415,5 +423,37 @@ func TestDecodeRelease(t *testing.T) {
 		if err := decodeRelease(strings.NewReader(body), &rel); err == nil {
 			t.Errorf("%s: decoded", name)
 		}
+	}
+}
+
+// Without a digest only the default URL installs; any other needs the
+// operator's #sha256= pin or a GitHub release digest, and is refused
+// before connecting (Codex audit of 1.23.0). The pin is cut off the URL.
+func TestQbtInstallRequiresDigestForCustomURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	defer srv.Close()
+	old := githubAPI
+	githubAPI = srv.URL
+	defer func() { githubAPI = old }()
+	m := &Manager{states: map[int64]*BoxState{7: {Ready: true}}}
+	p := &poller{m: m, box: &store.Box{ID: 7}}
+	ctx := context.Background()
+	for _, u := range []string{
+		"https://example.com/qbittorrent-nox",
+		"https://github.com/o/r/releases/latest/download/x86_64-qbittorrent-nox", // API down: no digest
+	} {
+		if _, err := p.qbtInstall(ctx, u); !errors.Is(err, errNoDigest) || !strings.Contains(err.Error(), "#sha256=") {
+			t.Errorf("%s: %v", u, err)
+		}
+	}
+	// Past the digest rule, the install goes on to connect (and fails
+	// here, with no box): a pinned custom URL, and the default unverified.
+	for _, u := range []string{"https://example.com/qbittorrent-nox#sha256=" + strings.Repeat("ab", 32), store.DefaultQbtDownloadURL} {
+		if _, err := p.qbtInstall(ctx, u); err == nil || errors.Is(err, errNoDigest) {
+			t.Errorf("%s: %v", u, err)
+		}
+	}
+	if clean, d, ok := downloadPin("https://example.com/b#sha256=" + strings.Repeat("AB", 32)); clean != "https://example.com/b" || d != strings.Repeat("ab", 32) || !ok {
+		t.Errorf("pin %q %q %v", clean, d, ok)
 	}
 }

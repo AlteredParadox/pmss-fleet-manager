@@ -122,8 +122,11 @@ for you, and nothing is moved.
 **qBittorrent lifecycle.** Install or update `~/bin/qbittorrent-nox` from the
 [userdocs static build](https://github.com/userdocs/qbittorrent-nox-static)
 (URL configurable). The download's sha256 is checked against the digest
-GitHub publishes for the release asset (any GitHub release URL; other
-sources install unverified and say so), then an ELF and `--version` check
+GitHub publishes for the release asset (any GitHub release URL), or against
+one you add to the URL as `#sha256=<64 hex digits>` (a mirror, a private
+build). A URL other than the default with neither is refused; the default
+installs unverified, and says so, only when GitHub's API cannot be
+reached. Then an ELF and `--version` check
 runs before the binary is swapped in atomically. The dashboard checks the latest GitHub release every
 six hours and flags boxes that are behind or that need a restart to pick up a
 new binary. "Set up autostart" writes a `~/bin/qbt-start` screen launcher and
@@ -1331,7 +1334,8 @@ These are the design decisions that came out of it.
   other tabs are told to refresh, so one tab never reverts another.
 - **Scripts on the box** run as your user and are embedded in the binary
   (documented in `internal/collect/qbtinstall.go`). Install verifies the
-  download's sha256 against the GitHub release digest (fetched by the
+  download's sha256 against a `#sha256=` pin on the URL or the GitHub
+  release digest (refusing a non-default URL with neither; the digest is fetched by the
   dashboard host, compared on the box, so a swapped file on either path
   fails), then the ELF magic and `--version` output, before swapping the
   binary in atomically;
@@ -1436,6 +1440,17 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**Unreleased**
+
+- **A custom qBittorrent download URL needs a sha256** (Codex audit of
+  1.23.0). Install used to go ahead unverified when the URL was not a
+  GitHub release asset. Now any URL other than the default needs a digest:
+  GitHub's for a release asset, or yours, added as `#sha256=<digest>` to
+  the URL in settings. **If you use a mirror or a private build, add its
+  digest before the next install or update.**
+- The security headers (CSP, `X-Frame-Options`, `nosniff`, referrer
+  policy) are now sent on the Host-check, login and throttle refusals too.
 
 **1.23.0**
 

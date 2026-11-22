@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"pmss-fleet-manager/internal/probe"
+	"pmss-fleet-manager/internal/store"
 )
 
 // installScript downloads a static qbittorrent-nox build to ~/bin, verifies
@@ -206,15 +207,39 @@ const maxDownloadURL = 2048
 
 // ValidDownloadURL is the one rule for the qBittorrent download URL, at
 // save time and again at install: bounded, URL characters only (it goes
-// into a shell command, quoted), and a well-formed https URL with a host
-// and no user info.
+// into a shell command, quoted), a well-formed https URL with a host and
+// no user info, and no fragment other than a sha256 pin (downloadPin).
 func ValidDownloadURL(u string) bool {
 	if len(u) > maxDownloadURL || !safeURL.MatchString(u) {
+		return false
+	}
+	if _, _, ok := downloadPin(u); !ok {
 		return false
 	}
 	p, err := url.Parse(u)
 	return err == nil && p.Scheme == "https" && p.Host != "" && p.Hostname() != "" && p.User == nil
 }
+
+// downloadPin splits the operator's digest off a download URL: a fragment
+// "#sha256=" and 64 hex digits, for a build GitHub publishes no digest for
+// (a mirror, a private build). clean is the URL without the fragment
+// (what the box fetches; a fragment is never sent anyway), digest the
+// lower-case pin or "". ok is false for any other fragment.
+func downloadPin(u string) (clean, digest string, ok bool) {
+	clean, frag, found := strings.Cut(u, "#")
+	if !found {
+		return u, "", true
+	}
+	d, isPin := strings.CutPrefix(frag, "sha256=")
+	d = strings.ToLower(d)
+	if !isPin || !sha256Hex.MatchString(d) {
+		return u, "", false
+	}
+	return clean, d, true
+}
+
+// errNoDigest refuses a custom download URL that nothing can verify.
+var errNoDigest = errors.New("a download URL other than the default needs a sha256 to check the file against")
 
 // githubAPI is the API base the digest lookup uses; a test points it at a
 // local server.
@@ -325,12 +350,22 @@ func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, er
 	if !ValidDownloadURL(downloadURL) {
 		return "", errors.New("download URL must be https, contain only URL characters and be at most 2048 bytes")
 	}
-	// The digest comes from GitHub's API on the dashboard host, the file
-	// from GitHub's CDN on the box: a swapped download on either path fails
-	// the comparison. No digest is not an error, only an unverified install.
-	digest, why := releaseDigest(ctx, downloadURL)
+	// The digest is the operator's pin on the URL, or else comes from
+	// GitHub's API on the dashboard host, the file from GitHub's CDN on the
+	// box: a swapped download on either path fails the comparison. Without
+	// one, only the default URL installs (unverified, and it says so, when
+	// GitHub's API cannot be reached); any other is refused before
+	// connecting (Codex audit of 1.23.0).
+	downloadURL, digest, _ := downloadPin(downloadURL)
+	why := ""
+	if digest == "" {
+		digest, why = releaseDigest(ctx, downloadURL)
+	}
 	note := ""
 	if digest == "" {
+		if downloadURL != store.DefaultQbtDownloadURL {
+			return "", fmt.Errorf("%w (%s): add #sha256=<the build's sha256> to the URL in settings", errNoDigest, why)
+		}
 		note = "digest: " + why + "\n"
 	}
 	cli, err := p.conn(ctx)

@@ -2330,7 +2330,7 @@ function viewSettings() {
     </div>
     <div class="panel"><div class="tile-label">qbittorrent-nox</div>
       <label class="f">download URL for install / update<input data-s="qbt_download_url" value="${esc(s.qbt_download_url || '')}"></label>
-      <div class="hint">Default is the userdocs static x86_64 build. Installed to ~/bin/qbittorrent-nox, mode 700, after an ELF and --version check.</div>
+      <div class="hint">Default is the userdocs static x86_64 build. Installed to ~/bin/qbittorrent-nox, mode 700, after a sha256 check, an ELF check and a --version check. Any other URL needs a digest to check against: a GitHub release asset has one, otherwise add #sha256=&lt;the build's sha256&gt; to the URL.</div>
     </div>
     <div class="panel"><div class="tile-label">pulsedmedia account</div>
       <label class="row">client area<input data-s="client_area_url" value="${esc(s.client_area_url || '')}"></label>
