@@ -26,11 +26,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 )
 
@@ -66,20 +69,96 @@ func testSSHServer(t *testing.T, root string) (port int, hostKey string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	srv := &testSSHState{procs: map[*exec.Cmd]struct{}{}}
+	// Registered after the caller's TempDir for root, so it runs before
+	// that is removed: no command of this server, a stand-in still sleeping
+	// or a poll of a box, may write into a home being deleted (the flaky
+	// "directory not empty" of TestChangePasswordLostConnection).
+	t.Cleanup(func() { ln.Close(); srv.shutdown() })
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go serveTestSSH(conn, cfg, root)
+			if !srv.track(conn) {
+				conn.Close()
+				return
+			}
+			go serveTestSSH(conn, cfg, root, srv)
 		}
 	}()
 	return ln.Addr().(*net.TCPAddr).Port, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
 }
 
-func serveTestSSH(conn net.Conn, cfg *ssh.ServerConfig, root string) {
+// testSSHState is what a test server's cleanup must end: its client
+// connections, from the moment they are accepted (so no session starts
+// after it), and the commands it runs, each in its own process group so a
+// stand-in's children go too. Nothing of the server touches the
+// filesystem except under its lock, once it is known not to be closed.
+type testSSHState struct {
+	mu     sync.Mutex
+	closed bool
+	conns  []net.Conn
+	procs  map[*exec.Cmd]struct{}
+	wg     sync.WaitGroup
+}
+
+// track registers an accepted connection, unless the server is closed.
+func (s *testSSHState) track(c net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.conns = append(s.conns, c)
+	return true
+}
+
+// start creates home and runs cmd in it, unless the server is shutting
+// down (then neither happens: a late exec cannot recreate a home that the
+// test's cleanup is removing, fred on #221).
+func (s *testSSHState) start(cmd *exec.Cmd, home string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return false
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return false
+	}
+	s.procs[cmd] = struct{}{}
+	s.wg.Add(1)
+	return true
+}
+
+func (s *testSSHState) done(cmd *exec.Cmd) {
+	s.mu.Lock()
+	delete(s.procs, cmd)
+	s.mu.Unlock()
+	s.wg.Done()
+}
+
+// shutdown closes every connection, kills every running command's process
+// group and waits for them all.
+func (s *testSSHState) shutdown() {
+	s.mu.Lock()
+	s.closed = true
+	for _, c := range s.conns {
+		c.Close()
+	}
+	for cmd := range s.procs {
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	s.mu.Unlock()
+	s.wg.Wait()
+}
+
+func serveTestSSH(conn net.Conn, cfg *ssh.ServerConfig, root string, srv *testSSHState) {
 	sc, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
 		return
@@ -106,13 +185,18 @@ func serveTestSSH(conn net.Conn, cfg *ssh.ServerConfig, root string) {
 				r.Reply(true, nil)
 				var p struct{ Cmd string }
 				ssh.Unmarshal(r.Payload, &p)
-				os.MkdirAll(home, 0o700)
 				cmd := exec.Command("sh", "-c", p.Cmd)
 				cmd.Env = append(os.Environ(), "HOME="+home, "XDG_RUNTIME_DIR="+home)
 				cmd.Dir = home
 				cmd.Stdin, cmd.Stdout, cmd.Stderr = ch, ch, ch.Stderr()
 				status := 0
-				if err := cmd.Run(); err != nil {
+				if !srv.start(cmd, home) {
+					ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{255}))
+					return
+				}
+				err := cmd.Wait()
+				srv.done(cmd)
+				if err != nil {
 					var ee *exec.ExitError
 					if errors.As(err, &ee) {
 						status = ee.ExitCode()
@@ -142,4 +226,61 @@ func sshTestBox(t *testing.T, m *Manager, name, user string, port int, hostKey s
 		t.Fatal("no poller for " + name)
 	}
 	return b
+}
+
+// The test server ends its commands when its test ends, before the test's
+// directories are removed: a command still running then (a stand-in that
+// sleeps, a poll) must not write into a home being deleted. Here one that
+// has provably started (it wrote "ready") waits for a release the test
+// gives only after the subtest (and so the server's cleanup) is over; it
+// would then write a file, which never appears. No time window: without
+// the cleanup's kill the file always appears (fred on #221).
+func TestSSHServerEndsCommands(t *testing.T) {
+	keep := t.TempDir()
+	ready, release, late := filepath.Join(keep, "ready"), filepath.Join(keep, "release"), filepath.Join(keep, "late")
+	// Only on the failure path: a cleanup that does not end the command
+	// waits for it, and it for the release; give the release after a while
+	// so that shows as the late file, not as a hung test.
+	subDone := make(chan struct{})
+	go func() {
+		select {
+		case <-subDone:
+		case <-time.After(5 * time.Second):
+			os.WriteFile(release, nil, 0o600)
+		}
+	}()
+	t.Run("server", func(t *testing.T) {
+		root := t.TempDir()
+		port, hostKey := testSSHServer(t, root)
+		cli, err := sshx.Dial(context.Background(), sshx.Config{Host: "127.0.0.1", Port: port, User: "u", AuthMethod: "password", Password: "x", HostKey: hostKey, Timeout: 5 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cli.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		script := "touch '" + ready + "'; while [ ! -e '" + release + "' ]; do sleep 0.02; done; touch '" + late + "'\n"
+		cli.Run(ctx, "sh", strings.NewReader(script)) // returns at the deadline; the command runs on
+		for i := 0; ; i++ {
+			if _, err := os.Stat(ready); err == nil {
+				break
+			}
+			if i == 500 {
+				t.Fatal("the command never started")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if _, err := os.Stat(late); !os.IsNotExist(err) {
+			t.Fatalf("the late file before the subtest ended: %v", err)
+		}
+	})
+	close(subDone)
+	// A surviving command would now write the late file within a few polls.
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if _, err := os.Stat(late); !os.IsNotExist(err) {
+		t.Fatalf("a command of the test server outlived its test (stat: %v)", err)
+	}
 }
