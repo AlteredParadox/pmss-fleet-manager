@@ -624,7 +624,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.22
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.23
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -1425,7 +1425,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.22.3 is the current release. The code was written against five real Pulsed
+1.23.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1436,6 +1436,49 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.23.0**
+
+- **Boxes that hide their socket tables are verified again, without an
+  opt-in** (#219). Before sending your WebUI login, the dashboard checks
+  that the connection reached your own client. Where Pulsed Media's
+  socket-table privacy keeps `/proc/net/tcp` from your account (also on
+  hosts where its `ss` filter did not load, PMSS #1303), it now checks the
+  listening socket instead: just before connecting and just after (before a
+  byte is sent), `ss` must report exactly one listener on 127.0.0.1 owned
+  by your account with the same socket cookie. A changed or foreign
+  listener refuses, with no fallback. Checked on kernel 6.1: a listener
+  swapped in between the two checks received zero bytes.
+- **Action needed on privacy hosts: qBittorrent's WebUI must listen on
+  127.0.0.1.** The check only accepts a WebUI bound to exactly 127.0.0.1
+  (PMSS's default). qBittorrent's own default is all addresses; a client
+  installed that way is refused on such a host, with a message saying so.
+  Set qBittorrent's WebUI address to 127.0.0.1.
+- **Listener-only, a per-box opt-in, off by default** (#218). Only for a
+  box whose `ss` reports the listener's owner but not its socket cookie;
+  the box's card then says *WebUI verification blocked by host socket
+  privacy · review*, and its new *verification* page explains the risk and
+  holds the switch. **What it risks:** if your client stops, a co-tenant
+  watching for that moment could take the port and receive your WebUI
+  login, and with it run commands as your account through the client's
+  settings. A box with it on carries a *listener-only* tag. Moving the box,
+  or replacing its host key, turns it off; turning it off closes the
+  connections made under it.
+- **Upgrade notes.** Boxes that used to drop to the port-owner check
+  silently on privacy hosts are now verified by the listener check instead.
+  A box whose `ss` cannot report the listener's owner at all is now
+  **blocked** rather than connected unverified. On hosts where PMSS's `ss`
+  filter did not load (PMSS #1303), qBittorrent (and rTorrent over TCP)
+  was refused on every connection before; it connects again.
+- **The port-owner check on privacy hosts no longer trusts `ss -p`**
+  (#219). It matched sockets to processes by inode number, a wrapping
+  counter, so a co-tenant squatting a port could in principle have been
+  labelled as you; it now uses the owner uid the kernel reports.
+- **Fixed: repeated "qBittorrent not responding" alerts** (#217). When
+  qBittorrent closed an idle connection, the kernel's leftover record of it
+  (listed as uid 0) made the next connection's check refuse for up to a
+  minute. Those records are now recognised (inode 0 and the time-wait
+  timer); a live socket of another account still refuses.
 
 **1.22.3**
 
