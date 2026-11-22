@@ -306,65 +306,23 @@ type cellScan struct {
 // before it is checked.
 func scanCells(ctx context.Context, db *sql.DB, drop bool) (cellScan, error) {
 	var sc cellScan
-	count := func(v string, bound bool) (unbound bool) {
-		if v == "" {
-			return false
-		}
-		version, ok := secrets.Envelope(v)
-		if !ok || !(version == 1 || bound && version == 2) {
-			sc.plain++
-			return false
-		}
-		sc.sealed++
-		if bound && version == 1 {
-			sc.unbound++
-			return true
-		}
-		return false
-	}
-	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('boxes') WHERE name IN ('password','qbt_pass','qbt_start_cmd')`)
+	cols, err := boxSecretColumns(ctx, db)
 	if err != nil {
 		return sc, err
 	}
-	var cols []string
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			rows.Close()
-			return sc, err
+	for _, col := range boxSecretCols {
+		if !cols[col.name] {
+			continue
 		}
-		cols = append(cols, c)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return sc, err
-	}
-	for _, col := range cols { // names from the fixed list above
-		rows, err := db.QueryContext(ctx, `SELECT id, `+col+` FROM boxes`)
+		ids, err := sc.scanColumn(ctx, db, col.list)
 		if err != nil {
-			return sc, err
-		}
-		var ids []int64
-		for rows.Next() {
-			var id int64
-			var v string
-			if err := rows.Scan(&id, &v); err != nil {
-				rows.Close()
-				return sc, err
-			}
-			if count(v, true) {
-				ids = append(ids, id)
-			}
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
 			return sc, err
 		}
 		if !drop {
 			continue
 		}
 		for _, id := range ids {
-			if _, err := db.ExecContext(ctx, `UPDATE boxes SET `+col+`='' WHERE id=?`, id); err != nil {
+			if _, err := db.ExecContext(ctx, col.clear, id); err != nil {
 				return sc, err
 			}
 		}
@@ -375,9 +333,75 @@ func scanCells(ctx context.Context, db *sql.DB, drop bool) (cellScan, error) {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return sc, err
 		}
-		count(v, false)
+		sc.count(v, false)
 	}
 	return sc, nil
+}
+
+// boxSecretCols are the box columns scanCells reads, with fixed queries.
+var boxSecretCols = []struct{ name, list, clear string }{
+	{"password", `SELECT id, password FROM boxes`, `UPDATE boxes SET password='' WHERE id=?`},
+	{"qbt_pass", `SELECT id, qbt_pass FROM boxes`, `UPDATE boxes SET qbt_pass='' WHERE id=?`},
+	{"qbt_start_cmd", `SELECT id, qbt_start_cmd FROM boxes`, `UPDATE boxes SET qbt_start_cmd='' WHERE id=?`},
+}
+
+// boxSecretColumns reports which of boxSecretCols the file's boxes table has.
+func boxSecretColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('boxes')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		cols[c] = true
+	}
+	return cols, rows.Err()
+}
+
+// scanColumn counts one box column's values (query lists id and value),
+// returning the IDs of the unbound ones.
+func (sc *cellScan) scanColumn(ctx context.Context, db *sql.DB, query string) ([]int64, error) {
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var v string
+		if err := rows.Scan(&id, &v); err != nil {
+			return nil, err
+		}
+		if sc.count(v, true) {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
+}
+
+// count classifies one value of a box column (bound) or a setting,
+// reporting whether it is an unbound box credential.
+func (sc *cellScan) count(v string, bound bool) (unbound bool) {
+	if v == "" {
+		return false
+	}
+	version, ok := secrets.Envelope(v)
+	if !ok || !(version == 1 || bound && version == 2) {
+		sc.plain++
+		return false
+	}
+	sc.sealed++
+	if bound && version == 1 {
+		sc.unbound++
+		return true
+	}
+	return false
 }
 
 // dropUnbound clears the staged copy's unbound credentials.

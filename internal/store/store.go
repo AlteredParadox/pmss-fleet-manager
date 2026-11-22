@@ -730,28 +730,9 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	if err != nil {
 		return err
 	}
-	pw, qp, sc := s.sealBoxSecrets(b)
-	if oldBind := boxBinding(b.ID, cur.Host, cur.Port, cur.User); oldBind == boxBinding(b.ID, b.Host, b.Port, b.User) {
-		// Same endpoint: a kept credential keeps its stored bytes.
-		if b.Password == "" && !clears.Password {
-			pw = curPw
-		}
-		if b.QbtPass == "" && !clears.QbtPass {
-			qp = curQp
-		}
-	} else {
-		keep := *b
-		if b.Password == "" && !clears.Password {
-			if keep.Password, err = s.openBoxSecret(labelPassword, oldBind, curPw); err != nil {
-				return fmt.Errorf("box %d SSH password: %w", b.ID, err)
-			}
-		}
-		if b.QbtPass == "" && !clears.QbtPass {
-			if keep.QbtPass, err = s.openBoxSecret(labelQbtPass, oldBind, curQp); err != nil {
-				return fmt.Errorf("box %d WebUI password: %w", b.ID, err)
-			}
-		}
-		pw, qp, _ = s.sealBoxSecrets(&keep)
+	pw, qp, sc, err := s.updatedBoxSecrets(b, clears, cur, curPw, curQp)
+	if err != nil {
+		return err
 	}
 	// The listener-only opt-in survives an edit of the same box only: the
 	// CASE reads the row's old endpoint (SQLite evaluates every SET
@@ -786,6 +767,39 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	}
 	b.Revision++
 	return nil
+}
+
+// updatedBoxSecrets is the stored form of b's credentials after an edit.
+// A credential kept (blank, not cleared) keeps its stored bytes while the
+// endpoint is the same (cur, the row's), and is opened under the row's
+// binding and sealed under the edited one when it is not.
+func (s *Store) updatedBoxSecrets(b *Box, clears Clears, cur Box, curPw, curQp string) (pw, qp, sc string, err error) {
+	keepPw := b.Password == "" && !clears.Password
+	keepQp := b.QbtPass == "" && !clears.QbtPass
+	oldBind := boxBinding(b.ID, cur.Host, cur.Port, cur.User)
+	if oldBind == boxBinding(b.ID, b.Host, b.Port, b.User) {
+		pw, qp, sc = s.sealBoxSecrets(b)
+		if keepPw {
+			pw = curPw
+		}
+		if keepQp {
+			qp = curQp
+		}
+		return pw, qp, sc, nil
+	}
+	keep := *b
+	if keepPw {
+		if keep.Password, err = s.openBoxSecret(labelPassword, oldBind, curPw); err != nil {
+			return "", "", "", fmt.Errorf("box %d SSH password: %w", b.ID, err)
+		}
+	}
+	if keepQp {
+		if keep.QbtPass, err = s.openBoxSecret(labelQbtPass, oldBind, curQp); err != nil {
+			return "", "", "", fmt.Errorf("box %d WebUI password: %w", b.ID, err)
+		}
+	}
+	pw, qp, sc = s.sealBoxSecrets(&keep)
+	return pw, qp, sc, nil
 }
 
 // openSecret returns the plaintext of a stored value. Without a sealer
