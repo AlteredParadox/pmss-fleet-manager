@@ -335,12 +335,13 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
   sending the password to that server. Editing a box in the dashboard
   re-encrypts what it keeps for the new endpoint. The pinned host key is
   not part of it. The first start of 1.24 converts the existing
-  credentials in place. This keeps saved passwords from being redirected;
-  it does not make a copy tamper-proof. Someone who can write the file
-  can still replace an encrypted value with plain text of their own (a
-  start command, the download link), which the dashboard takes as one
-  written by a build without the secret. So keep backups where only you
-  can write them, as well as read them.
+  credentials in place. Someone who cannot forge a ciphertext could still
+  write plain text in its place (their own start command or download
+  link), which the dashboard reads as left by a build without the secret;
+  a restore refuses that too (below). It covers the credentials only: the
+  rest of a backup, such as a box's name or a key-based box's host, is
+  restored as the file has it, so keep backups where only you can write
+  them, as well as read them.
 - **Starting without the secret, or with a different one, is refused** with
   a log line saying so, or naming the first credential it could not read.
   The pollers would otherwise present ciphertext to your boxes as the
@@ -440,12 +441,21 @@ To restore, stop the dashboard and run:
   database untouched. If the secret is truly lost, `-skip-secret-check`
   restores anyway, and the first start then needs
   `-forget-encrypted-credentials` (the forms ask for the passwords again).
-  A plain-text backup restored with a secret configured is encrypted on
-  the spot.
+  A plain-text backup restored with a secret configured (and
+  `-accept-plain-credentials`, below) is encrypted on the spot.
 - **It refuses a file whose box credentials were changed outside the
   dashboard**, such as a box's host edited in the backup by someone
   without the secret, so the password never reaches their server
   (*Encrypting stored credentials*).
+- **It refuses plain text where a credential should be encrypted**: in a
+  backup that is encrypted (even with its encryption markers removed),
+  and in any backup restored with a secret configured. A backup of an
+  encrypted dashboard never holds it, so the file was altered: someone
+  without the secret could have written their own start command or
+  download link, which would run on your box. A plain-text backup you
+  made yourself, restored with a secret to encrypt it, needs
+  `-accept-plain-credentials`. Without a secret, a plain-text backup
+  restores as before.
 - **A backup made before 1.24 needs `-old-credentials keep` or `drop`.**
   Its encrypted box credentials are not yet tied to their box, so nothing
   can tell whether someone who could write the file pointed a box
@@ -1484,6 +1494,10 @@ Newest first; each release's full notes are on the
   before the upgrade if you may roll back. **Restoring a backup made
   before 1.24 needs `-old-credentials keep` (a file only you could have
   changed) or `-old-credentials drop`** (re-enter those passwords).
+  Restore also refuses plain text where an encrypted credential belongs
+  (someone without the secret could have written their own start command
+  or download link there); **restoring a plain-text backup with a secret
+  configured now needs `-accept-plain-credentials`**.
 
 **1.23.0**
 

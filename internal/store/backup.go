@@ -39,6 +39,15 @@ type Summary struct {
 	// not yet bound to their box (boxBinding): Restore refuses them unless
 	// told to keep or drop them (WithOldCredentials).
 	Unbound int
+	// Plaintext counts credentials stored in plain text. In a file with
+	// any sign of encryption (Encrypted, a key check, a ciphertext), or
+	// restored with a secret, Restore refuses them unless told to accept
+	// them (WithPlainCredentials): someone without the secret could have
+	// written their own start command or download link there.
+	Plaintext int
+	// encrypted is any sign of encryption: the marker, the key check row,
+	// or a value in one of this build's envelopes.
+	encrypted bool
 }
 
 // OldCredentials is what Restore does with a backup's Unbound credentials.
@@ -63,6 +72,15 @@ var ErrOldCredentials = errors.New("the backup holds box credentials encrypted b
 // WithOldCredentials sets what Restore does with credentials encrypted
 // before they were bound to their box. Only Restore reads it.
 func WithOldCredentials(m OldCredentials) Option { return func(s *Store) { s.oldCreds = m } }
+
+// ErrPlainCredentials is the refusal of plain-text credentials in a
+// backup that is, or is being restored as, encrypted.
+var ErrPlainCredentials = errors.New("the backup holds credentials in plain text where this dashboard keeps them encrypted: a backup of an encrypted dashboard never does, so the file was altered (a start command or download link written by someone without the secret would run on your box), or it is a plain-text backup")
+
+// WithPlainCredentials makes Restore accept plain-text credentials in an
+// encrypted backup, or in any backup restored with a secret: for a
+// plain-text backup the operator means to encrypt. Only Restore reads it.
+func WithPlainCredentials() Option { return func(s *Store) { s.acceptPlain = true } }
 
 // Backup writes a consistent copy of the database at src to dst, which
 // must not exist yet. It is safe while the dashboard runs: VACUUM INTO
@@ -154,9 +172,16 @@ func Inspect(ctx context.Context, path string) (Summary, error) {
 		return sum, err
 	}
 	sum.Encrypted = sealed == "1"
-	if sum.Unbound, err = unboundCells(ctx, db, false); err != nil {
+	sc, err := scanCells(ctx, db, false)
+	if err != nil {
 		return sum, err
 	}
+	var checks int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM settings WHERE key=?`, checkKey).Scan(&checks); err != nil {
+		return sum, err
+	}
+	sum.Unbound, sum.Plaintext = sc.unbound, sc.plain
+	sum.encrypted = sum.Encrypted || checks > 0 || sc.sealed > 0
 	db.Close()
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -228,6 +253,14 @@ func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (
 	for _, o := range opts {
 		o(&cfg)
 	}
+	// Plain text where ciphertext belongs: an encrypted file has none (a
+	// build without the secret writing into it is the one exception, and
+	// rare enough to confirm). With a secret configured even a file with
+	// no sign of encryption is checked, since its markers could have been
+	// stripped along with the ciphertext.
+	if sum.Plaintext > 0 && (sum.encrypted || cfg.sealer.Enabled()) && !cfg.acceptPlain {
+		return Summary{}, fmt.Errorf("%w (%d)", ErrPlainCredentials, sum.Plaintext)
+	}
 	if sum.Unbound > 0 {
 		switch cfg.oldCreds {
 		case KeepOldCredentials:
@@ -254,35 +287,60 @@ func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (
 	return Inspect(ctx, staged)
 }
 
-// unboundCells counts the box credentials in a well-formed version-1
-// envelope, clearing them with drop. A malformed one never decrypts, in
-// any reading of the metadata, so it cannot carry a password anywhere;
-// and a plain-text password that merely starts with "pmss1:" is left to
-// the marker, as everywhere else. It reads only the columns the file has: an old file is
-// not migrated before it is checked.
-func unboundCells(ctx context.Context, db *sql.DB, drop bool) (int, error) {
+// cellScan is what scanCells found in a file's secret cells.
+type cellScan struct {
+	unbound int // box credentials in a well-formed version-1 envelope
+	plain   int // non-empty values with no envelope at all
+	sealed  int // values in one of this build's envelopes
+}
+
+// scanCells reads every secret cell of the file (the columns and settings
+// secretCells covers), clearing the unbound box credentials with drop.
+// A malformed old envelope never decrypts, in any reading of the
+// metadata, so it is not counted as unbound; a plain-text password that
+// merely starts with "pmss1:" is left to the marker, as everywhere else.
+// It reads only the columns the file has: an old file is not migrated
+// before it is checked.
+func scanCells(ctx context.Context, db *sql.DB, drop bool) (cellScan, error) {
+	var sc cellScan
+	count := func(v string, bound bool) (unbound bool) {
+		if v == "" {
+			return false
+		}
+		version, ok := secrets.Envelope(v)
+		switch {
+		case version == 0:
+			sc.plain++
+		case ok && (version == 1 || bound && version == 2):
+			sc.sealed++
+			if bound && version == 1 {
+				sc.unbound++
+				return true
+			}
+		}
+		return false
+	}
 	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('boxes') WHERE name IN ('password','qbt_pass','qbt_start_cmd')`)
 	if err != nil {
-		return 0, err
+		return sc, err
 	}
 	var cols []string
 	for rows.Next() {
 		var c string
 		if err := rows.Scan(&c); err != nil {
 			rows.Close()
-			return 0, err
+			return sc, err
 		}
 		cols = append(cols, c)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return sc, err
 	}
-	n := 0
 	for _, col := range cols { // names from the fixed list above
 		rows, err := db.QueryContext(ctx, `SELECT id, `+col+` FROM boxes`)
 		if err != nil {
-			return 0, err
+			return sc, err
 		}
 		var ids []int64
 		for rows.Next() {
@@ -290,27 +348,34 @@ func unboundCells(ctx context.Context, db *sql.DB, drop bool) (int, error) {
 			var v string
 			if err := rows.Scan(&id, &v); err != nil {
 				rows.Close()
-				return 0, err
+				return sc, err
 			}
-			if version, ok := secrets.Envelope(v); version == 1 && ok {
+			if count(v, true) {
 				ids = append(ids, id)
 			}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return 0, err
+			return sc, err
 		}
-		n += len(ids)
 		if !drop {
 			continue
 		}
 		for _, id := range ids {
 			if _, err := db.ExecContext(ctx, `UPDATE boxes SET `+col+`='' WHERE id=?`, id); err != nil {
-				return 0, err
+				return sc, err
 			}
 		}
 	}
-	return n, nil
+	for _, key := range []string{"pm_api_key", "qbt_download_url"} {
+		var v string
+		err := db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?`, key).Scan(&v)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return sc, err
+		}
+		count(v, false)
+	}
+	return sc, nil
 }
 
 // dropUnbound clears the staged copy's unbound credentials.
@@ -319,7 +384,7 @@ func dropUnbound(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	_, err = unboundCells(ctx, db, true)
+	_, err = scanCells(ctx, db, true)
 	return errors.Join(err, db.Close())
 }
 

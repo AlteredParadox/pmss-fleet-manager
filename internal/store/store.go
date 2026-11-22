@@ -188,11 +188,12 @@ type Store struct {
 	sealer *secrets.Sealer
 	// prev opens credentials sealed under the secret before a change (see
 	// WithPreviousSealer); forget drops the ones nothing opens.
-	prev      *secrets.Sealer
-	forget    bool
-	oldCreds  OldCredentials // Restore's, see WithOldCredentials
-	resealed  int
-	forgotten int
+	prev        *secrets.Sealer
+	forget      bool
+	oldCreds    OldCredentials // Restore's, see WithOldCredentials
+	acceptPlain bool           // Restore's, see WithPlainCredentials
+	resealed    int
+	forgotten   int
 }
 
 // The additional data each secret column is sealed under: a ciphertext
