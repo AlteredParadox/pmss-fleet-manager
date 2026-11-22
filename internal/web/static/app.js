@@ -515,7 +515,11 @@ function recomputeTotals() {
 }
 
 /* ---------- rendering ---------- */
-function render() { renderSide(); renderMain(); }
+// While an input method is composing text in a search box, replacing #main
+// would destroy the composition (a refocused copy cannot resume it): the
+// main render waits for compositionend, which renders with the committed text.
+let composing = false;
+function render() { renderSide(); if (!composing) renderMain(); }
 
 function renderSide() {
   const t = S.totals || {};
@@ -550,9 +554,12 @@ function renderMain() {
   const ae = document.activeElement;
   const pwKey = ae && m.contains(ae) && ae.dataset.pw && ae.type !== 'checkbox' ? ae.dataset.pw : '';
   const pwSel = pwKey ? [ae.selectionStart, ae.selectionEnd] : null;
-  // Likewise a search box (the overview's, or a filter) that has the caret.
-  const flKey = ae && m.contains(ae) ? (ae.hasAttribute('data-fleetq') ? '[data-fleetq]' : ae.hasAttribute('data-filter') ? '[data-filter]' : '') : '';
+  // Likewise a search box (the overview's, or a filter) that has the caret,
+  // and an overview status chip, found again by its status.
+  const inMain = ae && m.contains(ae);
+  const flKey = inMain ? ('fleetq' in ae.dataset ? '[data-fleetq]' : 'filter' in ae.dataset ? '[data-filter]' : '') : '';
   const flSel = flKey ? [ae.selectionStart, ae.selectionEnd] : null;
+  const chipKey = inMain && ae.dataset.act === 'fleet:status' ? ae.dataset.status : null;
   switch (S.view) {
     case 'box': m.innerHTML = viewBox(); break;
     case 'torrents': m.innerHTML = viewTorrents(); break;
@@ -568,6 +575,10 @@ function renderMain() {
   if (pwEl) { pwEl.focus({ preventScroll: true }); pwEl.setSelectionRange(pwSel[0], pwSel[1]); }
   const flEl = flKey ? m.querySelector(flKey) : null;
   if (flEl) { flEl.focus({ preventScroll: true }); flEl.setSelectionRange(flSel[0], flSel[1]); }
+  if (chipKey !== null) {
+    const chip = [...m.querySelectorAll('[data-act="fleet:status"]')].find((el) => el.dataset.status === chipKey) || m.querySelector('[data-fleetq]');
+    if (chip) chip.focus({ preventScroll: true });
+  }
   const ll = $('.loglist');
   if (ll && listTop !== null) ll.scrollTop = listTop;
   const lv = $('#logview');
@@ -630,11 +641,11 @@ function viewFleet() {
     ${body}`;
 }
 // boxSearchText: what the overview's search looks in: the name, the host
-// (the shown hostname and the address it was added with), type, plan, host
-// CPU model and status. Most of it is on the card; the table row has no
+// as shown (its hostname, else the address it was added with), type, plan,
+// host CPU model and status. All of it is on the card; the table row has no
 // plan column and shows the status as its light.
 function boxSearchText(b) {
-  return [b.name, b.hostname, b.host, b.type, planOf(b), b.host_sys?.cpu_short, statusLabel(b.status)];
+  return [b.name, b.hostname || b.host, b.type, planOf(b), b.host_sys?.cpu_short, statusLabel(b.status)];
 }
 // fleetFilterBar: the search box and the status choice above the boxes,
 // with how many are shown while either narrows them. The tiles above stay
@@ -2727,15 +2738,19 @@ document.addEventListener('input', (e) => {
     if (s.dataset.s === 'pm_api_key' && s.value) S.settingsDraft.clear_pm_api_key = false; // a key typed after "remove" replaces instead
     return;
   }
+  // Search boxes: renderMain keeps their caret; mid-composition, render()
+  // holds the main view back until compositionend.
   if (e.target.closest('[data-fleetq]')) { S.fleetQ = e.target.value; render(); return; }
-  const fl = e.target.closest('[data-filter]');
-  if (fl) {
-    S.filter = fl.value;
-    const pos = fl.selectionStart;
-    render();
-    const nf = $('[data-filter]');
-    if (nf) { nf.focus(); nf.setSelectionRange(pos, pos); }
-  }
+  if (e.target.closest('[data-filter]')) { S.filter = e.target.value; render(); }
+});
+const searchBox = (el) => el?.closest?.('[data-fleetq], [data-filter]');
+document.addEventListener('compositionstart', (e) => { if (searchBox(e.target)) composing = true; });
+document.addEventListener('compositionend', (e) => {
+  if (!composing) return;
+  composing = false;
+  const el = searchBox(e.target);
+  if (el) { if ('fleetq' in el.dataset) S.fleetQ = el.value; else S.filter = el.value; }
+  render();
 });
 window.addEventListener('hashchange', route);
 
