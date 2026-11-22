@@ -563,9 +563,11 @@ function renderMain() {
     default: m.innerHTML = viewFleet();
   }
   const pwEl = pwKey ? m.querySelector(`[data-pw="${pwKey}"]`) : null;
-  if (pwEl) { pwEl.focus(); pwEl.setSelectionRange(pwSel[0], pwSel[1]); }
+  // preventScroll: focus() would scroll the field into view, pulling a
+  // reader who scrolled down the page back up on every poll.
+  if (pwEl) { pwEl.focus({ preventScroll: true }); pwEl.setSelectionRange(pwSel[0], pwSel[1]); }
   const flEl = flKey ? m.querySelector(flKey) : null;
-  if (flEl) { flEl.focus(); flEl.setSelectionRange(flSel[0], flSel[1]); }
+  if (flEl) { flEl.focus({ preventScroll: true }); flEl.setSelectionRange(flSel[0], flSel[1]); }
   const ll = $('.loglist');
   if (ll && listTop !== null) ll.scrollTop = listTop;
   const lv = $('#logview');
@@ -627,8 +629,10 @@ function viewFleet() {
     </div>
     ${body}`;
 }
-// boxSearchText: what the overview's search looks in, all of it on the card
-// or the table row so a match can be seen there.
+// boxSearchText: what the overview's search looks in: the name, the host
+// (the shown hostname and the address it was added with), type, plan, host
+// CPU model and status. Most of it is on the card; the table row has no
+// plan column and shows the status as its light.
 function boxSearchText(b) {
   return [b.name, b.hostname, b.host, b.type, planOf(b), b.host_sys?.cpu_short, statusLabel(b.status)];
 }

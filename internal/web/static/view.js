@@ -735,8 +735,8 @@ function toggleServiceStatus(hidden, key) {
 
 /* fleetFilter: the overview's search and status choice, for a fleet too
    big to scan. Every word of the query must appear (case-insensitively) in
-   one of the texts fields(b) gives for a box: what its card and table row
-   show, so a hit can be seen. statuses counts the boxes the words match,
+   one of the texts fields(b) gives for a box (app.js's boxSearchText).
+   statuses counts the boxes the words match,
    one entry per status among them in FLEET_STATUS order; the chosen
    status stays listed at 0 so it can be cleared. shown is the matching
    boxes of the chosen status (any when none is), in their order. */
