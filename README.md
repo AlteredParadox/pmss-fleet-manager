@@ -181,10 +181,12 @@ on demand. Manual plan and renewal values on a box take precedence, and a
 typed renewal date does not follow the next billing cycle. Only Active and Suspended
 services count towards costs and renewal alerts; any other status (Cancelled,
 Terminated, Pending, Fraud, Completed) stays listed but counts towards
-neither. The Services table in settings has a toggle per status in the feed:
-switch one off (Cancelled, say) and its rows are left out of the table. That
-is a view choice remembered by the browser; costs, alerts and box matching
-are unaffected.
+neither. The services are listed on their own **Services** page (in the
+sidebar once a key is set), with a search box (product, login, status, box
+and so on; every word must match), a status choice (all, or one status, each
+with its count) and a box choice (all, with a box in this dashboard, or not
+added here). The two choices are remembered by the browser, the search is
+not; costs, alerts and box matching are unaffected.
 
 **Plan I/O and CPU priority.** Every Pulsed Media plan has an I/O priority
 and a CPU priority, weights on systemd's scale (Archive below 100, Standard
@@ -1508,6 +1510,17 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**Unreleased**
+
+- **Services has its own page, with search and filters** (Discord
+  request). The Services table moved from the bottom of Settings to a
+  *services* page in the sidebar (shown once a Pulsed Media API key is
+  set), with a text search, a status choice and a choice between services
+  with a box in this dashboard and those not added here, each with its
+  count. It replaces the per-status toggles, which only appeared once the
+  feed held two statuses; a status hidden with them is listed again.
+  Settings lays its panels out in two columns on a wide screen.
 
 **1.24.0**
 

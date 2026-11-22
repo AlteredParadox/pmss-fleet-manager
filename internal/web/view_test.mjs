@@ -463,45 +463,69 @@ test('a password result is spelled out per fixture, and the form keeps only what
   assert.deepEqual(refused.t, d.t);
 });
 
-test('the Services table hides the statuses switched off and counts every status in the feed', () => {
+test('the Services page narrows by words, status and box, counting each choice over the other two (Discord request)', () => {
   const feed = [
-    { id: 1, status: 'Cancelled' }, { id: 2, status: 'Active' }, { id: 3, status: 'cancelled ' },
-    { id: 4, status: 'Suspended' }, { id: 5, status: 'Terminated' }, { id: 6, status: 'Active' },
+    { id: 1, status: 'Cancelled', product: 'Seedbox 1TB', username: 'stu' }, { id: 2, status: 'Active', product: 'Seedbox 1TB', username: 'stu', box_id: 7 },
+    { id: 3, status: 'cancelled ', product: 'M1000', username: 'bob' }, { id: 4, status: 'Suspended', product: 'Dragon-R', username: 'stu' },
+    { id: 5, status: 'Terminated', product: 'M1000', username: 'amy' }, { id: 6, status: 'Active', product: 'Storage 6TB', username: 'amy', box_id: 9 },
   ];
-  const all = V.serviceStatusFilter(feed, []);
-  assert.deepEqual(all.statuses.map((c) => [c.key, c.label, c.count, c.hidden]), [
-    ['active', 'Active', 2, false], ['suspended', 'Suspended', 1, false], ['cancelled', 'Cancelled', 2, false], ['terminated', 'Terminated', 1, false],
+  const fields = (sv) => [sv.product, sv.username, sv.status];
+  const all = V.serviceFilter(feed, '', '', '', fields);
+  assert.deepEqual(all.statuses.map((c) => [c.key, c.label, c.count]), [
+    ['active', 'Active', 2], ['suspended', 'Suspended', 1], ['cancelled', 'Cancelled', 2], ['terminated', 'Terminated', 1],
   ], 'current statuses first, then by name; spelling variants are one status');
+  assert.deepEqual(all.boxes, { '': 6, added: 2, 'not-added': 4 });
   assert.equal(all.shown.length, 6);
-  const some = V.serviceStatusFilter(feed, ['cancelled', 'fraud']);
-  assert.deepEqual(some.shown.map((sv) => sv.id), [2, 4, 5, 6], 'feed order is kept');
-  assert.deepEqual(some.statuses.filter((c) => c.hidden).map((c) => c.key), ['cancelled'], 'a hidden status not in the feed has no toggle');
-  assert.equal(some.statuses.find((c) => c.key === 'cancelled').count, 2, 'a hidden status still shows how many rows it holds');
-  assert.deepEqual(V.serviceStatusFilter([], ['cancelled']), { statuses: [], shown: [] });
-  const odd = V.serviceStatusFilter([{ id: 1 }, { id: 2, status: 'constructor' }], ['']);
-  assert.deepEqual(odd.statuses.map((c) => [c.key, c.label, c.hidden]), [['', 'no status', true], ['constructor', 'constructor', false]]);
-  assert.deepEqual(odd.shown.map((sv) => sv.id), [2]);
+  assert.equal(all.filtered, false);
+
+  const stu = V.serviceFilter(feed, 'STU  seedbox', '', '', fields);
+  assert.deepEqual(stu.shown.map((sv) => sv.id), [1, 2], 'every word, any case, feed order kept');
+  assert.equal(stu.filtered, true);
+
+  const notAdded = V.serviceFilter(feed, '', 'cancelled', 'not-added', fields);
+  assert.deepEqual(notAdded.shown.map((sv) => sv.id), [1, 3]);
+  assert.deepEqual(notAdded.boxes, { '': 2, added: 0, 'not-added': 2 }, 'box counts follow the status');
+  assert.deepEqual(V.serviceFilter(feed, '', '', 'added', fields).statuses.map((c) => [c.key, c.count]), [['active', 2]], 'status counts follow the box choice');
+
+  const gone = V.serviceFilter(feed, '', 'fraud', '', fields);
+  assert.deepEqual(gone.shown, []);
+  assert.deepEqual(gone.statuses.find((c) => c.key === 'fraud'), { key: 'fraud', label: 'fraud', count: 0 }, 'a chosen status the feed lost stays listed at 0');
 });
 
-test('the status toggles are lit while listed, escaped, and absent when there is nothing to choose', () => {
-  const { statuses } = V.serviceStatusFilter([{ status: 'Active' }, { status: 'Cancelled' }, { status: 'Cancelled' }], ['cancelled']);
-  const html = V.serviceStatusToggles(statuses);
-  assert.match(html, /<button class="on" aria-pressed="true" data-act="svc:status" data-status="active"[^>]*>Active 1<\/button>/);
-  assert.match(html, /<button class="" aria-pressed="false" data-act="svc:status" data-status="cancelled"[^>]*>Cancelled 2<\/button>/);
-  assert.equal(V.serviceStatusToggles(V.serviceStatusFilter([{ status: 'Active' }], []).statuses), '', 'one status, listed');
-  assert.equal(V.serviceStatusToggles([]), '');
-  assert.match(V.serviceStatusToggles(V.serviceStatusFilter([{ status: 'Active' }], ['active']).statuses), /data-status="active"/, 'the only status is hidden: the toggle brings it back');
-  const hostile = V.serviceStatusToggles(V.serviceStatusFilter([{ status: 'A' }, { status: '"><img src=x onerror=1>' }], []).statuses);
-  assert.ok(!hostile.includes('<img'), 'the status text is the API\'s and is escaped');
-  assert.match(hostile, /data-status="&quot;&gt;&lt;img src=x onerror=1&gt;"/);
+test('a service with no status is listed under all statuses only, never as a second "all" (fred on #229)', () => {
+  const feed = [{ id: 1, status: 'Active' }, { id: 2 }, { id: 3, status: '  ' }];
+  const F = V.serviceFilter(feed, '', '', '', () => []);
+  assert.deepEqual(F.statuses.map((c) => [c.key, c.count]), [['active', 1]]);
+  assert.equal(F.total, 3, 'the total still counts them');
+  assert.deepEqual(F.shown.map((sv) => sv.id), [1, 2, 3]);
+  const html = V.serviceFilterControls(F, '', '');
+  assert.equal((html.match(/<option value=""/g) || []).length, 2, 'one "all" option per select, no blank status option');
+  assert.equal((html.match(/ selected>/g) || []).length, 2, 'one selected option per select');
+  assert.match(html, /<option value="" selected>all statuses \(3\)<\/option>/);
+  const active = V.serviceFilter(feed, '', 'active', '', () => []);
+  assert.deepEqual(active.shown.map((sv) => sv.id), [1]);
+  assert.deepEqual(V.serviceFilter(feed, '', '', '', () => []).shown.length, 3, 'clearing lists them again');
 });
 
-test('toggling a status hides it, toggling again lists it', () => {
-  assert.deepEqual(V.toggleServiceStatus([], 'cancelled'), ['cancelled']);
-  assert.deepEqual(V.toggleServiceStatus(['cancelled', 'fraud'], 'cancelled'), ['fraud']);
-  const before = ['fraud'];
-  V.toggleServiceStatus(before, 'cancelled');
-  assert.deepEqual(before, ['fraud'], 'the stored list is not edited in place');
+test('the box choice follows the boxes in the dashboard now, not the feed\'s cached match (fred on #229)', () => {
+  const feed = [{ id: 1, status: 'Active', box_id: 7 }, { id: 2, status: 'Active', box_id: 9 }, { id: 3, status: 'Active' }];
+  const live = new Set([7]); // box 9 was removed since the feed was matched
+  const hasBox = (sv) => !!sv.box_id && live.has(sv.box_id);
+  const F = V.serviceFilter(feed, '', '', 'not-added', () => [], hasBox);
+  assert.deepEqual(F.shown.map((sv) => sv.id), [2, 3], 'the service of the removed box is not added here');
+  assert.deepEqual(F.boxes, { '': 3, added: 1, 'not-added': 2 });
+  assert.deepEqual(V.serviceFilter(feed, '', '', 'added', () => [], hasBox).shown.map((sv) => sv.id), [1]);
+});
+
+test('the Services choices are escaped and mark the chosen option', () => {
+  const feed = [{ status: 'Active' }, { status: '"><img src=x onerror=1>', box_id: 3 }];
+  const F = V.serviceFilter(feed, '', 'active', 'not-added', () => []);
+  const html = V.serviceFilterControls(F, 'active', 'not-added');
+  assert.ok(!html.includes('<img'), 'the status text is the API\'s and is escaped');
+  assert.match(html, /<option value="active" selected>Active \(1\)<\/option>/);
+  assert.match(html, /<option value="not-added" selected>not added here \(1\)<\/option>/);
+  assert.match(html, /<option value="">all statuses \(1\)<\/option>/, 'the total is over the box choice');
+  assert.match(V.serviceFilterControls(V.serviceFilter(feed, '', '', '', () => []), '', ''), /<option value="" selected>all services \(2\)<\/option>/);
 });
 
 test('a box reads as name — user@host, with the port unless it is 22 (issue #197)', () => {

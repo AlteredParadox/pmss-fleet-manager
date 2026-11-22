@@ -50,12 +50,19 @@ const S = {
   xferFocus: null, // a transfer just started: its card is scrolled to and highlighted once
   pw: null, // the open "change password" panel of a box (see blankPw); dropped on leaving the box
   torSort: loadTorSort(), // column sort per torrent table ('qbt', 'rtorrent', 'all'): { key, dir } or null for the default order
-  svcHidden: loadSvcHidden(), // service statuses (lower case) left out of the settings page's Services table
+  svcQ: '', ...loadSvcFilter(), // the Services page's search words (not kept across reloads) and its status and box choices (kept)
   fleetQ: '', fleetStatus: '', // the overview's search words and chosen status; kept across pages, not across reloads
 };
 // The Services table's hidden statuses, kept the way the torrent sort is.
-function loadSvcHidden() { try { const v = JSON.parse(window.localStorage.getItem('pfm.svcHidden') || '[]'); return Array.isArray(v) ? v.filter((k) => typeof k === 'string') : []; } catch { return []; } }
-function saveSvcHidden() { try { window.localStorage.setItem('pfm.svcHidden', JSON.stringify(S.svcHidden)); } catch { /* storage unavailable: this tab only */ } }
+// The Services page's status and box choices, kept in this browser. A
+// status the feed no longer has stays chosen (listed at 0) until changed.
+function loadSvcFilter() {
+  try {
+    const v = JSON.parse(window.localStorage.getItem('pfm.svcFilter') || '{}');
+    return { svcStatus: typeof v.status === 'string' ? v.status : '', svcBox: v.box === 'added' || v.box === 'not-added' ? v.box : '' };
+  } catch { return { svcStatus: '', svcBox: '' }; }
+}
+function saveSvcFilter() { try { window.localStorage.setItem('pfm.svcFilter', JSON.stringify({ status: S.svcStatus, box: S.svcBox })); } catch { /* storage unavailable: this tab only */ } }
 // The torrent tables' sort is a per-browser convenience: kept in
 // localStorage when it is available, per tab otherwise.
 function loadTorSort() { try { const v = JSON.parse(window.localStorage.getItem('pfm.torSort') || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
@@ -211,7 +218,7 @@ function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const parts = h.split('/').filter(Boolean);
   const view = parts[0] || 'fleet';
-  S.view = ['fleet', 'torrents', 'compare', 'box', 'add', 'alerts', 'settings', 'edit'].includes(view) ? view : 'fleet';
+  S.view = ['fleet', 'torrents', 'compare', 'box', 'add', 'alerts', 'services', 'settings', 'edit'].includes(view) ? view : 'fleet';
   if (S.view === 'compare') void loadCompare();
   if (S.view === 'box') {
     S.selId = Number(parts[1]) || null;
@@ -229,7 +236,8 @@ function route() {
   }
   if (S.view === 'alerts') void loadAlerts();
   if (S.view === 'torrents') void loadTorrents();
-  if (S.view === 'settings') { S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; void loadServices(); void loadPMDB(); void loadPlans(); }
+  if (S.view === 'settings') { S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; void loadPMDB(); void loadPlans(); }
+  if (S.view === 'services') void loadServices();
   S.filter = '';
   S.torAdd = null;
   S.logView = null;
@@ -366,10 +374,11 @@ async function loadPlans() {
 async function loadServices() {
   const seq = ++servicesSeq;
   let next;
-  try { next = await api('GET', BASE + '/api/services'); } catch (e) { next = { configured: false, services: [], error: e.message }; }
+  // failed: the request itself failed, which says nothing about the key.
+  try { next = await api('GET', BASE + '/api/services'); } catch (e) { next = { configured: false, failed: true, services: [], error: e.message }; }
   if (seq !== servicesSeq) return; // a newer load or a sync result landed meanwhile
   S.services = next;
-  if (S.view === 'settings') render();
+  if (S.view === 'services') render();
 }
 async function loadAlerts() {
   const seq = ++alertsSeq;
@@ -468,7 +477,7 @@ function connectEvents() {
     const e = JSON.parse(ev.data);
     pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
     await loadState();
-    if (S.view === 'settings') void loadServices();
+    if (S.view === 'services') void loadServices();
     else if (S.view === 'box' && S.selId) void loadDetail(S.selId);
     else render();
   });
@@ -534,6 +543,7 @@ function renderSide() {
     <button class="nav ${navActive('compare')}" data-go="/compare"><span>compare</span></button>
     <button class="nav ${navActive('add')}" data-go="/add"><span>add box</span></button>
     <button class="nav ${navActive('alerts')}" data-go="/alerts"><span>alerts</span>${S.unacked ? `<span class="badge">${S.unacked}</span>` : ''}</button>
+    ${S.settings?.has_pm_api_key || S.view === 'services' ? `<button class="nav ${navActive('services')}" data-go="/services"><span>services</span></button>` : ''}
     <button class="nav ${navActive('settings')}" data-go="/settings"><span>settings</span></button>
     <div class="spacer"></div>
     <div class="side-stats">
@@ -560,15 +570,17 @@ function renderMain() {
   // Likewise a search box (the overview's, or a filter) that has the caret,
   // and an overview status chip, found again by its status.
   const inMain = ae && m.contains(ae);
-  const flKey = inMain ? ('fleetq' in ae.dataset ? '[data-fleetq]' : 'filter' in ae.dataset ? '[data-filter]' : '') : '';
+  const flKey = inMain ? ('fleetq' in ae.dataset ? '[data-fleetq]' : 'svcq' in ae.dataset ? '[data-svcq]' : 'filter' in ae.dataset ? '[data-filter]' : '') : '';
   const flSel = flKey ? [ae.selectionStart, ae.selectionEnd] : null;
   const chipKey = inMain && ae.dataset.act === 'fleet:status' ? ae.dataset.status : null;
+  const svcfKey = inMain && ae.dataset.svcf ? ae.dataset.svcf : '';
   switch (S.view) {
     case 'box': m.innerHTML = viewBox(); break;
     case 'torrents': m.innerHTML = viewTorrents(); break;
     case 'compare': m.innerHTML = viewCompare(); break;
     case 'add': case 'edit': m.innerHTML = viewAdd(); break;
     case 'alerts': m.innerHTML = viewAlerts(); break;
+    case 'services': m.innerHTML = viewServices(); break;
     case 'settings': m.innerHTML = viewSettings(); break;
     default: m.innerHTML = viewFleet();
   }
@@ -582,6 +594,7 @@ function renderMain() {
     const chip = [...m.querySelectorAll('[data-act="fleet:status"]')].find((el) => el.dataset.status === chipKey) || m.querySelector('[data-fleetq]');
     if (chip) chip.focus({ preventScroll: true });
   }
+  if (svcfKey) m.querySelector(`[data-svcf="${svcfKey}"]`)?.focus({ preventScroll: true });
   const ll = $('.loglist');
   if (ll && listTop !== null) ll.scrollTop = listTop;
   const lv = $('#logview');
@@ -2368,8 +2381,7 @@ function viewSettings() {
       <div class="hint">pmss-fleet-manager is free software under the GNU Affero General Public License v3 or later. Because you are using it over a network, you are entitled to its source code.</div>
       <div class="row" style="justify-content:flex-start;gap:16px"><a href="${esc(BASE)}/license" target="_blank" rel="noopener">license ↗</a><a href="${esc(BASE)}/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || BASE + '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
     </div>
-  </div>
-  ${viewServices()}`;
+  </div>`;
 }
 // viewPlans shows when the plan page was last read and what it listed,
 // marking the listings the fleet's boxes resolve to.
@@ -2404,19 +2416,32 @@ function viewPMDB() {
   const status = v.error ? `<span class="bad">${esc(v.error)}</span>` : v.checked_at ? `checked ${fmtAgo(v.checked_at)}` : v.configured ? 'not checked yet' : 'save a submission identifier to start';
   return `<div class="row" style="margin-top:8px"><span class="muted">${status}</span>${v.configured ? '<button class="small ghost" data-act="settings:pmdb-sync">check now</button>' : ''}</div>${rows || (v.configured ? '<div class="hint">No host has reported its inventory yet.</div>' : '')}`;
 }
+// svcSearchText: what the Services search looks through for one service.
+function svcSearchText(sv) {
+  const b = sv.box_id ? boxById(sv.box_id) : null;
+  return [sv.product, sv.group, sv.username, sv.domain, sv.username && sv.domain ? `${sv.username}@${sv.domain}` : '', sv.status, cycleShort(sv.billing_cycle), sv.next_due, b ? boxLabelOf(b) : ''];
+}
 function viewServices() {
   const v = S.services;
-  if (!v?.configured) return '';
+  const head = (sub, actions) => `<div class="head" style="margin-bottom:14px"><div><div class="eyebrow">pulsedmedia.com${v?.client_id ? ` · client ${v.client_id}` : ''}</div><h1 style="margin:0">Services</h1>${sub}</div>${actions}</div>`;
+  if (!v) return `${head('', '')}<div class="empty">loading…</div>`;
+  if (v.failed) return `${head('', '')}<div class="empty"><span class="bad">could not load the services: ${esc(v.error)}</span> <button class="small" data-act="svc:reload">retry</button></div>`;
+  if (!v.configured) return `${head('', '')}<div class="empty">Set your Pulsed Media API key under <a href="#/settings">settings</a> to list your services here.</div>`;
   const status = v.error ? `<span class="bad">${esc(v.error)}</span>` : v.synced_at ? `synced ${fmtAgo(v.synced_at)}${v.generated_at ? ` · feed generated ${fmtAgo(v.generated_at)}` : ''}` : 'not synced yet';
-  // The status toggles only choose the rows listed: the monthly cost is the server's, over every current service.
-  const { statuses, shown } = pfmView.serviceStatusFilter(v.services, S.svcHidden);
-  const count = shown.length === v.services.length ? `${v.services.length}` : `${shown.length} of ${v.services.length}`;
+  // The choices only pick the rows listed: the monthly cost is the server's, over every current service.
+  const F = pfmView.serviceFilter(v.services, S.svcQ, S.svcStatus, S.svcBox, svcSearchText, (sv) => !!(sv.box_id && boxById(sv.box_id)));
+  const count = F.filtered ? `showing ${F.shown.length} of ${v.services.length} · <button class="link" data-act="svc:clear">clear</button>` : `${v.services.length} services`;
+  const bar = v.services.length ? `<div class="fleet-filter svc-filter">
+      <input class="filter" type="search" placeholder="search product, login, status, box…" aria-label="search services" data-svcq value="${esc(S.svcQ)}">
+      ${pfmView.serviceFilterControls(F, S.svcStatus, S.svcBox)}
+      <span class="muted">${count}</span>
+    </div>` : '';
   return `<div class="svc">
-    <div class="head" style="margin:24px 0 10px"><div><div class="eyebrow">pulsedmedia.com${v.client_id ? ` · client ${v.client_id}` : ''}</div><h2 style="margin:0">Services</h2><div class="hint" style="margin-top:4px">${status}</div></div>
-      <div class="actions">${pfmView.serviceStatusToggles(statuses)}<span class="muted" style="font-size:12px">${count} services${v.currency ? ` · ${fmtMoney(v.monthly_cost, v.currency)}/mo` : ''}</span><button data-act="svc:sync">sync now</button></div></div>
-    ${!v.services.length ? '<div class="empty">no services on this account</div>' : !shown.length ? '<div class="empty">every service has a hidden status</div>' : `<div class="table svc-table">
+    ${head(`<div class="hint" style="margin-top:4px">${status}${v.currency ? ` · ${fmtMoney(v.monthly_cost, v.currency)}/mo` : ''}</div>`, '<div class="actions"><button data-act="svc:sync">sync now</button></div>')}
+    ${bar}
+    ${!v.services.length ? '<div class="empty">no services on this account</div>' : !F.shown.length ? '<div class="empty">no service matches — <button class="link" data-act="svc:clear">clear the filter</button></div>' : `<div class="table svc-table">
       <div class="trow head"><span>product</span><span>login</span><span>price</span><span>per month</span><span>next due</span><span>status</span><span>box</span></div>
-      ${shown.map((sv) => { const b = sv.box_id ? boxById(sv.box_id) : null; const d = daysUntil(sv.next_due); return `
+      ${F.shown.map((sv) => { const b = sv.box_id ? boxById(sv.box_id) : null; const d = daysUntil(sv.next_due); return `
       <div class="trow">
         <div class="ellip"><div class="ellip" title="${esc(sv.product)}">${esc(sv.product)}</div><div class="sub">${esc(sv.group || '')}${sv.registered ? ` · since ${esc(sv.registered)}` : ''}</div></div>
         <div class="ellip"><div class="ellip">${esc(sv.username || '—')}@${esc(sv.domain)}</div><div class="sub">${sv.login_url ? `<a href="${esc(safeHref(sv.login_url))}" target="_blank" rel="noopener">web ui ↗</a>` : ''}${sv.permanent_address ? ` <a href="${esc(safeHref(sv.permanent_address))}" target="_blank" rel="noopener">permanent ↗</a>` : ''}</div></div>
@@ -2683,7 +2708,8 @@ function settingsPatch(draft, touched) {
 }
 async function servicesAction(a, act) {
   if (a === 'svc:sync') { act.disabled = true; toast('syncing services from pulsedmedia.com…'); const synced = await api('POST', BASE + '/api/services/sync'); servicesSeq++; S.services = synced; await loadState(); toast(`synced ${S.services.services.length} services`, 'ok'); render(); }
-  else if (a === 'svc:status') { S.svcHidden = pfmView.toggleServiceStatus(S.svcHidden, act.dataset.status); saveSvcHidden(); render(); }
+  else if (a === 'svc:reload') { S.services = null; render(); await loadServices(); }
+  else if (a === 'svc:clear') { S.svcQ = ''; S.svcStatus = ''; S.svcBox = ''; saveSvcFilter(); render(); }
   else if (a === 'svc:add') {
     const sv = (S.services?.services || []).find((x) => String(x.id) === act.dataset.id);
     if (!sv) return;
@@ -2736,6 +2762,8 @@ document.addEventListener('toggle', (e) => {
   if (d) { if (d.open) S.logOpen.add(d.dataset.logdir); else S.logOpen.delete(d.dataset.logdir); }
 }, true);
 document.addEventListener('change', (e) => {
+  const sf = e.target.closest('[data-svcf]');
+  if (sf) { if (sf.dataset.svcf === 'status') S.svcStatus = sf.value; else S.svcBox = sf.value; saveSvcFilter(); render(); return; }
   const fi = e.target.closest('[data-ta-files]');
   if (fi && S.torAdd) { S.torAdd.files = [...fi.files]; render(); }
 });
@@ -2791,15 +2819,16 @@ document.addEventListener('input', (e) => {
   // Search boxes: renderMain keeps their caret; mid-composition, render()
   // holds the main view back until compositionend.
   if (e.target.closest('[data-fleetq]')) { S.fleetQ = e.target.value; render(); return; }
+  if (e.target.closest('[data-svcq]')) { S.svcQ = e.target.value; render(); return; }
   if (e.target.closest('[data-filter]')) { S.filter = e.target.value; render(); }
 });
-const searchBox = (el) => el?.closest?.('[data-fleetq], [data-filter]');
+const searchBox = (el) => el?.closest?.('[data-fleetq], [data-svcq], [data-filter]');
 document.addEventListener('compositionstart', (e) => { if (searchBox(e.target)) composing = true; });
 document.addEventListener('compositionend', (e) => {
   if (!composing) return;
   composing = false;
   const el = searchBox(e.target);
-  if (el) { if ('fleetq' in el.dataset) S.fleetQ = el.value; else S.filter = el.value; }
+  if (el) { if ('fleetq' in el.dataset) S.fleetQ = el.value; else if ('svcq' in el.dataset) S.svcQ = el.value; else S.filter = el.value; }
   render();
 });
 window.addEventListener('hashchange', route);

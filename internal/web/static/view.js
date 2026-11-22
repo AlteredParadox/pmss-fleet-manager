@@ -709,38 +709,54 @@ function draftAfterPassword(d, r) {
   return { ...d, t, result: r, cur: accountDone || !left ? '' : d.cur, neu: left ? d.neu : '', show: left ? d.show : false };
 }
 
-/* The settings page's Services table can leave statuses out (a cancelled
-   service stays in the feed for good). serviceStatusFilter gives the
-   toggles, one per status in the feed with its row count, Active and
-   Suspended first and the rest by name, and the rows whose status is not
-   hidden. Statuses compare trimmed and case-insensitively; the text is the
-   API's, so it is a key here and escaped where it is printed. A hidden
-   status that has left the feed stays hidden for when it returns. */
+/* The Services page lists every service in the Pulsed Media feed (a
+   cancelled one stays there for good), so it is narrowed three ways:
+   search words, a status and whether the service has a box in this
+   dashboard. serviceFilter gives what the controls offer and the rows:
+   every word must appear, any case, in one of the texts fields(sv) gives
+   (app.js's svcSearchText); statuses are counted over the rows the words
+   and the box choice keep, Active and Suspended first and the rest by name,
+   with the chosen one listed even at 0; the box choice is counted over the
+   words and the status. hasBox says whether a service's box is in the
+   dashboard now (the feed's match may name a box removed since), so the
+   rows, the counts and the row's own add-box button agree (fred on #229).
+   Statuses compare trimmed and case-insensitively; the text is the API's,
+   a key here, escaped where it is printed. A service with no status is
+   listed under all statuses only: '' is the "all" choice (fred on #229). */
 const SVC_CURRENT = ['active', 'suspended'];
+const SVC_BOX = ['', 'added', 'not-added'];
 const svcStatusKey = (status) => String(status ?? '').trim().toLowerCase();
-function serviceStatusFilter(services, hidden) {
-  const hide = new Set(hidden);
+function serviceFilter(services, query, status, box, fields, hasBox = (sv) => !!sv.box_id) {
+  const words = String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  const hit = (sv) => !words.length || words.every((w) => fields(sv).map((v) => String(v ?? '').toLowerCase()).join('\n').includes(w));
+  const boxOk = (sv, b) => !b || (b === 'added') === hasBox(sv);
+  const statusOk = (sv) => !status || svcStatusKey(sv.status) === status;
+  const matched = services.filter(hit);
   const by = new Map();
-  for (const sv of services) {
+  for (const sv of matched) {
+    if (!boxOk(sv, box)) continue;
     const key = svcStatusKey(sv.status);
-    const c = by.get(key) || { key, label: String(sv.status ?? '').trim() || 'no status', count: 0, hidden: hide.has(key) };
+    if (!key) continue; // counted in the total, not offered on its own
+    const c = by.get(key) || { key, label: String(sv.status ?? '').trim(), count: 0 };
     c.count++;
     by.set(key, c);
   }
+  if (status && !by.has(status)) by.set(status, { key: status, label: status, count: 0 });
   const rank = (c) => { const i = SVC_CURRENT.indexOf(c.key); return i < 0 ? SVC_CURRENT.length : i; };
   const statuses = [...by.values()].sort((a, b) => rank(a) - rank(b) || (a.key < b.key ? -1 : 1));
-  return { statuses, shown: services.filter((sv) => !hide.has(svcStatusKey(sv.status))) };
+  const boxes = Object.fromEntries(SVC_BOX.map((b) => [b, matched.filter((sv) => statusOk(sv) && boxOk(sv, b)).length]));
+  const total = matched.filter((sv) => boxOk(sv, box)).length;
+  return { statuses, boxes, total, shown: matched.filter((sv) => statusOk(sv) && boxOk(sv, box)), filtered: words.length > 0 || !!status || !!box };
 }
-/* serviceStatusToggles: the toggles' markup, lit while a status is listed.
-   Nothing to choose between with a single status, unless it is the hidden
-   one: then the toggle is the only way back. */
-function serviceStatusToggles(statuses) {
-  if (statuses.length < 2 && !statuses.some((c) => c.hidden)) return '';
-  const buttons = statuses.map((c) => `<button class="${c.hidden ? '' : 'on'}" aria-pressed="${!c.hidden}" data-act="svc:status" data-status="${esc(c.key)}" title="${c.hidden ? 'hidden: click to list' : 'listed: click to hide'}">${esc(c.label)} ${c.count}</button>`);
-  return `<div class="seg" role="group" aria-label="statuses listed">${buttons.join('')}</div>`;
-}
-function toggleServiceStatus(hidden, key) {
-  return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
+/* serviceFilterControls: the two choices' markup, with their counts; the
+   search box is app.js's (it keeps its caret across renders). */
+function serviceFilterControls(F, status, box) {
+  const total = F.total;
+  const opt = (v, label, on) => `<option value="${esc(v)}"${on ? ' selected' : ''}>${esc(label)}</option>`;
+  const st = [opt('', `all statuses (${total})`, !status), ...F.statuses.map((c) => opt(c.key, `${c.label} (${c.count})`, c.key === status))];
+  const names = { '': 'all services', added: 'with a box here', 'not-added': 'not added here' };
+  const bx = SVC_BOX.map((b) => opt(b, `${names[b]} (${F.boxes[b]})`, b === (box || '')));
+  return `<select data-svcf="status" aria-label="status">${st.join('')}</select><select data-svcf="box" aria-label="box in this dashboard">${bx.join('')}</select>`;
 }
 
 /* verifyView: how a box's WebUI/rTorrent connections are checked, for the
@@ -796,5 +812,5 @@ function compareSlowPct(data, days, current) {
   return counted === null ? { pct: current, stale: false } : { pct: counted, stale: counted !== current };
 }
 
-globalThis.pfmView = { verifyView, fleetFilter, serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, deleteFilesConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, compareSlowPct, estimateLines };
+globalThis.pfmView = { verifyView, fleetFilter, serviceFilter, serviceFilterControls, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, deleteFilesConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, compareSlowPct, estimateLines };
 })();
