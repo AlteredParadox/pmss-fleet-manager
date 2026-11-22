@@ -481,8 +481,10 @@ To restore, stop the dashboard and run:
   the same secret the server starts with: without one, an encrypted
   backup stripped down to plain text looks like a plain-text backup. A
   database copied into the data directory by hand is not checked at all.
-- **A backup made before 1.24 needs `-old-credentials keep` or `drop`.**
-  Its encrypted box credentials are not yet tied to their box, so nothing
+- **A backup holding box credentials encrypted before 1.24 needs
+  `-old-credentials keep` or `drop`** (any encrypted backup made by an
+  older release that has saved box passwords). Those credentials are not
+  yet tied to their box, so nothing
   can tell whether someone who could write the file pointed a box
   elsewhere. `keep` restores them as the file has them (only for a file
   that has been where nobody else could change it); `drop` restores
@@ -1512,10 +1514,13 @@ Newest first; each release's full notes are on the
 - **Upgrade notes.** With credential encryption on, the first start of
   1.24 re-encrypts every saved box credential in a new format, and
   **releases before 1.24 then refuse the database**: take a backup before
-  upgrading if you may roll back. **Restoring a backup made before 1.24
-  needs `-old-credentials keep` or `drop`**, and **restoring a plain-text
-  backup with a secret configured needs `-accept-plain-credentials`**
-  (both below). **A custom qBittorrent download URL now needs a sha256**
+  upgrading if you may roll back. **Restoring a backup that holds box
+  credentials encrypted before 1.24 needs `-old-credentials`**: `keep`
+  only if nobody else could have changed the file, otherwise `drop` and
+  enter those passwords again. **`-accept-plain-credentials`** is only for
+  a plain-text backup you made yourself and now restore with a secret
+  configured; it is not a way past a refusal of an encrypted backup, which
+  means the file was altered (both below). **A custom qBittorrent download URL now needs a sha256**
   (below). The default SSH connect timeout is now 45 s (was 15 to 25 s),
   so an unreachable box takes longer to show as down; `-ssh-timeout`
   sets it.
@@ -1527,13 +1532,16 @@ Newest first; each release's full notes are on the
   encrypted together with its ID, host, port and user, so such a file is
   refused. The first start converts existing credentials in place. **After
   that, releases before 1.24 refuse the database**: keep a backup from
-  before the upgrade if you may roll back. **Restoring a backup made
-  before 1.24 needs `-old-credentials keep` (a file only you could have
-  changed) or `-old-credentials drop`** (re-enter those passwords).
+  before the upgrade if you may roll back. **Restoring a backup that holds
+  box credentials encrypted before 1.24 needs `-old-credentials keep`**
+  (only if nobody else could have changed the file) **or
+  `-old-credentials drop`** (re-enter those passwords).
   Restore also refuses plain text where an encrypted credential belongs
   (someone without the secret could have written their own start command
-  or download link there); **restoring a plain-text backup with a secret
-  configured now needs `-accept-plain-credentials`**. Restore also never
+  or download link there); **restoring a plain-text backup you made
+  yourself with a secret configured now needs
+  `-accept-plain-credentials`**, which is not for an encrypted backup
+  that was refused. Restore also never
   installs a backup's database schema: the rows are copied into a fresh
   database with this version's tables, and a file with triggers, views or
   virtual tables is refused.
