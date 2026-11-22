@@ -456,6 +456,9 @@ To restore, stop the dashboard and run:
   made yourself, restored with a secret to encrypt it, needs
   `-accept-plain-credentials`. Without a secret, a plain-text backup
   restores as before.
+- **It refuses a file with triggers, views or virtual tables**, which
+  this dashboard never creates: one could rewrite a row during the
+  restore's own writes, after the checks above.
 - **These checks run in `restore`, with the server's secret.** Give it
   the same secret the server starts with: without one, an encrypted
   backup stripped down to plain text looks like a plain-text backup. A

