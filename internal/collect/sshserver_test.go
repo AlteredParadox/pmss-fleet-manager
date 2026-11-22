@@ -81,6 +81,10 @@ func testSSHServer(t *testing.T, root string) (port int, hostKey string) {
 			if err != nil {
 				return
 			}
+			if !srv.track(conn) {
+				conn.Close()
+				return
+			}
 			go serveTestSSH(conn, cfg, root, srv)
 		}
 	}()
@@ -88,21 +92,39 @@ func testSSHServer(t *testing.T, root string) (port int, hostKey string) {
 }
 
 // testSSHState is what a test server's cleanup must end: its client
-// connections (so no session starts after it) and the commands it runs,
-// each in its own process group so a stand-in's children go too.
+// connections, from the moment they are accepted (so no session starts
+// after it), and the commands it runs, each in its own process group so a
+// stand-in's children go too. Nothing of the server touches the
+// filesystem except under its lock, once it is known not to be closed.
 type testSSHState struct {
 	mu     sync.Mutex
 	closed bool
-	conns  []*ssh.ServerConn
+	conns  []net.Conn
 	procs  map[*exec.Cmd]struct{}
 	wg     sync.WaitGroup
 }
 
-// start runs cmd unless the server is shutting down.
-func (s *testSSHState) start(cmd *exec.Cmd) bool {
+// track registers an accepted connection, unless the server is closed.
+func (s *testSSHState) track(c net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
+		return false
+	}
+	s.conns = append(s.conns, c)
+	return true
+}
+
+// start creates home and runs cmd in it, unless the server is shutting
+// down (then neither happens: a late exec cannot recreate a home that the
+// test's cleanup is removing, fred on #221).
+func (s *testSSHState) start(cmd *exec.Cmd, home string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
 		return false
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -142,13 +164,6 @@ func serveTestSSH(conn net.Conn, cfg *ssh.ServerConfig, root string, srv *testSS
 		return
 	}
 	defer sc.Close()
-	srv.mu.Lock()
-	if srv.closed {
-		srv.mu.Unlock()
-		return
-	}
-	srv.conns = append(srv.conns, sc)
-	srv.mu.Unlock()
 	go ssh.DiscardRequests(reqs)
 	home := filepath.Join(root, sc.User())
 	for nc := range chans {
@@ -170,13 +185,12 @@ func serveTestSSH(conn net.Conn, cfg *ssh.ServerConfig, root string, srv *testSS
 				r.Reply(true, nil)
 				var p struct{ Cmd string }
 				ssh.Unmarshal(r.Payload, &p)
-				os.MkdirAll(home, 0o700)
 				cmd := exec.Command("sh", "-c", p.Cmd)
 				cmd.Env = append(os.Environ(), "HOME="+home, "XDG_RUNTIME_DIR="+home)
 				cmd.Dir = home
 				cmd.Stdin, cmd.Stdout, cmd.Stderr = ch, ch, ch.Stderr()
 				status := 0
-				if !srv.start(cmd) {
+				if !srv.start(cmd, home) {
 					ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{255}))
 					return
 				}
@@ -217,11 +231,11 @@ func sshTestBox(t *testing.T, m *Manager, name, user string, port int, hostKey s
 // The test server ends its commands when its test ends, before the test's
 // directories are removed: a command still running then (a stand-in that
 // sleeps, a poll) must not write into a home being deleted. Here one that
-// would write a file a second later is still running when its subtest
-// ends; the file never appears.
+// has provably started (it wrote "ready") and would write a file a second
+// later is still running when its subtest ends; the file never appears.
 func TestSSHServerEndsCommands(t *testing.T) {
 	keep := t.TempDir()
-	late := filepath.Join(keep, "late")
+	ready, late := filepath.Join(keep, "ready"), filepath.Join(keep, "late")
 	t.Run("server", func(t *testing.T) {
 		root := t.TempDir()
 		port, hostKey := testSSHServer(t, root)
@@ -232,10 +246,22 @@ func TestSSHServerEndsCommands(t *testing.T) {
 		defer cli.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
-		cli.Run(ctx, "sh", strings.NewReader("sleep 1; touch '"+late+"'\n")) // returns at the deadline; the command runs on
+		cli.Run(ctx, "sh", strings.NewReader("touch '"+ready+"'; sleep 1; touch '"+late+"'\n")) // returns at the deadline; the command runs on
+		for i := 0; ; i++ {
+			if _, err := os.Stat(ready); err == nil {
+				break
+			}
+			if i == 500 {
+				t.Fatal("the command never started")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if _, err := os.Stat(late); !os.IsNotExist(err) {
+			t.Fatalf("the late file before the subtest ended: %v", err)
+		}
 	})
 	time.Sleep(1500 * time.Millisecond)
-	if _, err := os.Stat(late); err == nil {
-		t.Fatal("a command of the test server outlived its test")
+	if _, err := os.Stat(late); !os.IsNotExist(err) {
+		t.Fatalf("a command of the test server outlived its test (stat: %v)", err)
 	}
 }
