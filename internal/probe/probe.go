@@ -279,15 +279,17 @@ func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
 // leaves ours in CLOSE-WAIT. It must not refuse every new connection. At
 // least one connection must still pair with an acceptor of ours.
 //
-// An accepting socket with inode 0 (the hex table prints it) is an orphan:
-// its process has closed it and the kernel only finishes the TCP close
-// (FIN-WAIT-2 or TIME-WAIT, listed as uid 0). No file descriptor refers to
-// it, so nothing can read from it, and it counts as no acceptor. This is
-// the usual form of the leftover above: qBittorrent closes an idle
-// keep-alive connection, our side waits in CLOSE-WAIT for the box's sshd,
-// and for up to a minute the pair looked like a root-owned acceptor. A
-// live socket always has an inode, whoever owns it, so a root or foreign
-// acceptor, half-closed or not, still refuses.
+// An accepting socket the hex table lists as a time-wait record (timer
+// type 3, inode 0) is dead: its process closed it and the kernel only
+// finishes the TCP close, listing it as uid 0 in FIN-WAIT-2 or TIME-WAIT.
+// No file descriptor refers to it and none ever will, so it counts as no
+// acceptor. This is the usual form of the leftover above: qBittorrent
+// closes an idle keep-alive connection, our side waits in CLOSE-WAIT for
+// the box's sshd, and for up to a minute the pair looked like a root-owned
+// acceptor. Both marks are needed: a connection still in the listener's
+// accept queue also has inode 0, but a live timer and its owner's uid,
+// and is judged like any acceptor (Codex on #217). A live socket, root's
+// or another account's, half-closed or not, still refuses.
 func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	if strings.TrimSpace(lines[len(lines)-1]) != "end" {
@@ -317,11 +319,11 @@ func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 				base = 10
 			}
 		case "c", "s":
-			if (len(f) != 5 && (f[0] != "s" || len(f) != 6)) || base == 0 {
+			if (len(f) != 5 && (f[0] != "s" || len(f) != 7)) || base == 0 {
 				continue
 			}
-			if len(f) == 6 && base == 16 && f[5] == "0" {
-				continue // an orphaned acceptor: closed by its process, unreadable
+			if len(f) == 7 && base == 16 && f[5] == "0" && f[6] == "03" {
+				continue // a time-wait record: closed by its process, nothing can read it
 			}
 			p, owner, good := listenerPortUID([]string{map[int]string{16: "h", 10: "d"}[base], f[1], f[2]})
 			if !good {
