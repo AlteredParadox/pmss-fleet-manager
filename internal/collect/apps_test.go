@@ -18,10 +18,12 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -381,5 +383,185 @@ func TestDetectGuardScopedToEndpoint(t *testing.T) {
 	port.QbtPort = 9000
 	if !authEndpointChanged(p, &port) {
 		t.Fatal("a WebUI port edit must drop the hold")
+	}
+}
+
+// The listener-only opt-in through the manager: refused for a stale
+// revision or a missing box; otherwise the record, the poller and the
+// served state change together, also under concurrent toggles (run with
+// -race); withdrawing it after an admission resets the recorded mode; an
+// edit that moves the box leaves the old page's revision stale.
+func TestManagerSetListenerOnly(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	b := &store.Box{Name: "x", Host: "h.example", User: "u", Port: 22, Enabled: false}
+	if err := m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := st.GetBox(ctx, b.ID)
+	rev := cur.Revision
+	consistent := func(want bool) {
+		t.Helper()
+		got, _ := st.GetBox(ctx, b.ID)
+		s, _ := m.State(b.ID)
+		if got.ListenerOnly != want || s.Verify.ListenerOnly != want || m.poller(b.ID).listenerOnly.Load() != want {
+			t.Fatalf("want %v: stored %v, state %v, poller %v", want, got.ListenerOnly, s.Verify.ListenerOnly, m.poller(b.ID).listenerOnly.Load())
+		}
+	}
+	if err := m.SetListenerOnly(ctx, b.ID, rev+1, true); !errors.Is(err, ErrStaleBox) {
+		t.Fatalf("stale revision: %v", err)
+	}
+	if err := m.SetListenerOnly(ctx, 999, rev, true); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing box: %v", err)
+	}
+	consistent(false)
+	if err := m.SetListenerOnly(ctx, b.ID, rev, true); err != nil {
+		t.Fatal(err)
+	}
+	consistent(true)
+
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Add(1)
+		go func(on bool) {
+			defer wg.Done()
+			if err := m.SetListenerOnly(ctx, b.ID, rev, on); err != nil {
+				t.Error(err)
+			}
+		}(i%2 == 0)
+	}
+	wg.Wait()
+	// Whichever toggle came last, the three must agree (fred on #218).
+	final, _ := st.GetBox(ctx, b.ID)
+	consistent(final.ListenerOnly)
+	if err := m.SetListenerOnly(ctx, b.ID, rev, true); err != nil {
+		t.Fatal(err)
+	}
+	consistent(true)
+
+	// A connection admitted under it, then withdrawn: closed, mode reset.
+	p := m.poller(b.ID)
+	c, srv := net.Pipe()
+	defer srv.Close()
+	if _, ok := p.admitListenerOnly(c); !ok {
+		t.Fatal("admission while opted in")
+	}
+	p.noteVerify(VerifyListenerOnly)
+	if err := m.SetListenerOnly(ctx, b.ID, rev, false); err != nil {
+		t.Fatal(err)
+	}
+	consistent(false)
+	srv.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := srv.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("the admitted connection must be closed: %v", err)
+	}
+	if s, _ := m.State(b.ID); s.Verify.Mode != "" || len(p.loConns) != 0 {
+		t.Fatalf("after withdrawal: mode %q, tracked %d", s.Verify.Mode, len(p.loConns))
+	}
+
+	// The box moves: the page drawn before cannot opt the new endpoint in.
+	cur, _ = st.GetBox(ctx, b.ID)
+	cur.Host = "z.example"
+	if err := m.UpdateBox(ctx, cur, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetListenerOnly(ctx, b.ID, rev, true); !errors.Is(err, ErrStaleBox) {
+		t.Fatalf("stale page after a move: %v", err)
+	}
+	consistent(false)
+}
+
+// A poller restarted from its record after a failed removal does not
+// bring back an opt-in that was withdrawn since it started (Codex on #218).
+func TestFailedRemovalKeepsWithdrawal(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	b := &store.Box{Name: "x", Host: "h.example", User: "u", Port: 22, Enabled: false}
+	if err := m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := st.GetBox(ctx, b.ID)
+	if err := m.SetListenerOnly(ctx, b.ID, cur.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	// Restart the poller from the record with the opt-in on, as a later
+	// start would, then withdraw it.
+	m.boxMu.Lock()
+	old := m.poller(b.ID)
+	old.stopAndWait()
+	fresh, _ := st.GetBox(ctx, b.ID) // the record, as an edit's re-read gives it
+	m.startPoller(fresh, nil)
+	m.boxMu.Unlock()
+	if !m.poller(b.ID).listenerOnly.Load() {
+		t.Fatal("a poller started from a record with the opt-in must have it")
+	}
+	if err := m.SetListenerOnly(ctx, b.ID, cur.Revision, false); err != nil {
+		t.Fatal(err)
+	}
+	m.deleteFault = func() error { return errors.New("disk full") }
+	if err := m.RemoveBox(ctx, b.ID); err == nil {
+		t.Fatal("the removal was meant to fail")
+	}
+	if p := m.poller(b.ID); p == nil || p.listenerOnly.Load() || p.box.ListenerOnly {
+		t.Fatal("the restarted poller must not have the withdrawn opt-in")
+	}
+}
+
+// An edit that saves but whose re-read fails restarts the old settings
+// strict: the saved edit may have cleared the opt-in (fred on #218).
+func TestFailedRereadRestartsStrict(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	b := &store.Box{Name: "x", Host: "h.example", User: "u", Port: 22, Enabled: false}
+	if err := m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := st.GetBox(ctx, b.ID)
+	if err := m.SetListenerOnly(ctx, b.ID, cur.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ = st.GetBox(ctx, b.ID)
+	cur.Host = "z.example" // an identity change: the database clears the opt-in
+	m.rereadFault = func() error { return errors.New("database is locked") }
+	if err := m.UpdateBox(ctx, cur, store.Clears{}); err == nil {
+		t.Fatal("the re-read was meant to fail")
+	}
+	m.rereadFault = nil
+	if saved, _ := st.GetBox(ctx, b.ID); saved.ListenerOnly {
+		t.Fatal("the saved edit must have cleared the opt-in")
+	}
+	p := m.poller(b.ID)
+	if p == nil || p.listenerOnly.Load() || p.box.ListenerOnly {
+		t.Fatal("the poller restarted after a failed re-read must be strict")
+	}
+	if s, _ := m.State(b.ID); s.Verify.ListenerOnly {
+		t.Fatal("its state must not show the opt-in")
 	}
 }

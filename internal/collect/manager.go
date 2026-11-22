@@ -99,6 +99,8 @@ type Manager struct {
 	cacheFault func(kind string) error
 	// deleteFault, when set (tests), replaces the box row delete.
 	deleteFault func() error
+	// rereadFault, when set (tests), fails the re-read after a box edit.
+	rereadFault func() error
 	// watchMu serialises SetAppWatch's read-modify-write of a box's watch
 	// list: two toggles at once would otherwise each save a list missing
 	// the other's change.
@@ -691,11 +693,23 @@ func (m *Manager) updateBoxLocked(ctx context.Context, b *store.Box, clears stor
 	// (after stopAndWait, so a toggle never waits on an in-flight poll).
 	m.watchMu.Lock()
 	defer m.watchMu.Unlock()
-	fresh, err := m.st.GetBox(sctx, b.ID)
+	var fresh *store.Box
+	err := error(nil)
+	if m.rereadFault != nil {
+		err = m.rereadFault()
+	} else {
+		fresh, err = m.st.GetBox(sctx, b.ID)
+	}
 	if err != nil {
 		if p != nil {
-			m.log.Warn("box edit saved but the record could not be re-read; polling continues with the previous settings until the next edit", "box", p.box.Name, "err", err)
-			m.startPoller(p.box, prev) // keep polling with the old settings rather than nothing
+			m.log.Warn("box edit saved but the record could not be re-read; polling continues with the previous settings until the next edit, with listener-only off", "box", p.box.Name, "err", err)
+			// Keep polling with the old settings rather than nothing, but
+			// strict: the saved edit may have moved the box or changed its
+			// host key, which cleared the opt-in in the database (fred on
+			// #218). The owner can give it again on the box's page.
+			old := *p.box
+			old.ListenerOnly = false
+			m.startPoller(&old, prev)
 		}
 		return err
 	}
@@ -930,6 +944,49 @@ func (m *Manager) mutateState(id int64, fn func(*BoxState)) {
 		fn(s)
 		return s
 	}, commitOpts{})
+}
+
+// SetListenerOnly records the box's opt-in to the listener check alone
+// where it denies this account its socket tables (store.Box.ListenerOnly),
+// applies it to the box's poller at once (withdrawing it drops the
+// connections made under it) and polls again, so the card shows the new
+// state without waiting.
+//
+// rev is the box record revision the page was drawn from: consent cannot
+// carry over to a box an edit has since changed. The whole change (record,
+// poller, state) runs under boxMu, so it neither interleaves with an edit
+// that replaces the poller nor with another toggle.
+func (m *Manager) SetListenerOnly(ctx context.Context, id, rev int64, on bool) error {
+	m.boxMu.Lock()
+	defer m.boxMu.Unlock()
+	p := m.poller(id)
+	if p == nil {
+		return store.ErrNotFound
+	}
+	if p.box.Revision != rev {
+		return ErrStaleBox
+	}
+	if err := m.st.SetListenerOnly(ctx, id, rev, on); err != nil {
+		if errors.Is(err, store.ErrStale) {
+			return ErrStaleBox
+		}
+		return err
+	}
+	// The poller's copy of the record too: a failed removal or a failed
+	// re-read after an edit restarts a poller from it, which must not bring
+	// back a withdrawn opt-in (Codex on #218). Restarts hold boxMu as well.
+	p.box.ListenerOnly = on
+	p.setListenerOnly(ctx, on)
+	mode := p.verifyModeNow()
+	if _, ok := m.commit(id, func(s *BoxState) *BoxState {
+		s.Verify = VerifyState{ListenerOnly: on, Mode: mode}
+		return s
+	}, commitOpts{publish: true}); !ok {
+		return store.ErrNotFound
+	}
+	m.log.Info("listener-only verification changed", "box", p.box.Name, "on", on)
+	p.wake()
+	return nil
 }
 
 // SetAppWatch adds or removes one detected application from the box's

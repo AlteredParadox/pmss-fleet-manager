@@ -80,6 +80,12 @@ type Box struct {
 	// raise an alert when they are not running. Edited only through
 	// SetAppsWatch, so a box edit never touches it.
 	AppsWatch []string `json:"apps_watch"`
+	// ListenerOnly is the owner's opt-in, on a box that denies this account
+	// its socket tables, to connect to the WebUI and rTorrent with the
+	// listener check alone (collect.verifiedDial). Off by default. Set only
+	// through SetListenerOnly; an edit that moves the box to another host,
+	// port or account turns it off, since the consent was for that box.
+	ListenerOnly bool `json:"listener_only"`
 	// Revision counts edits of the record. An update must name the
 	// revision it was based on and fails with ErrStale otherwise, so two
 	// tabs editing one box from the same snapshot cannot each apply their
@@ -360,6 +366,9 @@ func (s *Store) migrate() error {
 	if err := s.ensureAppsWatchColumn(); err != nil {
 		return err
 	}
+	if err := s.ensureListenerOnlyColumn(); err != nil {
+		return err
+	}
 	if err := s.ensureRevisionColumn(); err != nil {
 		return err
 	}
@@ -458,7 +467,43 @@ const (
 	boxesColumnsSQL     = "PRAGMA table_info(boxes)"
 	transfersColumnsSQL = "PRAGMA table_info(transfers)"
 	addAppsWatchColSQL  = "ALTER TABLE boxes ADD COLUMN apps_watch TEXT NOT NULL DEFAULT ''"
+	addListenerOnlySQL  = "ALTER TABLE boxes ADD COLUMN listener_only INTEGER NOT NULL DEFAULT 0"
 )
+
+// ensureListenerOnlyColumn adds boxes.listener_only (off) to a database from before it existed.
+func (s *Store) ensureListenerOnlyColumn() error {
+	has, err := s.hasBoxesColumn("listener_only")
+	if err != nil || has {
+		return err
+	}
+	if _, err := s.db.Exec(addListenerOnlySQL); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	return nil
+}
+
+// SetListenerOnly records the box's listener-only opt-in (see
+// Box.ListenerOnly) for the record revision the owner saw when deciding:
+// consent given on a page drawn before an edit (which may have moved the
+// box elsewhere and turned it off) fails with ErrStale. It does not bump
+// the revision itself, so other open pages of the box stay valid.
+func (s *Store) SetListenerOnly(ctx context.Context, id, rev int64, on bool) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET listener_only=? WHERE id=? AND revision=?`, on, id, rev)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM boxes WHERE id=?`, id).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return ErrNotFound
+		}
+		return ErrStale
+	}
+	return nil
+}
 
 // ensureAppsWatchColumn adds boxes.apps_watch to a database from before it existed.
 func (s *Store) ensureAppsWatchColumn() error {
@@ -523,7 +568,7 @@ func (s *Store) SetAppsWatch(ctx context.Context, id int64, keys []string) error
 }
 
 const boxCols = `id, name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
-	qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at, apps_watch, revision, rt_enabled, rt_scgi, io_weight, cpu_weight`
+	qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at, apps_watch, revision, rt_enabled, rt_scgi, io_weight, cpu_weight, listener_only`
 
 // The box queries are constants: nothing from a request is ever spliced in.
 const (
@@ -536,7 +581,7 @@ func (s *Store) scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 	var created, updated, watch string
 	err := row.Scan(&b.ID, &b.Name, &b.Host, &b.Port, &b.User, &b.AuthMethod, &b.KeyPath, &b.Password, &b.HostKey,
 		&b.Type, &b.Plan, &b.Datacenter, &b.Renewal, &b.QbtEnabled, &b.QbtPort, &b.QbtUser, &b.QbtPass, &b.QbtStartCmd,
-		&b.DockerEnabled, &b.DuEnabled, &b.Enabled, &created, &updated, &watch, &b.Revision, &b.RtEnabled, &b.RtSCGI, &b.IOWeight, &b.CPUWeight)
+		&b.DockerEnabled, &b.DuEnabled, &b.Enabled, &created, &updated, &watch, &b.Revision, &b.RtEnabled, &b.RtSCGI, &b.IOWeight, &b.CPUWeight, &b.ListenerOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -650,12 +695,19 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	// A blank secret seals to blank, so the CASE below still reads it as
 	// "keep the stored value".
 	pw, qp, sc := s.sealBoxSecrets(b)
-	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
+	// The listener-only opt-in survives an edit of the same box only: the
+	// CASE reads the row's old endpoint (SQLite evaluates every SET
+	// expression against the row as it was), and an edit that forgets or
+	// replaces the pinned host key (perhaps another machine) clears it too;
+	// pinning the key at first contact does not (fred on #218).
+	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET listener_only=CASE WHEN host=? AND port=? AND user=? AND NOT ? AND NOT ? THEN listener_only ELSE 0 END,
+		name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
 		password=CASE WHEN ? THEN '' WHEN ?='' THEN password ELSE ? END,
 		host_key=CASE WHEN ? THEN '' WHEN ? THEN ? WHEN host_key='' THEN ? ELSE host_key END,
 		type=?, plan=?, datacenter=?, renewal=?,
 		qbt_enabled=?, qbt_port=?, qbt_user=?, qbt_pass=CASE WHEN ? THEN '' WHEN ?='' THEN qbt_pass ELSE ? END, qbt_start_cmd=?,
 		docker_enabled=?, du_enabled=?, enabled=?, updated_at=?, rt_enabled=?, rt_scgi=?, io_weight=?, cpu_weight=?, revision=revision+1 WHERE id=? AND revision=?`,
+		b.Host, b.Port, b.User, clears.ForgetHostKey, clears.ReplaceHostKey,
 		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clears.Password, pw, pw,
 		clears.ForgetHostKey, clears.ReplaceHostKey, b.HostKey, b.HostKey,
 		b.Type, b.Plan, b.Datacenter, b.Renewal,

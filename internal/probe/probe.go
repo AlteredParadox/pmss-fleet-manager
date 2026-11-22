@@ -262,8 +262,9 @@ func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
 }
 
 // EstablishedOwner evaluates EstablishedScript's output for port. known is
-// false only for a box that hides non-listening sockets by policy
-// ("privacy"); the caller then has the pre-connect listener check alone. A
+// false only for a box that denies this account its socket tables by
+// policy ("privacy"); the caller then has the pre-connect listener check
+// alone. A
 // failed inspection, a cut-off output, or an output in which this
 // account's own tunnel connection to the port does not appear refuses. ok
 // requires every tunnel connection of this account whose peer is the
@@ -309,23 +310,21 @@ func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 				uid, _ = strconv.Atoi(f[1])
 			}
 		case "privacy":
-			return false, false, "the box hides its non-listening sockets (socket-table privacy)"
+			return false, false, "the box does not let this account read its socket tables (socket-table privacy)"
 		case "failed":
 			return false, true, "could not inspect the box's socket table (" + strings.Join(f[1:], " ") + ")"
 		case "base":
 			if len(f) == 2 && f[1] == "hex" {
 				base = 16
-			} else {
-				base = 10
 			}
 		case "c", "s":
 			if (len(f) != 5 && (f[0] != "s" || len(f) != 7)) || base == 0 {
 				continue
 			}
-			if len(f) == 7 && base == 16 && f[5] == "0" && f[6] == "03" {
+			if len(f) == 7 && f[5] == "0" && f[6] == "03" {
 				continue // a time-wait record: closed by its process, nothing can read it
 			}
-			p, owner, good := listenerPortUID([]string{map[int]string{16: "h", 10: "d"}[base], f[1], f[2]})
+			p, owner, good := listenerPortUID([]string{"h", f[1], f[2]})
 			if !good {
 				continue
 			}
@@ -372,11 +371,11 @@ func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 	return true, true, ""
 }
 
-// peerClosed reports whether a TCP state, as /proc/net/tcp (hex) or ss
-// prints it, means the peer has closed its side: CLOSE-WAIT or LAST-ACK.
+// peerClosed reports whether a TCP state, as /proc/net/tcp prints it,
+// means the peer has closed its side: CLOSE-WAIT or LAST-ACK.
 func peerClosed(state string) bool {
 	switch state {
-	case "08", "09", "CLOSE-WAIT", "LAST-ACK":
+	case "08", "09":
 		return true
 	}
 	return false

@@ -1741,3 +1741,103 @@ func TestPruneAlertsBoundsResolvedPerBox(t *testing.T) {
 		t.Fatalf("after prune: a resolved %d active %d, b rows %d", aResolved, aActive, bRows)
 	}
 }
+
+// The listener-only opt-in: off by default and after the migration, set
+// only by SetListenerOnly, kept by an edit of the same box, turned off by
+// an edit that moves the box to another host, port or account.
+func TestListenerOnly(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "l.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A database from before the column.
+	if _, err := s.db.Exec("ALTER TABLE boxes DROP COLUMN listener_only"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO boxes (name, host, port, user, created_at, updated_at) VALUES ('old', 'h', 22, 'u', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if s, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	bs, err := s.ListBoxes(ctx)
+	if err != nil || len(bs) != 1 || bs[0].ListenerOnly {
+		t.Fatalf("after the migration: %+v %v", bs, err)
+	}
+	b := bs[0]
+	if err := s.SetListenerOnly(ctx, b.ID, b.Revision+1, true); !errors.Is(err, ErrStale) {
+		t.Fatalf("consent for another revision: %v", err)
+	}
+	if got, _ := s.GetBox(ctx, b.ID); got.ListenerOnly {
+		t.Fatal("a stale opt-in must not be stored")
+	}
+	if err := s.SetListenerOnly(ctx, b.ID, b.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetBox(ctx, b.ID); got.Revision != b.Revision {
+		t.Fatal("the opt-in must not bump the revision")
+	}
+	if err := s.SetListenerOnly(ctx, 999, 0, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing box: %v", err)
+	}
+	// An edit of the same endpoint keeps it, whatever the request carried.
+	got, _ := s.GetBox(ctx, b.ID)
+	got.Plan, got.ListenerOnly = "p", false
+	if err := s.UpdateBox(ctx, got, Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.GetBox(ctx, b.ID); !got.ListenerOnly {
+		t.Fatal("an edit of the same box must keep the opt-in")
+	}
+	for name, move := range map[string]func(*Box){
+		"host": func(x *Box) { x.Host = "h2" }, "port": func(x *Box) { x.Port = 2222 }, "account": func(x *Box) { x.User = "v" },
+	} {
+		got, _ = s.GetBox(ctx, b.ID)
+		if err := s.SetListenerOnly(ctx, b.ID, got.Revision, true); err != nil {
+			t.Fatal(err)
+		}
+		move(got)
+		got.ListenerOnly = true
+		if err := s.UpdateBox(ctx, got, Clears{}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ = s.GetBox(ctx, b.ID); got.ListenerOnly {
+			t.Fatalf("moving the box to another %s must turn the opt-in off", name)
+		}
+		// The page drawn before the move cannot give it back.
+		if err := s.SetListenerOnly(ctx, b.ID, got.Revision-1, true); !errors.Is(err, ErrStale) {
+			t.Fatalf("stale consent after moving the %s: %v", name, err)
+		}
+	}
+	// The host key: pinning it at first contact keeps the opt-in; an edit
+	// that replaces or forgets it (perhaps another machine at the same
+	// address) clears it (fred on #218).
+	got, _ = s.GetBox(ctx, b.ID)
+	if err := s.SetListenerOnly(ctx, b.ID, got.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	got.HostKey = "ssh-ed25519 AAAAfirst"
+	if err := s.UpdateBox(ctx, got, Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.GetBox(ctx, b.ID); !got.ListenerOnly || got.HostKey == "" {
+		t.Fatalf("first-contact pinning must keep the opt-in: %v %q", got.ListenerOnly, got.HostKey)
+	}
+	for name, clears := range map[string]Clears{"replaced": {ReplaceHostKey: true}, "forgotten": {ForgetHostKey: true}} {
+		got, _ = s.GetBox(ctx, b.ID)
+		if err := s.SetListenerOnly(ctx, b.ID, got.Revision, true); err != nil {
+			t.Fatal(err)
+		}
+		got.HostKey = "ssh-ed25519 AAAAother"
+		if err := s.UpdateBox(ctx, got, clears); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ = s.GetBox(ctx, b.ID); got.ListenerOnly {
+			t.Fatalf("a %s host key must clear the opt-in", name)
+		}
+	}
+}

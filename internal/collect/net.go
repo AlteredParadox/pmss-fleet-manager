@@ -18,6 +18,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -104,10 +105,16 @@ type tunnel interface {
 // listener check. The script pairs this account's own tunnel socket with
 // the socket that accepted it (any TCP state), so the check is of this
 // very connection. Verified at connect time, a connection's peer is fixed,
-// so reuse is safe. A box that hides non-listening sockets by policy falls
-// back to the listener check; a box where the inspection merely failed
-// does not get the connection.
-func verifiedDial(cli tunnel, hp string, port int) qbt.Dialer {
+// so reuse is safe. A box where the inspection failed, or found someone
+// else's acceptor, does not get the connection.
+//
+// A box that denies this account its socket tables (socket-table privacy,
+// "privacy" from the script) cannot have the connection checked at all.
+// There the dial is refused with ErrVerifyBlocked unless pol allows the
+// listener check alone for this box (the per-box opt-in, off by default):
+// the opt-in relaxes that one outcome and nothing else. pol.note records
+// what each new connection got, for the box's state.
+func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer {
 	return func(ctx context.Context) (net.Conn, error) {
 		conn, err := cli.DialTCP(ctx, hp)
 		if err != nil {
@@ -121,14 +128,52 @@ func verifiedDial(cli tunnel, hp string, port int) qbt.Dialer {
 			return nil, fmt.Errorf("could not verify who accepted the connection on port %d: %w", port, err)
 		}
 		ok, known, reason := probe.EstablishedOwner(out, port)
-		if !known {
-			return conn, nil // socket-table privacy: the listener check is what applies
+		if !known && pol.allow != nil && pol.allow() {
+			admitted, ok := conn, true
+			if pol.admit != nil {
+				admitted, ok = pol.admit(conn)
+			}
+			if ok {
+				pol.record(VerifyListenerOnly)
+				return admitted, nil // opted in: the listener check is what applies
+			}
 		}
-		if !ok {
+		switch {
+		case !known:
+			conn.Close()
+			pol.record(VerifyBlocked)
+			return nil, ErrVerifyBlocked
+		case !ok:
 			conn.Close()
 			return nil, fmt.Errorf("refusing to use the connection on port %d: %s", port, reason)
 		}
+		pol.record(VerifyFull)
 		return conn, nil
+	}
+}
+
+// What the last new WebUI/SCGI connection of a box got (VerifyState.Mode).
+const (
+	VerifyFull         = "full"          // the accepting socket was checked to be ours
+	VerifyListenerOnly = "listener-only" // tables denied; opted in to the listener check alone
+	VerifyBlocked      = "blocked"       // tables denied; not opted in, refused
+)
+
+// ErrVerifyBlocked refuses a connection the box gives no way to check.
+var ErrVerifyBlocked = errors.New("WebUI verification blocked by host socket privacy: the box does not let this account read its socket tables, so the dashboard cannot check who accepted the connection; see the box's verification page")
+
+// verifyPolicy is a box's say in verifiedDial: allow reports the
+// listener-only opt-in at dial time, note receives the outcome. The zero
+// value is strict and silent (the add/edit wizard: no box setting yet).
+type verifyPolicy struct {
+	allow func() bool
+	admit func(net.Conn) (net.Conn, bool) // optional final say as a connection is let through: the conn to use, or refuse (poller.admitListenerOnly)
+	note  func(mode string)
+}
+
+func (v verifyPolicy) record(mode string) {
+	if v.note != nil {
+		v.note(mode)
 	}
 }
 

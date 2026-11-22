@@ -66,6 +66,21 @@ type poller struct {
 	dkUID int            // the UID dk was dialled for
 	guard *qbt.AuthGuard // outlives p.qbt; see qbt.AuthGuard
 
+	// listenerOnly is the box's opt-in to the listener check alone where
+	// the tables are denied (store.Box.ListenerOnly), read at every dial;
+	// verifyMode is what the last new connection got (Verify* or "").
+	// Atomics: dials run with and without p.mu held.
+	listenerOnly atomic.Bool
+	verifyMode   atomic.Value // string
+	// loConns are the open connections let through under the opt-in.
+	// Admission registers one and withdrawal closes them all, both under
+	// loMu, so no listener-only connection (idle, carrying a request, or
+	// still on its way back from the dial) outlives a withdrawal. Keyed
+	// on the connections, not on verifyMode, which a later fully verified
+	// dial overwrites.
+	loMu    sync.Mutex
+	loConns map[*loConn]struct{}
+
 	prevCPU     int64
 	prevCPUAt   time.Time
 	prevTicks   probe.CPUTicks // last /proc/stat reading, for the host-wide busy figure
@@ -269,11 +284,109 @@ func (p *poller) storeFix(start time.Time, keepDirs bool) func(s, stored *BoxSta
 		// through commit, never by a poll: the stored value is the latest,
 		// whatever this poll's starting snapshot carried (Codex on PR 123).
 		s.Rt.RemoveFailed, s.Rt.RemoveFailedAt = stored.Rt.RemoveFailed, stored.Rt.RemoveFailedAt
+		// The opt-in is changed through the manager, the mode by dials:
+		// read both live, so a toggle that landed while this poll was in
+		// flight (or a failed poll's old snapshot) is not overwritten.
+		s.Verify = VerifyState{ListenerOnly: p.listenerOnly.Load(), Mode: p.verifyModeNow()}
 	}
 }
 
 func newPoller(m *Manager, b *store.Box) *poller {
-	return &poller{m: m, box: b, guard: &qbt.AuthGuard{}, wakeCh: make(chan struct{}, 1), stopCh: make(chan struct{}), doneCh: make(chan struct{})}
+	p := &poller{m: m, box: b, guard: &qbt.AuthGuard{}, wakeCh: make(chan struct{}, 1), stopCh: make(chan struct{}), doneCh: make(chan struct{})}
+	p.listenerOnly.Store(b.ListenerOnly)
+	return p
+}
+
+// verifyPolicy is this box's say in verifiedDial.
+func (p *poller) verifyPolicy() verifyPolicy {
+	return verifyPolicy{allow: p.listenerOnly.Load, admit: p.admitListenerOnly, note: p.noteVerify}
+}
+
+// admitListenerOnly is the last word on a listener-only connection: under
+// loMu it re-reads the opt-in and, if it still holds, registers the
+// connection so a withdrawal can close it. It hands back the tracked
+// connection to use, or false: the opt-in was withdrawn meanwhile.
+func (p *poller) admitListenerOnly(c net.Conn) (net.Conn, bool) {
+	p.loMu.Lock()
+	defer p.loMu.Unlock()
+	if !p.listenerOnly.Load() {
+		return nil, false
+	}
+	lc := &loConn{Conn: c, p: p}
+	if p.loConns == nil {
+		p.loConns = map[*loConn]struct{}{}
+	}
+	p.loConns[lc] = struct{}{}
+	return lc, true
+}
+
+// loConn is a connection let through under the opt-in; closing it, by its
+// user or by a withdrawal, takes it out of the poller's set.
+type loConn struct {
+	net.Conn
+	p    *poller
+	once sync.Once
+}
+
+// Close closes first and unregisters after, so a withdrawal that takes
+// the set meanwhile still finds the connection and waits on the same
+// once (fred on #218): it never reports success while a close is in
+// progress.
+func (c *loConn) Close() error {
+	var err error
+	c.once.Do(func() { err = c.Conn.Close() })
+	c.p.loMu.Lock()
+	delete(c.p.loConns, c)
+	c.p.loMu.Unlock()
+	return err
+}
+
+// noteVerify records what a new connection got, logging each change.
+func (p *poller) noteVerify(mode string) {
+	if prev := p.verifyModeNow(); prev != mode {
+		p.verifyMode.Store(mode)
+		if p.m != nil && p.m.log != nil {
+			p.m.log.Info("WebUI connection verification", "box", p.box.Name, "mode", mode, "was", prev)
+		}
+	}
+}
+
+func (p *poller) verifyModeNow() string {
+	s, _ := p.verifyMode.Load().(string)
+	return s
+}
+
+// setListenerOnly applies a change of the opt-in. Turning it off closes
+// every connection admitted under it before returning (in use or idle;
+// a request on one fails), then drops the WebUI and rTorrent clients that
+// pooled them; the next dial is checked again.
+func (p *poller) setListenerOnly(ctx context.Context, on bool) {
+	p.loMu.Lock()
+	p.listenerOnly.Store(on)
+	var open []*loConn
+	if !on {
+		for c := range p.loConns {
+			open = append(open, c)
+		}
+		p.loConns = nil
+	}
+	p.loMu.Unlock()
+	if len(open) == 0 {
+		return
+	}
+	for _, c := range open {
+		c.once.Do(func() { c.Conn.Close() })
+	}
+	p.mu.Lock()
+	if p.qbt != nil {
+		p.qbt.Close()
+		p.qbt = nil
+	}
+	p.dropRtLocked(ctx)
+	p.mu.Unlock()
+	if p.verifyModeNow() == VerifyListenerOnly {
+		p.verifyMode.Store("")
+	}
 }
 
 func (p *poller) wake() {
@@ -529,7 +642,7 @@ func (p *poller) sshDialTCP(addr string) qbt.Dialer {
 		if _, ps, err := net.SplitHostPort(addr); err == nil {
 			port, _ = strconv.Atoi(ps)
 		}
-		return verifiedDial(cli, addr, port)(ctx)
+		return verifiedDial(cli, addr, port, p.verifyPolicy())(ctx)
 	}
 }
 
@@ -642,6 +755,7 @@ func (p *poller) poll(ctx context.Context) {
 		st.Rt = RtState{Enabled: false, ProcessUp: running, ProcessKnown: known, ConfFound: snap.Rt.ConfFound, Disabled: snap.Rt.Disabled,
 			Endpoint: clip(rtEndpoint(rtBox{p.box.RtSCGI}, snap), 600)}
 	}
+	st.Verify = VerifyState{ListenerOnly: p.listenerOnly.Load(), Mode: p.verifyModeNow()}
 	if p.box.DockerEnabled {
 		p.pollDocker(ctx, &st, snap)
 	} else {

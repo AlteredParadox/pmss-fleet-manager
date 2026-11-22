@@ -277,20 +277,26 @@ echo "uid $uid"
 // acceptor can half-close (shutdown SHUT_WR) and still read, so filtering
 // on ESTABLISHED would miss it; a missing accepting row refuses too.
 //
-// Lines: "base hex|dec", then "c <localport> <uid> <state> <peeraddr>" for
-// client sides and "s <peerport> <uid> <state> <localaddr> [<inode> <timer>]"
-// for accepting sides, from /proc/net/tcp{,6} (hex, with the inode and the
-// timer type) or, where those are root-only, from ss -Htnp (dec, neither;
-// uid is ours for our own processes' sockets, else x).
-// "privacy" marks a box that hides non-listening sockets by policy
+// Lines: "base hex", then "c <localport> <uid> <state> <peeraddr>" for
+// client sides and "s <peerport> <uid> <state> <localaddr> <inode> <timer>"
+// for accepting sides, from /proc/net/tcp{,6}.
+//
+// "privacy" marks a box whose kernel tables this account may not read
 // (Pulsed Media's socket-table privacy, ADR 0068): the caller falls back
-// to the listener check there. The policy is recognised by its opt-in
-// marker file, or, since the PMSS update of 2026-10-22 made /etc/seedbox
-// itself root-only on some hosts, by its signature: the kernel's tables
-// present but denied to this account while ss still lists listeners and
-// reports no non-listening socket at all. Any other failure to inspect
-// prints "failed <rc>" and the caller refuses: a gate that cannot run
-// must not pass.
+// to the listener check there. Recognised by the policy's opt-in marker
+// file or by the tables being present but denied to us (the PMSS update
+// of 2026-10-22 made /etc/seedbox root-only on some hosts, hiding the
+// marker). There is no ss fallback for this check: our tunnel's client
+// socket belongs to the box's sshd session process, which ss -p cannot
+// attribute to a tenant (sshd makes itself non-dumpable), so it lists as
+// nobody's and the check could never pass. That is the state of a host
+// where the policy's first stage (the tables) applies and its sock_diag
+// filter did not load (PMSS #1303): ss still lists every tenant's
+// sockets, and every connection was refused. The listener check, which
+// ss can serve (it attributes the listener to our qBittorrent), is what
+// such a host gets until PMSS offers tenants a view of their own sockets.
+// Any other failure (tables absent, or readable but empty) prints
+// "failed" and the caller refuses: a gate that cannot run must not pass.
 func EstablishedScript(port int) string {
 	return "#!/bin/sh\nLC_ALL=C; export LC_ALL\nport=" + strconv.Itoa(port) + "\n" +
 		`uid=$(id -u)
@@ -302,24 +308,13 @@ rows=$(awk -v hp="$hp" '$4!="0A"{n++; l=$2; r=$3; lp=l; sub(/.*:/,"",lp); rp=r; 
 if [ -n "$rows" ] && [ "${rows##*seen }" != "0" ]; then
   echo "base hex"; printf '%s\n' "$rows"
 else
-  out=$(timeout 10 ss -Htnp 2>/dev/null); rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "failed $rc"
-  elif [ -n "$out" ]; then
-    echo "base dec"
-    printf '%s\n' "$out" | awk -v uid="$uid" -v port="$port" '{o="x"; if ($6 ~ /^users:\(\(/) o=uid; m=split($4,a,":"); lp=a[m]; la=substr($4,1,length($4)-length(lp)-1); sub(/%.*/,"",la); m=split($5,b,":"); rp=b[m]; ra=substr($5,1,length($5)-length(rp)-1); sub(/%.*/,"",ra); if (rp==port) print "c", lp, o, $1, ra; if (lp==port) print "s", rp, o, $1, la}'
+  first=${tables%% *}
+  if [ -e "$marker" ] || { [ -e "$first" ] && ! [ -r "$first" ]; }; then
+    echo "privacy"
+  elif [ -e "$first" ]; then
+    echo "failed table-empty"
   else
-    # ss ran and listed no non-listening socket at all, not even this
-    # account's own tunnel: the privacy policy, if its whole signature
-    # shows (the marker, or the kernel's tables present but denied to us
-    # while ss can still list listeners, which proves ss works and the
-    # filter lets LISTEN through). Anything else is a failure.
-    first=${tables%% *}
-    if [ -e "$marker" ] || { [ -e "$first" ] && ! [ -r "$first" ] && [ -n "$(timeout 10 ss -Hltnp 2>/dev/null)" ]; }; then
-      echo "privacy"
-    else
-      echo "failed $rc"
-    fi
+    echo "failed no-table"
   fi
 fi
 echo end
