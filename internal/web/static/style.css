@@ -278,7 +278,8 @@ details.adv>div{display:grid;gap:16px;margin-top:14px}
 .alert .m button{background:none;border:0;padding:0;color:var(--accent);font-size:11px}
 .empty{padding:40px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:4px}
 
-.settings{display:grid;gap:14px;max-width:560px}
+.settings{display:grid;gap:14px;max-width:1180px;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));align-items:start}
+.settings>h1,.settings>.form-foot{grid-column:1/-1}
 .settings .panel{display:grid;gap:14px}
 .settings .row{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .settings .row select,.settings .row input{width:auto;min-width:120px;padding:6px 10px}
@@ -289,6 +290,7 @@ details.adv>div{display:grid;gap:16px;margin-top:14px}
 .filter{max-width:200px;padding:6px 10px}
 .fleet-filter{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:-8px 0 16px}
 .fleet-filter .filter{max-width:320px;flex:1 1 220px}
+.svc-filter select{width:auto;padding:6px 10px}
 .thead-tools{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:8px}
 
 @media (max-width:820px){
