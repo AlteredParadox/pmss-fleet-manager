@@ -44,6 +44,7 @@ const S = {
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
   settingsOpen: false, settingsTab: 'general', lastHash: 'fleet', // the settings dialog, its section, and the page it opened over
+  settingsSaving: false, routed: false, // a save in flight (the dialog is locked until it settles); a page has been routed
   transfers: null, // box-to-box copies from /api/transfers, loaded on a box's transfers tab
   cmp: { days: 7, data: null, busy: false, err: '', sort: { key: 'free', dir: 'desc' } }, // the comparison view
   hist: null, // the history tab's last answer: { box, days, data, busy, err, at }
@@ -221,12 +222,16 @@ function route() {
   const view = parts[0] || 'fleet';
   // #/settings opens the dialog over the page it was opened from (or the
   // fleet, on a fresh load) and leaves that page's address in the bar.
+  // A page already on show is left exactly as it is (an edit form keeps its
+  // draft, a box keeps its tab): only a fresh load routes the page under it
+  // (fred on #232).
   if (view === 'settings') {
     history.replaceState(null, '', `#/${S.lastHash}`);
     openSettings(parts[1]);
-    route();
+    if (!S.routed) route();
     return;
   }
+  S.routed = true;
   S.lastHash = h || 'fleet';
   S.view = ['fleet', 'torrents', 'compare', 'box', 'add', 'alerts', 'services', 'edit'].includes(view) ? view : 'fleet';
   if (S.view === 'compare') void loadCompare();
@@ -583,7 +588,7 @@ function openSettings(tab) {
 // closeSettings drops the draft (asking first when something was changed)
 // and puts the saved theme back if a preview was showing.
 function closeSettings() {
-  if (!S.settingsOpen) return;
+  if (!S.settingsOpen || S.settingsSaving) return; // a save in flight settles first
   if (settingsDirty() && !confirm('Discard the settings you changed?')) return;
   S.settingsOpen = false; S.settingsDraft = null; S.settingsTouched = {};
   applyTheme(S.settings.theme);
@@ -613,6 +618,7 @@ function renderSettings() {
   const pane0 = d.querySelector('.dlg-pane');
   const scroll = pane0 && pane0.dataset.pane === S.settingsTab ? pane0.scrollTop : 0; // a new section starts at its top
   d.innerHTML = viewSettings();
+  if (S.settingsSaving) d.querySelector('.dlg-pane fieldset')?.setAttribute('disabled', '');
   const pane = d.querySelector('.dlg-pane');
   if (pane) pane.scrollTop = scroll;
   const el = key ? d.querySelector(key) : null;
@@ -2467,7 +2473,7 @@ function viewSettings() {
     <div class="dlg-head"><h2 id="settings-title">Settings</h2><button class="dlg-x" data-act="settings:close" aria-label="close settings" title="close (Esc)">×</button></div>
     <div class="dlg-body">
       <div class="dlg-tabs" role="tablist" aria-label="settings sections">${SETTINGS_TABS.map(([k, l]) => `<button role="tab" aria-selected="${k === tab}" class="${k === tab ? 'on' : ''}" data-act="settings:tab" data-stab="${k}">${esc(l)}</button>`).join('')}</div>
-      <div class="dlg-pane settings" role="tabpanel" data-pane="${tab}">${panels[tab]()}</div>
+      <div class="dlg-pane" role="tabpanel" data-pane="${tab}"><fieldset class="settings">${panels[tab]()}</fieldset></div>
     </div>
     <div class="dlg-foot">${settingsFoot()}</div>
   </div>
@@ -2477,6 +2483,7 @@ function viewSettings() {
 // field being typed in keeps its caret.
 function settingsFoot() {
   const dirty = settingsDirty();
+  if (S.settingsSaving) return '<span class="muted">saving…</span><button disabled>cancel</button><button class="primary" disabled>save</button>';
   return `${dirty ? '<span class="muted">unsaved changes</span>' : ''}<button data-act="settings:close">${dirty ? 'cancel' : 'close'}</button><button class="primary" data-act="settings:save" ${dirty ? '' : 'disabled'}>save</button>`;
 }
 const settingsDirty = () => Object.keys(S.settingsTouched || {}).length > 0;
@@ -2588,6 +2595,7 @@ document.addEventListener('click', async (e) => {
   if (tab) {
     S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; S.logView = null; S.logOpen = new Set();
     history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`);
+    S.lastHash = `box/${S.selId}/${S.tab}`; // the settings dialog returns here
     if (S.tab === 'logs') rescanLogsIfStale();
     if (S.tab === 'transfers') void loadTransfers();
     if (S.tab === 'history') void loadHistory(S.selId);
@@ -2596,6 +2604,7 @@ document.addEventListener('click', async (e) => {
   }
   if (e.target.classList?.contains('dlg-scrim')) { closeSettings(); return; }
   const seg = e.target.closest('[data-s-seg]');
+  if (seg && S.settingsSaving) return;
   if (seg) {
     S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; S.settingsTouched[seg.dataset.sSeg] = true;
     if (seg.dataset.sSeg === 'theme') { applyTheme(seg.dataset.v); }
@@ -2765,20 +2774,29 @@ async function alertsAction(a, act) {
   else if (a === 'alert:dismiss') { act.disabled = true; await api('DELETE', `${BASE}/api/alerts/${act.dataset.id}`); await loadAlerts(); }
   else if (a === 'alerts:clear-resolved') { await api('POST', BASE + '/api/alerts/clear-resolved'); toast('resolved alerts cleared', 'ok'); await loadAlerts(); }
 }
+// saveSettings sends the touched fields and adopts the answer as the draft.
+async function saveSettings() {
+  // Only the fields touched in this tab go up (plus the API-key
+  // operation): the server merges them onto its current settings, so a
+  // save here cannot revert a change another tab made meanwhile, even one
+  // whose settings event has not reached this tab yet.
+  const d = settingsPatch(S.settingsDraft, S.settingsTouched);
+  const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
+  const pmdbChanged = 'pmdb_enabled' in d || 'pmdb_username' in d;
+  const saved = await api('PUT', BASE + '/api/settings', d);
+  stateSeq++; // a state load started before the save must not put the old values back
+  S.settings = saved; S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render(); renderSettings();
+  if (keyChanged) { S.services = null; servicesSeq++; setTimeout(loadServices, 1500); }
+  if (pmdbChanged) void loadPMDB(); // the first check runs a few seconds later and announces itself with a pmdb event
+}
 async function settingsAction(a, act) {
   if (a === 'settings:save') {
-    // Only the fields touched in this tab go up (plus the API-key
-    // operation): the server merges them onto its current settings, so a
-    // save here cannot revert a change another tab made meanwhile, even one
-    // whose settings event has not reached this tab yet.
-    const d = settingsPatch(S.settingsDraft, S.settingsTouched);
-    const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
-    const pmdbChanged = 'pmdb_enabled' in d || 'pmdb_username' in d;
-    const saved = await api('PUT', BASE + '/api/settings', d);
-    stateSeq++; // a state load started before the save must not put the old values back
-    S.settings = saved; S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render(); renderSettings();
-    if (keyChanged) { S.services = null; servicesSeq++; setTimeout(loadServices, 1500); }
-    if (pmdbChanged) void loadPMDB(); // the first check runs a few seconds later and announces itself with a pmdb event
+    // The dialog is locked while the save is in flight: no edits that the
+    // answer would overwrite, no second save, no closing on a draft that is
+    // still being committed. A failure keeps the draft (fred on #232).
+    if (S.settingsSaving) return;
+    S.settingsSaving = true; renderSettings();
+    try { await saveSettings(); } finally { S.settingsSaving = false; renderSettings(); }
   }
   else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; S.settingsTouched.clear_pm_api_key = true; renderSettings(); }
   else if (a === 'settings:open') openSettings();
@@ -2912,7 +2930,7 @@ document.addEventListener('input', (e) => {
     return;
   }
   const s = e.target.closest('[data-s]');
-  if (s && S.settingsDraft) {
+  if (s && S.settingsDraft && !S.settingsSaving) {
     S.settingsDraft[s.dataset.s] = s.type === 'checkbox' ? s.checked : s.value; S.settingsTouched[s.dataset.s] = true;
     if (s.dataset.s === 'pm_api_key' && s.value) S.settingsDraft.clear_pm_api_key = false; // a key typed after "remove" replaces instead
     const foot = $('.dlg-foot');
