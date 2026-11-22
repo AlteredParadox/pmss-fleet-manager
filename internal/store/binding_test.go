@@ -607,6 +607,7 @@ func TestRestoreRebuildOlderSchema(t *testing.T) {
 	rawExec(t, backup, `DELETE FROM boxes WHERE id=?`, b)
 	rawExec(t, backup, `ALTER TABLE boxes DROP COLUMN listener_only`)
 	rawExec(t, backup, `ALTER TABLE boxes DROP COLUMN cpu_weight`)
+	rawExec(t, backup, `DROP TABLE box_history`) // a table an older version did not have
 	live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
 	if _, err := Restore(ctx, live, backup, true, sealA); err != nil {
 		t.Fatal(err)
@@ -702,5 +703,88 @@ func TestRestoreRebuildCountersAndAlerts(t *testing.T) {
 	}
 	if nb.ID <= b2 {
 		t.Fatalf("new box got ID %d, the deleted ones went up to %d", nb.ID, b2)
+	}
+}
+
+// Only duplicate active alerts are left out of the copy: any other alert
+// row this schema refuses fails the restore, and the live database stays
+// (fred on #222).
+func TestRestoreRebuildRefusesBadAlertRow(t *testing.T) {
+	ctx := context.Background()
+	sealA := WithSealer(mustSealer(t, backupKeyA))
+	dir := t.TempDir()
+	backup, a, _ := boundBackup(t, dir)
+	for _, q := range []string{
+		`ALTER TABLE alerts RENAME TO alerts_old`,
+		`CREATE TABLE alerts (id INTEGER PRIMARY KEY, box_id INTEGER, key TEXT, severity TEXT, title TEXT, active INTEGER, acked INTEGER, created_at TEXT, updated_at TEXT, resolved_at TEXT)`,
+		`DROP TABLE alerts_old`,
+	} {
+		rawExec(t, backup, q)
+	}
+	rawExec(t, backup, `INSERT INTO alerts(box_id, key, severity, title, active, acked, created_at, updated_at) VALUES(?, 'disk', 'warn', NULL, 0, 0, 'x', 'x')`, a)
+	live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
+	liveStore(t, live, "current", sealA).Close()
+	if _, err := Restore(ctx, live, backup, true, sealA); err == nil || !strings.Contains(err.Error(), "table alerts") {
+		t.Fatalf("restore: %v", err)
+	}
+	if got := boxNames(t, live, sealA); len(got) != 1 || got[0] != "current/pw-current" {
+		t.Fatalf("a refused restore changed the database: %v", got)
+	}
+}
+
+// rebuild writes only a new file: an existing one is refused, not reused.
+func TestRebuildRefusesExistingDestination(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	backup, _, _ := boundBackup(t, dir)
+	dst := filepath.Join(dir, "exists.db")
+	if err := os.WriteFile(dst, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rebuild(ctx, backup, dst); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("rebuild over an existing file: %v", err)
+	}
+}
+
+// An edit that moves a box whose stored credential no longer opens (written
+// behind the store's back) fails with the credential named, and changes
+// nothing.
+func TestUpdateBoxMoveWithUnreadableCredential(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path, WithSealer(mustSealer(t, backupKeyA)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	b := &Box{Name: "a", Host: "odin.example", User: "ragnar", Password: "pw", QbtPass: "qp", Enabled: true}
+	if err := s.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	other := mustSealer(t, backupKeyB)
+	bind := boxBinding(b.ID, b.Host, b.Port, b.User)
+	for col, label := range map[string]string{"password": labelPassword, "qbt_pass": labelQbtPass} {
+		if _, err := s.db.Exec(`UPDATE boxes SET `+col+`=? WHERE id=?`, other.SealBound(label, bind, "x"), b.ID); err != nil {
+			t.Fatal(err)
+		}
+		edit := *b
+		edit.Host, edit.Password, edit.QbtPass = "thor.example", "", ""
+		if col == "password" {
+			edit.QbtPass = "new-qp" // only the password is kept
+		} else {
+			edit.Password = "new-pw" // only the WebUI password is kept
+		}
+		err := s.UpdateBox(ctx, &edit, Clears{})
+		if !errors.Is(err, secrets.ErrWrongKey) {
+			t.Fatalf("%s: %v", col, err)
+		}
+		var host string
+		if err := s.db.QueryRow(`SELECT host FROM boxes WHERE id=?`, b.ID).Scan(&host); err != nil || host != "odin.example" {
+			t.Fatalf("%s: host %q %v", col, host, err)
+		}
+		if _, err := s.db.Exec(`UPDATE boxes SET password=?, qbt_pass=? WHERE id=?`,
+			mustSealer(t, backupKeyA).SealBound(labelPassword, bind, "pw"), mustSealer(t, backupKeyA).SealBound(labelQbtPass, bind, "qp"), b.ID); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

@@ -383,14 +383,15 @@ func rebuild(ctx context.Context, src, dst string) error {
 		// statement's text. An old backup may hold several active alerts
 		// for one box and key, which the migration used to collapse onto
 		// the oldest before creating the unique index; this schema has the
-		// index already, so the oldest is kept by copying in rowid order
-		// and ignoring the rest (Codex on #222).
-		verb, order := `INSERT`, ``
-		if t.name == "alerts" {
-			verb, order = `INSERT OR IGNORE`, ` ORDER BY rowid`
+		// index already, so the same rule picks the rows to copy (Codex on
+		// #222). Only those duplicates are left out: any other row this
+		// schema refuses fails the restore (fred on #222).
+		where := ``
+		if t.name == "alerts" && have.has("alerts", "id") && have.has("alerts", "active") && have.has("alerts", "box_id") && have.has("alerts", "key") {
+			where = ` WHERE NOT (active=1 AND id NOT IN (SELECT MIN(id) FROM bk.alerts WHERE active=1 GROUP BY box_id, key))`
 		}
-		q := verb + ` INTO main.` + quoteIdent(t.name) + ` (` + list + `) SELECT ` + list + ` FROM bk.` + quoteIdent(t.name) + order // NOSONAR: identifiers from this build's schema, not from the backup
-		if _, err := db.ExecContext(ctx, q); err != nil {
+		q := `INSERT INTO main.` + quoteIdent(t.name) + ` (` + list + `) SELECT ` + list + ` FROM bk.` + quoteIdent(t.name) + where
+		if _, err := db.ExecContext(ctx, q); err != nil { // NOSONAR: identifiers from this build's schema, not from the backup
 			return fmt.Errorf("table %s: %w", t.name, err)
 		}
 	}

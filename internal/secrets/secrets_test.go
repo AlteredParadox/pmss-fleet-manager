@@ -286,6 +286,9 @@ func TestSealBound(t *testing.T) {
 	if _, err := sl.OpenBound("boxes.password", "b", sealed); !errors.Is(err, ErrBoundWrong) {
 		t.Fatalf("not ErrBoundWrong: %v", err)
 	}
+	if msg := ErrBoundWrong.Error(); !strings.Contains(msg, "host, port or user") {
+		t.Fatalf("message %q", msg)
+	}
 	// A version-1 value is never opened as bound, whatever its key.
 	if _, err := sl.OpenBound("boxes.password", "b", sl.Seal("boxes.password", "secret")); !errors.Is(err, ErrUnbound) {
 		t.Fatalf("v1: %v", err)
