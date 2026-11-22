@@ -733,6 +733,31 @@ function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
 }
 
+/* fleetFilter: the overview's search and status choice, for a fleet too
+   big to scan. Every word of the query must appear (case-insensitively) in
+   one of the texts fields(b) gives for a box (app.js's boxSearchText).
+   statuses counts the boxes the words match,
+   one entry per status among them in FLEET_STATUS order; the chosen
+   status stays listed at 0 so it can be cleared. shown is the matching
+   boxes of the chosen status (any when none is), in their order. */
+const FLEET_STATUS = ['online', 'degraded', 'pending', 'offline', 'disabled'];
+function fleetFilter(boxes, query, status, fields) {
+  const words = String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  const hit = (b) => {
+    if (!words.length) return true;
+    const text = fields(b).map((v) => String(v ?? '').toLowerCase()).join('\n');
+    return words.every((w) => text.includes(w));
+  };
+  const matched = boxes.filter(hit);
+  const count = new Map();
+  for (const b of matched) count.set(b.status, (count.get(b.status) || 0) + 1);
+  if (status && !count.has(status)) count.set(status, 0);
+  const rank = (k) => { const i = FLEET_STATUS.indexOf(k); return i < 0 ? FLEET_STATUS.length : i; };
+  const statuses = [...count].map(([key, n]) => ({ key, count: n, on: key === status }))
+    .sort((a, b) => rank(a.key) - rank(b.key) || (a.key < b.key ? -1 : 1));
+  return { statuses, shown: status ? matched.filter((b) => b.status === status) : matched, filtered: words.length > 0 || !!status };
+}
+
 /* compareSlowPct: the threshold the shown slow-hour counts were made at.
    The comparison keeps its last answer on show while a refresh is
    outstanding or after one failed, so after a change of the setting the
@@ -743,5 +768,5 @@ function compareSlowPct(data, days, current) {
   return counted === null ? { pct: current, stale: false } : { pct: counted, stale: counted !== current };
 }
 
-globalThis.pfmView = { serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, compareSlowPct, estimateLines };
+globalThis.pfmView = { fleetFilter, serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, compareSlowPct, estimateLines };
 })();

@@ -286,6 +286,8 @@ details.adv>div{display:grid;gap:16px;margin-top:14px}
 .toast.ok{border-left-color:var(--ok)}
 .toast.warn{border-left-color:var(--warn)}
 .filter{max-width:200px;padding:6px 10px}
+.fleet-filter{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:-8px 0 16px}
+.fleet-filter .filter{max-width:320px;flex:1 1 220px}
 .thead-tools{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:8px}
 
 @media (max-width:820px){

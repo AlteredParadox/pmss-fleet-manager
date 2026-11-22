@@ -24,6 +24,9 @@ card's title line and in its own table column), host CPU model
 (and hardware encoder, e.g. Intel QSV on N100 hosts), qBittorrent version with
 an update flag, and plan tags. Headline tiles for total storage, upload,
 aggregate bandwidth, torrents, containers, next renewal and monthly cost.
+A search box above the boxes narrows both views by name, host, type, plan or
+CPU (every word must match), and a status choice shows only the online,
+degraded or offline ones; the tiles stay fleet-wide.
 
 **Torrents.** Every seedbox's torrents in one table, busiest first, with
 the same columns as the per-box tab (name, size, progress, rates, lifetime
