@@ -1454,6 +1454,15 @@ Newest first; each release's full notes are on the
 
 **Unreleased**
 
+- **Boxes with the same name read apart everywhere.** Where a box is
+  named away from its own page (the alerts list, the fleet torrents list
+  and its notes, the Services table, the password panel and its
+  confirmation, and the remove, delete-files, autostart and listener-only
+  confirmations), it is shown as *name — user@host*, with *:port* when it
+  is not 22, as the transfer forms have since 1.21. A fleet with many
+  boxes named alike (often the account name on each machine) no longer
+  shows one bare name for all of them. The torrents filter matches the
+  user and host too.
 - **A custom qBittorrent download URL needs a sha256** (Codex audit of
   1.23.0). Install used to go ahead unverified when the URL was not a
   GitHub release asset. Now any URL other than the default needs a digest:
