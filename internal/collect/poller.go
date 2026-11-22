@@ -964,7 +964,8 @@ func (p *poller) apply(st *BoxState, snap *probe.Snapshot) {
 
 	q := snap.Quota
 	st.Disk = DiskState{OK: q.OK, UsedBytes: q.UsedBytes, QuotaBytes: q.SoftBytes, HardBytes: q.HardBytes,
-		FilesUsed: q.FilesUsed, FilesSoft: q.FilesSoft, Source: q.Source, AgeSec: int64(q.Age.Seconds())}
+		FilesUsed: q.FilesUsed, FilesSoft: q.FilesSoft, Source: q.Source, AgeSec: int64(q.Age.Seconds()),
+		BonusPct: q.BonusPct, BonusBytes: gibToBytes(q.BonusGiB)}
 	if st.Disk.QuotaBytes == 0 && snap.Account.QuotaGiB > 0 {
 		st.Disk.QuotaBytes = gibToBytes(snap.Account.QuotaGiB)
 	}

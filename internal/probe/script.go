@@ -125,6 +125,11 @@ sec df_home; bounded 10 df -B1 --output=size,used,avail,fstype "$home" | tail -n
 sec quota; bounded 10 quota -v -w
 sec quota_file; cat "$home/.quota" 2>/dev/null
 sec quota_mtime; stat -c %Y "$home/.quota" 2>/dev/null
+# The disk bonus: a percentage, and the GiB it buys (base * pct / 100, as
+# PMSS writes it). Root-owned but group-readable; a box without a bonus has
+# neither file, and the parser then shows no bonus rather than zero.
+sec disk_bonus; cat "$home/.bonus" 2>/dev/null
+sec disk_bonus_quota; cat "$home/.bonusQuota" 2>/dev/null
 sec traffic; head -c 262145 "$home/.trafficData" 2>/dev/null
 sec traffic_in; head -c 262145 "$home/.trafficDataIngress" 2>/dev/null
 sec traffic_limit; cat "$home/.trafficLimit" 2>/dev/null

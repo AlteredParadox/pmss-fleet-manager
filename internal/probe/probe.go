@@ -633,6 +633,8 @@ type QuotaInfo struct {
 	FilesSoft int64
 	Source    string // "quota", "file", or "quota+file" (live limits, the fresher ~/.quota's usage)
 	Age       time.Duration
+	BonusPct  float64 // ~/.bonus: the disk bonus in percent, 0 when the box has none
+	BonusGiB  float64 // ~/.bonusQuota: the quota that percentage adds
 }
 
 // TrafficSeries is one of PMSS's serialized traffic snapshots.
@@ -1409,6 +1411,14 @@ func sameLimit(file, live int64) bool {
 
 func parseQuota(s map[string]string, now time.Time) QuotaInfo {
 	q := QuotaInfo{}
+	// Read before the quota itself: the bonus is its own pair of files and
+	// still means something when quota -v fails.
+	if v, err := strconv.ParseFloat(strings.TrimSpace(s["disk_bonus"]), 64); err == nil && v > 0 {
+		q.BonusPct = v
+	}
+	if v, err := strconv.ParseFloat(strings.TrimSpace(s["disk_bonus_quota"]), 64); err == nil && v > 0 {
+		q.BonusGiB = v
+	}
 	file, fileOK := parseQuotaLine(s["quota_file"])
 	var age time.Duration
 	ageOK := false

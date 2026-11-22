@@ -68,6 +68,10 @@ Disk quotas for user ragnar (uid 1001):
       /dev/md2 1739461632* 2097152000 2621440000   6days   12345 1000000 1250000        
 @@quota_file
 @@quota_mtime
+@@disk_bonus
+37
+@@disk_bonus_quota
+2679
 @@traffic
 a:2:{s:3:"raw";a:5:{s:5:"month";d:6963.25;s:4:"week";i:1200;s:3:"day";d:0;s:4:"hour";d:12.5;s:5:"15min";d:3;}s:5:"daily";a:2:{s:10:"2026/10/15";d:220.5;s:10:"2026/10/16";i:40;}}
 @@traffic_in
@@ -154,6 +158,9 @@ func TestParse(t *testing.T) {
 	q := snap.Quota
 	if !q.OK || q.Source != "quota" || q.UsedBytes != 1739461632*1024 || q.SoftBytes != 2097152000*1024 || q.FilesUsed != 12345 {
 		t.Fatalf("quota: %+v", q)
+	}
+	if q.BonusPct != 37 || q.BonusGiB != 2679 {
+		t.Fatalf("disk bonus: %+v", q)
 	}
 	tr := snap.Traffic
 	if !tr.Out.OK || tr.Out.MonthMiB != 6963.25 || tr.Out.Daily["2026/10/16"] != 40 {
@@ -446,6 +453,19 @@ func TestQuotaContainerUsage(t *testing.T) {
 		if !q.OK || q.Source != c.source || q.UsedBytes != c.used || q.FilesUsed != c.files || q.SoftBytes != 2097152000<<10 || q.HardBytes != 2621440000<<10 {
 			t.Errorf("%s: %+v", c.name, q)
 		}
+	}
+}
+
+// The disk bonus is its own pair of files, so it survives a quota command
+// that failed, and absent files mean no bonus rather than a zero one.
+func TestParseQuotaBonusAlone(t *testing.T) {
+	q := parseQuota(map[string]string{"disk_bonus": "37", "disk_bonus_quota": "2679"}, time.Now())
+	if q.OK || q.BonusPct != 37 || q.BonusGiB != 2679 {
+		t.Fatalf("without quota: %+v", q)
+	}
+	q = parseQuota(map[string]string{"quota": "Disk quotas for user u (uid 1):\n     Filesystem   space   quota   limit   grace   files   quota   limit   grace\n       /dev/md2   1659G   2000G   2500G           12345   1000k   1250k\n"}, time.Now())
+	if !q.OK || q.BonusPct != 0 || q.BonusGiB != 0 {
+		t.Fatalf("without bonus files: %+v", q)
 	}
 }
 
