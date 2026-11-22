@@ -413,9 +413,9 @@ type Listener struct {
 // socket cookie, the kernel's 64-bit socket identity, never reused. Any
 // other row a 127.0.0.1 dial could reach makes it ambiguous; rows for
 // other addresses (127.0.0.2, ::1) do not count. Rows are trusted only
-// when the /proc tables are unreadable to this account (ltab denied), so
-// they can only come from the kernel's socket diagnostics, and only from
-// a complete output.
+// when the /proc tables are unreadable to this account (ltab denied) and
+// our row carries the field only ss's inet-diag path prints, so they come
+// from the kernel's socket diagnostics, and only from a complete output.
 func ListenerIdentity(out []byte, port, uid int) Listener {
 	var rows, others [][]string
 	rc, denied, end := -1, false, false
@@ -428,11 +428,15 @@ func ListenerIdentity(out []byte, port, uid int) Listener {
 			rc, _ = strconv.Atoi(f[1])
 		case len(f) == 2 && f[0] == "ltab":
 			denied = f[1] == "denied"
-		case len(f) == 5 && f[0] == "l" && f[1] == strconv.Itoa(port):
+		case len(f) == 6 && f[0] == "l" && f[1] == strconv.Itoa(port):
+			// Only the unscoped address itself is evidence for the
+			// unscoped IPv4 dial; a scoped row (127.0.0.1%lo) is another
+			// listener the dial might reach (fred on #219).
+			base, _, _ := strings.Cut(f[4], "%")
 			switch {
 			case f[4] == "127.0.0.1":
 				rows = append(rows, f)
-			case loopbackReachable(f[4]):
+			case loopbackReachable(base):
 				others = append(others, f)
 			}
 		}
@@ -466,9 +470,11 @@ func ListenerIdentity(out []byte, port, uid int) Listener {
 	case owner != uid:
 		return Listener{Status: ListenForeign, UID: owner, Reason: fmt.Sprintf("port %d is held by uid %d, not by this account", port, owner)}
 	case !native:
-		return Listener{Status: ListenMalformed, UID: owner, Reason: fmt.Sprintf("the listener on port %d is not bound to 127.0.0.1 itself, which this check needs", port)}
+		return Listener{Status: ListenMalformed, UID: owner, Reason: fmt.Sprintf("the WebUI on port %d is not bound to 127.0.0.1 itself, which this check needs on a box that hides its socket tables; set qBittorrent's WebUI address to 127.0.0.1", port)}
 	case f[3] == "?":
 		return Listener{Status: ListenMalformed, UID: owner, Reason: "ss printed a malformed socket cookie"}
+	case f[5] != "1":
+		return Listener{Status: ListenUnavailable, UID: owner, Reason: "ss's listing does not show it came from the kernel's socket diagnostics"}
 	case f[3] == "-":
 		return Listener{Status: ListenNoCookie, UID: owner, Reason: "ss did not report the listener's socket cookie"}
 	}

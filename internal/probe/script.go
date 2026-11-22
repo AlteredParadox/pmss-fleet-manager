@@ -357,20 +357,26 @@ const listenViaSS = `timeout 10 ss -Hltne 2>/dev/null | awk '` + ssListenAwk + `
 // socket's owner chooses, so text that can read "uid:<ours>") is never
 // looked at; a row that does not have that shape is x, which refuses.
 const ssListenAwk = `function ck(f) { if (f !~ /^sk:/) return "-"; f=substr(f,4); return (f ~ /^[0-9a-f]+$/ && length(f) <= 16 && f !~ /^0+$/) ? f : "?" }
-$1=="LISTEN"{n=split($4,a,":"); p=a[n]; ad=substr($4,1,length($4)-length(p)-1); sub(/%.*/,"",ad); u="x"; k="-"
-  if ($6 ~ /^uid:[0-9]+$/ && $7 ~ /^ino:[0-9]+$/) { u=substr($6,5); k=ck($8) }
-  else if ($6 ~ /^ino:[0-9]+$/) { u=0; k=ck($7) }`
+$1=="LISTEN"{n=split($4,a,":"); p=a[n]; sc=substr($4,1,length($4)-length(p)-1); ad=sc; sub(/%.*/,"",ad); u="x"; k="-"; i=0
+  if ($6 ~ /^uid:[0-9]+$/ && $7 ~ /^ino:[0-9]+$/) { u=substr($6,5); k=ck($8); i=(k=="-") ? 8 : 9 }
+  else if ($6 ~ /^ino:[0-9]+$/) { u=0; k=ck($7); i=(k=="-") ? 7 : 8 }
+  nl=(i > 0 && $i ~ /^cgroup:/) ? 1 : 0;`
 
 // listenIdentShell prints the listening sockets on $port as ss reports them
-// to this account, "l <port> <uid|x> <cookie|-|?> <addr>" each, "lrc <rc>"
-// for ss's exit status, and "ltab denied" when /proc/net/tcp and tcp6 are
-// both unreadable to this account: ss then has no /proc table to fall back
-// to, so its rows (and their cookies) come from the kernel's live socket
-// diagnostics. What ListenerIdentity reads. It needs $port.
-const listenIdentShell = `lo=$(timeout 10 ss -Hltne "sport = :$port" 2>/dev/null); lrc=$?
-lr=denied; for lt in ${PMSS_TCP_TABLES:-/proc/net/tcp /proc/net/tcp6}; do [ -r "$lt" ] && lr=readable; done; echo "ltab $lr"
+// to this account, "l <port> <uid|x> <cookie|-|?> <addr[%scope]> <nl>"
+// each (nl: 1 when the row carries the cgroup field right after the kernel
+// fields, which only ss's netlink (inet-diag) path prints, never its /proc
+// fallback; the field's text, the owner's to choose, is never read),
+// "lrc <rc>" for ss's exit status, and "ltab denied" when /proc/net/tcp
+// and tcp6 are both unreadable to this account, before and after ss ran.
+// The variables that point ss at other inputs are unset. What
+// ListenerIdentity reads. It needs $port.
+const listenIdentShell = `unset PROC_NET_TCP PROC_ROOT TCPDIAG_FILE
+lr=denied; for lt in ${PMSS_TCP_TABLES:-/proc/net/tcp /proc/net/tcp6}; do [ -r "$lt" ] && lr=readable; done
+lo=$(timeout 10 ss -Hltne "sport = :$port" 2>/dev/null); lrc=$?
+for lt in ${PMSS_TCP_TABLES:-/proc/net/tcp /proc/net/tcp6}; do [ -r "$lt" ] && lr=readable; done; echo "ltab $lr"
 echo "lrc $lrc"
-[ -n "$lo" ] && printf '%s\n' "$lo" | awk '` + ssListenAwk + ` print "l", p, u, k, ad}'
+[ -n "$lo" ] && printf '%s\n' "$lo" | awk '` + ssListenAwk + ` print "l", p, u, k, sc, nl}'
 `
 
 // ListenerScript reports the listening socket on 127.0.0.1:<port> for the

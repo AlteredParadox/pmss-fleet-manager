@@ -539,8 +539,8 @@ func TestVerifiedDial(t *testing.T) {
 	bad := fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\ns BEEF %d 05 0100007F 4242 00\nend\n", uid, uid, uid+1)
 	// Tables denied; ss reports the listener's uid but no cookie: the
 	// opt-in's case (continuity has nothing to compare).
-	privacy := fmt.Sprintf("uid %d\nprivacy\nlrc 0\nltab denied\nl 8089 %d - 127.0.0.1\nend\n", uid, uid)
-	pre := fmt.Sprintf("lrc 0\nltab denied\nl 8089 %d - 127.0.0.1\nend\n", uid)
+	privacy := fmt.Sprintf("uid %d\nprivacy\nlrc 0\nltab denied\nl 8089 %d - 127.0.0.1 1\nend\n", uid, uid)
+	pre := fmt.Sprintf("lrc 0\nltab denied\nl 8089 %d - 127.0.0.1 1\nend\n", uid)
 	ctx := context.Background()
 	var modes []string
 	optIn := false
@@ -607,8 +607,8 @@ func TestVerifiedDial(t *testing.T) {
 func TestSetListenerOnlyClosesConnections(t *testing.T) {
 	ctx := context.Background()
 	uid := os.Getuid()
-	privacy := fmt.Sprintf("uid %d\nprivacy\nlrc 0\nltab denied\nl 8089 %d - 127.0.0.1\nend\n", uid, uid)
-	pre := fmt.Sprintf("lrc 0\nltab denied\nl 8089 %d - 127.0.0.1\nend\n", uid)
+	privacy := fmt.Sprintf("uid %d\nprivacy\nlrc 0\nltab denied\nl 8089 %d - 127.0.0.1 1\nend\n", uid, uid)
+	pre := fmt.Sprintf("lrc 0\nltab denied\nl 8089 %d - 127.0.0.1 1\nend\n", uid)
 	full := fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\ns BEEF %d 01 0100007F 4242 00\nend\n", uid, uid, uid)
 	eof := func(f *fakeTunnel) bool {
 		f.server.SetReadDeadline(time.Now().Add(time.Second))
@@ -658,7 +658,7 @@ func TestSetListenerOnlyAbortsRequestInFlight(t *testing.T) {
 	p.listenerOnly.Store(true)
 	cli, box := net.Pipe()
 	defer box.Close()
-	pt := &pipeTunnel{conn: cli, out: fmt.Sprintf("uid %d\nprivacy\nlrc 0\nltab denied\nl 8089 %d - 127.0.0.1\nend\n", uid, uid), pre: fmt.Sprintf("lrc 0\nltab denied\nl 8089 %d - 127.0.0.1\nend\n", uid)}
+	pt := &pipeTunnel{conn: cli, out: fmt.Sprintf("uid %d\nprivacy\nlrc 0\nltab denied\nl 8089 %d - 127.0.0.1 1\nend\n", uid, uid), pre: fmt.Sprintf("lrc 0\nltab denied\nl 8089 %d - 127.0.0.1 1\nend\n", uid)}
 	dial := verifiedDial(pt, "127.0.0.1:8089", 8089, p.verifyPolicy())
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) }}}
 	got := make(chan struct{})
@@ -804,7 +804,7 @@ func TestVerifiedDialContinuity(t *testing.T) {
 	uid := os.Getuid()
 	ctx := context.Background()
 	row := func(owner int, cookie, addr string) string {
-		return fmt.Sprintf("l 8089 %d %s %s\n", owner, cookie, addr)
+		return fmt.Sprintf("l 8089 %d %s %s 1\n", owner, cookie, addr)
 	}
 	pre := func(rows string) string { return "lrc 0\nltab denied\n" + rows + "end\n" }
 	post := func(rows string) string {
@@ -828,7 +828,7 @@ func TestVerifiedDialContinuity(t *testing.T) {
 			"a second listener":    {pre: pre(ours), out: post(ours + row(uid+1, "9", "[::]"))},
 			"gone after":           {pre: pre(ours), out: post("")},
 			"no owner before":      {pre: "lrc 1\nend\n", out: post(ours)},
-			"no owner either side": {pre: pre("l 8089 x - 127.0.0.1\n"), out: post("l 8089 x - 127.0.0.1\n")},
+			"no owner either side": {pre: pre("l 8089 x - 127.0.0.1 1\n"), out: post("l 8089 x - 127.0.0.1 1\n")},
 		} {
 			_, err := verifiedDial(f, "127.0.0.1:8089", 8089, pol)(ctx)
 			if err == nil {
@@ -856,9 +856,9 @@ func TestVerifiedDialContinuityStrictFallback(t *testing.T) {
 	post := func(rows string) string {
 		return fmt.Sprintf("uid %d\nprivacy\nlrc 0\nltab denied\n%send\n", uid, rows)
 	}
-	withCookie := fmt.Sprintf("l 8089 %d 4005 127.0.0.1\n", uid)
-	noCookie := fmt.Sprintf("l 8089 %d - 127.0.0.1\n", uid)
-	malformed := fmt.Sprintf("l 8089 %d ? 127.0.0.1\n", uid)
+	withCookie := fmt.Sprintf("l 8089 %d 4005 127.0.0.1 1\n", uid)
+	noCookie := fmt.Sprintf("l 8089 %d - 127.0.0.1 1\n", uid)
+	malformed := fmt.Sprintf("l 8089 %d ? 127.0.0.1 1\n", uid)
 	pol := verifyPolicy{allow: func() bool { return true }}
 	for name, f := range map[string]*fakeTunnel{
 		"cookie before only":    {pre: pre(withCookie), out: post(noCookie)},
