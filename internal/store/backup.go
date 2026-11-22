@@ -157,24 +157,27 @@ func Inspect(ctx context.Context, path string) (Summary, error) {
 		return sum, err
 	}
 	defer db.Close()
+	// The dashboard's schema has no triggers, views, virtual or shadow
+	// tables. One in a file someone else could have edited would run, or
+	// answer, in place of the rows the checks below and the restore's
+	// writes (migrations, re-encryption, drop) mean, so the file is
+	// refused before anything writes to it, and before quick_check walks
+	// it (a virtual table's module would run). The table kinds are
+	// SQLite's own (pragma_table_list), not read from the schema text.
+	var foreign int
+	if err := db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM pragma_table_list WHERE schema='main' AND type<>'table')
+		+ (SELECT count(*) FROM sqlite_master WHERE type='trigger')`).Scan(&foreign); err != nil {
+		return sum, fmt.Errorf("not a readable SQLite database: %w", err)
+	}
+	if foreign > 0 {
+		return sum, fmt.Errorf("%w: it holds %d trigger(s), view(s), virtual or shadow table(s), which this dashboard never creates", ErrForeignSchema, foreign)
+	}
 	var check string
 	if err := db.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&check); err != nil {
 		return sum, fmt.Errorf("not a readable SQLite database: %w", err)
 	}
 	if check != "ok" {
 		return sum, fmt.Errorf("the database is damaged: %s", check)
-	}
-	// The dashboard's schema has no triggers, views or virtual tables.
-	// One in a file someone else could have edited would run, or answer,
-	// in place of the rows the checks below and the restore's writes
-	// (migrations, re-encryption, drop) mean, so the file is refused
-	// before anything writes to it.
-	var foreign int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type IN ('trigger','view') OR (type='table' AND upper(ltrim(sql)) LIKE 'CREATE VIRTUAL%')`).Scan(&foreign); err != nil {
-		return sum, err
-	}
-	if foreign > 0 {
-		return sum, fmt.Errorf("%w: it holds %d trigger(s), view(s) or virtual table(s), which this dashboard never creates", ErrForeignSchema, foreign)
 	}
 	var tables int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('boxes','settings')`).Scan(&tables); err != nil || tables != 2 {

