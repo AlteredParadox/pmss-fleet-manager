@@ -136,6 +136,9 @@ function tiersRows(b) {
       ${!io || !cpu ? `<div><span></span><span class="muted">${tiersNote(b, t)}</span></div>` : ''}`;
 }
 const boxById = (id) => S.boxes.find((b) => b.id === id);
+// boxLabelOf labels a box by its full record: the fleet torrents feed
+// carries a slimmer one, without the user and host the label needs.
+const boxLabelOf = (b) => pfmView.boxLabel(boxById(b.id) || b);
 // serviceActive mirrors the server's ServiceActive: Active and Suspended
 // services count towards costs and renewals, every other status is history.
 const serviceActive = (sv) => !!sv && /^(active|suspended)$/i.test(sv.status || '');
@@ -790,13 +793,13 @@ function boxPowerBtn(b, q) {
   if (S.monitorOnly) return '';
   const again = q.pmss_managed ? 'then Pulsed Media\'s watchdog starts it again' : 'then started again with the box\'s start command (default: ~/bin/qbt-start when present)';
   return q.enabled ? (q.process_up
-    ? `<button ${boxRef(b)} data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(b.name)}? It is asked to exit cleanly, ${again}">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button ${boxRef(b)} data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(b.name)}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
+    ? `<button ${boxRef(b)} data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(boxLabelOf(b))}? It is asked to exit cleanly, ${again}">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button ${boxRef(b)} data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(boxLabelOf(b))}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
     : q.pmss_managed ? '' : `<button ${boxRef(b)} data-act="qbt:start">start client</button>`) : '';
 }
 function boxInstallBtn(b, q) {
   if (q.pmss_managed || S.monitorOnly) return '';
   return (q.enabled || q.installed || b.type === 'seedbox')
-    ? `<button ${boxRef(b)} data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(b.name) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(b.name) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
+    ? `<button ${boxRef(b)} data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(boxLabelOf(b)) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(boxLabelOf(b)) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
 }
 function boxActions(b) {
   return `<div class="actions">
@@ -805,7 +808,7 @@ function boxActions(b) {
         ${boxPowerBtn(b, b.qbt)}
         ${S.monitorOnly || b.status === 'disabled' ? '' : '<button data-act="pw:open" title="set a new password for this account on the box: Linux login, web panel and qBittorrent WebUI">password</button>'}
         <button data-go="/edit/${b.id}">edit</button>
-        <button class="danger" data-act="remove" data-confirm="Remove ${esc(b.name)} from the fleet? Its alerts are deleted. Nothing on the box is touched.">remove</button>
+        <button class="danger" data-act="remove" data-confirm="Remove ${esc(boxLabelOf(b))} from the fleet? Its alerts are deleted. Nothing on the box is touched.">remove</button>
       </div>`;
 }
 // The password panel's state: the two typed passwords, the places ticked,
@@ -819,7 +822,7 @@ function passwordPanel(b) {
   const tick = (k, text) => `<label class="check" style="align-items:flex-start"><input type="checkbox" data-pw="t_${k}" ${d.t[k] ? 'checked' : ''} ${off}><span>${text}</span></label>`;
   const again = b.qbt?.pmss_managed ? 'Pulsed Media\'s watchdog starts it again' : 'started again with the box\'s start command';
   const curHint = d.saved === null ? '' : d.saved ? '(blank uses the saved SSH password)' : '(the one Pulsed Media\'s panel shows, unless you changed it)';
-  return `<div class="panel" style="margin-bottom:20px"><div class="tile-label">change the password of ${esc(b.user)} on ${esc(b.name)}</div>
+  return `<div class="panel" style="margin-bottom:20px"><div class="tile-label">change the password on ${esc(boxLabelOf(b))}</div>
     <div class="muted" style="margin:6px 0 12px">Sets a new password in the places Pulsed Media's setup put the first one. Their client panel is not told: it keeps showing the old password, and a password reset from their side replaces this one again. Save the new password in your password manager first; the dashboard keeps it only where it logs in with it itself.</div>
     <div class="f2">
       <label class="f">current password <span class="hint">${curHint}</span><input data-pw="cur" type="${type}" value="${esc(d.cur)}" autocomplete="off" spellcheck="false" ${d.t.account ? off : 'disabled'}></label>
@@ -939,7 +942,7 @@ function ovBinaryRow(q) {
 function ovAutostartRow(b, q) {
   if (q.pmss_managed) return `<div><span>autostart</span><span class="muted">Pulsed Media watchdog</span></div>`;
   const stale = q.start_helper_stale ? ' <span class="warn" title="~/bin/qbt-start checks for a running client with $USER, which is empty under cron, so every cron run starts another copy. Reapply rewrites the helper (the old one is saved to ~/.config/pmss-fleet-manager/qbt-start.bak).">helper needs a rewrite</span>' : '';
-  return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'}${stale}${S.monitorOnly ? '' : ` <button class="small ghost" ${boxRef(b)} data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing, or if it keys on $USER, which is empty under cron) and set the @reboot and */5 crontab entries on ${esc(b.name)}? Other crontab lines are kept; a replaced helper is saved first.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button>`}</span></div>`;
+  return `<div><span>autostart</span><span>${q.start_helper && q.cron_installed ? 'qbt-start + cron' : q.start_helper ? 'qbt-start present, <span class="warn">no cron</span>' : '<span class="warn">not set up</span>'}${stale}${S.monitorOnly ? '' : ` <button class="small ghost" ${boxRef(b)} data-act="qbt:autostart" data-confirm="Write ~/bin/qbt-start (if missing, or if it keys on $USER, which is empty under cron) and set the @reboot and */5 crontab entries on ${esc(boxLabelOf(b))}? Other crontab lines are kept; a replaced helper is saved first.">${q.start_helper && q.cron_installed ? 'reapply' : 'set up'}</button>`}</span></div>`;
 }
 // binary + autostart rows: shown whenever the client is monitored or at least present on the box.
 function ovAutostartRows(b, q) {
@@ -1259,7 +1262,7 @@ function clientSection(b, c, f, first) {
       <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span>${removeFailed}</div>
       <div class="actions">
         ${first ? `<input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">` : ''}
-        ${c.key === 'qbt' && !S.monitorOnly ? `<button class="small" ${boxRef(b)} data-act="qbt:pause" title="stop every torrent in qBittorrent" data-confirm="Stop all torrents in qBittorrent on ${esc(b.name)}?">stop all</button>
+        ${c.key === 'qbt' && !S.monitorOnly ? `<button class="small" ${boxRef(b)} data-act="qbt:pause" title="stop every torrent in qBittorrent" data-confirm="Stop all torrents in qBittorrent on ${esc(boxLabelOf(b))}?">stop all</button>
         <button class="small" ${boxRef(b)} data-act="qbt:resume" title="start every torrent, including any stopped on purpose">start all</button>` : ''}
         ${avail.stopped || S.monitorOnly ? '' : `<button class="small" ${boxRef(b)} data-act="tor-add:toggle" data-client="${c.key}">${addOpen ? 'close' : 'add'}</button>`}
       </div>
@@ -1291,7 +1294,7 @@ function rtDiscoveryNote(r, b) {
   if (!list.length) return '';
   return ' · ' + list.map((d) => {
     if (S.monitorOnly) return discState(`${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}`, d.warn, pfmView.rtDiscoveryState(d));
-    return `<button class="disc ${d.warn ? 'warn' : ''}" ${boxRef(b)} data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(pfmView.rtDiscoveryHint(d))}"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(b.name)}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
+    return `<button class="disc ${d.warn ? 'warn' : ''}" ${boxRef(b)} data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(pfmView.rtDiscoveryHint(d))}"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(boxLabelOf(b))}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
   }).join(' · ') + ' · <span class="disc na" title="rTorrent has no local service discovery">LSD n/a</span>';
 }
 
@@ -1350,8 +1353,8 @@ function viewTorrents() {
     for (const c of boxClients(b)) {
       const q = c.st;
       for (const k of Object.keys(sum)) sum[k] += q[k] || 0;
-      if (pfmView.clientAvailability(q).down) notes.push(`<span class="warn">${esc(b.name)} (${c.label}): ${unreachableNote(b, c)}</span>`);
-      for (const t of q.torrents || []) if (!f || torrentMatches(t, f) || b.name.toLowerCase().includes(f) || c.label.toLowerCase().includes(f)) rows.push([b, t]);
+      if (pfmView.clientAvailability(q).down) notes.push(`<span class="warn">${esc(boxLabelOf(b))} (${c.label}): ${unreachableNote(b, c)}</span>`);
+      for (const t of q.torrents || []) if (!f || torrentMatches(t, f) || boxLabelOf(b).toLowerCase().includes(f) || c.label.toLowerCase().includes(f)) rows.push([b, t]);
     }
   }
   // Same order as the per-box tab (active first, busiest first), then by
@@ -1362,7 +1365,7 @@ function viewTorrents() {
     if (ra !== rb) return rb - ra;
     return ba.name.localeCompare(bb.name) || ba.id - bb.id;
   });
-  const shown = pfmView.sortTorrents(rows, S.torSort.all, (r) => r[1], (r) => r[0].name).slice(0, 500);
+  const shown = pfmView.sortTorrents(rows, S.torSort.all, (r) => r[1], (r) => boxLabelOf(r[0])).slice(0, 500);
   const qbtBoxes = boxes.filter((b) => boxClients(b).length).length;
   const allTorrents = (list) => list.flatMap((b) => boxClients(b).flatMap((c) => c.st.torrents || []));
   return `<div class="head"><div><div class="eyebrow">PMSS</div><h1>Torrents</h1></div></div>
@@ -1386,7 +1389,8 @@ function viewTorrents() {
 function boxCell(b, t) {
   const rt = t?.client === 'rtorrent' ? pfmView.rtDiscoveryOn(b.rtorrent) : null;
   const on = rt ? rt.labels : discoveryOn(b.qbt);
-  return `<div class="ellip" title="${esc(b.name)}${on.length ? ' · ' + esc(rt ? rt.title : on.join(', ') + ' enabled') : ''}"><a href="#/box/${b.id}/torrents">${esc(b.name)}</a>${on.length ? ` <span class="warn">(${esc(on.join(' · '))})</span>` : ''}</div>`;
+  const full = boxById(b.id) || b, id = pfmView.boxIdentity(full.user, full.host, full.port);
+  return `<div class="ellip" title="${esc(boxLabelOf(b))}${on.length ? ' · ' + esc(rt ? rt.title : on.join(', ') + ' enabled') : ''}"><a href="#/box/${b.id}/torrents">${esc(b.name)}</a>${on.length ? ` <span class="warn">(${esc(on.join(' · '))})</span>` : ''}${id && id !== b.name ? `<div class="note ellip">${esc(id)}</div>` : ''}</div>`;
 }
 /* ---------- peer discovery (DHT / PeX / LSD) ---------- */
 const DISCOVERY = [['dht', 'DHT'], ['pex', 'PeX'], ['lsd', 'LSD']];
@@ -1418,7 +1422,7 @@ function discoveryNote(q, b) {
   return ' · ' + DISCOVERY.map(([k, l]) => {
     const on = q.discovery[k];
     if (S.monitorOnly) return discState(`${l} ${on ? 'on' : 'off'}`, on, `${l} ${on ? 'enabled' : 'disabled'}`);
-    return `<button class="disc ${on ? 'warn' : ''}" ${boxRef(b)} data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(b.name)}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
+    return `<button class="disc ${on ? 'warn' : ''}" ${boxRef(b)} data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(boxLabelOf(b))}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
   }).join(' · ');
 }
 // Toast after an add. qBittorrent 5.2+ reports per-entry counts; older
@@ -1477,9 +1481,7 @@ function torrentButtons(b, t, fleet = false) {
     : !pfmView.clientActionable(b, client) ? ` disabled title="${label} is stopped on purpose on this box (~/.rtorrentDisable); this row is from before it stopped"` : '';
   const h = `data-hash="${esc(t.hash)}" data-box="${b.id}" data-rev="${Number(b.box_rev) || 0}" data-client="${esc(client)}"${off}`;
   const name = esc(t.name);
-  const files = client === 'rtorrent'
-    ? `Remove ${name} from rTorrent AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? The box first checks that the path lies inside rTorrent's download directory and refuses otherwise, leaving the torrent in place. If it passes, the torrent is removed and then its files are deleted; should the deletion fail at that point, the torrent is already gone and files may remain. This cannot be undone.`
-    : `Remove ${name} AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? This cannot be undone.`;
+  const files = esc(pfmView.deleteFilesConfirmation(client, t.name, fmtBytes(t.size, 1), boxById(b.id) || b));
   // Icons; the hover text names each. A disabled button's own title (in h)
   // comes first and so is the one shown; one that does not apply to the
   // torrent's state is disabled and says why. Pause is rTorrent's alone
@@ -1488,7 +1490,7 @@ function torrentButtons(b, t, fleet = false) {
   // resumes a paused rTorrent torrent.
   const can = pfmView.torrentControls(client, t.kind, t.state);
   const btn = (act, ok, label, why, icon, extra = '') => `<button class="icon" data-act="tor:${act}" ${h}${ok ? '' : ' disabled'} title="${ok ? label : why}" aria-label="${label}"${extra}>${icon}</button>`;
-  return `${btn('start', can.start, client === 'rtorrent' && t.state === 'paused' ? 'resume' : 'start', 'already running', ICON.start)}${can.pause === null || fleet ? '' : btn('pause', can.pause, 'pause (stays open; start resumes it)', 'not running', ICON.pause)}${btn('stop', can.stop, 'stop', 'already stopped', ICON.stop, ` data-confirm="Stop ${name} on ${esc(b.name)}?"`)}<button class="icon" data-act="tor:remove" ${h} title="remove (keeps the files)" aria-label="remove, keeping the files" data-confirm="Remove ${name} from ${label} on ${esc(b.name)}? The downloaded files stay on disk.">${ICON.remove}</button><button class="icon danger" data-act="tor:remove-data" ${h} title="remove and delete the files" aria-label="remove and delete the files" data-confirm="${files}">${ICON.trash}</button>`;
+  return `${btn('start', can.start, client === 'rtorrent' && t.state === 'paused' ? 'resume' : 'start', 'already running', ICON.start)}${can.pause === null || fleet ? '' : btn('pause', can.pause, 'pause (stays open; start resumes it)', 'not running', ICON.pause)}${btn('stop', can.stop, 'stop', 'already stopped', ICON.stop, ` data-confirm="Stop ${name} on ${esc(boxLabelOf(b))}?"`)}<button class="icon" data-act="tor:remove" ${h} title="remove (keeps the files)" aria-label="remove, keeping the files" data-confirm="Remove ${name} from ${label} on ${esc(boxLabelOf(b))}? The downloaded files stay on disk.">${ICON.remove}</button><button class="icon danger" data-act="tor:remove-data" ${h} title="remove and delete the files" aria-label="remove and delete the files" data-confirm="${files}">${ICON.trash}</button>`;
 }
 // Torrent row icons (16-unit grid, drawn in the button's colour).
 const ICON = {
@@ -1498,13 +1500,23 @@ const ICON = {
   remove: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
   trash: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M6.2 4.5V2.5h3.6v2M4 4.5l.8 9h6.4l.8-9M6.6 7v4.5M9.4 7v4.5"/></svg>',
 };
+function driverNote(d) {
+  // Only the slow fallbacks get a note: overlay2 and the containerd image
+  // store say nothing bad by themselves.
+  if (d.driver !== 'fuse-overlayfs' && d.driver !== 'vfs') return '';
+  return `<div class="note driver-note">
+    <b>storage driver is ${esc(d.driver)}.</b>
+    It is a supported fallback, so nothing is broken: it FUSE-mounts or copies every image layer, which makes pulls, builds and container starts cost more than on overlay2.
+    See <a href="https://docs.docker.com/engine/storage/drivers/select-storage-driver/" target="_blank" rel="noopener noreferrer">Docker's storage driver documentation</a> for what each driver does.
+  </div>`;
+}
 function tabContainers(b) {
   const d = b.docker;
   if (!d.enabled) return `<div class="empty">docker monitoring is off for this box — enable it under <a href="#/edit/${b.id}">edit</a>.</div>`;
   const list = d.containers || [];
-  return `<div class="table ctr-table" style="overflow:hidden">
+  return `${driverNote(d)}<div class="table ctr-table" style="overflow:hidden">
     <div class="thead-tools">
-      <div style="font-size:12px"><b>rootless docker ${esc(d.version || '')}</b> <span class="muted">· ${d.running} running · ${d.stopped} stopped${d.reachable ? '' : ` · <span class="warn">not responding${d.error ? ': ' + esc(d.error) : ''}</span>`}</span></div>
+      <div style="font-size:12px"><b>rootless docker ${esc(d.version || '')}</b> <span class="muted">${d.driver ? `· ${esc(d.driver)} ` : ''}· ${d.running} running · ${d.stopped} stopped${d.reachable ? '' : ` · <span class="warn">not responding${d.error ? ': ' + esc(d.error) : ''}</span>`}</span></div>
     </div>
     <div style="overflow:auto">
       <div class="trow head"><span>name</span><span>image</span><span>state</span><span>ports</span><span>cpu</span><span>memory</span><span></span></div>
@@ -1786,7 +1798,7 @@ function transferEstimatePanel(c, d) {
   const btn = `<button type="button" class="small" data-act="xfer:estimate" ${E?.busy || d.busy ? 'disabled' : ''}>${E?.busy ? 'measuring…' : E?.result ? 'measure again' : 'estimate size'}</button>`;
   const body = E?.err ? `<div class="bad">${esc(E.err)}</div>`
     : E?.result ? pfmView.estimateLines(E.result, (b) => fmtBytes(b)).map((l) => `<div class="${l.kind}">${esc(l.text)}</div>`).join('')
-    : `<div class="muted">Optional: count the source folder's files and size on ${esc(boxById(c.srcBox)?.name || 'the source')} (at low priority, up to ${20} s) and compare with the destination's free quota.</div>`;
+    : `<div class="muted">Optional: count the source folder's files and size on ${esc(boxById(c.srcBox) ? boxLabelOf(boxById(c.srcBox)) : 'the source')} (at low priority, up to ${20} s) and compare with the destination's free quota.</div>`;
   return `<div class="panel" style="margin:0 0 10px;background:var(--bg)"><div style="display:flex;gap:8px;align-items:center;justify-content:space-between"><span class="tile-label">size check</span>${btn}</div><div style="display:grid;gap:4px;margin-top:6px">${body}</div></div>`;
 }
 // listDirs reads one folder of box (id, rev): the listing is refused (409)
@@ -1856,7 +1868,7 @@ async function transferAction(a, act) {
   if (a === 'xfer:browse') {
     const side = act.dataset.side, b = boxById(side === 'src' ? d.box : Number(d.dst_box));
     if (!b) return;
-    d.picker = { side, box: b.id, boxName: pfmView.boxLabel(b), rev: side === 'src' ? Number(act.dataset.rev) : d.dst_rev, listing: null, busy: false, err: '' };
+    d.picker = { side, box: b.id, boxName: boxLabelOf(b), rev: side === 'src' ? Number(act.dataset.rev) : d.dst_rev, listing: null, busy: false, err: '' };
     await pickerOpen(side === 'src' ? d.src : d.dst_parent);
     return;
   }
@@ -1946,7 +1958,7 @@ function tabVerification(b) {
         : `<span class="muted">no WebUI or rTorrent connection made since the dashboard started${v.on ? ' (listener-only is allowed)' : ''}</span>`;
   const btn = v.on
     ? `<button data-act="verify:set" data-on="" data-rev="${Number(b.box_rev) || 0}" title="refuse connections this box gives no way to verify">turn listener-only off</button>`
-    : `<button class="warn" data-act="verify:set" data-on="1" data-rev="${Number(b.box_rev) || 0}" data-confirm="Allow the listener check alone on ${esc(b.name)}? The dashboard will send your WebUI login after checking only who holds the port. A co-tenant who takes the port in the seconds after your client stops could receive it, and with it run commands as your account through the client's settings.">allow listener-only on this box</button>`;
+    : `<button class="warn" data-act="verify:set" data-on="1" data-rev="${Number(b.box_rev) || 0}" data-confirm="Allow the listener check alone on ${esc(boxLabelOf(b))}? The dashboard will send your WebUI login after checking only who holds the port. A co-tenant who takes the port in the seconds after your client stops could receive it, and with it run commands as your account through the client's settings.">allow listener-only on this box</button>`;
   return `<div class="grid"><div class="panel verify-page">
     <div class="tile-label">WebUI connection check</div>
     <div class="meta"><span>now</span><span>${state}</span></div>
@@ -2276,7 +2288,7 @@ async function confirmAdd() {
       go(`/box/${A.editId}`);
     } else {
       const b = await api('POST', BASE + '/api/boxes', payload(A.form));
-      toast(`${b.name} added to fleet`, 'ok');
+      toast(`${boxLabelOf(b)} added to fleet`, 'ok');
       await loadState();
       resetAdd();
       go(`/box/${b.id}`);
@@ -2307,7 +2319,9 @@ function viewAlerts() {
     ${done.length ? `<div class="tile-label" style="margin:24px 0 8px">recently resolved (${done.length})</div><div class="alerts">${done.map(row).join('')}</div>` : ''}
   </div>`;
 }
-function boxName(id) { const b = S.boxes.find((x) => x.id === id); return b ? b.name : 'removed box'; }
+// boxName is a box as the cross-box lists name it: name — user@host[:port],
+// so boxes named alike (one name and username on many machines) read apart.
+function boxName(id) { const b = S.boxes.find((x) => x.id === id); return b ? boxLabelOf(b) : 'removed box'; }
 
 /* ----- settings ----- */
 function viewSettings() {
@@ -2410,7 +2424,7 @@ function viewServices() {
         <span class="num">${sv.monthly ? fmtMoney(sv.monthly, sv.currency) : '—'}</span>
         <span class="${d !== null && d <= (S.settings.renewal_warn_days || 7) ? 'warn' : ''}">${sv.next_due ? `${esc(sv.next_due)} <span class="muted">· ${d < 0 ? 'overdue' : d + 'd'}</span>` : '—'}</span>
         <span class="${sv.status === 'Active' ? 'ok' : 'warn'}">${esc(sv.status)}</span>
-        <span>${b ? `<a href="#/box/${b.id}" title="matched by ${esc(sv.matched_by || '')}">${esc(b.name)}</a>` : sv.username ? `<button class="small" data-act="svc:add" data-id="${sv.id}">+ add box</button>` : '<span class="muted">—</span>'}</span>
+        <span>${b ? `<a href="#/box/${b.id}" title="matched by ${esc(sv.matched_by || '')}">${esc(boxLabelOf(b))}</a>` : sv.username ? `<button class="small" data-act="svc:add" data-id="${sv.id}">+ add box</button>` : '<span class="muted">—</span>'}</span>
       </div>`; }).join('')}
     </div>`}
   </div>`;
@@ -2517,10 +2531,12 @@ async function passwordAction(a, act) {
   }
   else if (a === 'pw:submit') {
     const b = boxById(d.box);
-    d.err = pfmView.passwordFormError(d);
+    // The box went away (removed in another tab) while the form was open:
+    // say so before any confirmation or request (fred on #227).
+    d.err = b ? pfmView.passwordFormError(d) : 'this box is no longer in the fleet; nothing was sent';
     if (d.err) { render(); return; }
     const places = ['account', 'web', 'qbt'].filter((k) => d.t[k]).map((k) => ({ account: 'the Linux account', web: 'the web panel', qbt: 'the qBittorrent WebUI' })[k]).join(', ');
-    if (!confirm(`Change the password of ${b?.user} on ${b?.name} for ${places}? Make sure the new password is saved somewhere first: it is not shown again.`)) return;
+    if (!confirm(`Change the password on ${boxLabelOf(b)} for ${places}? Make sure the new password is saved somewhere first: it is not shown again.`)) return;
     d.busy = true; d.result = null;
     render();
     try {
