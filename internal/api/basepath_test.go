@@ -17,9 +17,15 @@
 package api
 
 import (
+	"io"
+	"log/slog"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"pmss-fleet-manager/internal/collect"
+	"pmss-fleet-manager/internal/store"
 )
 
 // The served page must reference its assets relative to its own URL, so the
@@ -104,7 +110,16 @@ func TestNewPanicsOnInvalidBasePath(t *testing.T) {
 			t.Fatal("New accepted a base path with a wildcard")
 		}
 	}()
-	New(nil, nil, "", "/x{y}")
+	New(nil, nil, "", "/x{y}", nil)
+}
+
+func TestNewPanicsOnInvalidFrameAncestors(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("New accepted a wildcard frame ancestor")
+		}
+	}()
+	New(nil, nil, "", "", []string{"*"})
 }
 
 // The web font is served from the binary with a font MIME type, and neither
@@ -125,5 +140,68 @@ func TestEmbeddedFont(t *testing.T) {
 	srv.ServeHTTP(rr, req)
 	if strings.Contains(rr.Body.String(), "googleapis") || strings.Contains(rr.Header().Get("Content-Security-Policy"), "google") {
 		t.Fatal("page or CSP still refers to Google Fonts")
+	}
+}
+
+// The dashboard refuses to be framed by default, and only the origins named
+// with -frame-ancestors lift that. X-Frame-Options has to go with it: it cannot
+// name more than one ancestor and engines ignore it next to a CSP.
+func TestFrameAncestors(t *testing.T) {
+	cases := []struct {
+		name     string
+		ancestor []string
+		wantCSP  string
+		wantXFO  string
+	}{
+		{"default refuses framing", nil, "frame-ancestors 'none'", "DENY"},
+		{"named origin is allowed", []string{"https://homeassistant.local:8123"},
+			"frame-ancestors 'self' https://homeassistant.local:8123", ""},
+		{"several origins", []string{"https://a.example", "http://b.example:8123"},
+			"frame-ancestors 'self' https://a.example http://b.example:8123", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { st.Close() })
+			m := collect.New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			srv := New(st, m, "", "", c.ancestor)
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
+			if got := rr.Header().Get("Content-Security-Policy"); !strings.Contains(got, c.wantCSP) {
+				t.Errorf("policy %q does not contain %q", got, c.wantCSP)
+			}
+			if got := rr.Header().Get("X-Frame-Options"); got != c.wantXFO {
+				t.Errorf("X-Frame-Options = %q, want %q", got, c.wantXFO)
+			}
+		})
+	}
+}
+
+func TestNormalizeFrameAncestors(t *testing.T) {
+	good := map[string][]string{
+		"":                      nil,
+		"https://ha.local:8123": {"https://ha.local:8123"},
+		" https://ha.local ":    {"https://ha.local"},
+		"https://ha.local,,":    {"https://ha.local"},
+		"http://10.0.0.2:8123/": {"http://10.0.0.2:8123"},
+	}
+	for in, want := range good {
+		got, err := NormalizeFrameAncestors(strings.Split(in, ","))
+		if err != nil {
+			t.Errorf("%q: %v", in, err)
+			continue
+		}
+		if strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("%q = %v, want %v", in, got, want)
+		}
+	}
+	bad := []string{"*", "https://*.example", "ha.local", "ftp://ha.local", "https://", "https://ha.local/path", "https://ha.local/?q=1"}
+	for _, in := range bad {
+		if got, err := NormalizeFrameAncestors([]string{in}); err == nil {
+			t.Errorf("%q accepted as %v, want an error", in, got)
+		}
 	}
 }

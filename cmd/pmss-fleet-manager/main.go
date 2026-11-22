@@ -67,6 +67,7 @@ func main() {
 	auth := flag.String("auth", "", "optional HTTP basic auth as user:password (or set PMSS_AUTH, which -h never prints)")
 	authFile := flag.String("auth-file", os.Getenv("PMSS_AUTH_FILE"), "file holding the HTTP basic auth login as user:password, e.g. a container secret (or set PMSS_AUTH_FILE); one trailing line ending is ignored")
 	basePath := flag.String("base-path", os.Getenv("PMSS_BASE_PATH"), "URL path prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged (e.g. /fleet)")
+	frameAncestors := flag.String("frame-ancestors", os.Getenv("PMSS_FRAME_ANCESTORS"), "origins allowed to embed the dashboard in a frame, comma-separated (e.g. https://homeassistant.local:8123); unset keeps the default refusal")
 	sshKey := flag.String("ssh-key", os.Getenv("PMSS_SSH_KEY"), "private key file tried for every box without a key path of its own, before ~/.ssh/id_* (or set PMSS_SSH_KEY), e.g. a container secret")
 	logLevel := flag.String("log", envOr("PMSS_LOG", "info"), "log level: debug, info, warn, error")
 	secretFile := flag.String("secret-file", os.Getenv("PMSS_SECRET_FILE"), "file holding the secret that encrypts stored credentials (or set PMSS_SECRET to the secret itself, which -h never prints); unset keeps them in plain text")
@@ -190,7 +191,16 @@ func main() {
 	if bp != "" {
 		log.Info("serving under base path", "path", bp)
 	}
-	handler := api.New(st, mgr, *auth, bp)
+	var ancestors []string
+	if *frameAncestors != "" {
+		ancestors, err = api.NormalizeFrameAncestors(strings.Split(*frameAncestors, ","))
+		if err != nil {
+			log.Error("invalid -frame-ancestors", "err", err)
+			os.Exit(2)
+		}
+		log.Info("the dashboard may be framed by", "origins", strings.Join(ancestors, " "))
+	}
+	handler := api.New(st, mgr, *auth, bp, ancestors)
 	handler.SetLegal(legal.License, legal.ThirdPartyLicenses)
 	handler.SetVersion(version)
 	hosts, wildcard := allowedHostList(addrs, *allowedHosts)

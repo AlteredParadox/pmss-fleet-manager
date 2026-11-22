@@ -27,6 +27,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"slices"
 	"strconv"
@@ -67,6 +68,11 @@ type Server struct {
 	// instance identifies this process; the UI reloads itself when it
 	// changes after an SSE reconnect so a rebuilt server never runs stale JS.
 	instance string
+	// csp is built in New: the shared policy plus the frame-ancestors clause.
+	csp string
+	// frameAncestors lists the origins allowed to frame the UI; empty keeps
+	// the policy at 'none' and X-Frame-Options at DENY.
+	frameAncestors []string
 	// settingsMu serialises the read-merge-save of PUT /api/settings so two
 	// tabs saving at once cannot lose a field or leave memory and DB apart.
 	settingsMu sync.Mutex
@@ -197,20 +203,69 @@ func (s *Server) hostAllowed(hostport string) bool {
 // csp is the Content-Security-Policy for the embedded UI: own origin only,
 // fonts included (they are embedded and served here). Inline styles are
 // used for widths and the like, hence 'unsafe-inline' on styles only.
+//
+// frame-ancestors is appended in New, because -frame-ancestors widens it: the
+// dashboard refuses to be framed by default, since it holds SSH credentials for
+// every box, and only a named proxy origin (Home Assistant ingress, for one)
+// can lift that.
 const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-	"font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+	"font-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'"
 
 // New builds the handler tree. basePath is validated with NormalizeBasePath;
 // an invalid value is a programming error (main validates user input first).
-func New(st *store.Store, m *collect.Manager, basicAuth string, basePath string) *Server {
+func New(st *store.Store, m *collect.Manager, basicAuth string, basePath string, frameAncestors []string) *Server {
 	bp, err := NormalizeBasePath(basePath)
+	if err != nil {
+		panic("api.New: " + err.Error())
+	}
+	ancestors, err := NormalizeFrameAncestors(frameAncestors)
 	if err != nil {
 		panic("api.New: " + err.Error())
 	}
 	s := &Server{st: st, m: m, auth: basicAuth, basePath: bp, mux: http.NewServeMux(),
 		instance: strconv.FormatInt(time.Now().UnixNano(), 36), sseSlots: make(chan struct{}, maxSSEStreams)}
+	s.frameAncestors = ancestors
+	// 'none' keeps the default byte for byte; any named origin also means
+	// X-Frame-Options must go, since it cannot express more than one ancestor.
+	if len(ancestors) == 0 {
+		s.csp = csp + "; frame-ancestors 'none'"
+	} else {
+		s.csp = csp + "; frame-ancestors 'self' " + strings.Join(ancestors, " ")
+	}
 	s.routes()
 	return s
+}
+
+// NormalizeFrameAncestors turns the -frame-ancestors flag into the origins the
+// policy names. Each entry must be a bare origin, scheme and host and optional
+// port, because a browser compares frame ancestors byte for byte: a path or a
+// wildcard in the list would silently never match.
+func NormalizeFrameAncestors(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		if strings.Contains(v, "*") {
+			return nil, fmt.Errorf("frame ancestor %q: wildcards are not accepted, name the origin", v)
+		}
+		u, err := url.Parse(v)
+		if err != nil {
+			return nil, fmt.Errorf("frame ancestor %q: %v", v, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return nil, fmt.Errorf("frame ancestor %q: scheme must be http or https", v)
+		}
+		if u.Host == "" {
+			return nil, fmt.Errorf("frame ancestor %q: no host", v)
+		}
+		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+			return nil, fmt.Errorf("frame ancestor %q: give an origin only, without a path, query or user", v)
+		}
+		out = append(out, u.Scheme+"://"+u.Host)
+	}
+	return out, nil
 }
 
 // NormalizeBasePath turns the -base-path flag into the form routes are
@@ -426,9 +481,11 @@ func (s *Server) routes() {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// First, so the refusals below (Host, login, throttle) carry them too.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-Frame-Options", "DENY")
+	if len(s.frameAncestors) == 0 {
+		w.Header().Set("X-Frame-Options", "DENY")
+	}
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", csp)
+	w.Header().Set("Content-Security-Policy", s.csp)
 	if !s.hostAllowed(r.Host) {
 		http.Error(w, "unexpected Host header; start with -allowed-hosts to serve this name", http.StatusMisdirectedRequest)
 		return

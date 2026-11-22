@@ -62,7 +62,7 @@ func newTestServerWith(t *testing.T, auth, basePath string) (*Server, *store.Sto
 		t.Fatal(err)
 	}
 	t.Cleanup(m.Stop)
-	return New(st, m, auth, basePath), st
+	return New(st, m, auth, basePath, nil), st
 }
 
 // put edits a box the way the page does: with the record's current
@@ -220,7 +220,7 @@ func TestHostAllowList(t *testing.T) {
 	}
 	// The refusal still carries the security headers (Codex audit of
 	// 1.23.0: an error page is a page too).
-	if rr.Header().Get("Content-Security-Policy") != csp || rr.Header().Get("X-Frame-Options") != "DENY" || rr.Header().Get("X-Content-Type-Options") != "nosniff" {
+	if rr.Header().Get("Content-Security-Policy") != csp+"; frame-ancestors 'none'" || rr.Header().Get("X-Frame-Options") != "DENY" || rr.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("rejected request headers: %v", rr.Header())
 	}
 	// A specific bind lists its hosts, so an IP literal not among them is refused.
@@ -1599,7 +1599,7 @@ func TestPreAuthRefusalsCarrySecurityHeaders(t *testing.T) {
 		if rr.Code != code {
 			t.Fatalf("%s: code %d", name, rr.Code)
 		}
-		if rr.Header().Get("Content-Security-Policy") != csp || rr.Header().Get("X-Frame-Options") != "DENY" ||
+		if rr.Header().Get("Content-Security-Policy") != csp+"; frame-ancestors 'none'" || rr.Header().Get("X-Frame-Options") != "DENY" ||
 			rr.Header().Get("X-Content-Type-Options") != "nosniff" || rr.Header().Get("Referrer-Policy") != "no-referrer" {
 			t.Fatalf("%s: headers %v", name, rr.Header())
 		}
