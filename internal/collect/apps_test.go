@@ -18,6 +18,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -382,4 +383,89 @@ func TestDetectGuardScopedToEndpoint(t *testing.T) {
 	if !authEndpointChanged(p, &port) {
 		t.Fatal("a WebUI port edit must drop the hold")
 	}
+}
+
+// The listener-only opt-in through the manager: refused for a stale
+// revision or a missing box; otherwise the record, the poller and the
+// served state change together, also under concurrent toggles (run with
+// -race); withdrawing it after an admission resets the recorded mode; an
+// edit that moves the box leaves the old page's revision stale.
+func TestManagerSetListenerOnly(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	b := &store.Box{Name: "x", Host: "h.example", User: "u", Port: 22, Enabled: false}
+	if err := m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := st.GetBox(ctx, b.ID)
+	rev := cur.Revision
+	consistent := func(want bool) {
+		t.Helper()
+		got, _ := st.GetBox(ctx, b.ID)
+		s, _ := m.State(b.ID)
+		if got.ListenerOnly != want || s.Verify.ListenerOnly != want || m.poller(b.ID).listenerOnly.Load() != want {
+			t.Fatalf("want %v: stored %v, state %v, poller %v", want, got.ListenerOnly, s.Verify.ListenerOnly, m.poller(b.ID).listenerOnly.Load())
+		}
+	}
+	if err := m.SetListenerOnly(ctx, b.ID, rev+1, true); !errors.Is(err, ErrStaleBox) {
+		t.Fatalf("stale revision: %v", err)
+	}
+	if err := m.SetListenerOnly(ctx, 999, rev, true); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing box: %v", err)
+	}
+	consistent(false)
+	if err := m.SetListenerOnly(ctx, b.ID, rev, true); err != nil {
+		t.Fatal(err)
+	}
+	consistent(true)
+
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Add(1)
+		go func(on bool) {
+			defer wg.Done()
+			if err := m.SetListenerOnly(ctx, b.ID, rev, on); err != nil {
+				t.Error(err)
+			}
+		}(i%2 == 0)
+	}
+	wg.Wait()
+	if err := m.SetListenerOnly(ctx, b.ID, rev, true); err != nil {
+		t.Fatal(err)
+	}
+	consistent(true)
+
+	// A connection admitted under it, then withdrawn: the mode resets.
+	p := m.poller(b.ID)
+	if !p.admitListenerOnly() {
+		t.Fatal("admission while opted in")
+	}
+	p.noteVerify(VerifyListenerOnly)
+	if err := m.SetListenerOnly(ctx, b.ID, rev, false); err != nil {
+		t.Fatal(err)
+	}
+	consistent(false)
+	if s, _ := m.State(b.ID); s.Verify.Mode != "" || p.loAdmitted.Load() {
+		t.Fatalf("after withdrawal: mode %q, admitted %v", s.Verify.Mode, p.loAdmitted.Load())
+	}
+
+	// The box moves: the page drawn before cannot opt the new endpoint in.
+	cur, _ = st.GetBox(ctx, b.ID)
+	cur.Host = "z.example"
+	if err := m.UpdateBox(ctx, cur, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetListenerOnly(ctx, b.ID, rev, true); !errors.Is(err, ErrStaleBox) {
+		t.Fatalf("stale page after a move: %v", err)
+	}
+	consistent(false)
 }
