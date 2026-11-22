@@ -469,6 +469,36 @@ func TestParseQuotaBonusAlone(t *testing.T) {
 	}
 }
 
+// A junk marker must not hide the quota. ParseFloat accepts "inf", which
+// JSON rejects, so every bad value leaves both bonus fields at zero while the
+// quota still parses.
+func TestParseQuotaBonusIgnoresBadValues(t *testing.T) {
+	quota := "Disk quotas for user u (uid 1):\n     Filesystem   space   quota   limit   grace   files   quota   limit   grace\n       /dev/md2   1659G   2000G   2500G           12345   1000k   1250k\n"
+	bad := []string{"", " ", "abc", "inf", "+inf", "-inf", "Infinity", "NaN", "1e400", "0", "-5", "37\n41", strings.Repeat("9", 400)}
+	for _, v := range bad {
+		q := parseQuota(map[string]string{"quota": quota, "disk_bonus": v, "disk_bonus_quota": v}, time.Now())
+		if !q.OK {
+			t.Fatalf("%q: quota lost: %+v", v, q)
+		}
+		if q.BonusPct != 0 || q.BonusGiB != 0 {
+			t.Fatalf("%q: bonus kept: %+v", v, q)
+		}
+	}
+	// A value past either cap is treated like a corrupt file too.
+	for _, v := range []string{"10001", "1e12"} {
+		if q := parseQuota(map[string]string{"disk_bonus": v}, time.Now()); q.BonusPct != 0 {
+			t.Fatalf("pct %q: %+v", v, q)
+		}
+	}
+	if q := parseQuota(map[string]string{"disk_bonus_quota": "1e12"}, time.Now()); q.BonusGiB != 0 {
+		t.Fatalf("gib 1e12: %+v", q)
+	}
+	// And the boundary values still pass.
+	if q := parseQuota(map[string]string{"disk_bonus": "10000"}, time.Now()); q.BonusPct != 10000 {
+		t.Fatalf("pct at cap: %+v", q)
+	}
+}
+
 func TestQuotaHumanized(t *testing.T) {
 	text := `Disk quotas for user foo (uid 1001): 
      Filesystem   space   quota   limit   grace   files   quota   limit   grace

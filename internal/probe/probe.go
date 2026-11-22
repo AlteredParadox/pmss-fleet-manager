@@ -1409,14 +1409,34 @@ func sameLimit(file, live int64) bool {
 	return d <= live/100
 }
 
+// Caps for the two bonus values. The percentage has no meaning past a
+// doubling several times over, and the GiB value must still convert to int64
+// bytes downstream, so anything larger is a corrupt file, not a bonus.
+const (
+	maxBonusPct = 10000
+	maxBonusGiB = float64(math.MaxInt64 >> 30)
+)
+
+// bonusNumber reads a bonus value. A missing, malformed, non-finite,
+// non-positive or out-of-range file yields false, so the snapshot keeps
+// quota and everything else instead of carrying a number JSON rejects.
+func bonusNumber(raw string, max float64) (float64, bool) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > max {
+		return 0, false
+	}
+	return v, true
+}
+
 func parseQuota(s map[string]string, now time.Time) QuotaInfo {
 	q := QuotaInfo{}
 	// Read before the quota itself: the bonus is its own pair of files and
-	// still means something when quota -v fails.
-	if v, err := strconv.ParseFloat(strings.TrimSpace(s["disk_bonus"]), 64); err == nil && v > 0 {
+	// still means something when quota -v fails. Both readers take a cap:
+	// ParseFloat accepts "inf", and JSON cannot encode it.
+	if v, ok := bonusNumber(s["disk_bonus"], maxBonusPct); ok {
 		q.BonusPct = v
 	}
-	if v, err := strconv.ParseFloat(strings.TrimSpace(s["disk_bonus_quota"]), 64); err == nil && v > 0 {
+	if v, ok := bonusNumber(s["disk_bonus_quota"], maxBonusGiB); ok {
 		q.BonusGiB = v
 	}
 	file, fileOK := parseQuotaLine(s["quota_file"])
