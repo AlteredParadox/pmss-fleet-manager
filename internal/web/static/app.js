@@ -1498,13 +1498,23 @@ const ICON = {
   remove: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
   trash: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M6.2 4.5V2.5h3.6v2M4 4.5l.8 9h6.4l.8-9M6.6 7v4.5M9.4 7v4.5"/></svg>',
 };
+function driverNote(d) {
+  // Only the slow fallbacks get a note: overlay2 and the containerd image
+  // store say nothing bad by themselves.
+  if (d.driver !== 'fuse-overlayfs' && d.driver !== 'vfs') return '';
+  return `<div class="note driver-note">
+    <b>storage driver is ${esc(d.driver)}.</b>
+    It is a supported fallback, so nothing is broken: it FUSE-mounts or copies every image layer, which makes pulls, builds and container starts cost more than on overlay2.
+    See <a href="https://docs.docker.com/engine/storage/drivers/select-storage-driver/" target="_blank" rel="noopener noreferrer">Docker's storage driver documentation</a> for what each driver does.
+  </div>`;
+}
 function tabContainers(b) {
   const d = b.docker;
   if (!d.enabled) return `<div class="empty">docker monitoring is off for this box — enable it under <a href="#/edit/${b.id}">edit</a>.</div>`;
   const list = d.containers || [];
-  return `<div class="table ctr-table" style="overflow:hidden">
+  return `${driverNote(d)}<div class="table ctr-table" style="overflow:hidden">
     <div class="thead-tools">
-      <div style="font-size:12px"><b>rootless docker ${esc(d.version || '')}</b> <span class="muted">· ${d.running} running · ${d.stopped} stopped${d.reachable ? '' : ` · <span class="warn">not responding${d.error ? ': ' + esc(d.error) : ''}</span>`}</span></div>
+      <div style="font-size:12px"><b>rootless docker ${esc(d.version || '')}</b> <span class="muted">${d.driver ? `· ${esc(d.driver)} ` : ''}· ${d.running} running · ${d.stopped} stopped${d.reachable ? '' : ` · <span class="warn">not responding${d.error ? ': ' + esc(d.error) : ''}</span>`}</span></div>
     </div>
     <div style="overflow:auto">
       <div class="trow head"><span>name</span><span>image</span><span>state</span><span>ports</span><span>cpu</span><span>memory</span><span></span></div>

@@ -208,6 +208,7 @@ button.th-sort:hover,button.th-sort.on{color:var(--text)}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px}
 .panel .tile-value{font-size:22px;margin:4px 0 8px}
 .panel .note{font-size:11px;color:var(--muted);margin-top:6px}
+.driver-note{border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin:8px 0;font-size:12px;line-height:1.5}
 .rows{display:grid;gap:8px;font-size:12px;align-content:start}
 .rows>div{display:flex;justify-content:space-between;gap:8px}
 .rows>div>span:first-child{color:var(--muted);white-space:nowrap}

@@ -49,8 +49,13 @@ const (
 	// the parser never sees megabytes of one section (2026-11 audits).
 	probeOutputLimit = 6 << 20
 	apiTimeout       = 30 * time.Second
-	duTimeout        = 20 * time.Minute
-	defaultQbtCmd    = `cd "$HOME" && ( "$HOME/bin/qbittorrent-nox" -d </dev/null >/dev/null 2>&1 )`
+	// infoTimeout is the budget of the one optional daemon call, /info,
+	// which the dashboard reads for the storage driver. Short on purpose:
+	// a daemon slow or unable to answer it keeps its last known driver
+	// instead of making a healthy box look down.
+	infoTimeout   = 10 * time.Second
+	duTimeout     = 20 * time.Minute
+	defaultQbtCmd = `cd "$HOME" && ( "$HOME/bin/qbittorrent-nox" -d </dev/null >/dev/null 2>&1 )`
 )
 
 type poller struct {
@@ -1491,7 +1496,7 @@ func (p *poller) dockerClient(uid int) *dockerx.Client {
 }
 
 func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snapshot) {
-	ds := DockerState{Enabled: true, SocketUp: snap.Docker.SocketPresent, Version: st.Docker.Version}
+	ds := DockerState{Enabled: true, SocketUp: snap.Docker.SocketPresent, Version: st.Docker.Version, Driver: st.Docker.Driver}
 	if !snap.Docker.SocketPresent {
 		ds.Error = "docker socket not present (daemon not running?)"
 		st.Docker = ds
@@ -1524,6 +1529,7 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 		ds.Containers = append(ds.Containers, cv)
 	}
 	mergeContainerStats(ctx, cli, ds.Containers, running)
+	refreshDriver(ctx, cli, &ds)
 	sort.Slice(ds.Containers, func(i, j int) bool {
 		a, b := ds.Containers[i], ds.Containers[j]
 		if (a.State == "running") != (b.State == "running") {
@@ -1532,6 +1538,18 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 		return a.Name < b.Name
 	})
 	st.Docker = ds
+}
+
+// refreshDriver reads the daemon's storage driver, keeping the last known
+// one when /info fails. It runs on every poll, after the containers call and
+// under its own short budget: reading it once per daemon would leave a stale
+// warning (or none) after a daemon restarts on another driver.
+func refreshDriver(ctx context.Context, cli *dockerx.Client, ds *DockerState) {
+	dctx, cancel := context.WithTimeout(ctx, infoTimeout)
+	defer cancel()
+	if i, err := cli.Info(dctx); err == nil && i.Driver != "" {
+		ds.Driver = clip(i.Driver, 32)
+	}
 }
 
 // containerView builds the dashboard view of one container, every

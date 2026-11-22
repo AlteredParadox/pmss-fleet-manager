@@ -153,3 +153,20 @@ func TestDecodeContainersMalformed(t *testing.T) {
 		}
 	}
 }
+
+// Info reads the daemon's storage driver and nothing else needs to parse.
+func TestInfo(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ID":"abc","Driver":"fuse-overlayfs","DriverStatus":[["Backing Filesystem","extfs"]],"Containers":3}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+	c := New(func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) })
+	defer c.Close()
+	i, err := c.Info(context.Background())
+	if err != nil || i.Driver != "fuse-overlayfs" {
+		t.Fatalf("info: %+v %v", i, err)
+	}
+}

@@ -153,6 +153,18 @@ func (c *Client) Version(ctx context.Context) (*Version, error) {
 	return &v, c.do(ctx, http.MethodGet, "/version", &v)
 }
 
+// Info is the daemon block the dashboard reads for facts that are not a
+// per-container one, such as its storage driver.
+type Info struct {
+	Driver string `json:"Driver"`
+}
+
+// Info reads the daemon's /info block.
+func (c *Client) Info(ctx context.Context) (*Info, error) {
+	var v Info
+	return &v, c.do(ctx, http.MethodGet, "/info", &v)
+}
+
 // Port is one published port mapping.
 type Port struct {
 	IP          string `json:"IP"`

@@ -84,7 +84,14 @@ for you, and nothing is moved.
   stop / start / remove (with or without the files) per torrent; stop all /
   start all; and start / stop / restart of the client.
 - Containers: rootless Docker containers with CPU and memory, start / stop /
-  restart.
+  restart, and the daemon's storage driver, read again on every poll. The two
+  slow fallbacks, `fuse-overlayfs` (a supported rootless backend, where
+  `overlay2` is unavailable) and `vfs`, get a note in the tab saying what they
+  cost; every other driver, the containerd image store's `overlayfs` included,
+  says nothing. Neither is broken, and the note links Docker's storage driver
+  documentation instead of telling anyone to switch: a change makes the
+  existing containers, their writable layers and the old driver's images
+  inaccessible.
 - Transfers: copy or move a directory to another of your boxes, into a new
   directory or an existing one (keeping the files already there, or
   replacing those that differ), straight from box to box with rsync over
