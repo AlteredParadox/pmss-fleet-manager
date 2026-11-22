@@ -256,7 +256,8 @@ mkdir -p -m 700 ~/.config/pmss-fleet-manager
 where every user on the machine can read it.
 
 Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
-`PMSS_AUTH`, `PMSS_AUTH_FILE`, `PMSS_SSH_KEY`, `PMSS_MONITOR_ONLY`, `PMSS_LOG`,
+`PMSS_AUTH`, `PMSS_AUTH_FILE`, `PMSS_SSH_KEY`, `PMSS_SSH_TIMEOUT`,
+`PMSS_MONITOR_ONLY`, `PMSS_LOG`,
 `PMSS_ALLOWED_HOSTS`, `PMSS_BASE_PATH`, `PMSS_SECRET_FILE`,
 `PMSS_SECRET_PREVIOUS_FILE`,
 `PMSS_FORGET_ENCRYPTED_CREDENTIALS`; `PMSS_SECRET` and
@@ -269,6 +270,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-auth` | none | HTTP basic auth as `user:password`; set it if you bind to a non-loopback address |
 | `-auth-file` | none | file holding that login as `user:password` (a container secret, say); one trailing line ending is ignored and nothing else, so a password may end in a space. A configured file that is missing, empty or not `user:password` stops the start. Set this or `-auth` / `PMSS_AUTH`, not both |
 | `-ssh-key` | none | private key file tried for every box without a key path of its own, before `~/.ssh/id_*`; a box's own key path always wins |
+| `-ssh-timeout` | `45s` | how long an SSH connection may take to come up, and how long the detection probe and the poll's probe may run, e.g. `90s` or `2m`. Raise it for a box too busy to answer in time: the covered steps then fail with `context deadline exceeded` and the dashboard shows the box as degraded. Other SSH steps keep their own deadlines: the liveness check on an already open connection stays at 10 s, and rTorrent's detached transport at 20 s. Capped at `24h`. Applies to every box, not one. Detection in the add wizard gets a budget of twice this plus 45 s, so a box set to `2m` can actually be added |
 | `-monitor-only` | off | refuse the web UI's actions on the boxes (`PMSS_MONITOR_ONLY=1`): torrent, client, discovery, container, transfer and password actions answer 403 and their controls are hidden; monitoring runs as usual. Adding, editing and removing boxes, alerts, settings, refresh, du and log reads still work. It limits this interface, not the SSH keys it holds: see *Security and hardening* |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
