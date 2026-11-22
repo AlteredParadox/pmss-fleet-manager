@@ -1492,7 +1492,7 @@ func (p *poller) dockerClient(uid int) *dockerx.Client {
 }
 
 func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snapshot) {
-	ds := DockerState{Enabled: true, SocketUp: snap.Docker.SocketPresent, Version: st.Docker.Version}
+	ds := DockerState{Enabled: true, SocketUp: snap.Docker.SocketPresent, Version: st.Docker.Version, Driver: st.Docker.Driver}
 	if !snap.Docker.SocketPresent {
 		ds.Error = "docker socket not present (daemon not running?)"
 		st.Docker = ds
@@ -1504,6 +1504,11 @@ func (p *poller) pollDocker(ctx context.Context, st *BoxState, snap *probe.Snaps
 	if ds.Version == "" {
 		if v, err := cli.Version(actx); err == nil {
 			ds.Version = clip(v.Version, 64)
+		}
+	}
+	if ds.Driver == "" {
+		if i, err := cli.Info(actx); err == nil {
+			ds.Driver = clip(i.Driver, 32)
 		}
 	}
 	cs, err := cli.Containers(actx)

@@ -84,7 +84,10 @@ for you, and nothing is moved.
   stop / start / remove (with or without the files) per torrent; stop all /
   start all; and start / stop / restart of the client.
 - Containers: rootless Docker containers with CPU and memory, start / stop /
-  restart.
+  restart, and the daemon's storage driver. A driver other than `overlay2`
+  (Pulsed Media's default `fuse-overlayfs`, or `vfs`) gets a warning in the
+  tab and an alert: every image layer then goes through a slow FUSE mount,
+  and changing the driver hides the images layered by the old one.
 - Transfers: copy or move a directory to another of your boxes, into a new
   directory or an existing one (keeping the files already there, or
   replacing those that differ), straight from box to box with rsync over

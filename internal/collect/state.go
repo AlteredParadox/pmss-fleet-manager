@@ -419,10 +419,14 @@ type ContainerView struct {
 
 // DockerState is the rootless docker view.
 type DockerState struct {
-	Enabled    bool            `json:"enabled"`
-	SocketUp   bool            `json:"socket_up"`
-	Reachable  bool            `json:"reachable"`
-	Version    string          `json:"version,omitempty"`
+	Enabled   bool   `json:"enabled"`
+	SocketUp  bool   `json:"socket_up"`
+	Reachable bool   `json:"reachable"`
+	Version   string `json:"version,omitempty"`
+	// Driver is the daemon's storage driver ("overlay2", "fuse-overlayfs",
+	// "vfs"). Read once per daemon; a daemon restarted with another driver
+	// keeps the old value until the box is re-polled from scratch.
+	Driver     string          `json:"driver,omitempty"`
 	Error      string          `json:"error,omitempty"`
 	Running    int             `json:"running"`
 	Stopped    int             `json:"stopped"`

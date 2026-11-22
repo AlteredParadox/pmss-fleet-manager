@@ -65,7 +65,7 @@ func recheckable(s *collect.BoxState, k string) bool {
 		return s.RAM.OK
 	case k == "suspended":
 		return s.Account.OK
-	case strings.HasPrefix(k, containerKey), k == "containers":
+	case strings.HasPrefix(k, containerKey), k == "containers", k == "docker-driver":
 		// Monitoring switched off for the box is a deliberate "nothing to
 		// check", like a disabled box: the alert must not be stranded.
 		return s.Docker.Reachable || !s.Docker.Enabled
@@ -383,6 +383,9 @@ func wantDocker(s *collect.BoxState, open []string) []want {
 	var active []want
 	if s.Docker.Enabled && !s.Docker.Reachable {
 		active = append(active, want{"docker", "warn", fmt.Sprintf("%s — rootless docker not responding (%s)", s.Name, s.Docker.Error)})
+	}
+	if s.Docker.Enabled && s.Docker.Reachable && s.Docker.Driver != "" && s.Docker.Driver != "overlay2" {
+		active = append(active, want{"docker-driver", "warn", fmt.Sprintf("%s — rootless docker uses the %s storage driver, not overlay2 (slower, and its image layers can be lost)", s.Name, s.Docker.Driver)})
 	}
 	kept, pending := containerWants(s, open)
 	active = append(active, kept...)

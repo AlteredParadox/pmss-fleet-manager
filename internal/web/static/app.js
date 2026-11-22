@@ -1498,13 +1498,23 @@ const ICON = {
   remove: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
   trash: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M6.2 4.5V2.5h3.6v2M4 4.5l.8 9h6.4l.8-9M6.6 7v4.5M9.4 7v4.5"/></svg>',
 };
+function driverNote(d) {
+  if (!d.driver || d.driver === 'overlay2') return '';
+  return `<div class="note" style="color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:8px 10px;margin:8px 0;font-size:12px;line-height:1.5">
+    <b>storage driver is ${esc(d.driver)}, not overlay2.</b>
+    Every image layer sits in a slow FUSE mount, so pulls, container starts and image builds take far longer than they should.
+    Switch to overlay2: set <span class="muted">"storage-driver": "overlay2"</span> in <span class="muted">~/.config/docker/daemon.json</span>, then restart the rootless daemon.
+    Changing the driver hides the images layered by ${esc(d.driver)} (they stay on disk under <span class="muted">~/.local/share/docker</span> and still count against the quota), so recreate the containers afterwards, then delete the old driver directory.
+    On a Pulsed Media box, restart the daemon with a panel slot reload, never <span class="muted">systemctl --user restart docker</span>: that deadlocks rootlesskit.
+  </div>`;
+}
 function tabContainers(b) {
   const d = b.docker;
   if (!d.enabled) return `<div class="empty">docker monitoring is off for this box — enable it under <a href="#/edit/${b.id}">edit</a>.</div>`;
   const list = d.containers || [];
-  return `<div class="table ctr-table" style="overflow:hidden">
+  return `${driverNote(d)}<div class="table ctr-table" style="overflow:hidden">
     <div class="thead-tools">
-      <div style="font-size:12px"><b>rootless docker ${esc(d.version || '')}</b> <span class="muted">· ${d.running} running · ${d.stopped} stopped${d.reachable ? '' : ` · <span class="warn">not responding${d.error ? ': ' + esc(d.error) : ''}</span>`}</span></div>
+      <div style="font-size:12px"><b>rootless docker ${esc(d.version || '')}</b> <span class="muted">${d.driver ? `· ${esc(d.driver)} ` : ''}· ${d.running} running · ${d.stopped} stopped${d.reachable ? '' : ` · <span class="warn">not responding${d.error ? ': ' + esc(d.error) : ''}</span>`}</span></div>
     </div>
     <div style="overflow:auto">
       <div class="trow head"><span>name</span><span>image</span><span>state</span><span>ports</span><span>cpu</span><span>memory</span><span></span></div>

@@ -527,3 +527,60 @@ func TestRaiseLogVolume(t *testing.T) {
 		t.Fatalf("single %d summary %d:\n%s", single, summary, buf.String())
 	}
 }
+
+// A daemon on a FUSE or vfs storage driver is worth one alert, raised with
+// the driver name, and it resolves when the driver is overlay2 again. A poll
+// that could not read the daemon leaves it alone until the next good one.
+func TestDockerDriverAlert(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	b := &store.Box{Name: "slow", Host: "h", User: "u", Port: 22, Enabled: true}
+	if err := st.CreateBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	e := New(st, store.DefaultSettings, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	find := func() (active bool, title string) {
+		rows, err := st.ListAlerts(ctx, 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range rows {
+			if a.Key == "docker-driver" && a.Active {
+				return true, a.Title
+			}
+		}
+		return false, ""
+	}
+	s := &collect.BoxState{ID: b.ID, Name: "slow", Status: "online"}
+	s.Docker.Enabled, s.Docker.Reachable = true, true
+
+	s.Docker.Driver = "overlay2"
+	e.Evaluate(ctx, s)
+	if active, title := find(); active {
+		t.Fatalf("overlay2 raised %q", title)
+	}
+
+	s.Docker.Driver = "fuse-overlayfs"
+	e.Evaluate(ctx, s)
+	if active, title := find(); !active || !strings.Contains(title, "fuse-overlayfs") {
+		t.Fatalf("fuse-overlayfs: active %v title %q", active, title)
+	}
+
+	// A poll that could not reach the daemon says nothing about the driver:
+	// the alert stays, the "docker" one explains why.
+	s.Docker.Reachable, s.Docker.Error = false, "no socket"
+	e.Evaluate(ctx, s)
+	if active, _ := find(); !active {
+		t.Fatal("driver alert dropped by an unreadable poll")
+	}
+
+	s.Docker.Reachable, s.Docker.Error, s.Docker.Driver = true, "", "overlay2"
+	e.Evaluate(ctx, s)
+	if active, title := find(); active {
+		t.Fatalf("back on overlay2: still active %q", title)
+	}
+}
