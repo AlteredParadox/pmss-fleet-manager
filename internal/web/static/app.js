@@ -2521,7 +2521,9 @@ async function passwordAction(a, act) {
   }
   else if (a === 'pw:submit') {
     const b = boxById(d.box);
-    d.err = pfmView.passwordFormError(d);
+    // The box went away (removed in another tab) while the form was open:
+    // say so before any confirmation or request (fred on #227).
+    d.err = b ? pfmView.passwordFormError(d) : 'this box is no longer in the fleet; nothing was sent';
     if (d.err) { render(); return; }
     const places = ['account', 'web', 'qbt'].filter((k) => d.t[k]).map((k) => ({ account: 'the Linux account', web: 'the web panel', qbt: 'the qBittorrent WebUI' })[k]).join(', ');
     if (!confirm(`Change the password on ${boxLabelOf(b)} for ${places}? Make sure the new password is saved somewhere first: it is not shown again.`)) return;
