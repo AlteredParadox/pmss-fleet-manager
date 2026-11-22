@@ -1403,7 +1403,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.22.2 is the current release. The code was written against five real Pulsed
+1.22.3 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1414,6 +1414,19 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.22.3**
+
+- **Search and status filter on the fleet overview**, for fleets too big to
+  scan (#215). A search box above the cards and the table narrows both by
+  name, host, type, plan, CPU model or status (every word must match, any
+  case), and status buttons with counts show only the online, degraded or
+  offline boxes. "showing N of M boxes · clear" says when boxes are hidden;
+  the headline tiles stay fleet-wide. The filter is kept when you open a box
+  and come back, not across a reload.
+- Search and filter boxes keep the caret, the page's scroll position and
+  an input method's composition when a poll redraws the page; the torrents
+  and log filters lost focus mid-typing before (#215).
 
 **1.22.2**
 
