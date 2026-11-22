@@ -457,8 +457,10 @@ To restore, stop the dashboard and run:
   `-accept-plain-credentials`. Without a secret, a plain-text backup
   restores as before.
 - **It refuses a file with triggers, views or virtual tables**, which
-  this dashboard never creates: one could rewrite a row during the
-  restore's own writes, after the checks above.
+  this dashboard never creates, and **it never installs the file's
+  schema**: the rows are copied into a fresh database with this
+  version's tables, so a foreign key, default or constraint someone added
+  to the backup cannot rewrite a row during the restore or afterwards.
 - **These checks run in `restore`, with the server's secret.** Give it
   the same secret the server starts with: without one, an encrypted
   backup stripped down to plain text looks like a plain-text backup. A

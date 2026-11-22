@@ -25,6 +25,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"pmss-fleet-manager/internal/secrets"
@@ -258,8 +260,17 @@ func Restore(ctx context.Context, dbPath, in string, verify bool, opts ...Option
 // stage copies in to staged, checks it, and with verify opens it as the
 // dashboard would (steps 1 and 2 of Restore).
 func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (Summary, error) {
-	if err := copyFile(in, staged); err != nil {
+	raw := staged + "-in"
+	removeDB(raw)
+	defer removeDB(raw)
+	if err := copyFile(in, raw); err != nil {
 		return Summary{}, err
+	}
+	if _, err := Inspect(ctx, raw); err != nil {
+		return Summary{}, err
+	}
+	if err := rebuild(ctx, raw, staged); err != nil {
+		return Summary{}, fmt.Errorf("copy the backup's rows into a fresh database: %w", err)
 	}
 	sum, err := Inspect(ctx, staged)
 	if err != nil {
@@ -314,6 +325,117 @@ func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (
 	}
 	return final, nil
 }
+
+// rebuild writes to dst (which must not exist) a database with this
+// build's schema holding src's rows: for every table of that schema, the
+// columns src has too (a column src lacks, from an older version, takes
+// this build's default; the migrations then run at Open as for any old
+// database). Nothing of src's schema comes along: a foreign-key action,
+// column default, constraint, index or table someone added to the file
+// could otherwise write during the restore's own statements or the
+// dashboard's later ones (Codex on #222: an ON DELETE SET DEFAULT that a
+// migration's DELETE turned into a planted start command). src is only
+// read, with foreign keys off, so its rows are copied as they are.
+func rebuild(ctx context.Context, src, dst string) error {
+	db, err := sql.Open("sqlite", "file:"+sqliteURIPath.Replace(dst)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return err
+	}
+	db.SetMaxOpenConns(1) // the ATTACH belongs to the one connection
+	defer db.Close()
+	if err := (&Store{db: db}).migrate(); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `ATTACH DATABASE ? AS bk`, src); err != nil {
+		return err
+	}
+	tables, err := columnsOf(ctx, db, `SELECT m.name, p.name FROM main.sqlite_master m, pragma_table_info(m.name, 'main') p
+		WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' ORDER BY m.name, p.cid`)
+	if err != nil {
+		return err
+	}
+	have, err := columnsOf(ctx, db, `SELECT m.name, p.name FROM bk.sqlite_master m, pragma_table_info(m.name, 'bk') p
+		WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		return err
+	}
+	for _, t := range tables {
+		var cols []string
+		for _, c := range t.cols {
+			if have.has(t.name, c) {
+				cols = append(cols, quoteIdent(c))
+			}
+		}
+		if len(cols) == 0 {
+			continue
+		}
+		list := strings.Join(cols, ", ")
+		// Names from this build's own schema, quoted: no input reaches the
+		// statement's text.
+		q := `INSERT INTO main.` + quoteIdent(t.name) + ` (` + list + `) SELECT ` + list + ` FROM bk.` + quoteIdent(t.name) // NOSONAR: identifiers from this build's schema, not from the backup
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("table %s: %w", t.name, err)
+		}
+	}
+	// AUTOINCREMENT counters, so an ID a deleted box had is not handed out
+	// again, for this build's tables only.
+	var seq int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM bk.sqlite_master WHERE name='sqlite_sequence'`).Scan(&seq); err != nil {
+		return err
+	}
+	if seq > 0 {
+		if _, err := db.ExecContext(ctx, `UPDATE main.sqlite_sequence SET seq=max(seq, (SELECT max(b.seq) FROM bk.sqlite_sequence b WHERE b.name=main.sqlite_sequence.name AND typeof(b.seq)='integer'))
+			WHERE EXISTS (SELECT 1 FROM bk.sqlite_sequence b WHERE b.name=main.sqlite_sequence.name AND typeof(b.seq)='integer')`); err != nil {
+			return err
+		}
+	}
+	if _, err := db.ExecContext(ctx, `DETACH DATABASE bk`); err != nil {
+		return err
+	}
+	return db.Close()
+}
+
+// tableCols is one table's column names, in order.
+type tableCols struct {
+	name string
+	cols []string
+}
+
+type schemaCols []tableCols
+
+func (sc schemaCols) has(table, col string) bool {
+	for _, t := range sc {
+		if t.name == table {
+			return slices.Contains(t.cols, col)
+		}
+	}
+	return false
+}
+
+// columnsOf groups (table, column) rows by table, keeping their order.
+func columnsOf(ctx context.Context, db *sql.DB, query string) (schemaCols, error) {
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out schemaCols
+	for rows.Next() {
+		var t, c string
+		if err := rows.Scan(&t, &c); err != nil {
+			return nil, err
+		}
+		if n := len(out); n > 0 && out[n-1].name == t {
+			out[n-1].cols = append(out[n-1].cols, c)
+		} else {
+			out = append(out, tableCols{t, []string{c}})
+		}
+	}
+	return out, rows.Err()
+}
+
+// quoteIdent quotes an SQL identifier.
+func quoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
 // cellScan is what scanCells found in a file's secret cells.
 type cellScan struct {
