@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -625,5 +626,81 @@ func TestRestoreRebuildOlderSchema(t *testing.T) {
 	}
 	if nb.ID <= b {
 		t.Fatalf("new box got ID %d, the deleted one had %d", nb.ID, b)
+	}
+}
+
+// The rebuilt file is owner-only from the start: an unchecked restore of a
+// plain-text backup installs it as it is (Codex and fred on #222).
+func TestRestoreRebuildOwnerOnly(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.db")
+	liveStore(t, src, "plain").Close()
+	backup := filepath.Join(dir, "backup.db")
+	if _, err := Backup(ctx, src, backup); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(dir, "data")
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(data, "pmss-fleet-manager.db")
+	if _, err := Restore(ctx, live, backup, false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(live); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("installed mode %v %v", fi.Mode(), err)
+	}
+}
+
+// Counters of tables the backup holds no rows of any more still come
+// along (fred on #222), and an old backup's duplicate active alerts are
+// collapsed onto the oldest, as the migration did (Codex on #222).
+func TestRestoreRebuildCountersAndAlerts(t *testing.T) {
+	ctx := context.Background()
+	sealA := WithSealer(mustSealer(t, backupKeyA))
+	dir := t.TempDir()
+	backup, a, b := boundBackup(t, dir)
+	rawExec(t, backup, `DROP INDEX alerts_active_unique`)
+	for i := range 2 {
+		rawExec(t, backup, `INSERT INTO alerts(box_id, key, severity, title, active, created_at, updated_at) VALUES(?, 'disk', 'warn', ?, 1, 'x', 'x')`, a, fmt.Sprint("dup ", i))
+	}
+	rawExec(t, backup, `DELETE FROM boxes WHERE id=?`, b)
+	live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
+	if _, err := Restore(ctx, live, backup, true, sealA); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(live, sealA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var n int
+	var title string
+	if err := s.db.QueryRow(`SELECT count(*), min(title) FROM alerts WHERE box_id=? AND key='disk' AND active=1`, a).Scan(&n, &title); err != nil || n != 1 || title != "dup 0" {
+		t.Fatalf("alerts: %d %q %v", n, title, err)
+	}
+	// Every box deleted: the table is copied empty, its counter is not lost.
+	// (SQLite already opens a counter row on an INSERT ... SELECT of no
+	// rows, which the update then raises; rebuild also inserts missing
+	// ones, so this holds either way.)
+	dir2 := t.TempDir()
+	backup2, _, b2 := boundBackup(t, dir2)
+	rawExec(t, backup2, `DELETE FROM boxes`)
+	live2 := filepath.Join(dir2, "data", "pmss-fleet-manager.db")
+	if _, err := Restore(ctx, live2, backup2, true, sealA); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(live2, sealA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	nb := &Box{Name: "c", Host: "h", User: "u", Enabled: true}
+	if err := s2.CreateBox(ctx, nb); err != nil {
+		t.Fatal(err)
+	}
+	if nb.ID <= b2 {
+		t.Fatalf("new box got ID %d, the deleted ones went up to %d", nb.ID, b2)
 	}
 }

@@ -337,6 +337,15 @@ func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (
 // migration's DELETE turned into a planted start command). src is only
 // read, with foreign keys off, so its rows are copied as they are.
 func rebuild(ctx context.Context, src, dst string) error {
+	// Owner-only before SQLite opens it: credentials are copied in before
+	// anything else would restrict it, and an unchecked restore installs
+	// this file as it is (Codex and fred on #222). SQLite gives its journal
+	// the database's mode.
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	f.Close()
 	db, err := sql.Open("sqlite", "file:"+sqliteURIPath.Replace(dst)+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return err
@@ -371,8 +380,16 @@ func rebuild(ctx context.Context, src, dst string) error {
 		}
 		list := strings.Join(cols, ", ")
 		// Names from this build's own schema, quoted: no input reaches the
-		// statement's text.
-		q := `INSERT INTO main.` + quoteIdent(t.name) + ` (` + list + `) SELECT ` + list + ` FROM bk.` + quoteIdent(t.name) // NOSONAR: identifiers from this build's schema, not from the backup
+		// statement's text. An old backup may hold several active alerts
+		// for one box and key, which the migration used to collapse onto
+		// the oldest before creating the unique index; this schema has the
+		// index already, so the oldest is kept by copying in rowid order
+		// and ignoring the rest (Codex on #222).
+		verb, order := `INSERT`, ``
+		if t.name == "alerts" {
+			verb, order = `INSERT OR IGNORE`, ` ORDER BY rowid`
+		}
+		q := verb + ` INTO main.` + quoteIdent(t.name) + ` (` + list + `) SELECT ` + list + ` FROM bk.` + quoteIdent(t.name) + order // NOSONAR: identifiers from this build's schema, not from the backup
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("table %s: %w", t.name, err)
 		}
@@ -386,6 +403,17 @@ func rebuild(ctx context.Context, src, dst string) error {
 	if seq > 0 {
 		if _, err := db.ExecContext(ctx, `UPDATE main.sqlite_sequence SET seq=max(seq, (SELECT max(b.seq) FROM bk.sqlite_sequence b WHERE b.name=main.sqlite_sequence.name AND typeof(b.seq)='integer'))
 			WHERE EXISTS (SELECT 1 FROM bk.sqlite_sequence b WHERE b.name=main.sqlite_sequence.name AND typeof(b.seq)='integer')`); err != nil {
+			return err
+		}
+		// A table copied empty has no counter yet, but the backup's may
+		// be past zero (its rows were deleted): carry those too, for this
+		// build's AUTOINCREMENT tables (fred on #222).
+		if _, err := db.ExecContext(ctx, `INSERT INTO main.sqlite_sequence(name, seq)
+			SELECT b.name, max(b.seq) FROM bk.sqlite_sequence b
+			WHERE typeof(b.seq)='integer'
+			  AND b.name IN (SELECT name FROM main.sqlite_master WHERE type='table' AND sql LIKE '%AUTOINCREMENT%')
+			  AND b.name NOT IN (SELECT name FROM main.sqlite_sequence)
+			GROUP BY b.name`); err != nil {
 			return err
 		}
 	}
