@@ -52,3 +52,11 @@ func sshTimeout() time.Duration {
 	}
 	return defaultSSHTimeout
 }
+
+// DetectBudget is how long one detection may take end to end: the connection
+// deadline, the probe deadline and the detection-only steps that keep their
+// own 15 s each (qBittorrent, docker, du). A caller that caps detection below
+// this cancels a probe that respects -ssh-timeout.
+func DetectBudget() time.Duration {
+	return 2*sshTimeout() + 45*time.Second
+}

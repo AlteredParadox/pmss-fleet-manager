@@ -1867,7 +1867,7 @@ func (s *Server) handleDetect(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), collect.DetectBudget())
 	defer cancel()
 	res := collect.Detect(ctx, b)
 	writeJSON(w, 200, res)

@@ -26,6 +26,14 @@ import (
 func TestSSHTimeoutOverride(t *testing.T) {
 	t.Cleanup(func() { SetSSHTimeout(0) })
 
+	if got := DetectBudget(); got != 2*defaultSSHTimeout+45*time.Second {
+		t.Fatalf("default detection budget = %v", got)
+	}
+	SetSSHTimeout(2 * time.Minute)
+	if got := DetectBudget(); got != 4*time.Minute+45*time.Second {
+		t.Fatalf("detection budget with 2m = %v", got)
+	}
+	SetSSHTimeout(0)
 	if got := sshTimeout(); got != defaultSSHTimeout {
 		t.Fatalf("default timeout = %v, want %v", got, defaultSSHTimeout)
 	}
