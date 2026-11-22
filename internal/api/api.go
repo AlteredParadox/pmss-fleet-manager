@@ -264,20 +264,24 @@ func NormalizeFrameAncestors(in []string) ([]string, error) {
 		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 			return nil, fmt.Errorf("frame ancestor %q: give an origin only, without a path, query or user", v)
 		}
+		if !cspHost(host) {
+			return nil, fmt.Errorf("frame ancestor %q: %q is not a plain host name or IPv4 address", v, host)
+		}
+		// The origin is rebuilt from the parts checked here, never copied from
+		// u.Host: that would carry brackets or a trailing colon into the policy.
+		origin := u.Scheme + "://" + host
 		if p := u.Port(); p != "" {
 			n, err := strconv.Atoi(p)
 			if err != nil || n < 1 || n > 65535 {
 				return nil, fmt.Errorf("frame ancestor %q: port must be between 1 and 65535", v)
 			}
+			origin += ":" + p
 		} else if strings.HasSuffix(u.Host, ":") {
-			// "https://host:" parses with an empty port and a trailing colon in
-			// Host, which the origin below would copy into the policy.
+			// "https://host:" names an empty port; refuse it instead of
+			// silently treating it as the default one.
 			return nil, fmt.Errorf("frame ancestor %q: port is empty after ':'", v)
 		}
-		if !cspHost(host) {
-			return nil, fmt.Errorf("frame ancestor %q: %q is not a plain host name or IPv4 address", v, host)
-		}
-		out = append(out, u.Scheme+"://"+u.Host)
+		out = append(out, origin)
 	}
 	return out, nil
 }
