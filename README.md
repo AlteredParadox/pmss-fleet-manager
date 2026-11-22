@@ -1449,9 +1449,9 @@ Newest first; each release's full notes are on the
   by your account with the same socket cookie. A changed or foreign
   listener refuses, with no fallback. Checked on kernel 6.1: a listener
   swapped in between the two checks received zero bytes.
-- **Action needed on privacy hosts: qBittorrent's WebUI must listen on
-  127.0.0.1.** The check only accepts a WebUI bound to exactly 127.0.0.1
-  (PMSS's default). qBittorrent's own default is all addresses; a client
+- **Action needed on privacy hosts: qBittorrent's WebUI (and rTorrent's
+  SCGI over TCP) must listen on 127.0.0.1.** The check only accepts a
+  listener bound to exactly 127.0.0.1 (PMSS's default for qBittorrent). qBittorrent's own default is all addresses; a client
   installed that way is refused on such a host, with a message saying so.
   Set qBittorrent's WebUI address to 127.0.0.1.
 - **Listener-only, a per-box opt-in, off by default** (#218). Only for a
@@ -1469,7 +1469,10 @@ Newest first; each release's full notes are on the
   A box whose `ss` cannot report the listener's owner at all is now
   **blocked** rather than connected unverified. On hosts where PMSS's `ss`
   filter did not load (PMSS #1303), qBittorrent (and rTorrent over TCP)
-  was refused on every connection before; it connects again.
+  was refused on every connection before; it connects again when it listens
+  on exactly 127.0.0.1 and `ss` reports the listener's owner and socket
+  cookie (the same rule as on other privacy hosts; rTorrent's Unix socket
+  was never affected).
 - **The port-owner check on privacy hosts no longer trusts `ss -p`**
   (#219). It matched sockets to processes by inode number, a wrapping
   counter, so a co-tenant squatting a port could in principle have been
