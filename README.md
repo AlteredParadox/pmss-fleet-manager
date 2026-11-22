@@ -693,7 +693,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.23
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.24
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -1495,7 +1495,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.23.0 is the current release. The code was written against five real Pulsed
+1.24.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1507,9 +1507,19 @@ checksums, and a matching container image on GHCR.
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
-**Unreleased**
+**1.24.0**
 
-- **Saved box credentials are tied to their box** (Codex audit of
+- **Upgrade notes.** With credential encryption on, the first start of
+  1.24 re-encrypts every saved box credential in a new format, and
+  **releases before 1.24 then refuse the database**: take a backup before
+  upgrading if you may roll back. **Restoring a backup made before 1.24
+  needs `-old-credentials keep` or `drop`**, and **restoring a plain-text
+  backup with a secret configured needs `-accept-plain-credentials`**
+  (both below). **A custom qBittorrent download URL now needs a sha256**
+  (below). The default SSH connect timeout is now 45 s (was 15 to 25 s),
+  so an unreachable box takes longer to show as down; `-ssh-timeout`
+  sets it.
+- **Saved box credentials are tied to their box** (#222, Codex audit of
   1.23.0). With credential encryption on, an encrypted backup edited by
   someone without the secret could point a box at their own server: the
   restore accepted it, and the next poll sent them the saved password.
@@ -1523,8 +1533,11 @@ Newest first; each release's full notes are on the
   Restore also refuses plain text where an encrypted credential belongs
   (someone without the secret could have written their own start command
   or download link there); **restoring a plain-text backup with a secret
-  configured now needs `-accept-plain-credentials`**.
-- **Boxes with the same name read apart everywhere.** Where a box is
+  configured now needs `-accept-plain-credentials`**. Restore also never
+  installs a backup's database schema: the rows are copied into a fresh
+  database with this version's tables, and a file with triggers, views or
+  virtual tables is refused.
+- **Boxes with the same name read apart everywhere** (#227). Where a box is
   named away from its own page (the alerts list, the fleet torrents list
   and its notes, the Services table, the password panel and its
   confirmation, and the remove, delete-files, autostart and listener-only
@@ -1533,14 +1546,27 @@ Newest first; each release's full notes are on the
   boxes named alike (often the account name on each machine) no longer
   shows one bare name for all of them. The torrents filter matches the
   user and host too.
-- **A custom qBittorrent download URL needs a sha256** (Codex audit of
-  1.23.0). Install used to go ahead unverified when the URL was not a
+- **A custom qBittorrent download URL needs a sha256** (#224, Codex audit
+  of 1.23.0). Install used to go ahead unverified when the URL was not a
   GitHub release asset. Now any URL other than the default needs a digest:
   GitHub's for a release asset, or yours, added as `#sha256=<digest>` to
   the URL in settings. **If you use a mirror or a private build, add its
   digest before the next install or update.**
 - The security headers (CSP, `X-Frame-Options`, `nosniff`, referrer
-  policy) are now sent on the Host-check, login and throttle refusals too.
+  policy) are now sent on the Host-check, login and throttle refusals too
+  (#224).
+- **`-ssh-timeout` / `PMSS_SSH_TIMEOUT`** (#223, by vasilvestre): one
+  value, 45 s by default, for an SSH connection to come up and for the
+  detection and poll probes to run, for boxes too busy to answer in time.
+  The add wizard's detection gets twice that plus 45 s.
+- **The Containers tab shows the docker storage driver** (#225, by
+  vasilvestre), read on every poll, with a short note on what the slow
+  fallbacks (`fuse-overlayfs`, `vfs`) cost. No alert, and no advice to
+  switch.
+- **The disk panel shows PMSS's disk bonus** (#226, by vasilvestre): the
+  applied Free Bonus Disk percent (`~/.bonus`) and, where PMSS wrote one,
+  the additional disk already included in the quota (`~/.bonusQuota`), as
+  two separate figures.
 
 **1.23.0**
 
