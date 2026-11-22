@@ -53,8 +53,9 @@ for you, and nothing is moved.
 
 **Per box.**
 
-- Overview: disk with its PMSS bonus (`~/.bonus`, the percentage and the GiB
-  it adds), upload with limit/bonus/throttle state, bandwidth, CPU/RAM
+- Overview: disk with PMSS's two bonus figures (`~/.bonus`, the applied Free
+  Bonus Disk percent, and `~/.bonusQuota`, additional disk GiB already in the
+  quota), upload with limit/bonus/throttle state, bandwidth, CPU/RAM
   (your slice against its quota and as a share of the whole host), client,
   incoming connectivity and listen port, autostart status, plan and billing.
 - Traffic: daily upload/download bars for the rolling 30 days PMSS tracks.
@@ -2299,3 +2300,4 @@ refactors by pure extraction, no behaviour change.
 
 **1.0.0** is the first release, after ten rounds of adversarial review of the
 probe, the credential gate and the UI.
+MARKER

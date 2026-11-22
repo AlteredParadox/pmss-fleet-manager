@@ -875,7 +875,7 @@ function ovDiskPanel(b, dt) {
   return `<div class="panel"><div class="tile-label">disk</div>
       <div class="tile-value">${fmtBytes(b.disk.used_bytes, 2)} <small>/ ${b.disk.quota_bytes ? fmtBytes(b.disk.quota_bytes, 1) : 'n/a'}</small></div>
       <div class="meter thick"><i class="${levelClass(b.disk.pct, dt)}" style="width:${Math.min(100, b.disk.pct)}%"></i></div>
-      <div class="note">${b.disk.quota_bytes ? `${fmtPct(b.disk.pct)} used · ${fmtBytes(Math.max(0, b.disk.quota_bytes - b.disk.used_bytes), 1)} free` : 'quota unknown'}${b.disk.bonus_pct ? ` · +${b.disk.bonus_pct}% bonus${b.disk.bonus_bytes ? ` (${fmtBytes(b.disk.bonus_bytes, 1)})` : ''}` : ''}${b.disk.source === 'file' ? ` · snapshot ${fmtDur(b.disk.age_sec)} old` : ''}</div></div>`;
+      <div class="note">${b.disk.quota_bytes ? `${fmtPct(b.disk.pct)} used · ${fmtBytes(Math.max(0, b.disk.quota_bytes - b.disk.used_bytes), 1)} free` : 'quota unknown'}${b.disk.bonus_pct ? ` · +${b.disk.bonus_pct}% bonus` : ''}${b.disk.bonus_bytes ? ` · ${fmtBytes(b.disk.bonus_bytes, 1)} additional disk (in quota)` : ''}${b.disk.source === 'file' ? ` · snapshot ${fmtDur(b.disk.age_sec)} old` : ''}</div></div>`;
 }
 function ovUploadPanel(b, tt) {
   const tr = b.traffic;

@@ -633,8 +633,8 @@ type QuotaInfo struct {
 	FilesSoft int64
 	Source    string // "quota", "file", or "quota+file" (live limits, the fresher ~/.quota's usage)
 	Age       time.Duration
-	BonusPct  float64 // ~/.bonus: the disk bonus in percent, 0 when the box has none
-	BonusGiB  float64 // ~/.bonusQuota: the quota that percentage adds
+	BonusPct  float64 // ~/.bonus: the applied Free Bonus Disk percent, 0 when absent
+	BonusGiB  float64 // ~/.bonusQuota: additional disk GiB already in the quota, 0 when absent
 }
 
 // TrafficSeries is one of PMSS's serialized traffic snapshots.
