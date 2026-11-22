@@ -2300,4 +2300,3 @@ refactors by pure extraction, no behaviour change.
 
 **1.0.0** is the first release, after ten rounds of adversarial review of the
 probe, the credential gate and the UI.
-MARKER
