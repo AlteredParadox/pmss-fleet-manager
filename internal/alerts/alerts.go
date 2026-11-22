@@ -65,7 +65,7 @@ func recheckable(s *collect.BoxState, k string) bool {
 		return s.RAM.OK
 	case k == "suspended":
 		return s.Account.OK
-	case strings.HasPrefix(k, containerKey), k == "containers", k == "docker-driver":
+	case strings.HasPrefix(k, containerKey), k == "containers":
 		// Monitoring switched off for the box is a deliberate "nothing to
 		// check", like a disabled box: the alert must not be stranded.
 		return s.Docker.Reachable || !s.Docker.Enabled
@@ -379,28 +379,10 @@ const containerKey = "container:"
 // resolved earlier, is admitted only while the count allows. A database
 // holding more open container alerts than the bound keeps them all and
 // admits no new one until it is under the bound again.
-// slowDriver reports the storage drivers the dashboard mentions: both copy
-// or FUSE-mount every layer, so pulls, builds and starts cost more than on
-// overlay2. Neither is broken.
-func slowDriver(d string) bool {
-	return d == "fuse-overlayfs" || d == "vfs"
-}
-
-// driverNote is the alert's tail: what the driver costs, and that it is not
-// an error to fix.
-const driverNote = "no fault, and no need to switch"
-
 func wantDocker(s *collect.BoxState, open []string) []want {
 	var active []want
 	if s.Docker.Enabled && !s.Docker.Reachable {
 		active = append(active, want{"docker", "warn", fmt.Sprintf("%s — rootless docker not responding (%s)", s.Name, s.Docker.Error)})
-	}
-	// Only the two slow fallbacks are worth an alert, and it is information,
-	// not a fault: fuse-overlayfs is a supported rootless backend where
-	// overlay2 is unavailable, and vfs is the last resort. Any other driver
-	// (overlay2, the containerd image store's) says nothing bad by itself.
-	if s.Docker.Enabled && s.Docker.Reachable && slowDriver(s.Docker.Driver) {
-		active = append(active, want{"docker-driver", "warn", fmt.Sprintf("%s — rootless docker uses the %s storage driver, the slow fallback (%s)", s.Name, s.Docker.Driver, driverNote)})
 	}
 	kept, pending := containerWants(s, open)
 	active = append(active, kept...)

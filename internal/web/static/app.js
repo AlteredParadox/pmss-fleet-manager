@@ -1502,11 +1502,10 @@ function driverNote(d) {
   // Only the slow fallbacks get a note: overlay2 and the containerd image
   // store say nothing bad by themselves.
   if (d.driver !== 'fuse-overlayfs' && d.driver !== 'vfs') return '';
-  return `<div class="note" style="border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin:8px 0;font-size:12px;line-height:1.5">
+  return `<div class="note driver-note">
     <b>storage driver is ${esc(d.driver)}.</b>
-    Rootless docker falls back to it, so nothing is broken: it FUSE-mounts or copies every image layer, and pulls, builds and container starts cost more than on overlay2.
-    If you do want overlay2, convert rather than switch blindly: changing the driver makes the existing containers, their writable layers and the images under the old one inaccessible (they stay on disk and still count against the quota), so you lose the running setup until you rebuild it.
-    Read <a href="https://docs.docker.com/engine/storage/drivers/select-storage-driver/" target="_blank" rel="noopener noreferrer">Docker's storage driver and migration notes</a> first, and on a Pulsed Media box restart the daemon with a panel slot reload, never <span class="muted">systemctl --user restart docker</span>: that deadlocks rootlesskit.
+    It is a supported fallback, so nothing is broken: it FUSE-mounts or copies every image layer, which makes pulls, builds and container starts cost more than on overlay2.
+    See <a href="https://docs.docker.com/engine/storage/drivers/select-storage-driver/" target="_blank" rel="noopener noreferrer">Docker's storage driver documentation</a> for what each driver does.
   </div>`;
 }
 function tabContainers(b) {
