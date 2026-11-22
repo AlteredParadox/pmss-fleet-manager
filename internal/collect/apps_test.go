@@ -524,3 +524,44 @@ func TestFailedRemovalKeepsWithdrawal(t *testing.T) {
 		t.Fatal("the restarted poller must not have the withdrawn opt-in")
 	}
 }
+
+// An edit that saves but whose re-read fails restarts the old settings
+// strict: the saved edit may have cleared the opt-in (fred on #218).
+func TestFailedRereadRestartsStrict(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	b := &store.Box{Name: "x", Host: "h.example", User: "u", Port: 22, Enabled: false}
+	if err := m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := st.GetBox(ctx, b.ID)
+	if err := m.SetListenerOnly(ctx, b.ID, cur.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ = st.GetBox(ctx, b.ID)
+	cur.Host = "z.example" // an identity change: the database clears the opt-in
+	m.rereadFault = func() error { return errors.New("database is locked") }
+	if err := m.UpdateBox(ctx, cur, store.Clears{}); err == nil {
+		t.Fatal("the re-read was meant to fail")
+	}
+	m.rereadFault = nil
+	if saved, _ := st.GetBox(ctx, b.ID); saved.ListenerOnly {
+		t.Fatal("the saved edit must have cleared the opt-in")
+	}
+	p := m.poller(b.ID)
+	if p == nil || p.listenerOnly.Load() || p.box.ListenerOnly {
+		t.Fatal("the poller restarted after a failed re-read must be strict")
+	}
+	if s, _ := m.State(b.ID); s.Verify.ListenerOnly {
+		t.Fatal("its state must not show the opt-in")
+	}
+}

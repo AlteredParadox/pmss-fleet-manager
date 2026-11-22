@@ -99,6 +99,8 @@ type Manager struct {
 	cacheFault func(kind string) error
 	// deleteFault, when set (tests), replaces the box row delete.
 	deleteFault func() error
+	// rereadFault, when set (tests), fails the re-read after a box edit.
+	rereadFault func() error
 	// watchMu serialises SetAppWatch's read-modify-write of a box's watch
 	// list: two toggles at once would otherwise each save a list missing
 	// the other's change.
@@ -691,11 +693,23 @@ func (m *Manager) updateBoxLocked(ctx context.Context, b *store.Box, clears stor
 	// (after stopAndWait, so a toggle never waits on an in-flight poll).
 	m.watchMu.Lock()
 	defer m.watchMu.Unlock()
-	fresh, err := m.st.GetBox(sctx, b.ID)
+	var fresh *store.Box
+	err := error(nil)
+	if m.rereadFault != nil {
+		err = m.rereadFault()
+	} else {
+		fresh, err = m.st.GetBox(sctx, b.ID)
+	}
 	if err != nil {
 		if p != nil {
-			m.log.Warn("box edit saved but the record could not be re-read; polling continues with the previous settings until the next edit", "box", p.box.Name, "err", err)
-			m.startPoller(p.box, prev) // keep polling with the old settings rather than nothing
+			m.log.Warn("box edit saved but the record could not be re-read; polling continues with the previous settings until the next edit, with listener-only off", "box", p.box.Name, "err", err)
+			// Keep polling with the old settings rather than nothing, but
+			// strict: the saved edit may have moved the box or changed its
+			// host key, which cleared the opt-in in the database (fred on
+			// #218). The owner can give it again on the box's page.
+			old := *p.box
+			old.ListenerOnly = false
+			m.startPoller(&old, prev)
 		}
 		return err
 	}
