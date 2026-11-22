@@ -26,11 +26,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"pmss-fleet-manager/internal/sshx"
 	"pmss-fleet-manager/internal/store"
 )
 
@@ -66,25 +69,86 @@ func testSSHServer(t *testing.T, root string) (port int, hostKey string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	srv := &testSSHState{procs: map[*exec.Cmd]struct{}{}}
+	// Registered after the caller's TempDir for root, so it runs before
+	// that is removed: no command of this server, a stand-in still sleeping
+	// or a poll of a box, may write into a home being deleted (the flaky
+	// "directory not empty" of TestChangePasswordLostConnection).
+	t.Cleanup(func() { ln.Close(); srv.shutdown() })
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go serveTestSSH(conn, cfg, root)
+			go serveTestSSH(conn, cfg, root, srv)
 		}
 	}()
 	return ln.Addr().(*net.TCPAddr).Port, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
 }
 
-func serveTestSSH(conn net.Conn, cfg *ssh.ServerConfig, root string) {
+// testSSHState is what a test server's cleanup must end: its client
+// connections (so no session starts after it) and the commands it runs,
+// each in its own process group so a stand-in's children go too.
+type testSSHState struct {
+	mu     sync.Mutex
+	closed bool
+	conns  []*ssh.ServerConn
+	procs  map[*exec.Cmd]struct{}
+	wg     sync.WaitGroup
+}
+
+// start runs cmd unless the server is shutting down.
+func (s *testSSHState) start(cmd *exec.Cmd) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return false
+	}
+	s.procs[cmd] = struct{}{}
+	s.wg.Add(1)
+	return true
+}
+
+func (s *testSSHState) done(cmd *exec.Cmd) {
+	s.mu.Lock()
+	delete(s.procs, cmd)
+	s.mu.Unlock()
+	s.wg.Done()
+}
+
+// shutdown closes every connection, kills every running command's process
+// group and waits for them all.
+func (s *testSSHState) shutdown() {
+	s.mu.Lock()
+	s.closed = true
+	for _, c := range s.conns {
+		c.Close()
+	}
+	for cmd := range s.procs {
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	s.mu.Unlock()
+	s.wg.Wait()
+}
+
+func serveTestSSH(conn net.Conn, cfg *ssh.ServerConfig, root string, srv *testSSHState) {
 	sc, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
 		return
 	}
 	defer sc.Close()
+	srv.mu.Lock()
+	if srv.closed {
+		srv.mu.Unlock()
+		return
+	}
+	srv.conns = append(srv.conns, sc)
+	srv.mu.Unlock()
 	go ssh.DiscardRequests(reqs)
 	home := filepath.Join(root, sc.User())
 	for nc := range chans {
@@ -112,7 +176,13 @@ func serveTestSSH(conn net.Conn, cfg *ssh.ServerConfig, root string) {
 				cmd.Dir = home
 				cmd.Stdin, cmd.Stdout, cmd.Stderr = ch, ch, ch.Stderr()
 				status := 0
-				if err := cmd.Run(); err != nil {
+				if !srv.start(cmd) {
+					ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{255}))
+					return
+				}
+				err := cmd.Wait()
+				srv.done(cmd)
+				if err != nil {
 					var ee *exec.ExitError
 					if errors.As(err, &ee) {
 						status = ee.ExitCode()
@@ -142,4 +212,30 @@ func sshTestBox(t *testing.T, m *Manager, name, user string, port int, hostKey s
 		t.Fatal("no poller for " + name)
 	}
 	return b
+}
+
+// The test server ends its commands when its test ends, before the test's
+// directories are removed: a command still running then (a stand-in that
+// sleeps, a poll) must not write into a home being deleted. Here one that
+// would write a file a second later is still running when its subtest
+// ends; the file never appears.
+func TestSSHServerEndsCommands(t *testing.T) {
+	keep := t.TempDir()
+	late := filepath.Join(keep, "late")
+	t.Run("server", func(t *testing.T) {
+		root := t.TempDir()
+		port, hostKey := testSSHServer(t, root)
+		cli, err := sshx.Dial(context.Background(), sshx.Config{Host: "127.0.0.1", Port: port, User: "u", AuthMethod: "password", Password: "x", HostKey: hostKey, Timeout: 5 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cli.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		cli.Run(ctx, "sh", strings.NewReader("sleep 1; touch '"+late+"'\n")) // returns at the deadline; the command runs on
+	})
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(late); err == nil {
+		t.Fatal("a command of the test server outlived its test")
+	}
 }
