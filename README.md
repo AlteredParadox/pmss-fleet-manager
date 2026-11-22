@@ -1519,8 +1519,8 @@ Newest first; each release's full notes are on the
   only if nobody else could have changed the file, otherwise `drop` and
   enter those passwords again. **`-accept-plain-credentials`** is only for
   a plain-text backup you made yourself and now restore with a secret
-  configured; it is not a way past a refusal of an encrypted backup, which
-  means the file was altered (both below). **A custom qBittorrent download URL now needs a sha256**
+  configured; don't use it to override unexpected plain text in an
+  encrypted backup (both below). **A custom qBittorrent download URL now needs a sha256**
   (below). The default SSH connect timeout is now 45 s (was 15 to 25 s),
   so an unreachable box takes longer to show as down; `-ssh-timeout`
   sets it.
@@ -1540,8 +1540,8 @@ Newest first; each release's full notes are on the
   (someone without the secret could have written their own start command
   or download link there); **restoring a plain-text backup you made
   yourself with a secret configured now needs
-  `-accept-plain-credentials`**, which is not for an encrypted backup
-  that was refused. Restore also never
+  `-accept-plain-credentials`**; don't use it to override unexpected plain
+  text in an encrypted backup. Restore also never
   installs a backup's database schema: the rows are copied into a fresh
   database with this version's tables, and a file with triggers, views or
   virtual tables is refused.
