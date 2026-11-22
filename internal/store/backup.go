@@ -290,16 +290,19 @@ func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (
 // cellScan is what scanCells found in a file's secret cells.
 type cellScan struct {
 	unbound int // box credentials in a well-formed version-1 envelope
-	plain   int // non-empty values with no envelope at all
-	sealed  int // values in one of this build's envelopes
+	// plain counts non-empty values that are not a well-formed envelope
+	// the cell accepts: plain text, and text that merely starts like an
+	// envelope ("pmss1:;…", "pmss3:…"), which a file with stripped
+	// encryption markers would hand out as plain text.
+	plain  int
+	sealed int // values in a well-formed envelope the cell accepts
 }
 
 // scanCells reads every secret cell of the file (the columns and settings
 // secretCells covers), clearing the unbound box credentials with drop.
-// A malformed old envelope never decrypts, in any reading of the
-// metadata, so it is not counted as unbound; a plain-text password that
-// merely starts with "pmss1:" is left to the marker, as everywhere else.
-// It reads only the columns the file has: an old file is not migrated
+// A malformed old envelope never decrypts, so it is not counted as
+// unbound (drop leaves it): it counts as plain, which only matters where
+// plain text is refused. It reads only the columns the file has: an old file is not migrated
 // before it is checked.
 func scanCells(ctx context.Context, db *sql.DB, drop bool) (cellScan, error) {
 	var sc cellScan
@@ -308,15 +311,14 @@ func scanCells(ctx context.Context, db *sql.DB, drop bool) (cellScan, error) {
 			return false
 		}
 		version, ok := secrets.Envelope(v)
-		switch {
-		case version == 0:
+		if !ok || !(version == 1 || bound && version == 2) {
 			sc.plain++
-		case ok && (version == 1 || bound && version == 2):
-			sc.sealed++
-			if bound && version == 1 {
-				sc.unbound++
-				return true
-			}
+			return false
+		}
+		sc.sealed++
+		if bound && version == 1 {
+			sc.unbound++
+			return true
 		}
 		return false
 	}
