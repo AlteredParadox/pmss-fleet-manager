@@ -424,8 +424,8 @@ type DockerState struct {
 	Reachable bool   `json:"reachable"`
 	Version   string `json:"version,omitempty"`
 	// Driver is the daemon's storage driver ("overlay2", "fuse-overlayfs",
-	// "vfs"). Read once per daemon; a daemon restarted with another driver
-	// keeps the old value until the box is re-polled from scratch.
+	// "vfs", or the containerd image store's). Read on every poll; the last
+	// known value stands while /info cannot be read.
 	Driver     string          `json:"driver,omitempty"`
 	Error      string          `json:"error,omitempty"`
 	Running    int             `json:"running"`

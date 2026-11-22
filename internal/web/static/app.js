@@ -1499,13 +1499,14 @@ const ICON = {
   trash: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M6.2 4.5V2.5h3.6v2M4 4.5l.8 9h6.4l.8-9M6.6 7v4.5M9.4 7v4.5"/></svg>',
 };
 function driverNote(d) {
-  if (!d.driver || d.driver === 'overlay2') return '';
-  return `<div class="note" style="color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:8px 10px;margin:8px 0;font-size:12px;line-height:1.5">
-    <b>storage driver is ${esc(d.driver)}, not overlay2.</b>
-    Every image layer sits in a slow FUSE mount, so pulls, container starts and image builds take far longer than they should.
-    Switch to overlay2: set <span class="muted">"storage-driver": "overlay2"</span> in <span class="muted">~/.config/docker/daemon.json</span>, then restart the rootless daemon.
-    Changing the driver hides the images layered by ${esc(d.driver)} (they stay on disk under <span class="muted">~/.local/share/docker</span> and still count against the quota), so recreate the containers afterwards, then delete the old driver directory.
-    On a Pulsed Media box, restart the daemon with a panel slot reload, never <span class="muted">systemctl --user restart docker</span>: that deadlocks rootlesskit.
+  // Only the slow fallbacks get a note: overlay2 and the containerd image
+  // store say nothing bad by themselves.
+  if (d.driver !== 'fuse-overlayfs' && d.driver !== 'vfs') return '';
+  return `<div class="note" style="border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin:8px 0;font-size:12px;line-height:1.5">
+    <b>storage driver is ${esc(d.driver)}.</b>
+    Rootless docker falls back to it, so nothing is broken: it FUSE-mounts or copies every image layer, and pulls, builds and container starts cost more than on overlay2.
+    If you do want overlay2, convert rather than switch blindly: changing the driver makes the existing containers, their writable layers and the images under the old one inaccessible (they stay on disk and still count against the quota), so you lose the running setup until you rebuild it.
+    Read <a href="https://docs.docker.com/engine/storage/drivers/select-storage-driver/" target="_blank" rel="noopener noreferrer">Docker's storage driver and migration notes</a> first, and on a Pulsed Media box restart the daemon with a panel slot reload, never <span class="muted">systemctl --user restart docker</span>: that deadlocks rootlesskit.
   </div>`;
 }
 function tabContainers(b) {

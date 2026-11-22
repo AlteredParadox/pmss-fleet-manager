@@ -528,9 +528,10 @@ func TestRaiseLogVolume(t *testing.T) {
 	}
 }
 
-// A daemon on a FUSE or vfs storage driver is worth one alert, raised with
-// the driver name, and it resolves when the driver is overlay2 again. A poll
-// that could not read the daemon leaves it alone until the next good one.
+// The two slow fallbacks are worth one informational alert, raised with the
+// driver name, and it resolves when a poll reads another driver. Any other
+// driver says nothing: overlay2 and the containerd image store's are not
+// faults. A poll that could not read the daemon leaves the alert alone.
 func TestDockerDriverAlert(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
@@ -558,16 +559,21 @@ func TestDockerDriverAlert(t *testing.T) {
 	s := &collect.BoxState{ID: b.ID, Name: "slow", Status: "online"}
 	s.Docker.Enabled, s.Docker.Reachable = true, true
 
-	s.Docker.Driver = "overlay2"
-	e.Evaluate(ctx, s)
-	if active, title := find(); active {
-		t.Fatalf("overlay2 raised %q", title)
+	for _, d := range []string{"overlay2", "overlayfs", "btrfs", ""} {
+		s.Docker.Driver = d
+		e.Evaluate(ctx, s)
+		if active, title := find(); active {
+			t.Fatalf("%q raised %q", d, title)
+		}
 	}
 
-	s.Docker.Driver = "fuse-overlayfs"
-	e.Evaluate(ctx, s)
-	if active, title := find(); !active || !strings.Contains(title, "fuse-overlayfs") {
-		t.Fatalf("fuse-overlayfs: active %v title %q", active, title)
+	for _, d := range []string{"fuse-overlayfs", "vfs"} {
+		s.Docker.Driver = d
+		e.Evaluate(ctx, s)
+		active, title := find()
+		if !active || !strings.Contains(title, d) || !strings.Contains(title, "no fault") {
+			t.Fatalf("%s: active %v title %q", d, active, title)
+		}
 	}
 
 	// A poll that could not reach the daemon says nothing about the driver:
@@ -578,9 +584,10 @@ func TestDockerDriverAlert(t *testing.T) {
 		t.Fatal("driver alert dropped by an unreadable poll")
 	}
 
-	s.Docker.Reachable, s.Docker.Error, s.Docker.Driver = true, "", "overlay2"
+	// Docker monitoring switched off is a deliberate "nothing to check".
+	s.Docker.Enabled = false
 	e.Evaluate(ctx, s)
 	if active, title := find(); active {
-		t.Fatalf("back on overlay2: still active %q", title)
+		t.Fatalf("monitoring off: still active %q", title)
 	}
 }
