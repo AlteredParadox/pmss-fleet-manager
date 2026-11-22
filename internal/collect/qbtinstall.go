@@ -18,10 +18,13 @@ package collect
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -31,6 +34,7 @@ import (
 	"time"
 
 	"pmss-fleet-manager/internal/probe"
+	"pmss-fleet-manager/internal/store"
 )
 
 // installScript downloads a static qbittorrent-nox build to ~/bin, verifies
@@ -176,10 +180,10 @@ fi
 const verifyChecksumShell = `if [ -n "$want" ]; then
   got=$(sha256sum "$tmp" 2>/dev/null | cut -d' ' -f1)
   [ -n "$got" ] || { echo "sha256sum is not available on this box; cannot verify the download"; rm -f "$tmp"; exit 1; }
-  [ "$got" = "$want" ] || { echo "checksum mismatch: the download's sha256 is $got, the release says $want"; rm -f "$tmp"; exit 1; }
-  echo "checksum: sha256 matches the GitHub release digest"
+  [ "$got" = "$want" ] || { echo "checksum mismatch: the download's sha256 is $got, the expected digest is $want"; rm -f "$tmp"; exit 1; }
+  echo "checksum: sha256 matches the expected digest"
 else
-  echo "checksum: not verified (no release digest for this URL); relying on the ELF and --version checks"
+  echo "checksum: not verified (GitHub's API could not be reached for the default build's digest); relying on the ELF and --version checks"
 fi
 `
 
@@ -206,15 +210,60 @@ const maxDownloadURL = 2048
 
 // ValidDownloadURL is the one rule for the qBittorrent download URL, at
 // save time and again at install: bounded, URL characters only (it goes
-// into a shell command, quoted), and a well-formed https URL with a host
-// and no user info.
+// into a shell command, quoted), a well-formed https URL with a host and
+// no user info, and no fragment other than a sha256 pin (downloadPin).
 func ValidDownloadURL(u string) bool {
 	if len(u) > maxDownloadURL || !safeURL.MatchString(u) {
+		return false
+	}
+	if _, _, ok := downloadPin(u); !ok {
 		return false
 	}
 	p, err := url.Parse(u)
 	return err == nil && p.Scheme == "https" && p.Host != "" && p.Hostname() != "" && p.User == nil
 }
+
+// downloadPin splits the operator's digest off a download URL: a fragment
+// "#sha256=" and 64 hex digits, for a build GitHub publishes no digest for
+// (a mirror, a private build). clean is the URL without the fragment
+// (what the box fetches; a fragment is never sent anyway), digest the
+// lower-case pin or "". ok is false for any other fragment.
+func downloadPin(u string) (clean, digest string, ok bool) {
+	clean, frag, found := strings.Cut(u, "#")
+	if !found {
+		return u, "", true
+	}
+	d, isPin := strings.CutPrefix(frag, "sha256=")
+	d = strings.ToLower(d)
+	if !isPin || !sha256Hex.MatchString(d) {
+		return u, "", false
+	}
+	return clean, d, true
+}
+
+// installDigest decides what an install fetches and checks it against:
+// the URL without its pin, and the pin, or else GitHub's digest. With
+// neither, only the default URL during a GitHub outage goes ahead, with a
+// note saying it is unverified; anything else is errNoDigest.
+func installDigest(ctx context.Context, download string) (clean, digest, note string, err error) {
+	clean, digest, _ = downloadPin(download)
+	if digest != "" {
+		return clean, digest, "", nil
+	}
+	digest, why, outage := releaseDigest(ctx, clean)
+	switch {
+	case digest != "":
+		return clean, digest, "", nil
+	case clean == store.DefaultQbtDownloadURL && outage:
+		return clean, "", "digest: " + why + "\n", nil
+	case clean == store.DefaultQbtDownloadURL:
+		return "", "", "", fmt.Errorf("%w (%s): GitHub answered but does not vouch for the default build; try again later", errNoDigest, why)
+	}
+	return "", "", "", fmt.Errorf("%w (%s): add #sha256=<the build's sha256> to the URL in settings", errNoDigest, why)
+}
+
+// errNoDigest refuses a download that nothing can verify.
+var errNoDigest = errors.New("no sha256 to check the download against")
 
 // githubAPI is the API base the digest lookup uses; a test points it at a
 // local server.
@@ -247,27 +296,34 @@ var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // releaseDigest fetches the sha256 GitHub records for the asset a download
 // URL names. It returns the lower-case hex digest, or "" with the reason it
-// could not be had; the install then goes ahead unverified and says so.
-func releaseDigest(ctx context.Context, download string) (digest, reason string) {
+// could not be had. outage is true when GitHub could not be asked (no
+// connection, a server error, rate limiting), false when it answered
+// without vouching for the file: only the former lets the default URL
+// install unverified (fred on #224).
+func releaseDigest(ctx context.Context, download string) (digest, reason string, outage bool) {
 	api, asset, ok := releaseAssetAPI(download)
 	if !ok {
-		return "", "not a GitHub release asset URL"
+		return "", "not a GitHub release asset URL", false
 	}
 	rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, api, nil)
 	if err != nil {
-		return "", err.Error()
+		return "", err.Error(), false
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "pmss-fleet-manager")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", "GitHub API: " + err.Error()
+		return "", "GitHub API: " + err.Error(), transientNetError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", fmt.Sprintf("GitHub API answered HTTP %d", resp.StatusCode)
+		// A 5xx, or a rate limit GitHub confirms (429, or 403 with no
+		// requests left); any other refusal is an answer.
+		busy := resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests ||
+			resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0"
+		return "", fmt.Sprintf("GitHub API answered HTTP %d", resp.StatusCode), busy
 	}
 	var rel struct {
 		Assets []struct {
@@ -276,7 +332,7 @@ func releaseDigest(ctx context.Context, download string) (digest, reason string)
 		} `json:"assets"`
 	}
 	if err := decodeRelease(resp.Body, &rel); err != nil {
-		return "", "GitHub API: " + err.Error()
+		return "", "GitHub API: " + err.Error(), false
 	}
 	for _, a := range rel.Assets {
 		if a.Name != asset {
@@ -285,11 +341,41 @@ func releaseDigest(ctx context.Context, download string) (digest, reason string)
 		d, found := strings.CutPrefix(a.Digest, "sha256:")
 		d = strings.ToLower(d)
 		if !found || !sha256Hex.MatchString(d) {
-			return "", "the release lists no sha256 digest for " + asset
+			return "", "the release lists no sha256 digest for " + asset, false
 		}
-		return d, ""
+		return d, "", false
 	}
-	return "", "the release has no asset named " + asset
+	return "", "the release has no asset named " + asset, false
+}
+
+// transientNetError reports whether a failed request to GitHub's API is
+// one that says nothing about the download: a timeout, a name that did
+// not resolve, a connection that could not be made. A TLS failure (an
+// untrusted or mismatched certificate) is not: something answered as
+// api.github.com and could not prove it, which must not let the default
+// build install unverified (fred on #224).
+func transientNetError(err error) bool {
+	var cert *tls.CertificateVerificationError
+	var unknown x509.UnknownAuthorityError
+	var host x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	var rec tls.RecordHeaderError
+	switch {
+	case errors.As(err, &cert), errors.As(err, &unknown), errors.As(err, &host), errors.As(err, &invalid), errors.As(err, &rec):
+		return false
+	}
+	var dns *net.DNSError
+	var op *net.OpError
+	var ne net.Error
+	switch {
+	case errors.As(err, &dns):
+		return true
+	case errors.As(err, &op) && op.Op == "dial":
+		return true
+	case errors.As(err, &ne) && ne.Timeout():
+		return true
+	}
+	return false
 }
 
 // shellQuote single-quotes a string for POSIX sh.
@@ -325,13 +411,15 @@ func (p *poller) qbtInstall(ctx context.Context, downloadURL string) (string, er
 	if !ValidDownloadURL(downloadURL) {
 		return "", errors.New("download URL must be https, contain only URL characters and be at most 2048 bytes")
 	}
-	// The digest comes from GitHub's API on the dashboard host, the file
-	// from GitHub's CDN on the box: a swapped download on either path fails
-	// the comparison. No digest is not an error, only an unverified install.
-	digest, why := releaseDigest(ctx, downloadURL)
-	note := ""
-	if digest == "" {
-		note = "digest: " + why + "\n"
+	// The digest is the operator's pin on the URL, or else comes from
+	// GitHub's API on the dashboard host, the file from GitHub's CDN on the
+	// box: a swapped download on either path fails the comparison. Without
+	// one, only the default URL installs (unverified, and it says so, when
+	// GitHub's API cannot be reached); any other is refused before
+	// connecting (Codex audit of 1.23.0).
+	downloadURL, digest, note, err := installDigest(ctx, downloadURL)
+	if err != nil {
+		return "", err
 	}
 	cli, err := p.conn(ctx)
 	if err != nil {

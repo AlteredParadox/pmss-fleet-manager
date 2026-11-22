@@ -218,8 +218,10 @@ func TestHostAllowList(t *testing.T) {
 	if rr.Code != 421 {
 		t.Fatalf("license with bad host: %d", rr.Code)
 	}
-	if rr.Header().Get("Content-Security-Policy") != "" {
-		t.Fatal("rejected request should not carry app headers")
+	// The refusal still carries the security headers (Codex audit of
+	// 1.23.0: an error page is a page too).
+	if rr.Header().Get("Content-Security-Policy") != csp || rr.Header().Get("X-Frame-Options") != "DENY" || rr.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("rejected request headers: %v", rr.Header())
 	}
 	// A specific bind lists its hosts, so an IP literal not among them is refused.
 	req = httptest.NewRequest("GET", "/api/state", nil)
@@ -1586,4 +1588,36 @@ func TestTransferEstimateNeedsRevisions(t *testing.T) {
 	if code, out := do(t, srv, "POST", p+"?rev=0", `{"path":"dl","bogus":1}`, hdr); code != 400 {
 		t.Errorf("unknown field: %d %s", code, out)
 	}
+}
+
+// The login challenge and the throttle refusal carry the security headers
+// too: they are served before any route runs.
+func TestPreAuthRefusalsCarrySecurityHeaders(t *testing.T) {
+	s, _ := newTestServerWith(t, "admin:secret", "")
+	check := func(name string, rr *httptest.ResponseRecorder, code int) {
+		t.Helper()
+		if rr.Code != code {
+			t.Fatalf("%s: code %d", name, rr.Code)
+		}
+		if rr.Header().Get("Content-Security-Policy") != csp || rr.Header().Get("X-Frame-Options") != "DENY" ||
+			rr.Header().Get("X-Content-Type-Options") != "nosniff" || rr.Header().Get("Referrer-Policy") != "no-referrer" {
+			t.Fatalf("%s: headers %v", name, rr.Header())
+		}
+	}
+	req := httptest.NewRequest("GET", "/api/state", nil)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	check("no credential", rr, http.StatusUnauthorized)
+	var last *httptest.ResponseRecorder
+	for range 50 {
+		req = httptest.NewRequest("GET", "/api/state", nil)
+		req.SetBasicAuth("admin", "wrong")
+		last = httptest.NewRecorder()
+		s.ServeHTTP(last, req)
+		if last.Code == http.StatusTooManyRequests {
+			break
+		}
+		check("wrong credential", last, http.StatusUnauthorized)
+	}
+	check("throttled", last, http.StatusTooManyRequests)
 }
