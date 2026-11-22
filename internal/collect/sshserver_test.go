@@ -231,11 +231,24 @@ func sshTestBox(t *testing.T, m *Manager, name, user string, port int, hostKey s
 // The test server ends its commands when its test ends, before the test's
 // directories are removed: a command still running then (a stand-in that
 // sleeps, a poll) must not write into a home being deleted. Here one that
-// has provably started (it wrote "ready") and would write a file a second
-// later is still running when its subtest ends; the file never appears.
+// has provably started (it wrote "ready") waits for a release the test
+// gives only after the subtest (and so the server's cleanup) is over; it
+// would then write a file, which never appears. No time window: without
+// the cleanup's kill the file always appears (fred on #221).
 func TestSSHServerEndsCommands(t *testing.T) {
 	keep := t.TempDir()
-	ready, late := filepath.Join(keep, "ready"), filepath.Join(keep, "late")
+	ready, release, late := filepath.Join(keep, "ready"), filepath.Join(keep, "release"), filepath.Join(keep, "late")
+	// Only on the failure path: a cleanup that does not end the command
+	// waits for it, and it for the release; give the release after a while
+	// so that shows as the late file, not as a hung test.
+	subDone := make(chan struct{})
+	go func() {
+		select {
+		case <-subDone:
+		case <-time.After(5 * time.Second):
+			os.WriteFile(release, nil, 0o600)
+		}
+	}()
 	t.Run("server", func(t *testing.T) {
 		root := t.TempDir()
 		port, hostKey := testSSHServer(t, root)
@@ -246,7 +259,8 @@ func TestSSHServerEndsCommands(t *testing.T) {
 		defer cli.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
-		cli.Run(ctx, "sh", strings.NewReader("touch '"+ready+"'; sleep 1; touch '"+late+"'\n")) // returns at the deadline; the command runs on
+		script := "touch '" + ready + "'; while [ ! -e '" + release + "' ]; do sleep 0.02; done; touch '" + late + "'\n"
+		cli.Run(ctx, "sh", strings.NewReader(script)) // returns at the deadline; the command runs on
 		for i := 0; ; i++ {
 			if _, err := os.Stat(ready); err == nil {
 				break
@@ -260,7 +274,12 @@ func TestSSHServerEndsCommands(t *testing.T) {
 			t.Fatalf("the late file before the subtest ended: %v", err)
 		}
 	})
-	time.Sleep(1500 * time.Millisecond)
+	close(subDone)
+	// A surviving command would now write the late file within a few polls.
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
 	if _, err := os.Stat(late); !os.IsNotExist(err) {
 		t.Fatalf("a command of the test server outlived its test (stat: %v)", err)
 	}
