@@ -199,7 +199,8 @@ func TestNormalizeFrameAncestors(t *testing.T) {
 		}
 	}
 	bad := []string{"*", "https://*.example", "ha.local", "ftp://ha.local", "https://", "https://ha.local/path", "https://ha.local/?q=1",
-		"https://ha.local:0", "https://ha.local:70000", "https://[::1]:8123", "https://exa_mple.local", "https://-ha.local", "https://ha.local."}
+		"https://ha.local:0", "https://ha.local:70000", "https://[::1]:8123", "https://exa_mple.local", "https://-ha.local", "https://ha.local.",
+		"https://ha.local:", "https://ha.local:/"}
 	for _, in := range bad {
 		if got, err := NormalizeFrameAncestors([]string{in}); err == nil {
 			t.Errorf("%q accepted as %v, want an error", in, got)

@@ -269,6 +269,10 @@ func NormalizeFrameAncestors(in []string) ([]string, error) {
 			if err != nil || n < 1 || n > 65535 {
 				return nil, fmt.Errorf("frame ancestor %q: port must be between 1 and 65535", v)
 			}
+		} else if strings.HasSuffix(u.Host, ":") {
+			// "https://host:" parses with an empty port and a trailing colon in
+			// Host, which the origin below would copy into the policy.
+			return nil, fmt.Errorf("frame ancestor %q: port is empty after ':'", v)
 		}
 		if !cspHost(host) {
 			return nil, fmt.Errorf("frame ancestor %q: %q is not a plain host name or IPv4 address", v, host)
@@ -280,7 +284,8 @@ func NormalizeFrameAncestors(in []string) ([]string, error) {
 
 // cspHost reports whether host is a plain DNS name or IPv4 address, the forms
 // this list accepts. IPv6 literals are refused: their bracket form in a source
-// list was not tried in a browser here.
+// list was not tried in a browser here. An IPv4 literal is accepted, but CSP
+// does not require browsers to match one, so a DNS name is the portable form.
 func cspHost(host string) bool {
 	if strings.Contains(host, ":") {
 		return false
