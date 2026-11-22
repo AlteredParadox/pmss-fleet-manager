@@ -734,12 +734,12 @@ test('the delete-files confirmation names the box by name and identity, for both
   const a = { id: 1, name: 'stu', user: 'stu', host: 'h1.example', port: 22 };
   const b = { id: 2, name: 'stu', user: 'stu', host: 'h2.example', port: 2222 };
   for (const client of ['qbt', 'rtorrent']) {
-    const qa = pfmView.deleteFilesConfirmation(client, 'Some.Torrent', '1.5 GiB', a);
-    const qb = pfmView.deleteFilesConfirmation(client, 'Some.Torrent', '1.5 GiB', b);
+    const qa = V.deleteFilesConfirmation(client, 'Some.Torrent', '1.5 GiB', a);
+    const qb = V.deleteFilesConfirmation(client, 'Some.Torrent', '1.5 GiB', b);
     assert.ok(qa.includes('on stu — stu@h1.example?'), qa);
     assert.ok(qb.includes('on stu — stu@h2.example:2222?'), qb);
     assert.notEqual(qa, qb);
     assert.ok(qa.includes('DELETE its 1.5 GiB of files') && qa.includes('Some.Torrent'), qa);
   }
-  assert.ok(pfmView.deleteFilesConfirmation('rtorrent', 'x', '1 B', a).includes("rTorrent's download directory"));
+  assert.ok(V.deleteFilesConfirmation('rtorrent', 'x', '1 B', a).includes("rTorrent's download directory"));
 });
