@@ -235,7 +235,7 @@ write). A host is submitted once, then again when these facts change, after
 ten minutes; the receipts are kept in the database, so a restart posts
 nothing. The check runs after a box's quarter-hourly inventory (asking the
 catalogue only while a host is due), every six hours, and on demand. The
-settings page lists each host's standing (submitted and when, due, skipped,
+settings dialog's pmdb.fyi section lists each host's standing (submitted and when, due, skipped,
 or the error) with a link to its catalogue page. Off by default; untick
 the box to stop it. What is submitted is what each box reports about
 itself: turning this on trusts your boxes' probe output under your
@@ -1520,7 +1520,13 @@ Newest first; each release's full notes are on the
   with a box in this dashboard and those not added here, each with its
   count. It replaces the per-status toggles, which only appeared once the
   feed held two statuses; a status hidden with them is listed again.
-  Settings lays its panels out in two columns on a wide screen.
+- **Settings is a dialog.** A *settings* button at the bottom of the
+  sidebar opens it over whatever page you are on, with a section list
+  (general, polling and alerts, Pulsed Media, plan priorities, pmdb.fyi,
+  qBittorrent, about) instead of one long page. Changes are a draft until
+  *save*; *cancel*, Escape or a click outside asks before dropping them,
+  and a theme preview reverts. `#/settings` (or `#/settings/<section>`)
+  still opens it. On a phone it fills the screen.
 
 **1.24.0**
 
