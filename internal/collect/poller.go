@@ -72,11 +72,14 @@ type poller struct {
 	// Atomics: dials run with and without p.mu held.
 	listenerOnly atomic.Bool
 	verifyMode   atomic.Value // string
-	// loAdmitted: a connection was let through under the opt-in since it
-	// was last withdrawn. Withdrawal keys on this, not on verifyMode (a
-	// later fully verified dial overwrites that while an admitted
-	// connection may still be pooled).
-	loAdmitted atomic.Bool
+	// loConns are the open connections let through under the opt-in.
+	// Admission registers one and withdrawal closes them all, both under
+	// loMu, so no listener-only connection (idle, carrying a request, or
+	// still on its way back from the dial) outlives a withdrawal. Keyed
+	// on the connections, not on verifyMode, which a later fully verified
+	// dial overwrites.
+	loMu    sync.Mutex
+	loConns map[*loConn]struct{}
 
 	prevCPU     int64
 	prevCPUAt   time.Time
@@ -281,6 +284,10 @@ func (p *poller) storeFix(start time.Time, keepDirs bool) func(s, stored *BoxSta
 		// through commit, never by a poll: the stored value is the latest,
 		// whatever this poll's starting snapshot carried (Codex on PR 123).
 		s.Rt.RemoveFailed, s.Rt.RemoveFailedAt = stored.Rt.RemoveFailed, stored.Rt.RemoveFailedAt
+		// The opt-in is changed through the manager, the mode by dials:
+		// read both live, so a toggle that landed while this poll was in
+		// flight (or a failed poll's old snapshot) is not overwritten.
+		s.Verify = VerifyState{ListenerOnly: p.listenerOnly.Load(), Mode: p.verifyModeNow()}
 	}
 }
 
@@ -295,14 +302,39 @@ func (p *poller) verifyPolicy() verifyPolicy {
 	return verifyPolicy{allow: p.listenerOnly.Load, admit: p.admitListenerOnly, note: p.noteVerify}
 }
 
-// admitListenerOnly is the last word on a listener-only connection: it
-// marks one as admitted first, then re-reads the opt-in. A withdrawal
-// stores the opt-in first, then reads the mark, so either this sees it
-// withdrawn (and the dial refuses) or the withdrawal sees the mark (and
-// drops the clients this connection is pooled in).
-func (p *poller) admitListenerOnly() bool {
-	p.loAdmitted.Store(true)
-	return p.listenerOnly.Load()
+// admitListenerOnly is the last word on a listener-only connection: under
+// loMu it re-reads the opt-in and, if it still holds, registers the
+// connection so a withdrawal can close it. It hands back the tracked
+// connection to use, or false: the opt-in was withdrawn meanwhile.
+func (p *poller) admitListenerOnly(c net.Conn) (net.Conn, bool) {
+	p.loMu.Lock()
+	defer p.loMu.Unlock()
+	if !p.listenerOnly.Load() {
+		return nil, false
+	}
+	lc := &loConn{Conn: c, p: p}
+	if p.loConns == nil {
+		p.loConns = map[*loConn]struct{}{}
+	}
+	p.loConns[lc] = struct{}{}
+	return lc, true
+}
+
+// loConn is a connection let through under the opt-in; closing it, by its
+// user or by a withdrawal, takes it out of the poller's set.
+type loConn struct {
+	net.Conn
+	p    *poller
+	once sync.Once
+}
+
+func (c *loConn) Close() error {
+	c.p.loMu.Lock()
+	delete(c.p.loConns, c)
+	c.p.loMu.Unlock()
+	var err error
+	c.once.Do(func() { err = c.Conn.Close() })
+	return err
 }
 
 // noteVerify records what a new connection got, logging each change.
@@ -320,14 +352,26 @@ func (p *poller) verifyModeNow() string {
 	return s
 }
 
-// setListenerOnly applies a change of the opt-in. Turning it off drops
-// the pooled WebUI and rTorrent clients whenever any connection was
-// admitted under it (see admitListenerOnly), so none outlives the
-// consent; the next dial is checked again.
+// setListenerOnly applies a change of the opt-in. Turning it off closes
+// every connection admitted under it before returning (in use or idle;
+// a request on one fails), then drops the WebUI and rTorrent clients that
+// pooled them; the next dial is checked again.
 func (p *poller) setListenerOnly(ctx context.Context, on bool) {
+	p.loMu.Lock()
 	p.listenerOnly.Store(on)
-	if on || !p.loAdmitted.Swap(false) {
+	var open []*loConn
+	if !on {
+		for c := range p.loConns {
+			open = append(open, c)
+		}
+		p.loConns = nil
+	}
+	p.loMu.Unlock()
+	if len(open) == 0 {
 		return
+	}
+	for _, c := range open {
+		c.once.Do(func() { c.Conn.Close() })
 	}
 	p.mu.Lock()
 	if p.qbt != nil {
@@ -689,9 +733,6 @@ func (p *poller) poll(ctx context.Context) {
 		st.Ready = true // the facts below are this generation's; actions may use them
 	}
 
-	if !p.listenerOnly.Load() && p.loAdmitted.Load() {
-		p.setListenerOnly(ctx, false) // a dial that was in flight when the opt-in was withdrawn
-	}
 	if p.box.QbtEnabled {
 		p.pollQbt(ctx, &st, snap)
 	} else {

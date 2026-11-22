@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -439,14 +440,19 @@ func TestManagerSetListenerOnly(t *testing.T) {
 		}(i%2 == 0)
 	}
 	wg.Wait()
+	// Whichever toggle came last, the three must agree (fred on #218).
+	final, _ := st.GetBox(ctx, b.ID)
+	consistent(final.ListenerOnly)
 	if err := m.SetListenerOnly(ctx, b.ID, rev, true); err != nil {
 		t.Fatal(err)
 	}
 	consistent(true)
 
-	// A connection admitted under it, then withdrawn: the mode resets.
+	// A connection admitted under it, then withdrawn: closed, mode reset.
 	p := m.poller(b.ID)
-	if !p.admitListenerOnly() {
+	c, srv := net.Pipe()
+	defer srv.Close()
+	if _, ok := p.admitListenerOnly(c); !ok {
 		t.Fatal("admission while opted in")
 	}
 	p.noteVerify(VerifyListenerOnly)
@@ -454,8 +460,12 @@ func TestManagerSetListenerOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	consistent(false)
-	if s, _ := m.State(b.ID); s.Verify.Mode != "" || p.loAdmitted.Load() {
-		t.Fatalf("after withdrawal: mode %q, admitted %v", s.Verify.Mode, p.loAdmitted.Load())
+	srv.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := srv.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("the admitted connection must be closed: %v", err)
+	}
+	if s, _ := m.State(b.ID); s.Verify.Mode != "" || len(p.loConns) != 0 {
+		t.Fatalf("after withdrawal: mode %q, tracked %d", s.Verify.Mode, len(p.loConns))
 	}
 
 	// The box moves: the page drawn before cannot opt the new endpoint in.

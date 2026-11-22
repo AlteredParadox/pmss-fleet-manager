@@ -583,59 +583,134 @@ func TestVerifiedDial(t *testing.T) {
 	}
 }
 
-// Withdrawing the listener-only opt-in drops the pooled WebUI client
-// whenever a connection was admitted under it, even if a later fully
-// verified dial has replaced the recorded mode (fred on #218); a client
-// with no listener-only admission is kept; giving the opt-in drops nothing.
-// A dial that read the opt-in before it was withdrawn is refused at
-// admission, and leaves no mark.
-func TestSetListenerOnlyDropsConnections(t *testing.T) {
+// Withdrawing the listener-only opt-in closes every connection admitted
+// under it before it returns: one still in use (fred on #218: closing the
+// HTTP client only drops idle ones), also after a later fully verified
+// dial replaced the recorded mode; a fully verified connection stays open.
+// A dial whose consent was withdrawn by the time it is admitted is refused
+// and closed unused.
+func TestSetListenerOnlyClosesConnections(t *testing.T) {
 	ctx := context.Background()
-	newClient := func() *qbt.Client {
-		return qbt.NewWithGuard(func(context.Context) (net.Conn, error) { return nil, errors.New("unused") }, "127.0.0.1:1", "", "", &qbt.AuthGuard{})
-	}
 	uid := os.Getuid()
 	privacy := fmt.Sprintf("uid %d\nprivacy\nend\n", uid)
 	full := fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\ns BEEF %d 01 0100007F 4242 00\nend\n", uid, uid, uid)
-
+	eof := func(f *fakeTunnel) bool {
+		f.server.SetReadDeadline(time.Now().Add(time.Second))
+		n, err := f.server.Read(make([]byte, 8))
+		return n == 0 && err == io.EOF
+	}
 	p := &poller{box: &store.Box{Name: "b"}}
 	p.listenerOnly.Store(true)
-	p.qbt = newClient()
-	if _, err := verifiedDial(&fakeTunnel{out: privacy}, "127.0.0.1:8089", 8089, p.verifyPolicy())(ctx); err != nil {
+	p.qbt = qbt.NewWithGuard(func(context.Context) (net.Conn, error) { return nil, errors.New("unused") }, "127.0.0.1:1", "", "", &qbt.AuthGuard{})
+	lo := &fakeTunnel{out: privacy}
+	if _, err := verifiedDial(lo, "127.0.0.1:8089", 8089, p.verifyPolicy())(ctx); err != nil {
 		t.Fatalf("admitted under the opt-in: %v", err)
 	}
-	if _, err := verifiedDial(&fakeTunnel{out: full}, "127.0.0.1:8089", 8089, p.verifyPolicy())(ctx); err != nil || p.verifyModeNow() != VerifyFull {
+	fv := &fakeTunnel{out: full}
+	if _, err := verifiedDial(fv, "127.0.0.1:8089", 8089, p.verifyPolicy())(ctx); err != nil || p.verifyModeNow() != VerifyFull {
 		t.Fatalf("a later full dial: %v %q", err, p.verifyModeNow())
 	}
 	p.setListenerOnly(ctx, false)
-	if p.qbt != nil || p.loAdmitted.Load() {
-		t.Fatal("withdrawal must drop the client a listener-only connection may still be pooled in")
+	if !eof(lo) {
+		t.Fatal("the listener-only connection, still in use, must be closed by the withdrawal")
 	}
-
+	if p.qbt != nil {
+		t.Fatal("the client that may pool it must be dropped")
+	}
+	if eof(fv) {
+		t.Fatal("a fully verified connection must stay open")
+	}
+	// Withdrawn between the dial's first read of the opt-in and admission.
 	p = &poller{box: &store.Box{Name: "b"}}
-	p.listenerOnly.Store(true)
-	p.qbt = newClient()
-	if _, err := verifiedDial(&fakeTunnel{out: full}, "127.0.0.1:8089", 8089, p.verifyPolicy())(ctx); err != nil {
-		t.Fatal(err)
-	}
-	p.setListenerOnly(ctx, false)
-	if p.qbt == nil {
-		t.Fatal("a client with no listener-only admission must be kept")
-	}
-	p.setListenerOnly(ctx, true)
-	if p.qbt == nil || !p.listenerOnly.Load() {
-		t.Fatal("giving the opt-in drops nothing")
-	}
-
-	// Withdrawn between the dial's first read and its admission.
-	p = &poller{box: &store.Box{Name: "b"}}
-	pol := verifyPolicy{allow: func() bool { return true }, admit: func() bool { p.loAdmitted.Store(true); return false }, note: p.noteVerify}
+	pol := p.verifyPolicy()
+	pol.allow = func() bool { return true } // the dial read it before the withdrawal
 	ft := &fakeTunnel{out: privacy}
 	if _, err := verifiedDial(ft, "127.0.0.1:8089", 8089, pol)(ctx); !errors.Is(err, ErrVerifyBlocked) {
-		t.Fatalf("a dial whose consent was withdrawn at admission must be blocked: %v", err)
+		t.Fatalf("refused at admission: %v", err)
 	}
-	ft.server.SetReadDeadline(time.Now().Add(time.Second))
-	if n, rerr := ft.server.Read(make([]byte, 8)); n != 0 || rerr != io.EOF {
-		t.Fatal("the refused connection must be closed unused")
+	if !eof(ft) || len(p.loConns) != 0 {
+		t.Fatal("the refused connection must be closed unused and not tracked")
+	}
+}
+
+// An HTTP request in flight on a listener-only connection fails when the
+// opt-in is withdrawn, and the connection is closed before the withdrawal
+// returns (fred on #218).
+func TestSetListenerOnlyAbortsRequestInFlight(t *testing.T) {
+	uid := os.Getuid()
+	p := &poller{box: &store.Box{Name: "b"}}
+	p.listenerOnly.Store(true)
+	cli, box := net.Pipe()
+	defer box.Close()
+	pt := &pipeTunnel{conn: cli, out: fmt.Sprintf("uid %d\nprivacy\nend\n", uid)}
+	dial := verifiedDial(pt, "127.0.0.1:8089", 8089, p.verifyPolicy())
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) }}}
+	got := make(chan struct{})
+	served := make(chan struct{})
+	go func() { // the box side: read the request, never answer
+		buf := make([]byte, 4096)
+		box.Read(buf)
+		close(got)
+		for {
+			if _, err := box.Read(buf); err != nil {
+				close(served)
+				return
+			}
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		resp, err := client.Get("http://127.0.0.1:8089/api/v2/app/version")
+		if err == nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+	select {
+	case <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the box side")
+	}
+	p.setListenerOnly(context.Background(), false)
+	select {
+	case <-served: // closed by the time setListenerOnly returned
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("the connection carrying the request was not closed by the withdrawal")
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("the request must fail")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request did not end after the withdrawal")
+	}
+}
+
+// pipeTunnel hands out one pre-made connection, so a test holds the box
+// side from the start.
+type pipeTunnel struct {
+	conn net.Conn
+	out  string
+}
+
+func (t *pipeTunnel) DialTCP(context.Context, string) (net.Conn, error) { return t.conn, nil }
+func (t *pipeTunnel) Run(context.Context, string, io.Reader) ([]byte, []byte, error) {
+	return []byte(t.out), nil, nil
+}
+func (t *pipeTunnel) RunLimited(ctx context.Context, cmd string, stdin io.Reader, _ int) ([]byte, []byte, error) {
+	return t.Run(ctx, cmd, stdin)
+}
+
+// A poll's commit takes the opt-in and the mode live, so a toggle that
+// landed while the poll was in flight is not overwritten (Codex on #218).
+func TestStoreFixKeepsVerify(t *testing.T) {
+	p := &poller{box: &store.Box{Name: "b"}, m: &Manager{}}
+	p.listenerOnly.Store(true)
+	p.verifyMode.Store(VerifyListenerOnly)
+	s := &BoxState{Verify: VerifyState{ListenerOnly: false, Mode: VerifyBlocked}}
+	p.storeFix(time.Now(), false)(s, &BoxState{})
+	if !s.Verify.ListenerOnly || s.Verify.Mode != VerifyListenerOnly {
+		t.Fatalf("verify after commit: %+v", s.Verify)
 	}
 }
