@@ -250,6 +250,10 @@ func TestReleaseAssetAPI(t *testing.T) {
 func TestReleaseDigest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/repos/o/r/releases/tags/busy":
+			w.WriteHeader(503)
+		case "/repos/o/r/releases/tags/limited":
+			w.WriteHeader(403)
 		case "/repos/o/r/releases/latest":
 			w.Write([]byte(`{"tag_name":"release-5.2.4_v2.0.15","assets":[{"name":"other","digest":"sha256:` + strings.Repeat("a", 64) + `"},{"name":"x86_64-qbittorrent-nox","digest":"sha256:` + strings.Repeat("AB", 32) + `"},{"name":"nodigest"}]}`))
 		default:
@@ -261,17 +265,24 @@ func TestReleaseDigest(t *testing.T) {
 	githubAPI = srv.URL
 	defer func() { githubAPI = old }()
 	ctx := context.Background()
-	if d, why := releaseDigest(ctx, "https://github.com/o/r/releases/latest/download/x86_64-qbittorrent-nox"); d != strings.Repeat("ab", 32) || why != "" {
-		t.Fatalf("digest %q %q", d, why)
+	if d, why, outage := releaseDigest(ctx, "https://github.com/o/r/releases/latest/download/x86_64-qbittorrent-nox"); d != strings.Repeat("ab", 32) || why != "" || outage {
+		t.Fatalf("digest %q %q %v", d, why, outage)
 	}
-	for url, want := range map[string]string{
-		"https://github.com/o/r/releases/latest/download/nodigest":           "no sha256 digest",
-		"https://github.com/o/r/releases/latest/download/missing":            "no asset named",
-		"https://github.com/o/r/releases/download/v9/x86_64-qbittorrent-nox": "HTTP 404",
-		"https://example.com/x86_64-qbittorrent-nox":                         "not a GitHub release",
+	// An answer that does not vouch for the file is not an outage; a server
+	// error or rate limiting is.
+	for url, want := range map[string]struct {
+		why    string
+		outage bool
+	}{
+		"https://github.com/o/r/releases/latest/download/nodigest":           {"no sha256 digest", false},
+		"https://github.com/o/r/releases/latest/download/missing":            {"no asset named", false},
+		"https://github.com/o/r/releases/download/v9/x86_64-qbittorrent-nox": {"HTTP 404", false},
+		"https://github.com/o/r/releases/download/busy/x":                    {"HTTP 503", true},
+		"https://github.com/o/r/releases/download/limited/x":                 {"HTTP 403", true},
+		"https://example.com/x86_64-qbittorrent-nox":                         {"not a GitHub release", false},
 	} {
-		if d, why := releaseDigest(ctx, url); d != "" || !strings.Contains(why, want) {
-			t.Errorf("%s: digest %q reason %q, want reason with %q", url, d, why, want)
+		if d, why, outage := releaseDigest(ctx, url); d != "" || !strings.Contains(why, want.why) || outage != want.outage {
+			t.Errorf("%s: digest %q reason %q outage %v, want reason with %q outage %v", url, d, why, outage, want.why, want.outage)
 		}
 	}
 }
@@ -350,7 +361,7 @@ func TestVerifyChecksumShell(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte("not really qbittorrent"))
 	good := hex.EncodeToString(sum[:])
-	if out, err, kept := run(good); err != nil || !kept || !strings.Contains(out, "matches the GitHub release digest") {
+	if out, err, kept := run(good); err != nil || !kept || !strings.Contains(out, "matches the expected digest") {
 		t.Fatalf("good digest: %v kept=%v %s", err, kept, out)
 	}
 	if out, err, kept := run(strings.Repeat("0", 64)); err == nil || kept || !strings.Contains(out, "checksum mismatch") || !strings.Contains(out, good) {
@@ -426,34 +437,52 @@ func TestDecodeRelease(t *testing.T) {
 	}
 }
 
-// Without a digest only the default URL installs; any other needs the
-// operator's #sha256= pin or a GitHub release digest, and is refused
-// before connecting (Codex audit of 1.23.0). The pin is cut off the URL.
-func TestQbtInstallRequiresDigestForCustomURL(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+// What an install fetches and checks: the pin (cut off the URL) or
+// GitHub's digest; without either, only the default URL during a GitHub
+// outage goes ahead, and any other case is refused before connecting
+// (Codex audit of 1.23.0, fred on #224).
+func TestInstallDigest(t *testing.T) {
+	answered := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !answered {
+			w.WriteHeader(503)
+			return
+		}
+		w.Write([]byte(`{"assets":[{"name":"other","digest":"sha256:` + strings.Repeat("c", 64) + `"}]}`))
+	}))
 	defer srv.Close()
 	old := githubAPI
 	githubAPI = srv.URL
 	defer func() { githubAPI = old }()
+	ctx := context.Background()
+	pin := strings.Repeat("ab", 32)
+
+	clean, d, note, err := installDigest(ctx, "https://example.com/qbittorrent-nox#sha256="+strings.ToUpper(pin))
+	if err != nil || clean != "https://example.com/qbittorrent-nox" || d != pin || note != "" {
+		t.Fatalf("pinned: %q %q %q %v", clean, d, note, err)
+	}
+	for _, outage := range []bool{false, true} {
+		answered = !outage
+		for _, u := range []string{"https://example.com/qbittorrent-nox", "https://github.com/o/r/releases/latest/download/x86_64-qbittorrent-nox"} {
+			if _, _, _, err := installDigest(ctx, u); !errors.Is(err, errNoDigest) || !strings.Contains(err.Error(), "#sha256=") {
+				t.Errorf("outage=%v %s: %v", outage, u, err)
+			}
+		}
+	}
+	// The default: unverified with a note in an outage only; GitHub
+	// answering without the asset's digest refuses.
+	answered = false
+	if clean, d, note, err := installDigest(ctx, store.DefaultQbtDownloadURL); err != nil || clean != store.DefaultQbtDownloadURL || d != "" || !strings.Contains(note, "HTTP 503") {
+		t.Errorf("default in an outage: %q %q %q %v", clean, d, note, err)
+	}
+	answered = true
+	if _, _, _, err := installDigest(ctx, store.DefaultQbtDownloadURL); !errors.Is(err, errNoDigest) {
+		t.Errorf("default, answered without a digest: %v", err)
+	}
+	// qbtInstall refuses before connecting (this poller has no box).
 	m := &Manager{states: map[int64]*BoxState{7: {Ready: true}}}
 	p := &poller{m: m, box: &store.Box{ID: 7}}
-	ctx := context.Background()
-	for _, u := range []string{
-		"https://example.com/qbittorrent-nox",
-		"https://github.com/o/r/releases/latest/download/x86_64-qbittorrent-nox", // API down: no digest
-	} {
-		if _, err := p.qbtInstall(ctx, u); !errors.Is(err, errNoDigest) || !strings.Contains(err.Error(), "#sha256=") {
-			t.Errorf("%s: %v", u, err)
-		}
-	}
-	// Past the digest rule, the install goes on to connect (and fails
-	// here, with no box): a pinned custom URL, and the default unverified.
-	for _, u := range []string{"https://example.com/qbittorrent-nox#sha256=" + strings.Repeat("ab", 32), store.DefaultQbtDownloadURL} {
-		if _, err := p.qbtInstall(ctx, u); err == nil || errors.Is(err, errNoDigest) {
-			t.Errorf("%s: %v", u, err)
-		}
-	}
-	if clean, d, ok := downloadPin("https://example.com/b#sha256=" + strings.Repeat("AB", 32)); clean != "https://example.com/b" || d != strings.Repeat("ab", 32) || !ok {
-		t.Errorf("pin %q %q %v", clean, d, ok)
+	if _, err := p.qbtInstall(ctx, "https://example.com/qbittorrent-nox"); !errors.Is(err, errNoDigest) {
+		t.Errorf("install: %v", err)
 	}
 }
