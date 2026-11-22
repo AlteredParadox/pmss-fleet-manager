@@ -479,3 +479,48 @@ func TestManagerSetListenerOnly(t *testing.T) {
 	}
 	consistent(false)
 }
+
+// A poller restarted from its record after a failed removal does not
+// bring back an opt-in that was withdrawn since it started (Codex on #218).
+func TestFailedRemovalKeepsWithdrawal(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	b := &store.Box{Name: "x", Host: "h.example", User: "u", Port: 22, Enabled: false}
+	if err := m.AddBox(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := st.GetBox(ctx, b.ID)
+	if err := m.SetListenerOnly(ctx, b.ID, cur.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	// Restart the poller from the record with the opt-in on, as a later
+	// start would, then withdraw it.
+	m.boxMu.Lock()
+	old := m.poller(b.ID)
+	old.stopAndWait()
+	fresh, _ := st.GetBox(ctx, b.ID) // the record, as an edit's re-read gives it
+	m.startPoller(fresh, nil)
+	m.boxMu.Unlock()
+	if !m.poller(b.ID).listenerOnly.Load() {
+		t.Fatal("a poller started from a record with the opt-in must have it")
+	}
+	if err := m.SetListenerOnly(ctx, b.ID, cur.Revision, false); err != nil {
+		t.Fatal(err)
+	}
+	m.deleteFault = func() error { return errors.New("disk full") }
+	if err := m.RemoveBox(ctx, b.ID); err == nil {
+		t.Fatal("the removal was meant to fail")
+	}
+	if p := m.poller(b.ID); p == nil || p.listenerOnly.Load() || p.box.ListenerOnly {
+		t.Fatal("the restarted poller must not have the withdrawn opt-in")
+	}
+}

@@ -958,6 +958,10 @@ func (m *Manager) SetListenerOnly(ctx context.Context, id, rev int64, on bool) e
 		}
 		return err
 	}
+	// The poller's copy of the record too: a failed removal or a failed
+	// re-read after an edit restarts a poller from it, which must not bring
+	// back a withdrawn opt-in (Codex on #218). Restarts hold boxMu as well.
+	p.box.ListenerOnly = on
 	p.setListenerOnly(ctx, on)
 	mode := p.verifyModeNow()
 	if _, ok := m.commit(id, func(s *BoxState) *BoxState {
