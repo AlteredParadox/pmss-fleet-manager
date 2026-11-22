@@ -53,7 +53,9 @@ for you, and nothing is moved.
 
 **Per box.**
 
-- Overview: disk, upload with limit/bonus/throttle state, bandwidth, CPU/RAM
+- Overview: disk with PMSS's two bonus figures (`~/.bonus`, the applied Free
+  Bonus Disk percent, and `~/.bonusQuota`, additional disk GiB already in the
+  quota), upload with limit/bonus/throttle state, bandwidth, CPU/RAM
   (your slice against its quota and as a share of the whole host), client,
   incoming connectivity and listen port, autostart status, plan and billing.
 - Traffic: daily upload/download bars for the rolling 30 days PMSS tracks.

@@ -142,6 +142,11 @@ type DiskState struct {
 	Pct        float64 `json:"pct"`
 	FilesUsed  int64   `json:"files_used"`
 	FilesSoft  int64   `json:"files_soft"`
+	// BonusPct and BonusBytes are PMSS's two disk bonus figures (~/.bonus,
+	// the applied Free Bonus Disk percent, and ~/.bonusQuota, additional
+	// disk GiB already in the quota). Independent; zero when absent.
+	BonusPct   float64 `json:"bonus_pct,omitempty"`
+	BonusBytes int64   `json:"bonus_bytes,omitempty"`
 	Source     string  `json:"source,omitempty"`
 	AgeSec     int64   `json:"age_sec,omitempty"`
 }
