@@ -125,7 +125,7 @@ func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer 
 		// box that hides its socket tables (read only there, below). Its
 		// failure costs nothing elsewhere: it is then simply unavailable.
 		pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
-		before, _, _ := cli.RunLimited(pctx, "sh", strings.NewReader(probe.ListenerScript(port)), socketTableLimit)
+		before, _, preErr := cli.RunLimited(pctx, "sh", strings.NewReader(probe.ListenerScript(port)), socketTableLimit)
 		pcancel()
 		conn, err := cli.DialTCP(ctx, hp)
 		if err != nil {
@@ -140,6 +140,10 @@ func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer 
 		}
 		ok, known, reason := probe.EstablishedOwner(out, port)
 		if !known {
+			if preErr != nil || err != nil {
+				conn.Close() // a read that failed, partly or wholly, is no evidence either way
+				return nil, fmt.Errorf("refusing to use the connection on port %d: could not read the listening socket before and after connecting", port)
+			}
 			uid := probe.ScriptUID(out)
 			switch v, why := continuity(probe.ListenerIdentity(before, port, uid), probe.ListenerIdentity(out, port, uid)); v {
 			case contVerified:
@@ -192,12 +196,15 @@ const (
 
 // continuity compares the listener read before a connection with the one
 // read after it (probe.ListenerIdentity). Anything that shows the port is
-// not ours, or that its socket changed, refuses outright; only missing
-// information leaves a choice, and then only with a trustworthy uid.
+// not ours, that its socket changed, or that a reading is incomplete or
+// malformed, refuses outright. Missing information leaves a choice only
+// when both readings cleanly report our uid and no cookie at all (the
+// opt-in's case); a cookie on one side only is a failed check, not an
+// unsupported feature (fred on #219).
 func continuity(before, after probe.Listener) (verdict int, reason string) {
 	for _, l := range []probe.Listener{before, after} {
 		switch l.Status {
-		case probe.ListenForeign, probe.ListenAmbiguous, probe.ListenNone:
+		case probe.ListenForeign, probe.ListenAmbiguous, probe.ListenNone, probe.ListenMalformed:
 			return contRefused, l.Reason
 		}
 	}
@@ -209,8 +216,10 @@ func continuity(before, after probe.Listener) (verdict int, reason string) {
 			return contRefused, "the listening socket changed while connecting (the client restarted, or something else took the port)"
 		}
 		return contVerified, ""
+	case before.Status == probe.ListenNoCookie && after.Status == probe.ListenNoCookie:
+		return contUIDOnly, "the box does not report the listening socket's identity"
 	}
-	return contUIDOnly, "the box does not report the listening socket's identity"
+	return contRefused, "the listening socket's identity was reported in one reading and not the other"
 }
 
 // ErrVerifyBlocked refuses a connection the box gives no way to check.

@@ -349,20 +349,26 @@ if [ -n "$l" ]; then printf '%s\n' "$l"; else echo "via ss"; ` + listenViaSS + `
 const listenViaSS = `timeout 10 ss -Hltne 2>/dev/null | awk '` + ssListenAwk + ` print "d", p, u, ad}'`
 
 // ssListenAwk reads one ss -Hltne row into p (port), ad (address), u (the
-// owner uid, or x) and k (the socket cookie, or -), for the caller's print.
-// Positional, from the kernel-formatted columns only: State Recv-Q Send-Q
-// Local Peer, then uid:N (absent for uid 0, as ss leaves it out), ino:N,
-// sk:HEX. Everything after (cgroup:<path>, a directory name the socket's
-// owner chooses, so text that can read "uid:<ours>") is never looked at; a
-// row that does not have that shape is x and -, which refuses.
-const ssListenAwk = `$1=="LISTEN"{n=split($4,a,":"); p=a[n]; ad=substr($4,1,length($4)-length(p)-1); sub(/%.*/,"",ad); u="x"; k="-"
-  if ($6 ~ /^uid:[0-9]+$/ && $7 ~ /^ino:[0-9]+$/) { u=substr($6,5); if ($8 ~ /^sk:[0-9a-f]+$/) k=substr($8,4) }
-  else if ($6 ~ /^ino:[0-9]+$/) { u=0; if ($7 ~ /^sk:[0-9a-f]+$/) k=substr($7,4) }`
+// owner uid, or x) and k (the socket cookie: hex, - when ss printed none,
+// ? when what it printed is not a nonzero 64-bit value), for the caller's
+// print. Positional, from the kernel-formatted columns only: State Recv-Q
+// Send-Q Local Peer, then uid:N (absent for uid 0, as ss leaves it out),
+// ino:N, sk:HEX. Everything after (cgroup:<path>, a directory name the
+// socket's owner chooses, so text that can read "uid:<ours>") is never
+// looked at; a row that does not have that shape is x, which refuses.
+const ssListenAwk = `function ck(f) { if (f !~ /^sk:/) return "-"; f=substr(f,4); return (f ~ /^[0-9a-f]+$/ && length(f) <= 16 && f !~ /^0+$/) ? f : "?" }
+$1=="LISTEN"{n=split($4,a,":"); p=a[n]; ad=substr($4,1,length($4)-length(p)-1); sub(/%.*/,"",ad); u="x"; k="-"
+  if ($6 ~ /^uid:[0-9]+$/ && $7 ~ /^ino:[0-9]+$/) { u=substr($6,5); k=ck($8) }
+  else if ($6 ~ /^ino:[0-9]+$/) { u=0; k=ck($7) }`
 
 // listenIdentShell prints the listening sockets on $port as ss reports them
-// to this account, "l <port> <uid|x> <cookie|-> <addr>" each, and "lrc <rc>"
-// for ss's exit status: what ListenerIdentity reads. It needs $port.
+// to this account, "l <port> <uid|x> <cookie|-|?> <addr>" each, "lrc <rc>"
+// for ss's exit status, and "ltab denied" when /proc/net/tcp and tcp6 are
+// both unreadable to this account: ss then has no /proc table to fall back
+// to, so its rows (and their cookies) come from the kernel's live socket
+// diagnostics. What ListenerIdentity reads. It needs $port.
 const listenIdentShell = `lo=$(timeout 10 ss -Hltne "sport = :$port" 2>/dev/null); lrc=$?
+lr=denied; for lt in ${PMSS_TCP_TABLES:-/proc/net/tcp /proc/net/tcp6}; do [ -r "$lt" ] && lr=readable; done; echo "ltab $lr"
 echo "lrc $lrc"
 [ -n "$lo" ] && printf '%s\n' "$lo" | awk '` + ssListenAwk + ` print "l", p, u, k, ad}'
 `

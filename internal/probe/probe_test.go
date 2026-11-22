@@ -2045,14 +2045,20 @@ func TestParseDuBounded(t *testing.T) {
 // not ListenOK.
 func TestListenerIdentity(t *testing.T) {
 	bin := t.TempDir()
+	os.WriteFile(bin+"/denied", nil, 0)
+	os.WriteFile(bin+"/readable", nil, 0o600)
+	tables := bin + "/denied"
 	run := func(rows string, rc int) Listener {
 		t.Helper()
 		os.WriteFile(bin+"/ss", []byte(fmt.Sprintf("#!/bin/sh\ncat <<'X'\n%sX\nexit %d\n", rows, rc)), 0o700)
 		cmd := exec.Command("sh")
 		cmd.Stdin = strings.NewReader(ListenerScript(4365))
-		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "PMSS_TCP_TABLES="+tables)
 		out, _ := cmd.Output()
 		return ListenerIdentity(out, 4365, 1000)
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root reads a mode-0 file, so denied tables cannot be staged as root")
 	}
 	ours := "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 sk:4005 cgroup:/user.slice/user-1000.slice <->\n"
 	cases := []struct {
@@ -2064,6 +2070,12 @@ func TestListenerIdentity(t *testing.T) {
 		{"ours", ours, 0, ListenOK},
 		{"ours and a 127.0.0.2 neighbour", ours + "LISTEN 0 50 127.0.0.2:4365 0.0.0.0:* uid:1001 ino:2 sk:a cgroup:/x\n", 0, ListenOK},
 		{"ours and a foreign v6 any", ours + "LISTEN 0 50 [::]:4365 [::]:* uid:1001 ino:2 sk:a cgroup:/x\n", 0, ListenAmbiguous},
+		{"ours on a lone v6 wildcard (may be v6-only)", "LISTEN 0 50 [::]:4365 [::]:* uid:1000 ino:16166 sk:4005 cgroup:/u\n", 0, ListenMalformed},
+		{"ours on the v4 wildcard", "LISTEN 0 50 0.0.0.0:4365 0.0.0.0:* uid:1000 ino:16166 sk:4005 cgroup:/u\n", 0, ListenMalformed},
+		{"ours on * (iproute2 6.1's dual-stack)", "LISTEN 0 50 *:4365 *:* uid:1000 ino:16166 sk:4005 cgroup:/u\n", 0, ListenMalformed},
+		{"a malformed cookie", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 sk:zz cgroup:/u\n", 0, ListenMalformed},
+		{"a zero cookie", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 sk:0 cgroup:/u\n", 0, ListenMalformed},
+		{"a cookie past 64 bits", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 sk:10000000000000000 cgroup:/u\n", 0, ListenMalformed},
 		{"foreign", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1001 ino:2 sk:a cgroup:/x\n", 0, ListenForeign},
 		{"root, uid left out", "LISTEN 0 50 0.0.0.0:4365 0.0.0.0:* ino:1 sk:9 cgroup:/system.slice\n", 0, ListenForeign},
 		{"forged uid in the cgroup", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1001 ino:2 sk:a cgroup:/x uid:1000 ino:3 sk:b\n", 0, ListenForeign},
@@ -2081,6 +2093,16 @@ func TestListenerIdentity(t *testing.T) {
 	}
 	if got := run(ours, 0); got.Cookie != "4005" || got.UID != 1000 {
 		t.Fatalf("ours: %+v", got)
+	}
+	// Readable tables: ss could have filled the rows from them, not from
+	// the kernel's socket diagnostics, so nothing is trusted.
+	tables = bin + "/readable"
+	if got := run(ours, 0); got.Status != ListenUnavailable {
+		t.Fatalf("readable tables: %+v", got)
+	}
+	// An output cut off before its end.
+	if got := ListenerIdentity([]byte("lrc 0\nltab denied\nl 4365 1000 4005 127.0.0.1\n"), 4365, 1000); got.Status != ListenMalformed {
+		t.Fatalf("incomplete: %+v", got)
 	}
 }
 
