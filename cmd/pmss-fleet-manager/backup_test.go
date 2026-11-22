@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -205,5 +206,109 @@ func TestOpenStoreHoldsTheLock(t *testing.T) {
 	}
 	if _, release, err := openStore(bad, nil); err == nil || release != nil {
 		t.Fatalf("lock not released after a failed open: %v", err)
+	}
+}
+
+// A backup from before 1.24 (box credentials not bound to their box) is
+// refused until -old-credentials says keep or drop.
+func TestRestoreOldCredentials(t *testing.T) {
+	const secret = "cccccccccccccccccccccccccccccccc"
+	t.Setenv("PMSS_SECRET", "")
+	t.Setenv("PMSS_SECRET_FILE", "")
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	seedDataDir(t, src, "old", secret)
+	sl, _ := secrets.New([]byte(secret))
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(src, dbName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE boxes SET password=?`, sl.Seal("boxes.password", "pw")); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	file := filepath.Join(dir, "backup.db")
+	var out, errOut bytes.Buffer
+	if rc := backupCmd([]string{"-data", src, "-out", file}, &out, &errOut); rc != 0 {
+		t.Fatalf("backup rc %d: %s", rc, errOut.String())
+	}
+	secretFile := filepath.Join(dir, "secret")
+	if err := os.WriteFile(secretFile, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "dst")
+	errOut.Reset()
+	if rc := restoreCmd([]string{"-data", dst, "-secret-file", secretFile, "-in", file}, nil, &errOut); rc != 1 || !strings.Contains(errOut.String(), "-old-credentials keep") {
+		t.Fatalf("refusal: rc %d %q", rc, errOut.String())
+	}
+	if rc := restoreCmd([]string{"-data", dst, "-old-credentials", "maybe", "-in", file}, nil, &errOut); rc != 2 {
+		t.Fatalf("bad -old-credentials: rc %d", rc)
+	}
+	errOut.Reset()
+	dropped := filepath.Join(dir, "dropped")
+	if rc := restoreCmd([]string{"-data", dropped, "-secret-file", secretFile, "-old-credentials", "drop", "-in", file}, nil, &errOut); rc != 0 {
+		t.Fatalf("drop: rc %d %q", rc, errOut.String())
+	}
+	sd, err := store.Open(filepath.Join(dropped, dbName), store.WithSealer(sl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boxes, err := sd.ListBoxes(context.Background()); err != nil || len(boxes) != 1 || boxes[0].Password != "" {
+		t.Fatalf("dropped %+v %v", boxes, err)
+	}
+	sd.Close()
+	errOut.Reset()
+	if rc := restoreCmd([]string{"-data", dst, "-secret-file", secretFile, "-old-credentials", "keep", "-in", file}, nil, &errOut); rc != 0 {
+		t.Fatalf("keep: rc %d %q", rc, errOut.String())
+	}
+	s, err := store.Open(filepath.Join(dst, dbName), store.WithSealer(sl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	boxes, err := s.ListBoxes(context.Background())
+	if err != nil || len(boxes) != 1 || boxes[0].Password != "pw" {
+		t.Fatalf("kept %+v %v", boxes, err)
+	}
+}
+
+// A plain-text backup restored with a secret configured needs
+// -accept-plain-credentials: it could be an encrypted one stripped.
+func TestRestorePlainCredentialsFlag(t *testing.T) {
+	const secret = "cccccccccccccccccccccccccccccccc"
+	t.Setenv("PMSS_SECRET", "")
+	t.Setenv("PMSS_SECRET_FILE", "")
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	s, err := store.Open(filepath.Join(src, dbName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateBox(context.Background(), &store.Box{Name: "plain", Host: "h", User: "u", Password: "pw", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	file := filepath.Join(dir, "backup.db")
+	var out, errOut bytes.Buffer
+	if rc := backupCmd([]string{"-data", src, "-out", file}, &out, &errOut); rc != 0 {
+		t.Fatalf("backup rc %d: %s", rc, errOut.String())
+	}
+	secretFile := filepath.Join(dir, "secret")
+	if err := os.WriteFile(secretFile, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "dst")
+	errOut.Reset()
+	if rc := restoreCmd([]string{"-data", dst, "-secret-file", secretFile, "-in", file}, nil, &errOut); rc != 1 || !strings.Contains(errOut.String(), "-accept-plain-credentials") {
+		t.Fatalf("refusal: rc %d %q", rc, errOut.String())
+	}
+	errOut.Reset()
+	if rc := restoreCmd([]string{"-data", dst, "-secret-file", secretFile, "-accept-plain-credentials", "-in", file}, nil, &errOut); rc != 0 || !strings.Contains(errOut.String(), "credentials encrypted") {
+		t.Fatalf("accepted: rc %d %q", rc, errOut.String())
+	}
+	// Without a secret, a plain backup is plain: no flag needed.
+	errOut.Reset()
+	if rc := restoreCmd([]string{"-data", filepath.Join(dir, "plain"), "-in", file}, nil, &errOut); rc != 0 {
+		t.Fatalf("plain without a secret: rc %d %q", rc, errOut.String())
 	}
 }

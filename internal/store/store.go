@@ -188,10 +188,12 @@ type Store struct {
 	sealer *secrets.Sealer
 	// prev opens credentials sealed under the secret before a change (see
 	// WithPreviousSealer); forget drops the ones nothing opens.
-	prev      *secrets.Sealer
-	forget    bool
-	resealed  int
-	forgotten int
+	prev        *secrets.Sealer
+	forget      bool
+	oldCreds    OldCredentials // Restore's, see WithOldCredentials
+	acceptPlain bool           // Restore's, see WithPlainCredentials
+	resealed    int
+	forgotten   int
 }
 
 // The additional data each secret column is sealed under: a ciphertext
@@ -585,13 +587,14 @@ func (s *Store) scanBox(row interface{ Scan(...any) error }) (*Box, error) {
 	if err != nil {
 		return nil, err
 	}
-	if b.Password, err = s.openSecret(labelPassword, b.Password); err != nil {
+	bind := boxBinding(b.ID, b.Host, b.Port, b.User)
+	if b.Password, err = s.openBoxSecret(labelPassword, bind, b.Password); err != nil {
 		return nil, fmt.Errorf("box %d SSH password: %w", b.ID, err)
 	}
-	if b.QbtPass, err = s.openSecret(labelQbtPass, b.QbtPass); err != nil {
+	if b.QbtPass, err = s.openBoxSecret(labelQbtPass, bind, b.QbtPass); err != nil {
 		return nil, fmt.Errorf("box %d WebUI password: %w", b.ID, err)
 	}
-	if b.QbtStartCmd, err = s.openSecret(labelQbtStartCmd, b.QbtStartCmd); err != nil {
+	if b.QbtStartCmd, err = s.openBoxSecret(labelQbtStartCmd, bind, b.QbtStartCmd); err != nil {
 		return nil, fmt.Errorf("box %d qBittorrent start command: %w", b.ID, err)
 	}
 	b.AppsWatch = []string{}
@@ -648,19 +651,39 @@ func (s *Store) CreateBox(ctx context.Context, b *Box) error {
 	if b.Type == "" {
 		b.Type = "seedbox"
 	}
-	// The Box keeps its plaintext: the caller starts the poller from it.
-	pw, qp, sc := s.sealBoxSecrets(b)
-	res, err := s.db.ExecContext(ctx, `INSERT INTO boxes (name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
+	// The credentials are bound to the box's ID, known only once the row
+	// exists: they are written in the same transaction, so no reader sees
+	// the box without them. The Box keeps its plaintext: the caller starts
+	// the poller from it.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO boxes (name, host, port, user, auth_method, key_path, password, host_key, type, plan, datacenter, renewal,
 		qbt_enabled, qbt_port, qbt_user, qbt_pass, qbt_start_cmd, docker_enabled, du_enabled, enabled, created_at, updated_at, rt_enabled, rt_scgi, io_weight, cpu_weight)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, pw, b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
-		b.QbtEnabled, b.QbtPort, b.QbtUser, qp, sc, b.DockerEnabled, b.DuEnabled, b.Enabled,
+		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, "", b.HostKey, b.Type, b.Plan, b.Datacenter, b.Renewal,
+		b.QbtEnabled, b.QbtPort, b.QbtUser, "", "", b.DockerEnabled, b.DuEnabled, b.Enabled,
 		now.Format(time.RFC3339), now.Format(time.RFC3339), b.RtEnabled, b.RtSCGI, b.IOWeight, b.CPUWeight)
 	if err != nil {
 		return err
 	}
-	b.ID, err = res.LastInsertId()
-	return err
+	id, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	b.ID = id
+	pw, qp, sc := s.sealBoxSecrets(b)
+	if _, err := tx.ExecContext(ctx, `UPDATE boxes SET password=?, qbt_pass=?, qbt_start_cmd=? WHERE id=?`, pw, qp, sc, id); err != nil {
+		b.ID = 0
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		b.ID = 0
+		return err
+	}
+	return nil
 }
 
 // Clears names the stored secrets an update removes. A blank Password or
@@ -692,9 +715,25 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	if clears.QbtPass {
 		b.QbtPass = ""
 	}
-	// A blank secret seals to blank, so the CASE below still reads it as
-	// "keep the stored value".
-	pw, qp, sc := s.sealBoxSecrets(b)
+	// A blank secret keeps the stored one. The credentials are bound to
+	// the endpoint (boxBinding), so a kept one is opened under the row's
+	// endpoint and sealed again under the edited one. The row is read
+	// first; the revision check below still decides, so a write between
+	// the read and the update is ErrStale, never a stale credential.
+	var cur Box
+	var curPw, curQp string
+	err := s.db.QueryRowContext(ctx, `SELECT host, port, user, password, qbt_pass FROM boxes WHERE id=?`, b.ID).
+		Scan(&cur.Host, &cur.Port, &cur.User, &curPw, &curQp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	pw, qp, sc, err := s.updatedBoxSecrets(b, clears, cur, curPw, curQp)
+	if err != nil {
+		return err
+	}
 	// The listener-only opt-in survives an edit of the same box only: the
 	// CASE reads the row's old endpoint (SQLite evaluates every SET
 	// expression against the row as it was), and an edit that forgets or
@@ -702,16 +741,16 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	// pinning the key at first contact does not (fred on #218).
 	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET listener_only=CASE WHEN host=? AND port=? AND user=? AND NOT ? AND NOT ? THEN listener_only ELSE 0 END,
 		name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
-		password=CASE WHEN ? THEN '' WHEN ?='' THEN password ELSE ? END,
+		password=?,
 		host_key=CASE WHEN ? THEN '' WHEN ? THEN ? WHEN host_key='' THEN ? ELSE host_key END,
 		type=?, plan=?, datacenter=?, renewal=?,
-		qbt_enabled=?, qbt_port=?, qbt_user=?, qbt_pass=CASE WHEN ? THEN '' WHEN ?='' THEN qbt_pass ELSE ? END, qbt_start_cmd=?,
+		qbt_enabled=?, qbt_port=?, qbt_user=?, qbt_pass=?, qbt_start_cmd=?,
 		docker_enabled=?, du_enabled=?, enabled=?, updated_at=?, rt_enabled=?, rt_scgi=?, io_weight=?, cpu_weight=?, revision=revision+1 WHERE id=? AND revision=?`,
 		b.Host, b.Port, b.User, clears.ForgetHostKey, clears.ReplaceHostKey,
-		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clears.Password, pw, pw,
+		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, pw,
 		clears.ForgetHostKey, clears.ReplaceHostKey, b.HostKey, b.HostKey,
 		b.Type, b.Plan, b.Datacenter, b.Renewal,
-		b.QbtEnabled, b.QbtPort, b.QbtUser, clears.QbtPass, qp, qp, sc, b.DockerEnabled, b.DuEnabled, b.Enabled,
+		b.QbtEnabled, b.QbtPort, b.QbtUser, qp, sc, b.DockerEnabled, b.DuEnabled, b.Enabled,
 		now.Format(time.RFC3339), b.RtEnabled, b.RtSCGI, b.IOWeight, b.CPUWeight, b.ID, b.Revision)
 	if err != nil {
 		return err
@@ -730,6 +769,39 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	return nil
 }
 
+// updatedBoxSecrets is the stored form of b's credentials after an edit.
+// A credential kept (blank, not cleared) keeps its stored bytes while the
+// endpoint is the same (cur, the row's), and is opened under the row's
+// binding and sealed under the edited one when it is not.
+func (s *Store) updatedBoxSecrets(b *Box, clears Clears, cur Box, curPw, curQp string) (pw, qp, sc string, err error) {
+	keepPw := b.Password == "" && !clears.Password
+	keepQp := b.QbtPass == "" && !clears.QbtPass
+	oldBind := boxBinding(b.ID, cur.Host, cur.Port, cur.User)
+	if oldBind == boxBinding(b.ID, b.Host, b.Port, b.User) {
+		pw, qp, sc = s.sealBoxSecrets(b)
+		if keepPw {
+			pw = curPw
+		}
+		if keepQp {
+			qp = curQp
+		}
+		return pw, qp, sc, nil
+	}
+	keep := *b
+	if keepPw {
+		if keep.Password, err = s.openBoxSecret(labelPassword, oldBind, curPw); err != nil {
+			return "", "", "", fmt.Errorf("box %d SSH password: %w", b.ID, err)
+		}
+	}
+	if keepQp {
+		if keep.QbtPass, err = s.openBoxSecret(labelQbtPass, oldBind, curQp); err != nil {
+			return "", "", "", fmt.Errorf("box %d WebUI password: %w", b.ID, err)
+		}
+	}
+	pw, qp, sc = s.sealBoxSecrets(&keep)
+	return pw, qp, sc, nil
+}
+
 // openSecret returns the plaintext of a stored value. Without a sealer
 // every value is plaintext, whatever it starts with: Open established that
 // (the secrets_sealed marker) before anything is read.
@@ -740,11 +812,34 @@ func (s *Store) openSecret(label, stored string) (string, error) {
 	return s.sealer.Open(label, stored)
 }
 
+// openBoxSecret is openSecret for a box's credential, sealed bound to
+// the box (boxBinding).
+func (s *Store) openBoxSecret(label, bind, stored string) (string, error) {
+	if s.sealer == nil {
+		return stored, nil
+	}
+	return s.sealer.OpenBound(label, bind, stored)
+}
+
 // sealBoxSecrets returns the stored forms of b's SSH and WebUI passwords
-// and its qBittorrent start command.
+// and its qBittorrent start command, bound to b's ID and endpoint.
 func (s *Store) sealBoxSecrets(b *Box) (pw, qp, sc string) {
-	return s.sealer.Seal(labelPassword, b.Password), s.sealer.Seal(labelQbtPass, b.QbtPass),
-		s.sealer.Seal(labelQbtStartCmd, b.QbtStartCmd)
+	bind := boxBinding(b.ID, b.Host, b.Port, b.User)
+	return s.sealer.SealBound(labelPassword, bind, b.Password), s.sealer.SealBound(labelQbtPass, bind, b.QbtPass),
+		s.sealer.SealBound(labelQbtStartCmd, bind, b.QbtStartCmd)
+}
+
+// boxBinding is what a box's credentials are sealed to besides their
+// column: the row and the endpoint they are sent to. A backup whose host,
+// port or user was edited by someone without the secret then fails to
+// open, rather than sending the password to their server at the next
+// poll (Codex audit of 1.23.0, restore-sealed-credential-endpoint-
+// rebinding). Lengths make the encoding unambiguous. The pinned host key
+// is left out: a pin is written at first contact without the box's
+// credentials, and clearing one only matters to someone who can also
+// intercept the box's own address.
+func boxBinding(id int64, host string, port int, user string) string {
+	return fmt.Sprintf("box %d host %d:%s port %d user %d:%s", id, len(host), host, port, len(user), user)
 }
 
 // SetHostKey pins a key seen while dialling host:port onto the box, only if

@@ -920,13 +920,22 @@ func TestReadPathRefusesForeignCiphertext(t *testing.T) {
 	if err := s.CreateBox(ctx, box); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE boxes SET password=? WHERE id=?`, b.Seal(labelPassword, "x"), box.ID); err != nil {
+	bind := boxBinding(box.ID, box.Host, box.Port, box.User)
+	if _, err := s.db.Exec(`UPDATE boxes SET password=? WHERE id=?`, b.SealBound(labelPassword, bind, "x"), box.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetBox(ctx, box.ID); !errors.Is(err, secrets.ErrWrongKey) || !strings.Contains(err.Error(), "SSH password") {
 		t.Fatalf("foreign SSH password: %v", err)
 	}
-	if _, err := s.db.Exec(`UPDATE boxes SET password='', qbt_pass=? WHERE id=?`, b.Seal(labelQbtPass, "x"), box.ID); err != nil {
+	// An unbound (version 1) value, even under the right secret, is never
+	// handed out after Open: Open upgrades every one it finds.
+	if _, err := s.db.Exec(`UPDATE boxes SET password=? WHERE id=?`, a.Seal(labelPassword, "x"), box.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetBox(ctx, box.ID); !errors.Is(err, secrets.ErrUnbound) {
+		t.Fatalf("unbound SSH password: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE boxes SET password='', qbt_pass=? WHERE id=?`, b.SealBound(labelQbtPass, bind, "x"), box.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ListBoxes(ctx); !errors.Is(err, secrets.ErrWrongKey) || !strings.Contains(err.Error(), "WebUI password") {
@@ -1281,7 +1290,7 @@ func TestDamagedEncodingMetadataFailsClosed(t *testing.T) {
 	})
 	t.Run("newer envelope", func(t *testing.T) {
 		path, id := sealedFixture(t)
-		rawExec(t, path, `UPDATE boxes SET password='pmss2:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' WHERE id=?`, id)
+		rawExec(t, path, `UPDATE boxes SET password='pmss3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' WHERE id=?`, id)
 		if _, err := Open(path, WithSealer(mustSealer(t, keyA))); err == nil || !strings.Contains(err.Error(), "newer version") {
 			t.Fatalf("newer envelope: %v", err)
 		}

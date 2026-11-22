@@ -30,7 +30,8 @@ import (
 // password may start with anything.
 const (
 	// sealedKey is "1" while every non-empty secret column is ciphertext
-	// (envelope version 1), "0" while they are plaintext. Missing means a
+	// (envelope version 1; version 2, bound to the box, for a box's
+	// credentials), "0" while they are plaintext. Missing means a
 	// database never opened by a build with encryption support, which is
 	// plaintext too; the row is written at the first open so that missing
 	// and "0" can be told apart afterwards.
@@ -85,8 +86,38 @@ type encoding struct {
 type secretCell struct {
 	where string // for the error message
 	label string
+	// bind is a box credential's boxBinding, "" for a setting. A bound
+	// cell is sealed in envelope version 2; one still in version 1 (from
+	// before 1.24) is opened by its label alone and sealed again, bound.
+	bind  string
 	value string // the stored form; once planned, the plaintext to store
 	apply func(tx *sql.Tx, stored string) error
+}
+
+// version is the envelope the cell is sealed in.
+func (c secretCell) version() int {
+	if c.bind != "" {
+		return 2
+	}
+	return 1
+}
+
+// open decrypts the stored value with sl (nil: ErrNoKey) by its envelope:
+// a bound cell's version-2 value under its binding, a version-1 value by
+// its label.
+func (c secretCell) open(sl *secrets.Sealer) (string, error) {
+	if v, _ := secrets.Envelope(c.value); v == 2 && c.bind != "" {
+		return sl.OpenBound(c.label, c.bind, c.value)
+	}
+	return sl.Open(c.label, c.value)
+}
+
+// seal is the stored form of plain for this cell under sl.
+func (c secretCell) seal(sl *secrets.Sealer, plain string) string {
+	if c.bind != "" {
+		return sl.SealBound(c.label, c.bind, plain)
+	}
+	return sl.Seal(c.label, plain)
 }
 
 // resealSecrets runs at Open. It brings every stored credential into the
@@ -285,7 +316,7 @@ func (s *Store) planSealedCell(c secretCell) (plan secretCell, keep bool, err er
 		// No envelope in a sealed store: plaintext written by a build
 		// without the secret. Sealed if there is a sealer, left otherwise.
 		return c, false, nil
-	case version > 1:
+	case version > c.version():
 		if s.forget {
 			return c.cleared(), false, nil
 		}
@@ -299,7 +330,7 @@ func (s *Store) planSealedCell(c secretCell) (plan secretCell, keep bool, err er
 // case it has to open (proving it ours) or be forgotten, never be handed
 // out as a password.
 func (s *Store) planUnmarkedCell(c secretCell) (plan secretCell, keep bool, err error) {
-	if version, wellFormed := secrets.Envelope(c.value); version != 1 || !wellFormed {
+	if version, wellFormed := secrets.Envelope(c.value); version < 1 || version > c.version() || !wellFormed {
 		return c, false, nil
 	}
 	return s.planCiphertext(c, func(err error) error {
@@ -307,16 +338,20 @@ func (s *Store) planUnmarkedCell(c secretCell) (plan secretCell, keep bool, err 
 	})
 }
 
-// planCiphertext: a ciphertext has to open with the current secret (keep),
-// or with the previous one on a change (rewrite), or be forgotten on
-// request; otherwise the open fails with wrap around the current sealer's
-// error.
+// planCiphertext: a ciphertext has to open with the current secret (keep,
+// or rewrite when it is in an older envelope than the cell's: a box
+// credential from before binding), or with the previous one on a change
+// (rewrite), or be forgotten on request; otherwise the open fails with
+// wrap around the current sealer's error.
 func (s *Store) planCiphertext(c secretCell, wrap func(error) error) (plan secretCell, keep bool, err error) {
-	_, cur := s.sealer.Open(c.label, c.value)
+	plain, cur := c.open(s.sealer)
 	if cur == nil {
+		if v, _ := secrets.Envelope(c.value); v < c.version() {
+			return c.with(plain), false, nil
+		}
 		return c, true, nil
 	}
-	if plain, ok := s.opensWithPrevious(c.label, c.value); ok {
+	if plain, ok := s.opensWithPrevious(c); ok {
 		return c.with(plain), false, nil
 	}
 	if s.forget {
@@ -326,11 +361,11 @@ func (s *Store) planCiphertext(c secretCell, wrap func(error) error) (plan secre
 }
 
 // opensWithPrevious opens a ciphertext with the previous sealer, if any.
-func (s *Store) opensWithPrevious(label, stored string) (string, bool) {
+func (s *Store) opensWithPrevious(c secretCell) (string, bool) {
 	if s.prev == nil {
 		return "", false
 	}
-	plain, err := s.prev.Open(label, stored)
+	plain, err := c.open(s.prev)
 	return plain, err == nil
 }
 
@@ -352,27 +387,29 @@ func (c secretCell) cleared() secretCell          { c.value = ""; return c }
 // secretCells lists every stored credential with its rewrite.
 func (s *Store) secretCells(ctx context.Context) ([]secretCell, error) {
 	var cells []secretCell
-	rows, err := s.db.QueryContext(ctx, `SELECT id, password, qbt_pass, qbt_start_cmd FROM boxes`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, host, port, user, password, qbt_pass, qbt_start_cmd FROM boxes`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id int64
-		var pw, qp, sc string
-		if err := rows.Scan(&id, &pw, &qp, &sc); err != nil {
+		var port int
+		var host, user, pw, qp, sc string
+		if err := rows.Scan(&id, &host, &port, &user, &pw, &qp, &sc); err != nil {
 			return nil, err
 		}
+		bind := boxBinding(id, host, port, user)
 		cells = append(cells,
-			secretCell{fmt.Sprintf("box %d SSH password", id), labelPassword, pw, func(tx *sql.Tx, v string) error {
+			secretCell{fmt.Sprintf("box %d SSH password", id), labelPassword, bind, pw, func(tx *sql.Tx, v string) error {
 				_, err := tx.ExecContext(ctx, `UPDATE boxes SET password=? WHERE id=?`, v, id)
 				return err
 			}},
-			secretCell{fmt.Sprintf("box %d WebUI password", id), labelQbtPass, qp, func(tx *sql.Tx, v string) error {
+			secretCell{fmt.Sprintf("box %d WebUI password", id), labelQbtPass, bind, qp, func(tx *sql.Tx, v string) error {
 				_, err := tx.ExecContext(ctx, `UPDATE boxes SET qbt_pass=? WHERE id=?`, v, id)
 				return err
 			}},
-			secretCell{fmt.Sprintf("box %d qBittorrent start command", id), labelQbtStartCmd, sc, func(tx *sql.Tx, v string) error {
+			secretCell{fmt.Sprintf("box %d qBittorrent start command", id), labelQbtStartCmd, bind, sc, func(tx *sql.Tx, v string) error {
 				_, err := tx.ExecContext(ctx, `UPDATE boxes SET qbt_start_cmd=? WHERE id=?`, v, id)
 				return err
 			}})
@@ -390,7 +427,7 @@ func (s *Store) secretCells(ctx context.Context) ([]secretCell, error) {
 			return nil, err
 		}
 		key := kv.key
-		cells = append(cells, secretCell{kv.where, kv.label, v, func(tx *sql.Tx, stored string) error {
+		cells = append(cells, secretCell{kv.where, kv.label, "", v, func(tx *sql.Tx, stored string) error {
 			_, err := tx.ExecContext(ctx, `UPDATE settings SET value=? WHERE key=?`, stored, key)
 			return err
 		}})
@@ -409,7 +446,7 @@ func (s *Store) rewriteSecrets(ctx context.Context, pending []secretCell, sealed
 	}
 	defer tx.Rollback()
 	for _, c := range pending {
-		if err := c.apply(tx, s.sealer.Seal(c.label, c.value)); err != nil {
+		if err := c.apply(tx, c.seal(s.sealer, c.value)); err != nil {
 			return fmt.Errorf("rewrite %s: %w", c.where, err)
 		}
 	}

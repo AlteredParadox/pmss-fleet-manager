@@ -31,7 +31,12 @@
 //
 // Format: "pmss1:" + base64 (raw, standard alphabet) of nonce || AES-256-GCM
 // ciphertext. The column's label is the additional data, so a ciphertext
-// moved to another column does not open. An empty value stays empty: the
+// moved to another column does not open. Version 2 ("pmss2:", SealBound)
+// has the same body, and its additional data also names what the value
+// belongs to (for a box's credentials: the box and the endpoint they are
+// sent to), so a ciphertext moved to another row, or left in a row whose
+// endpoint was edited outside the dashboard, does not open either (Codex
+// audit of 1.23.0). An empty value stays empty: the
 // store treats an empty secret as "none" and an empty PUT field as "keep",
 // and both have to survive the round trip unchanged.
 package secrets
@@ -52,8 +57,12 @@ import (
 	"strings"
 )
 
-// Prefix marks a sealed value in the database.
-const Prefix = "pmss1:"
+// Prefix marks a sealed value in the database; PrefixBound one sealed
+// with SealBound.
+const (
+	Prefix      = "pmss1:"
+	PrefixBound = "pmss2:"
+)
 
 // MinSecretLen is the shortest master secret accepted, in bytes. 24 is the
 // base64 length of 16 random bytes; the recommended 32 bytes encode to 44.
@@ -72,6 +81,24 @@ var ErrNoKey = errors.New("the credential is encrypted but no PMSS_SECRET (or -s
 // configured secret: it was sealed under another one, or the row was
 // damaged.
 var ErrWrongKey = errors.New("the credential does not decrypt with the configured PMSS_SECRET: it was encrypted with a different secret, or the row is damaged")
+
+// ErrBoundWrong is ErrWrongKey (errors.Is matches both) for a bound value
+// (SealBound): besides a different secret or damage, it does not open when
+// what it is bound to was changed outside the dashboard, such as a box's
+// host in a backup.
+var ErrBoundWrong error = boundWrong{}
+
+type boundWrong struct{}
+
+func (boundWrong) Error() string {
+	return "the credential does not decrypt with the configured PMSS_SECRET for this box: it was encrypted with a different secret, the row is damaged, or the box's host, port or user was changed outside the dashboard"
+}
+func (boundWrong) Unwrap() error { return ErrWrongKey }
+
+// ErrUnbound is returned by OpenBound for a version-1 value: one sealed
+// before credentials were bound to their box, which the store upgrades
+// when it opens and never hands out afterwards.
+var ErrUnbound = errors.New("the credential is in the old encryption format, not bound to its box")
 
 // Sealer seals and opens credentials. A nil *Sealer is valid and means
 // "no encryption": Seal returns the plaintext and Open accepts only
@@ -102,12 +129,13 @@ func must[T any](v T, err error) T {
 // Enabled reports whether values are encrypted.
 func (s *Sealer) Enabled() bool { return s != nil }
 
-// IsSealed reports whether a stored value carries the version-1 envelope.
-// Whether it is ciphertext is the store's call (its encoding marker),
-// since a plaintext password may start with anything.
+// IsSealed reports whether a stored value carries one of this build's
+// envelopes (version 1, or 2 from SealBound). Whether it is ciphertext is
+// the store's call (its encoding marker), since a plaintext password may
+// start with anything.
 func IsSealed(stored string) bool {
 	v, _ := Envelope(stored)
-	return v == 1
+	return v == 1 || v == 2
 }
 
 // Envelope is the one parser of the envelope grammar, shared by Open and
@@ -117,7 +145,7 @@ func IsSealed(stored string) bool {
 // grammar is canonical: "pmss", a version of one to three digits with no
 // leading zero, ":". A plaintext that happens to begin with "pmss1:" is
 // almost never well-formed: the body has to be raw standard base64 of at
-// least 28 bytes.
+// least 28 bytes. Version 2 has the same body grammar.
 func Envelope(stored string) (version int, wellFormed bool) {
 	rest, ok := strings.CutPrefix(stored, "pmss")
 	if !ok {
@@ -133,11 +161,11 @@ func Envelope(stored string) (version int, wellFormed bool) {
 		}
 	}
 	version, _ = strconv.Atoi(digits)
-	if version != 1 {
+	if version != 1 && version != 2 {
 		return version, false
 	}
 	raw, err := base64.RawStdEncoding.DecodeString(stored[len(Prefix):])
-	return 1, err == nil && len(raw) >= nonceSize+tagSize
+	return version, err == nil && len(raw) >= nonceSize+tagSize
 }
 
 // AES-GCM parameters, fixed by the construction.
@@ -151,10 +179,30 @@ func (s *Sealer) Seal(label, plain string) string {
 	if s == nil || plain == "" {
 		return plain
 	}
+	return s.seal(Prefix, []byte(label), plain)
+}
+
+// SealBound encrypts plain for the column named label in the row that
+// bind identifies (version 2). "" seals to "". bind must encode its parts
+// unambiguously (the store's boxBinding does).
+func (s *Sealer) SealBound(label, bind, plain string) string {
+	if s == nil || plain == "" {
+		return plain
+	}
+	return s.seal(PrefixBound, boundAD(label, bind), plain)
+}
+
+// boundAD is version 2's additional data. The version is part of it, so
+// a version-2 body can never be opened as version 1 or the reverse.
+func boundAD(label, bind string) []byte {
+	return []byte("pmss2\x00" + label + "\x00" + bind)
+}
+
+func (s *Sealer) seal(prefix string, ad []byte, plain string) string {
 	nonce := make([]byte, s.aead.NonceSize())
 	rand.Read(nonce) // cannot fail (crypto/rand since Go 1.24)
-	out := s.aead.Seal(nonce, nonce, []byte(plain), []byte(label))
-	return Prefix + base64.RawStdEncoding.EncodeToString(out)
+	out := s.aead.Seal(nonce, nonce, []byte(plain), ad)
+	return prefix + base64.RawStdEncoding.EncodeToString(out)
 }
 
 // Open decrypts a stored value for the column named label. A value without
@@ -166,17 +214,36 @@ func (s *Sealer) Open(label, stored string) (string, error) {
 	if version != 1 {
 		return stored, nil
 	}
+	return s.open(stored, wellFormed, []byte(label), ErrWrongKey)
+}
+
+// OpenBound decrypts a value sealed with SealBound for label and bind.
+// A value without an envelope is plaintext, returned as is, as with Open;
+// a version-1 value is ErrUnbound: the store upgrades those when it opens,
+// so one met later is not to be trusted with an endpoint.
+func (s *Sealer) OpenBound(label, bind, stored string) (string, error) {
+	version, wellFormed := Envelope(stored)
+	switch version {
+	case 1:
+		return "", ErrUnbound
+	case 2:
+		return s.open(stored, wellFormed, boundAD(label, bind), ErrBoundWrong)
+	}
+	return stored, nil
+}
+
+func (s *Sealer) open(stored string, wellFormed bool, ad []byte, wrong error) (string, error) {
 	if s == nil {
 		return "", ErrNoKey
 	}
 	if !wellFormed {
-		return "", ErrWrongKey
+		return "", wrong
 	}
 	raw, _ := base64.RawStdEncoding.DecodeString(stored[len(Prefix):])
 	ns := s.aead.NonceSize()
-	plain, err := s.aead.Open(nil, raw[:ns], raw[ns:], []byte(label))
+	plain, err := s.aead.Open(nil, raw[:ns], raw[ns:], ad)
 	if err != nil {
-		return "", ErrWrongKey
+		return "", wrong
 	}
 	return string(plain), nil
 }

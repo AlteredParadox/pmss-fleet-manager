@@ -252,8 +252,13 @@ func TestBackupRestoreErrors(t *testing.T) {
 	if err != nil || res.Encrypted || res.Boxes != 1 || res.Previous == "" {
 		t.Fatalf("unverified plain restore %+v %v", res, err)
 	}
-	// With a secret configured, a verified restore encrypts it.
-	res, err = Restore(ctx, live, plain, true, WithSealer(mustSealer(t, backupKeyA)))
+	// With a secret configured, plain text is refused unless accepted
+	// (it could be a stripped encrypted backup); accepted, a verified
+	// restore encrypts it.
+	if _, err = Restore(ctx, live, plain, true, WithSealer(mustSealer(t, backupKeyA))); !errors.Is(err, ErrPlainCredentials) {
+		t.Fatalf("plain restore under a secret, not accepted: %v", err)
+	}
+	res, err = Restore(ctx, live, plain, true, WithSealer(mustSealer(t, backupKeyA)), WithPlainCredentials())
 	if err != nil || !res.Encrypted {
 		t.Fatalf("plain restore under a secret %+v %v", res, err)
 	}
