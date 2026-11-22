@@ -328,12 +328,16 @@ type loConn struct {
 	once sync.Once
 }
 
+// Close closes first and unregisters after, so a withdrawal that takes
+// the set meanwhile still finds the connection and waits on the same
+// once (fred on #218): it never reports success while a close is in
+// progress.
 func (c *loConn) Close() error {
+	var err error
+	c.once.Do(func() { err = c.Conn.Close() })
 	c.p.loMu.Lock()
 	delete(c.p.loConns, c)
 	c.p.loMu.Unlock()
-	var err error
-	c.once.Do(func() { err = c.Conn.Close() })
 	return err
 }
 

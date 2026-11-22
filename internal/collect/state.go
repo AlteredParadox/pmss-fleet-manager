@@ -474,6 +474,9 @@ func (s *BoxState) adoptIdentity(from BoxState) {
 	s.Rt.Endpoint = from.Rt.Endpoint
 	s.Apps.Watched = from.Apps.Watched
 	s.Apps.markWatched()
+	// The opt-in is the record's; the mode belongs to the poller that
+	// dialled, and a new one has dialled nothing yet (Codex on #218).
+	s.Verify = VerifyState{ListenerOnly: from.Verify.ListenerOnly}
 }
 
 // resetVolatile clears what only a fresh poll by the current poller may
@@ -486,6 +489,7 @@ func (s *BoxState) resetVolatile() {
 	s.Rt.PortOK, s.Rt.Reachable = false, false
 	s.Docker.Reachable = false
 	s.Dirs.Running = false
+	s.Verify.Mode = "" // what an earlier poller's dials got
 	s.Unpolled = true
 	s.Ready = false
 }

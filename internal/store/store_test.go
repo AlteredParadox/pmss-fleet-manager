@@ -1813,4 +1813,31 @@ func TestListenerOnly(t *testing.T) {
 			t.Fatalf("stale consent after moving the %s: %v", name, err)
 		}
 	}
+	// The host key: pinning it at first contact keeps the opt-in; an edit
+	// that replaces or forgets it (perhaps another machine at the same
+	// address) clears it (fred on #218).
+	got, _ = s.GetBox(ctx, b.ID)
+	if err := s.SetListenerOnly(ctx, b.ID, got.Revision, true); err != nil {
+		t.Fatal(err)
+	}
+	got.HostKey = "ssh-ed25519 AAAAfirst"
+	if err := s.UpdateBox(ctx, got, Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.GetBox(ctx, b.ID); !got.ListenerOnly || got.HostKey == "" {
+		t.Fatalf("first-contact pinning must keep the opt-in: %v %q", got.ListenerOnly, got.HostKey)
+	}
+	for name, clears := range map[string]Clears{"replaced": {ReplaceHostKey: true}, "forgotten": {ForgetHostKey: true}} {
+		got, _ = s.GetBox(ctx, b.ID)
+		if err := s.SetListenerOnly(ctx, b.ID, got.Revision, true); err != nil {
+			t.Fatal(err)
+		}
+		got.HostKey = "ssh-ed25519 AAAAother"
+		if err := s.UpdateBox(ctx, got, clears); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ = s.GetBox(ctx, b.ID); got.ListenerOnly {
+			t.Fatalf("a %s host key must clear the opt-in", name)
+		}
+	}
 }

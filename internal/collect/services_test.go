@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -712,5 +713,64 @@ func TestStoreFixKeepsVerify(t *testing.T) {
 	p.storeFix(time.Now(), false)(s, &BoxState{})
 	if !s.Verify.ListenerOnly || s.Verify.Mode != VerifyListenerOnly {
 		t.Fatalf("verify after commit: %+v", s.Verify)
+	}
+}
+
+// A connection being closed by its user stays registered until the close
+// has completed, so a concurrent withdrawal waits for it rather than
+// reporting success first (fred on #218).
+func TestWithdrawalWaitsForClosingConnection(t *testing.T) {
+	p := &poller{box: &store.Box{Name: "b"}}
+	p.listenerOnly.Store(true)
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	bc := &blockingConn{release: release, entered: entered}
+	c, ok := p.admitListenerOnly(bc)
+	if !ok {
+		t.Fatal("admission")
+	}
+	go c.Close() // its user closes it; the close blocks until released
+	<-entered
+	withdrawn := make(chan struct{})
+	go func() { p.setListenerOnly(context.Background(), false); close(withdrawn) }()
+	select {
+	case <-withdrawn:
+		t.Fatal("the withdrawal returned while the connection was still closing")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-withdrawn:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the withdrawal did not return after the close completed")
+	}
+	if bc.closes.Load() != 1 {
+		t.Fatalf("closed %d times, want once", bc.closes.Load())
+	}
+}
+
+// blockingConn's Close waits for release.
+type blockingConn struct {
+	net.Conn
+	release, entered chan struct{}
+	closes           atomic.Int32
+}
+
+func (b *blockingConn) Close() error {
+	b.closes.Add(1)
+	close(b.entered)
+	<-b.release
+	return nil
+}
+
+// A state restored from cache (or carried across an edit) takes the
+// opt-in from the record and forgets the earlier poller's mode (Codex on
+// #218).
+func TestRestoredStateVerify(t *testing.T) {
+	cached := BoxState{Verify: VerifyState{ListenerOnly: false, Mode: VerifyListenerOnly}}
+	cached.adoptIdentity(fromBox(&store.Box{Name: "b", ListenerOnly: true}))
+	cached.resetVolatile()
+	if !cached.Verify.ListenerOnly || cached.Verify.Mode != "" {
+		t.Fatalf("restored verify: %+v", cached.Verify)
 	}
 }

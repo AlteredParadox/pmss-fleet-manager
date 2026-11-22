@@ -697,15 +697,17 @@ func (s *Store) UpdateBox(ctx context.Context, b *Box, clears Clears) error {
 	pw, qp, sc := s.sealBoxSecrets(b)
 	// The listener-only opt-in survives an edit of the same box only: the
 	// CASE reads the row's old endpoint (SQLite evaluates every SET
-	// expression against the row as it was).
-	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET listener_only=CASE WHEN host=? AND port=? AND user=? THEN listener_only ELSE 0 END,
+	// expression against the row as it was), and an edit that forgets or
+	// replaces the pinned host key (perhaps another machine) clears it too;
+	// pinning the key at first contact does not (fred on #218).
+	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET listener_only=CASE WHEN host=? AND port=? AND user=? AND NOT ? AND NOT ? THEN listener_only ELSE 0 END,
 		name=?, host=?, port=?, user=?, auth_method=?, key_path=?,
 		password=CASE WHEN ? THEN '' WHEN ?='' THEN password ELSE ? END,
 		host_key=CASE WHEN ? THEN '' WHEN ? THEN ? WHEN host_key='' THEN ? ELSE host_key END,
 		type=?, plan=?, datacenter=?, renewal=?,
 		qbt_enabled=?, qbt_port=?, qbt_user=?, qbt_pass=CASE WHEN ? THEN '' WHEN ?='' THEN qbt_pass ELSE ? END, qbt_start_cmd=?,
 		docker_enabled=?, du_enabled=?, enabled=?, updated_at=?, rt_enabled=?, rt_scgi=?, io_weight=?, cpu_weight=?, revision=revision+1 WHERE id=? AND revision=?`,
-		b.Host, b.Port, b.User,
+		b.Host, b.Port, b.User, clears.ForgetHostKey, clears.ReplaceHostKey,
 		b.Name, b.Host, b.Port, b.User, b.AuthMethod, b.KeyPath, clears.Password, pw, pw,
 		clears.ForgetHostKey, clears.ReplaceHostKey, b.HostKey, b.HostKey,
 		b.Type, b.Plan, b.Datacenter, b.Renewal,
