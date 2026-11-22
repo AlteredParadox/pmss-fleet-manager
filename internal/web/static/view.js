@@ -717,22 +717,27 @@ function draftAfterPassword(d, r) {
    (app.js's svcSearchText); statuses are counted over the rows the words
    and the box choice keep, Active and Suspended first and the rest by name,
    with the chosen one listed even at 0; the box choice is counted over the
-   words and the status. Statuses compare trimmed and case-insensitively;
-   the text is the API's, a key here, escaped where it is printed. */
+   words and the status. hasBox says whether a service's box is in the
+   dashboard now (the feed's match may name a box removed since), so the
+   rows, the counts and the row's own add-box button agree (fred on #229).
+   Statuses compare trimmed and case-insensitively; the text is the API's,
+   a key here, escaped where it is printed. A service with no status is
+   listed under all statuses only: '' is the "all" choice (fred on #229). */
 const SVC_CURRENT = ['active', 'suspended'];
 const SVC_BOX = ['', 'added', 'not-added'];
 const svcStatusKey = (status) => String(status ?? '').trim().toLowerCase();
-function serviceFilter(services, query, status, box, fields) {
+function serviceFilter(services, query, status, box, fields, hasBox = (sv) => !!sv.box_id) {
   const words = String(query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
   const hit = (sv) => !words.length || words.every((w) => fields(sv).map((v) => String(v ?? '').toLowerCase()).join('\n').includes(w));
-  const boxOk = (sv, b) => !b || (b === 'added') === !!sv.box_id;
+  const boxOk = (sv, b) => !b || (b === 'added') === hasBox(sv);
   const statusOk = (sv) => !status || svcStatusKey(sv.status) === status;
   const matched = services.filter(hit);
   const by = new Map();
   for (const sv of matched) {
     if (!boxOk(sv, box)) continue;
     const key = svcStatusKey(sv.status);
-    const c = by.get(key) || { key, label: String(sv.status ?? '').trim() || 'no status', count: 0 };
+    if (!key) continue; // counted in the total, not offered on its own
+    const c = by.get(key) || { key, label: String(sv.status ?? '').trim(), count: 0 };
     c.count++;
     by.set(key, c);
   }
@@ -740,12 +745,13 @@ function serviceFilter(services, query, status, box, fields) {
   const rank = (c) => { const i = SVC_CURRENT.indexOf(c.key); return i < 0 ? SVC_CURRENT.length : i; };
   const statuses = [...by.values()].sort((a, b) => rank(a) - rank(b) || (a.key < b.key ? -1 : 1));
   const boxes = Object.fromEntries(SVC_BOX.map((b) => [b, matched.filter((sv) => statusOk(sv) && boxOk(sv, b)).length]));
-  return { statuses, boxes, shown: matched.filter((sv) => statusOk(sv) && boxOk(sv, box)), filtered: words.length > 0 || !!status || !!box };
+  const total = matched.filter((sv) => boxOk(sv, box)).length;
+  return { statuses, boxes, total, shown: matched.filter((sv) => statusOk(sv) && boxOk(sv, box)), filtered: words.length > 0 || !!status || !!box };
 }
 /* serviceFilterControls: the two choices' markup, with their counts; the
    search box is app.js's (it keeps its caret across renders). */
 function serviceFilterControls(F, status, box) {
-  const total = F.statuses.reduce((n, c) => n + c.count, 0);
+  const total = F.total;
   const opt = (v, label, on) => `<option value="${esc(v)}"${on ? ' selected' : ''}>${esc(label)}</option>`;
   const st = [opt('', `all statuses (${total})`, !status), ...F.statuses.map((c) => opt(c.key, `${c.label} (${c.count})`, c.key === status))];
   const names = { '': 'all services', added: 'with a box here', 'not-added': 'not added here' };

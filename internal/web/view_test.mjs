@@ -490,7 +490,31 @@ test('the Services page narrows by words, status and box, counting each choice o
   const gone = V.serviceFilter(feed, '', 'fraud', '', fields);
   assert.deepEqual(gone.shown, []);
   assert.deepEqual(gone.statuses.find((c) => c.key === 'fraud'), { key: 'fraud', label: 'fraud', count: 0 }, 'a chosen status the feed lost stays listed at 0');
-  assert.deepEqual(V.serviceFilter([{ id: 1 }], '', '', '', fields).statuses, [{ key: '', label: 'no status', count: 1 }]);
+});
+
+test('a service with no status is listed under all statuses only, never as a second "all" (fred on #229)', () => {
+  const feed = [{ id: 1, status: 'Active' }, { id: 2 }, { id: 3, status: '  ' }];
+  const F = V.serviceFilter(feed, '', '', '', () => []);
+  assert.deepEqual(F.statuses.map((c) => [c.key, c.count]), [['active', 1]]);
+  assert.equal(F.total, 3, 'the total still counts them');
+  assert.deepEqual(F.shown.map((sv) => sv.id), [1, 2, 3]);
+  const html = V.serviceFilterControls(F, '', '');
+  assert.equal((html.match(/<option value=""/g) || []).length, 2, 'one "all" option per select, no blank status option');
+  assert.equal((html.match(/ selected>/g) || []).length, 2, 'one selected option per select');
+  assert.match(html, /<option value="" selected>all statuses \(3\)<\/option>/);
+  const active = V.serviceFilter(feed, '', 'active', '', () => []);
+  assert.deepEqual(active.shown.map((sv) => sv.id), [1]);
+  assert.deepEqual(V.serviceFilter(feed, '', '', '', () => []).shown.length, 3, 'clearing lists them again');
+});
+
+test('the box choice follows the boxes in the dashboard now, not the feed\'s cached match (fred on #229)', () => {
+  const feed = [{ id: 1, status: 'Active', box_id: 7 }, { id: 2, status: 'Active', box_id: 9 }, { id: 3, status: 'Active' }];
+  const live = new Set([7]); // box 9 was removed since the feed was matched
+  const hasBox = (sv) => !!sv.box_id && live.has(sv.box_id);
+  const F = V.serviceFilter(feed, '', '', 'not-added', () => [], hasBox);
+  assert.deepEqual(F.shown.map((sv) => sv.id), [2, 3], 'the service of the removed box is not added here');
+  assert.deepEqual(F.boxes, { '': 3, added: 1, 'not-added': 2 });
+  assert.deepEqual(V.serviceFilter(feed, '', '', 'added', () => [], hasBox).shown.map((sv) => sv.id), [1]);
 });
 
 test('the Services choices are escaped and mark the chosen option', () => {

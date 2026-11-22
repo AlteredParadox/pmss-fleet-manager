@@ -374,7 +374,8 @@ async function loadPlans() {
 async function loadServices() {
   const seq = ++servicesSeq;
   let next;
-  try { next = await api('GET', BASE + '/api/services'); } catch (e) { next = { configured: false, services: [], error: e.message }; }
+  // failed: the request itself failed, which says nothing about the key.
+  try { next = await api('GET', BASE + '/api/services'); } catch (e) { next = { configured: false, failed: true, services: [], error: e.message }; }
   if (seq !== servicesSeq) return; // a newer load or a sync result landed meanwhile
   S.services = next;
   if (S.view === 'services') render();
@@ -2424,10 +2425,11 @@ function viewServices() {
   const v = S.services;
   const head = (sub, actions) => `<div class="head" style="margin-bottom:14px"><div><div class="eyebrow">pulsedmedia.com${v?.client_id ? ` · client ${v.client_id}` : ''}</div><h1 style="margin:0">Services</h1>${sub}</div>${actions}</div>`;
   if (!v) return `${head('', '')}<div class="empty">loading…</div>`;
+  if (v.failed) return `${head('', '')}<div class="empty"><span class="bad">could not load the services: ${esc(v.error)}</span> <button class="small" data-act="svc:reload">retry</button></div>`;
   if (!v.configured) return `${head('', '')}<div class="empty">Set your Pulsed Media API key under <a href="#/settings">settings</a> to list your services here.</div>`;
   const status = v.error ? `<span class="bad">${esc(v.error)}</span>` : v.synced_at ? `synced ${fmtAgo(v.synced_at)}${v.generated_at ? ` · feed generated ${fmtAgo(v.generated_at)}` : ''}` : 'not synced yet';
   // The choices only pick the rows listed: the monthly cost is the server's, over every current service.
-  const F = pfmView.serviceFilter(v.services, S.svcQ, S.svcStatus, S.svcBox, svcSearchText);
+  const F = pfmView.serviceFilter(v.services, S.svcQ, S.svcStatus, S.svcBox, svcSearchText, (sv) => !!(sv.box_id && boxById(sv.box_id)));
   const count = F.filtered ? `showing ${F.shown.length} of ${v.services.length} · <button class="link" data-act="svc:clear">clear</button>` : `${v.services.length} services`;
   const bar = v.services.length ? `<div class="fleet-filter svc-filter">
       <input class="filter" type="search" placeholder="search product, login, status, box…" aria-label="search services" data-svcq value="${esc(S.svcQ)}">
@@ -2706,6 +2708,7 @@ function settingsPatch(draft, touched) {
 }
 async function servicesAction(a, act) {
   if (a === 'svc:sync') { act.disabled = true; toast('syncing services from pulsedmedia.com…'); const synced = await api('POST', BASE + '/api/services/sync'); servicesSeq++; S.services = synced; await loadState(); toast(`synced ${S.services.services.length} services`, 'ok'); render(); }
+  else if (a === 'svc:reload') { S.services = null; render(); await loadServices(); }
   else if (a === 'svc:clear') { S.svcQ = ''; S.svcStatus = ''; S.svcBox = ''; saveSvcFilter(); render(); }
   else if (a === 'svc:add') {
     const sv = (S.services?.services || []).find((x) => String(x.id) === act.dataset.id);
