@@ -129,7 +129,7 @@ func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer 
 		}
 		ok, known, reason := probe.EstablishedOwner(out, port)
 		switch {
-		case !known && pol.allow != nil && pol.allow():
+		case !known && pol.allow != nil && pol.allow() && (pol.admit == nil || pol.admit()):
 			pol.record(VerifyListenerOnly)
 			return conn, nil // opted in: the listener check is what applies
 		case !known:
@@ -160,6 +160,7 @@ var ErrVerifyBlocked = errors.New("WebUI verification blocked by host socket pri
 // value is strict and silent (the add/edit wizard: no box setting yet).
 type verifyPolicy struct {
 	allow func() bool
+	admit func() bool // optional final check as the connection is let through (poller.admitListenerOnly)
 	note  func(mode string)
 }
 

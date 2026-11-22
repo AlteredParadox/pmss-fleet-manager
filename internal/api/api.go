@@ -1794,8 +1794,16 @@ func (s *Server) handleAppWatch(w http.ResponseWriter, r *http.Request) {
 
 // handleSetVerification sets the box's listener-only opt-in. The value
 // must be stated: a body without it is refused rather than read as off.
+// ?rev= names the box record revision the page was drawn from (409 when
+// the box was edited since), as for box actions; unlike them it is served
+// in monitor-only mode, since it changes nothing on the box.
 func (s *Server) handleSetVerification(w http.ResponseWriter, r *http.Request) {
 	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	rev, err := boxRevParam(r)
 	if err != nil {
 		writeErr(w, 400, err)
 		return
@@ -1811,7 +1819,7 @@ func (s *Server) handleSetVerification(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("listener_only is required"))
 		return
 	}
-	if err := s.m.SetListenerOnly(r.Context(), id, *in.ListenerOnly); err != nil {
+	if err := s.m.SetListenerOnly(r.Context(), id, rev, *in.ListenerOnly); err != nil {
 		writeErr(w, actionCode(err), err)
 		return
 	}

@@ -72,6 +72,11 @@ type poller struct {
 	// Atomics: dials run with and without p.mu held.
 	listenerOnly atomic.Bool
 	verifyMode   atomic.Value // string
+	// loAdmitted: a connection was let through under the opt-in since it
+	// was last withdrawn. Withdrawal keys on this, not on verifyMode (a
+	// later fully verified dial overwrites that while an admitted
+	// connection may still be pooled).
+	loAdmitted atomic.Bool
 
 	prevCPU     int64
 	prevCPUAt   time.Time
@@ -287,7 +292,17 @@ func newPoller(m *Manager, b *store.Box) *poller {
 
 // verifyPolicy is this box's say in verifiedDial.
 func (p *poller) verifyPolicy() verifyPolicy {
-	return verifyPolicy{allow: p.listenerOnly.Load, note: p.noteVerify}
+	return verifyPolicy{allow: p.listenerOnly.Load, admit: p.admitListenerOnly, note: p.noteVerify}
+}
+
+// admitListenerOnly is the last word on a listener-only connection: it
+// marks one as admitted first, then re-reads the opt-in. A withdrawal
+// stores the opt-in first, then reads the mark, so either this sees it
+// withdrawn (and the dial refuses) or the withdrawal sees the mark (and
+// drops the clients this connection is pooled in).
+func (p *poller) admitListenerOnly() bool {
+	p.loAdmitted.Store(true)
+	return p.listenerOnly.Load()
 }
 
 // noteVerify records what a new connection got, logging each change.
@@ -306,11 +321,12 @@ func (p *poller) verifyModeNow() string {
 }
 
 // setListenerOnly applies a change of the opt-in. Turning it off drops
-// every pooled WebUI and rTorrent connection made under it, so none
-// outlives the consent; the next dial is checked again.
+// the pooled WebUI and rTorrent clients whenever any connection was
+// admitted under it (see admitListenerOnly), so none outlives the
+// consent; the next dial is checked again.
 func (p *poller) setListenerOnly(ctx context.Context, on bool) {
 	p.listenerOnly.Store(on)
-	if on || p.verifyModeNow() != VerifyListenerOnly {
+	if on || !p.loAdmitted.Swap(false) {
 		return
 	}
 	p.mu.Lock()
@@ -320,7 +336,9 @@ func (p *poller) setListenerOnly(ctx context.Context, on bool) {
 	}
 	p.dropRtLocked(ctx)
 	p.mu.Unlock()
-	p.verifyMode.Store("")
+	if p.verifyModeNow() == VerifyListenerOnly {
+		p.verifyMode.Store("")
+	}
 }
 
 func (p *poller) wake() {
@@ -671,7 +689,7 @@ func (p *poller) poll(ctx context.Context) {
 		st.Ready = true // the facts below are this generation's; actions may use them
 	}
 
-	if !p.listenerOnly.Load() && p.verifyModeNow() == VerifyListenerOnly {
+	if !p.listenerOnly.Load() && p.loAdmitted.Load() {
 		p.setListenerOnly(ctx, false) // a dial that was in flight when the opt-in was withdrawn
 	}
 	if p.box.QbtEnabled {

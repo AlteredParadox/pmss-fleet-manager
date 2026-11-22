@@ -482,14 +482,25 @@ func (s *Store) ensureListenerOnlyColumn() error {
 	return nil
 }
 
-// SetListenerOnly records the box's listener-only opt-in (see Box.ListenerOnly).
-func (s *Store) SetListenerOnly(ctx context.Context, id int64, on bool) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET listener_only=? WHERE id=?`, on, id)
+// SetListenerOnly records the box's listener-only opt-in (see
+// Box.ListenerOnly) for the record revision the owner saw when deciding:
+// consent given on a page drawn before an edit (which may have moved the
+// box elsewhere and turned it off) fails with ErrStale. It does not bump
+// the revision itself, so other open pages of the box stay valid.
+func (s *Store) SetListenerOnly(ctx context.Context, id, rev int64, on bool) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE boxes SET listener_only=? WHERE id=? AND revision=?`, on, id, rev)
 	if err != nil {
 		return err
 	}
 	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		return ErrNotFound
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM boxes WHERE id=?`, id).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return ErrNotFound
+		}
+		return ErrStale
 	}
 	return nil
 }

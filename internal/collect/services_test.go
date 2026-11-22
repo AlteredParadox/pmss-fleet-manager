@@ -583,30 +583,59 @@ func TestVerifiedDial(t *testing.T) {
 	}
 }
 
-// Withdrawing the listener-only opt-in drops the pooled WebUI client made
-// under it, so no connection outlives the consent; a client made under
-// full verification is kept, and so is any client when the opt-in is given.
+// Withdrawing the listener-only opt-in drops the pooled WebUI client
+// whenever a connection was admitted under it, even if a later fully
+// verified dial has replaced the recorded mode (fred on #218); a client
+// with no listener-only admission is kept; giving the opt-in drops nothing.
+// A dial that read the opt-in before it was withdrawn is refused at
+// admission, and leaves no mark.
 func TestSetListenerOnlyDropsConnections(t *testing.T) {
-	mk := func(mode string, on bool) *poller {
-		p := &poller{box: &store.Box{Name: "b"}}
-		p.listenerOnly.Store(on)
-		p.verifyMode.Store(mode)
-		p.qbt = qbt.NewWithGuard(func(context.Context) (net.Conn, error) { return nil, errors.New("unused") }, "127.0.0.1:1", "", "", &qbt.AuthGuard{})
-		return p
+	ctx := context.Background()
+	newClient := func() *qbt.Client {
+		return qbt.NewWithGuard(func(context.Context) (net.Conn, error) { return nil, errors.New("unused") }, "127.0.0.1:1", "", "", &qbt.AuthGuard{})
 	}
-	p := mk(VerifyListenerOnly, true)
-	p.setListenerOnly(context.Background(), false)
-	if p.qbt != nil || p.verifyModeNow() != "" || p.listenerOnly.Load() {
-		t.Fatalf("withdrawn under listener-only: qbt %v mode %q", p.qbt, p.verifyModeNow())
+	uid := os.Getuid()
+	privacy := fmt.Sprintf("uid %d\nprivacy\nend\n", uid)
+	full := fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\ns BEEF %d 01 0100007F 4242 00\nend\n", uid, uid, uid)
+
+	p := &poller{box: &store.Box{Name: "b"}}
+	p.listenerOnly.Store(true)
+	p.qbt = newClient()
+	if _, err := verifiedDial(&fakeTunnel{out: privacy}, "127.0.0.1:8089", 8089, p.verifyPolicy())(ctx); err != nil {
+		t.Fatalf("admitted under the opt-in: %v", err)
 	}
-	p = mk(VerifyFull, true)
-	p.setListenerOnly(context.Background(), false)
-	if p.qbt == nil || p.verifyModeNow() != VerifyFull {
-		t.Fatal("a fully verified client must be kept")
+	if _, err := verifiedDial(&fakeTunnel{out: full}, "127.0.0.1:8089", 8089, p.verifyPolicy())(ctx); err != nil || p.verifyModeNow() != VerifyFull {
+		t.Fatalf("a later full dial: %v %q", err, p.verifyModeNow())
 	}
-	p = mk(VerifyBlocked, false)
-	p.setListenerOnly(context.Background(), true)
+	p.setListenerOnly(ctx, false)
+	if p.qbt != nil || p.loAdmitted.Load() {
+		t.Fatal("withdrawal must drop the client a listener-only connection may still be pooled in")
+	}
+
+	p = &poller{box: &store.Box{Name: "b"}}
+	p.listenerOnly.Store(true)
+	p.qbt = newClient()
+	if _, err := verifiedDial(&fakeTunnel{out: full}, "127.0.0.1:8089", 8089, p.verifyPolicy())(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p.setListenerOnly(ctx, false)
+	if p.qbt == nil {
+		t.Fatal("a client with no listener-only admission must be kept")
+	}
+	p.setListenerOnly(ctx, true)
 	if p.qbt == nil || !p.listenerOnly.Load() {
 		t.Fatal("giving the opt-in drops nothing")
+	}
+
+	// Withdrawn between the dial's first read and its admission.
+	p = &poller{box: &store.Box{Name: "b"}}
+	pol := verifyPolicy{allow: func() bool { return true }, admit: func() bool { p.loAdmitted.Store(true); return false }, note: p.noteVerify}
+	ft := &fakeTunnel{out: privacy}
+	if _, err := verifiedDial(ft, "127.0.0.1:8089", 8089, pol)(ctx); !errors.Is(err, ErrVerifyBlocked) {
+		t.Fatalf("a dial whose consent was withdrawn at admission must be blocked: %v", err)
+	}
+	ft.server.SetReadDeadline(time.Now().Add(time.Second))
+	if n, rerr := ft.server.Read(make([]byte, 8)); n != 0 || rerr != io.EOF {
+		t.Fatal("the refused connection must be closed unused")
 	}
 }

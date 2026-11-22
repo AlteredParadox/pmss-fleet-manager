@@ -666,8 +666,10 @@ func TestAppWatch(t *testing.T) {
 	}
 }
 
-// The listener-only opt-in: stated explicitly, persisted, in the box's
-// state, and changeable in monitor-only mode (it changes nothing on a box).
+// The listener-only opt-in: stated explicitly, for the revision the page
+// was drawn from, persisted, in the box's state, and changeable in
+// monitor-only mode (it changes nothing on a box). Consent from a page
+// drawn before an edit (which may have moved the box) is refused.
 func TestSetVerification(t *testing.T) {
 	s, st := newTestServer(t)
 	ctx := context.Background()
@@ -676,17 +678,24 @@ func TestSetVerification(t *testing.T) {
 	}
 	boxes, _ := st.ListBoxes(ctx)
 	id := boxes[0].ID
-	url := fmt.Sprintf("/api/boxes/%d/verification", id)
+	rev := boxes[0].Revision
+	url := func(r int64) string { return fmt.Sprintf("/api/boxes/%d/verification?rev=%d", id, r) }
 	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
 	for _, body := range []string{`{}`, `{"listener_only":"yes"}`, `{"listener_only":true,"x":1}`} {
-		if code, _ := do(t, s, "POST", url, body, hdr); code != 400 {
+		if code, _ := do(t, s, "POST", url(rev), body, hdr); code != 400 {
 			t.Fatalf("%s: code %d", body, code)
 		}
+	}
+	if code, _ := do(t, s, "POST", fmt.Sprintf("/api/boxes/%d/verification", id), `{"listener_only":true}`, hdr); code != 400 {
+		t.Fatalf("no revision: code %d", code)
+	}
+	if code, _ := do(t, s, "POST", url(rev+7), `{"listener_only":true}`, hdr); code != 409 {
+		t.Fatalf("stale revision: code %d", code)
 	}
 	if got, _ := st.GetBox(ctx, id); got.ListenerOnly {
 		t.Fatal("refused requests must not change it")
 	}
-	if code, out := do(t, s, "POST", url, `{"listener_only":true}`, hdr); code != 200 {
+	if code, out := do(t, s, "POST", url(rev), `{"listener_only":true}`, hdr); code != 200 {
 		t.Fatalf("on: %d %s", code, out)
 	}
 	got, _ := st.GetBox(ctx, id)
@@ -695,7 +704,7 @@ func TestSetVerification(t *testing.T) {
 		t.Fatalf("on: stored %v, state %+v", got.ListenerOnly, state.Verify)
 	}
 	s.monitorOnly = true
-	if code, out := do(t, s, "POST", url, `{"listener_only":false}`, hdr); code != 200 {
+	if code, out := do(t, s, "POST", url(rev), `{"listener_only":false}`, hdr); code != 200 {
 		t.Fatalf("off in monitor-only: %d %s", code, out)
 	}
 	s.monitorOnly = false
@@ -704,7 +713,21 @@ func TestSetVerification(t *testing.T) {
 	if got.ListenerOnly || state.Verify.ListenerOnly {
 		t.Fatalf("off: stored %v, state %+v", got.ListenerOnly, state.Verify)
 	}
-	if code, _ := do(t, s, "POST", "/api/boxes/999999/verification", `{"listener_only":true}`, hdr); code != 404 {
+	// An edit moves the box; the page drawn before it cannot opt the new
+	// endpoint in, and neither the record nor the new poller changes.
+	got.Host = "z.example"
+	if err := s.m.UpdateBox(ctx, got, store.Clears{}); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := do(t, s, "POST", url(rev), `{"listener_only":true}`, hdr); code != 409 {
+		t.Fatalf("stale consent after a move: code %d", code)
+	}
+	moved, _ := st.GetBox(ctx, id)
+	state, _ = s.m.State(id)
+	if moved.ListenerOnly || state.Verify.ListenerOnly {
+		t.Fatalf("after a stale enable: stored %v, state %+v", moved.ListenerOnly, state.Verify)
+	}
+	if code, _ := do(t, s, "POST", "/api/boxes/999999/verification?rev=0", `{"listener_only":true}`, hdr); code != 404 {
 		t.Fatalf("missing box: %d", code)
 	}
 }

@@ -1769,10 +1769,19 @@ func TestListenerOnly(t *testing.T) {
 		t.Fatalf("after the migration: %+v %v", bs, err)
 	}
 	b := bs[0]
-	if err := s.SetListenerOnly(ctx, b.ID, true); err != nil {
+	if err := s.SetListenerOnly(ctx, b.ID, b.Revision+1, true); !errors.Is(err, ErrStale) {
+		t.Fatalf("consent for another revision: %v", err)
+	}
+	if got, _ := s.GetBox(ctx, b.ID); got.ListenerOnly {
+		t.Fatal("a stale opt-in must not be stored")
+	}
+	if err := s.SetListenerOnly(ctx, b.ID, b.Revision, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetListenerOnly(ctx, 999, true); !errors.Is(err, ErrNotFound) {
+	if got, _ := s.GetBox(ctx, b.ID); got.Revision != b.Revision {
+		t.Fatal("the opt-in must not bump the revision")
+	}
+	if err := s.SetListenerOnly(ctx, 999, 0, true); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing box: %v", err)
 	}
 	// An edit of the same endpoint keeps it, whatever the request carried.
@@ -1787,10 +1796,10 @@ func TestListenerOnly(t *testing.T) {
 	for name, move := range map[string]func(*Box){
 		"host": func(x *Box) { x.Host = "h2" }, "port": func(x *Box) { x.Port = 2222 }, "account": func(x *Box) { x.User = "v" },
 	} {
-		if err := s.SetListenerOnly(ctx, b.ID, true); err != nil {
+		got, _ = s.GetBox(ctx, b.ID)
+		if err := s.SetListenerOnly(ctx, b.ID, got.Revision, true); err != nil {
 			t.Fatal(err)
 		}
-		got, _ = s.GetBox(ctx, b.ID)
 		move(got)
 		got.ListenerOnly = true
 		if err := s.UpdateBox(ctx, got, Clears{}); err != nil {
@@ -1798,6 +1807,10 @@ func TestListenerOnly(t *testing.T) {
 		}
 		if got, _ = s.GetBox(ctx, b.ID); got.ListenerOnly {
 			t.Fatalf("moving the box to another %s must turn the opt-in off", name)
+		}
+		// The page drawn before the move cannot give it back.
+		if err := s.SetListenerOnly(ctx, b.ID, got.Revision-1, true); !errors.Is(err, ErrStale) {
+			t.Fatalf("stale consent after moving the %s: %v", name, err)
 		}
 	}
 }

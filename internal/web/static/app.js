@@ -1945,8 +1945,8 @@ function tabVerification(b) {
       : v.mode === 'full' ? `<span class="ok">fully verified</span>${v.on ? ' <span class="muted">(listener-only is allowed, and not needed now)</span>' : ''}`
         : `<span class="muted">no WebUI or rTorrent connection made since the dashboard started${v.on ? ' (listener-only is allowed)' : ''}</span>`;
   const btn = v.on
-    ? `<button data-act="verify:set" data-on="" title="refuse connections this box gives no way to verify">turn listener-only off</button>`
-    : `<button class="warn" data-act="verify:set" data-on="1" data-confirm="Allow the listener check alone on ${esc(b.name)}? The dashboard will send your WebUI login after checking only who holds the port. A co-tenant who takes the port in the seconds after your client stops could receive it, and with it run commands as your account through the client's settings.">allow listener-only on this box</button>`;
+    ? `<button data-act="verify:set" data-on="" data-rev="${Number(b.box_rev) || 0}" title="refuse connections this box gives no way to verify">turn listener-only off</button>`
+    : `<button class="warn" data-act="verify:set" data-on="1" data-rev="${Number(b.box_rev) || 0}" data-confirm="Allow the listener check alone on ${esc(b.name)}? The dashboard will send your WebUI login after checking only who holds the port. A co-tenant who takes the port in the seconds after your client stops could receive it, and with it run commands as your account through the client's settings.">allow listener-only on this box</button>`;
   return `<div class="grid"><div class="panel verify-page">
     <div class="tile-label">WebUI connection check</div>
     <div class="meta"><span>now</span><span>${state}</span></div>
@@ -2704,7 +2704,7 @@ async function runAction(a, act) {
   else if (a === 'fleet:clear') { S.fleetQ = ''; S.fleetStatus = ''; render(); }
   else if (a === 'cmp:days') await loadCompare(Number(act.dataset.days) === 30 ? 30 : 7);
   else if (a === 'cmp:sort') { const k = act.dataset.key, c = S.cmp.sort; S.cmp.sort = { key: k, dir: c.key === k ? (c.dir === 'desc' ? 'asc' : 'desc') : (CMP_ASC.has(k) ? 'asc' : 'desc') }; render(); }
-  else if (a === 'verify:set') { act.disabled = true; const on = !!act.dataset.on; await api('POST', `${BASE}/api/boxes/${S.selId}/verification`, { listener_only: on }); toast(on ? 'listener-only allowed on this box' : 'listener-only turned off: connections this box gives no way to verify are refused', on ? 'warn' : 'ok'); await loadDetail(S.selId); }
+  else if (a === 'verify:set') { act.disabled = true; const on = !!act.dataset.on; await api('POST', `${BASE}/api/boxes/${S.selId}/verification?rev=${encodeURIComponent(act.dataset.rev || '')}`, { listener_only: on }); toast(on ? 'listener-only allowed on this box' : 'listener-only turned off: connections this box gives no way to verify are refused', on ? 'warn' : 'ok'); await loadDetail(S.selId); }
   else if (a === 'hist:days') await loadHistory(S.selId, Number(act.dataset.days) === 30 ? 30 : 7);
   else if (a.startsWith('pw:')) await passwordAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
