@@ -356,6 +356,11 @@ const listenViaSS = `timeout 10 ss -Hltne 2>/dev/null | awk '` + ssListenAwk + `
 // ino:N, sk:HEX. Everything after (cgroup:<path>, a directory name the
 // socket's owner chooses, so text that can read "uid:<ours>") is never
 // looked at; a row that does not have that shape is x, which refuses.
+// Each line is one kernel record: the only free text ss -e (without -p)
+// prints is that cgroup path and an interface scope, and the kernel
+// rejects '\n' in both (cgroup_mkdir and cgroup1_rename in
+// kernel/cgroup/, "to prevent making /proc/<pid>/cgroup unparsable";
+// cgroup v2 forbids renames; dev_valid_name refuses whitespace).
 const ssListenAwk = `function ck(f) { if (f !~ /^sk:/) return "-"; f=substr(f,4); return (f ~ /^[0-9a-f]+$/ && length(f) <= 16 && f !~ /^0+$/) ? f : "?" }
 $1=="LISTEN"{n=split($4,a,":"); p=a[n]; sc=substr($4,1,length($4)-length(p)-1); ad=sc; sub(/%.*/,"",ad); u="x"; k="-"; i=0
   if ($6 ~ /^uid:[0-9]+$/ && $7 ~ /^ino:[0-9]+$/) { u=substr($6,5); k=ck($8); i=(k=="-") ? 8 : 9 }
