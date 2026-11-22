@@ -23,41 +23,35 @@ import (
 	"pmss-fleet-manager/internal/store"
 )
 
+// Every caller of sshTimeout() must see the same value, and the detection
+// budget derived from it must follow, including at the clamp: a duration of a
+// few centuries would otherwise double past what an int64 holds.
 func TestSSHTimeoutOverride(t *testing.T) {
 	t.Cleanup(func() { SetSSHTimeout(0) })
 
-	if got := DetectBudget(); got != 2*defaultSSHTimeout+45*time.Second {
-		t.Fatalf("default detection budget = %v", got)
+	cases := []struct {
+		name     string
+		set      time.Duration
+		want     time.Duration
+		wantBudg time.Duration
+	}{
+		{"default", 0, defaultSSHTimeout, 2*defaultSSHTimeout + 45*time.Second},
+		{"override", 2 * time.Minute, 2 * time.Minute, 4*time.Minute + 45*time.Second},
+		{"clamped at the maximum", 48 * time.Hour, MaxSSHTimeout, 2*MaxSSHTimeout + 45*time.Second},
+		{"non-positive restores the default", -1, defaultSSHTimeout, 2*defaultSSHTimeout + 45*time.Second},
 	}
-	SetSSHTimeout(2 * time.Minute)
-	if got := DetectBudget(); got != 4*time.Minute+45*time.Second {
-		t.Fatalf("detection budget with 2m = %v", got)
-	}
-	SetSSHTimeout(0)
-	SetSSHTimeout(48 * time.Hour)
-	if got := sshTimeout(); got != MaxSSHTimeout {
-		t.Fatalf("above the maximum: %v", got)
-	}
-	if got := DetectBudget(); got != 2*MaxSSHTimeout+45*time.Second {
-		t.Fatalf("budget at the maximum overflows: %v", got)
-	}
-	SetSSHTimeout(0)
-	if got := sshTimeout(); got != defaultSSHTimeout {
-		t.Fatalf("default timeout = %v, want %v", got, defaultSSHTimeout)
-	}
-
-	SetSSHTimeout(2 * time.Minute)
-	if got := sshTimeout(); got != 2*time.Minute {
-		t.Fatalf("timeout after SetSSHTimeout = %v, want 2m", got)
-	}
-	if got := sshConfig(&store.Box{Host: "box", Port: 22}).Timeout; got != 2*time.Minute {
-		t.Fatalf("sshConfig Timeout = %v, want the configured 2m", got)
-	}
-
-	// A non-positive value restores the default instead of dialling with no
-	// deadline at all.
-	SetSSHTimeout(-1)
-	if got := sshTimeout(); got != defaultSSHTimeout {
-		t.Fatalf("timeout after SetSSHTimeout(-1) = %v, want %v", got, defaultSSHTimeout)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			SetSSHTimeout(c.set)
+			if got := sshTimeout(); got != c.want {
+				t.Fatalf("sshTimeout = %v, want %v", got, c.want)
+			}
+			if got := sshConfig(&store.Box{Host: "box", Port: 22}).Timeout; got != c.want {
+				t.Fatalf("sshConfig Timeout = %v, want %v", got, c.want)
+			}
+			if got := DetectBudget(); got != c.wantBudg {
+				t.Fatalf("DetectBudget = %v, want %v", got, c.wantBudg)
+			}
+		})
 	}
 }
