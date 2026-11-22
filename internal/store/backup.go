@@ -388,7 +388,10 @@ func rebuild(ctx context.Context, src, dst string) error {
 		// schema refuses fails the restore (fred on #222).
 		where := ``
 		if t.name == "alerts" && have.has("alerts", "id") && have.has("alerts", "active") && have.has("alerts", "box_id") && have.has("alerts", "key") {
-			where = ` WHERE NOT (active=1 AND id NOT IN (SELECT MIN(id) FROM bk.alerts WHERE active=1 GROUP BY box_id, key))`
+			// Skip a row only when it is positively a later duplicate: NULL
+			// anywhere makes the predicate unknown, and coalesce then
+			// copies the row for this schema to accept or refuse (fred).
+			where = ` WHERE NOT coalesce(active IS 1 AND id IS NOT NULL AND id NOT IN (SELECT MIN(id) FROM bk.alerts WHERE active IS 1 AND id IS NOT NULL GROUP BY box_id, key), 0)`
 		}
 		q := `INSERT INTO main.` + quoteIdent(t.name) + ` (` + list + `) SELECT ` + list + ` FROM bk.` + quoteIdent(t.name) + where
 		if _, err := db.ExecContext(ctx, q); err != nil { // NOSONAR: identifiers from this build's schema, not from the backup

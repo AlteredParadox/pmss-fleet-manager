@@ -721,14 +721,22 @@ func TestRestoreRebuildRefusesBadAlertRow(t *testing.T) {
 	} {
 		rawExec(t, backup, q)
 	}
-	rawExec(t, backup, `INSERT INTO alerts(box_id, key, severity, title, active, acked, created_at, updated_at) VALUES(?, 'disk', 'warn', NULL, 0, 0, 'x', 'x')`, a)
 	live := filepath.Join(dir, "data", "pmss-fleet-manager.db")
 	liveStore(t, live, "current", sealA).Close()
-	if _, err := Restore(ctx, live, backup, true, sealA); err == nil || !strings.Contains(err.Error(), "table alerts") {
-		t.Fatalf("restore: %v", err)
-	}
-	if got := boxNames(t, live, sealA); len(got) != 1 || got[0] != "current/pw-current" {
-		t.Fatalf("a refused restore changed the database: %v", got)
+	// A NULL title, then a NULL active (which the duplicate filter must
+	// not take for a duplicate and drop, fred on #222).
+	for _, row := range []string{
+		`INSERT INTO alerts(box_id, key, severity, title, active, acked, created_at, updated_at) VALUES(?, 'disk', 'warn', NULL, 0, 0, 'x', 'x')`,
+		`INSERT INTO alerts(box_id, key, severity, title, active, acked, created_at, updated_at) VALUES(?, 'disk', 'warn', 't', NULL, 0, 'x', 'x')`,
+	} {
+		rawExec(t, backup, `DELETE FROM alerts`)
+		rawExec(t, backup, row, a)
+		if _, err := Restore(ctx, live, backup, true, sealA); err == nil || !strings.Contains(err.Error(), "table alerts") {
+			t.Fatalf("%s: restore: %v", row, err)
+		}
+		if got := boxNames(t, live, sealA); len(got) != 1 || got[0] != "current/pw-current" {
+			t.Fatalf("a refused restore changed the database: %v", got)
+		}
 	}
 }
 
