@@ -17,8 +17,12 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -143,5 +147,28 @@ func TestSSHKeyWarning(t *testing.T) {
 	os.Chmod(p, 0o644)
 	if w := sshKeyWarning(p); !strings.Contains(w, "readable by other users (mode 0644)") {
 		t.Fatalf("loose mode: %q", w)
+	}
+}
+
+// An invalid flag must stop the process before the store is opened: opening
+// on an upgrade reseals the stored credentials, and a typo must not do that
+// to a directory the server then never serves.
+func TestInvalidFrameAncestorsExitsBeforeOpeningStore(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "pmss-fleet-manager")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	dataDir := filepath.Join(t.TempDir(), "data")
+	var stderr bytes.Buffer
+	cmd := exec.Command(bin, "-data", dataDir, "-listen", "127.0.0.1:0", "-frame-ancestors", "https://ha.local/path")
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+		t.Fatalf("run: %v (stderr %q), want exit 2", err, stderr.String())
+	}
+	if _, err := os.Stat(dataDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("-data %s exists after an invalid flag (stat: %v)", dataDir, err)
 	}
 }

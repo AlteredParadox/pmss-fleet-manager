@@ -123,6 +123,15 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	var ancestors []string
+	if *frameAncestors != "" {
+		ancestors, err = api.NormalizeFrameAncestors(strings.Split(*frameAncestors, ","))
+		if err != nil {
+			log.Error("invalid -frame-ancestors", "err", err)
+			os.Exit(2)
+		}
+		log.Info("the dashboard may be framed by", "origins", strings.Join(ancestors, " "))
+	}
 	var addrs []string
 	for _, a := range strings.Split(*listen, ",") {
 		if a = strings.TrimSpace(a); a != "" {
@@ -190,15 +199,6 @@ func main() {
 	}
 	if bp != "" {
 		log.Info("serving under base path", "path", bp)
-	}
-	var ancestors []string
-	if *frameAncestors != "" {
-		ancestors, err = api.NormalizeFrameAncestors(strings.Split(*frameAncestors, ","))
-		if err != nil {
-			log.Error("invalid -frame-ancestors", "err", err)
-			os.Exit(2)
-		}
-		log.Info("the dashboard may be framed by", "origins", strings.Join(ancestors, " "))
 	}
 	handler := api.New(st, mgr, *auth, bp, ancestors)
 	handler.SetLegal(legal.License, legal.ThirdPartyLicenses)

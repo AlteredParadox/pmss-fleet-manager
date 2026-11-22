@@ -238,8 +238,8 @@ func New(st *store.Store, m *collect.Manager, basicAuth string, basePath string,
 
 // NormalizeFrameAncestors turns the -frame-ancestors flag into the origins the
 // policy names. Each entry must be a bare origin, scheme and host and optional
-// port, because a browser compares frame ancestors byte for byte: a path or a
-// wildcard in the list would silently never match.
+// port: the directive takes origins, so a path or a wildcard would not be an
+// effective source, and the host must be a plain name or IPv4 address.
 func NormalizeFrameAncestors(in []string) ([]string, error) {
 	out := make([]string, 0, len(in))
 	for _, raw := range in {
@@ -257,15 +257,52 @@ func NormalizeFrameAncestors(in []string) ([]string, error) {
 		if u.Scheme != "http" && u.Scheme != "https" {
 			return nil, fmt.Errorf("frame ancestor %q: scheme must be http or https", v)
 		}
-		if u.Host == "" {
+		host := u.Hostname()
+		if host == "" {
 			return nil, fmt.Errorf("frame ancestor %q: no host", v)
 		}
 		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 			return nil, fmt.Errorf("frame ancestor %q: give an origin only, without a path, query or user", v)
 		}
+		if p := u.Port(); p != "" {
+			n, err := strconv.Atoi(p)
+			if err != nil || n < 1 || n > 65535 {
+				return nil, fmt.Errorf("frame ancestor %q: port must be between 1 and 65535", v)
+			}
+		}
+		if !cspHost(host) {
+			return nil, fmt.Errorf("frame ancestor %q: %q is not a plain host name or IPv4 address", v, host)
+		}
 		out = append(out, u.Scheme+"://"+u.Host)
 	}
 	return out, nil
+}
+
+// cspHost reports whether host is a plain DNS name or IPv4 address, the forms
+// this list accepts. IPv6 literals are refused: their bracket form in a source
+// list was not tried in a browser here.
+func cspHost(host string) bool {
+	if strings.Contains(host, ":") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.To4() != nil
+	}
+	if len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if ('a' > c || c > 'z') && ('A' > c || c > 'Z') && ('0' > c || c > '9') && c != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // NormalizeBasePath turns the -base-path flag into the form routes are
