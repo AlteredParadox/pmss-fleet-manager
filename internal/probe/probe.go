@@ -371,6 +371,85 @@ func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 	return true, true, ""
 }
 
+// ScriptUID is the "uid N" line EstablishedScript (and ListenerScript's
+// caller) prints first: this account's uid on the box, or -1.
+func ScriptUID(out []byte) int {
+	for _, line := range strings.Split(string(out), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "uid" {
+			if u, err := strconv.Atoi(f[1]); err == nil && u >= 0 {
+				return u
+			}
+		}
+	}
+	return -1
+}
+
+// ListenStatus is what ListenerIdentity found on a port.
+type ListenStatus int
+
+const (
+	ListenOK          ListenStatus = iota // one listener a 127.0.0.1 dial reaches, ours, with its cookie
+	ListenNoCookie                        // as ListenOK, but ss gave no socket cookie (uid still the kernel's)
+	ListenUnavailable                     // ss failed, or gave no owner uid: nothing can be said
+	ListenNone                            // nothing listens there
+	ListenAmbiguous                       // more than one listener a 127.0.0.1 dial could reach
+	ListenForeign                         // the listener is another account's
+)
+
+// Listener is the listening socket ListenerIdentity found.
+type Listener struct {
+	Status ListenStatus
+	UID    int    // the kernel's owner uid (when Status is ListenOK, ListenNoCookie or ListenForeign)
+	Cookie string // the socket cookie, hex (ListenOK only)
+	Reason string // why, for any other status
+}
+
+// ListenerIdentity reads the "l" rows listenIdentShell printed (from
+// ListenerScript, or EstablishedScript's privacy branch) for port: exactly
+// one listener a 127.0.0.1 dial reaches, owned by uid, and its socket
+// cookie. The cookie is the kernel's 64-bit socket identity, never reused:
+// two readings with the same cookie, one before and one after a
+// connection, are the same socket, so the connection went to it (nothing
+// else can bind that address while it is bound). Rows for other
+// addresses (127.0.0.2, ::1) are no listener for a 127.0.0.1 dial and do
+// not count; a v6 any row does, as it may be dual-stack.
+func ListenerIdentity(out []byte, port, uid int) Listener {
+	var rows [][]string
+	rc := -1
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 2 && f[0] == "lrc":
+			rc, _ = strconv.Atoi(f[1])
+		case len(f) == 5 && f[0] == "l" && f[1] == strconv.Itoa(port) && loopbackReachable(f[4]):
+			rows = append(rows, f)
+		}
+	}
+	switch {
+	case rc != 0:
+		return Listener{Status: ListenUnavailable, Reason: "ss could not list the listening sockets"}
+	case len(rows) == 0:
+		return Listener{Status: ListenNone, Reason: fmt.Sprintf("nothing is listening on port %d", port)}
+	case len(rows) > 1:
+		return Listener{Status: ListenAmbiguous, Reason: fmt.Sprintf("more than one socket listens where a connection to 127.0.0.1:%d could go", port)}
+	}
+	f := rows[0]
+	if f[2] == "x" {
+		return Listener{Status: ListenUnavailable, Reason: "ss did not report the listener's owner"}
+	}
+	owner, err := strconv.Atoi(f[2])
+	if err != nil || owner < 0 {
+		return Listener{Status: ListenUnavailable, Reason: "ss reported an unreadable owner"}
+	}
+	if owner != uid {
+		return Listener{Status: ListenForeign, UID: owner, Reason: fmt.Sprintf("port %d is held by uid %d, not by this account", port, owner)}
+	}
+	if f[3] == "-" {
+		return Listener{Status: ListenNoCookie, UID: owner, Reason: "ss did not report the listener's socket cookie"}
+	}
+	return Listener{Status: ListenOK, UID: owner, Cookie: f[3]}
+}
+
 // peerClosed reports whether a TCP state, as /proc/net/tcp prints it,
 // means the peer has closed its side: CLOSE-WAIT or LAST-ACK.
 func peerClosed(state string) bool {

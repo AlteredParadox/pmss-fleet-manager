@@ -498,7 +498,8 @@ func TestServiceActiveStatuses(t *testing.T) {
 // pipe (the other end is the "server"), Run answers EstablishedScript with
 // a canned table.
 type fakeTunnel struct {
-	out    string
+	out    string // EstablishedScript's answer
+	pre    string // ListenerScript's (the listener before the connection)
 	runErr error
 	server net.Conn
 }
@@ -514,7 +515,17 @@ func (f *fakeTunnel) RunLimited(ctx context.Context, cmd string, stdin io.Reader
 }
 
 func (f *fakeTunnel) Run(ctx context.Context, cmd string, stdin io.Reader) ([]byte, []byte, error) {
+	if isListenerScript(stdin) {
+		return []byte(f.pre), nil, f.runErr
+	}
 	return []byte(f.out), nil, f.runErr
+}
+
+// isListenerScript tells ListenerScript (run before a connection) from
+// EstablishedScript (after): only the latter reads the socket tables.
+func isListenerScript(stdin io.Reader) bool {
+	b, _ := io.ReadAll(stdin)
+	return !strings.Contains(string(b), "PMSS_TCP_TABLES")
 }
 
 // verifiedDial hands out a connection only when the box attributes its
@@ -526,7 +537,10 @@ func TestVerifiedDial(t *testing.T) {
 	uid := os.Getuid()
 	ok := fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\ns BEEF %d 01 0100007F 4242 00\nend\n", uid, uid, uid)
 	bad := fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\ns BEEF %d 05 0100007F 4242 00\nend\n", uid, uid, uid+1)
-	privacy := fmt.Sprintf("uid %d\nprivacy\nend\n", uid)
+	// Tables denied; ss reports the listener's uid but no cookie: the
+	// opt-in's case (continuity has nothing to compare).
+	privacy := fmt.Sprintf("uid %d\nprivacy\nlrc 0\nl 8089 %d - 127.0.0.1\nend\n", uid, uid)
+	pre := fmt.Sprintf("lrc 0\nl 8089 %d - 127.0.0.1\nend\n", uid)
 	ctx := context.Background()
 	var modes []string
 	optIn := false
@@ -564,19 +578,19 @@ func TestVerifiedDial(t *testing.T) {
 	}
 	// Tables denied, no opt-in: blocked, closed unused.
 	optIn = false
-	fp := &fakeTunnel{out: privacy}
+	fp := &fakeTunnel{out: privacy, pre: pre}
 	if _, err := verifiedDial(fp, "127.0.0.1:8089", 8089, pol)(ctx); !errors.Is(err, ErrVerifyBlocked) {
 		t.Fatalf("privacy without the opt-in must be blocked: %v", err)
 	}
 	closedUnused("privacy, no opt-in", fp)
 	// The strict zero policy (the wizard) too.
-	fp = &fakeTunnel{out: privacy}
+	fp = &fakeTunnel{out: privacy, pre: pre}
 	if _, err := verifiedDial(fp, "127.0.0.1:8089", 8089, verifyPolicy{})(ctx); !errors.Is(err, ErrVerifyBlocked) {
 		t.Fatalf("the zero policy must be strict: %v", err)
 	}
 	// Opted in: the listener check alone applies, read at dial time.
 	optIn = true
-	if _, err := verifiedDial(&fakeTunnel{out: privacy}, "127.0.0.1:8089", 8089, pol)(ctx); err != nil {
+	if _, err := verifiedDial(&fakeTunnel{out: privacy, pre: pre}, "127.0.0.1:8089", 8089, pol)(ctx); err != nil {
 		t.Fatalf("privacy with the opt-in: %v", err)
 	}
 	if want := []string{VerifyFull, VerifyBlocked, VerifyListenerOnly}; fmt.Sprint(modes) != fmt.Sprint(want) {
@@ -593,7 +607,8 @@ func TestVerifiedDial(t *testing.T) {
 func TestSetListenerOnlyClosesConnections(t *testing.T) {
 	ctx := context.Background()
 	uid := os.Getuid()
-	privacy := fmt.Sprintf("uid %d\nprivacy\nend\n", uid)
+	privacy := fmt.Sprintf("uid %d\nprivacy\nlrc 0\nl 8089 %d - 127.0.0.1\nend\n", uid, uid)
+	pre := fmt.Sprintf("lrc 0\nl 8089 %d - 127.0.0.1\nend\n", uid)
 	full := fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\ns BEEF %d 01 0100007F 4242 00\nend\n", uid, uid, uid)
 	eof := func(f *fakeTunnel) bool {
 		f.server.SetReadDeadline(time.Now().Add(time.Second))
@@ -603,7 +618,7 @@ func TestSetListenerOnlyClosesConnections(t *testing.T) {
 	p := &poller{box: &store.Box{Name: "b"}}
 	p.listenerOnly.Store(true)
 	p.qbt = qbt.NewWithGuard(func(context.Context) (net.Conn, error) { return nil, errors.New("unused") }, "127.0.0.1:1", "", "", &qbt.AuthGuard{})
-	lo := &fakeTunnel{out: privacy}
+	lo := &fakeTunnel{out: privacy, pre: pre}
 	if _, err := verifiedDial(lo, "127.0.0.1:8089", 8089, p.verifyPolicy())(ctx); err != nil {
 		t.Fatalf("admitted under the opt-in: %v", err)
 	}
@@ -625,7 +640,7 @@ func TestSetListenerOnlyClosesConnections(t *testing.T) {
 	p = &poller{box: &store.Box{Name: "b"}}
 	pol := p.verifyPolicy()
 	pol.allow = func() bool { return true } // the dial read it before the withdrawal
-	ft := &fakeTunnel{out: privacy}
+	ft := &fakeTunnel{out: privacy, pre: pre}
 	if _, err := verifiedDial(ft, "127.0.0.1:8089", 8089, pol)(ctx); !errors.Is(err, ErrVerifyBlocked) {
 		t.Fatalf("refused at admission: %v", err)
 	}
@@ -643,7 +658,7 @@ func TestSetListenerOnlyAbortsRequestInFlight(t *testing.T) {
 	p.listenerOnly.Store(true)
 	cli, box := net.Pipe()
 	defer box.Close()
-	pt := &pipeTunnel{conn: cli, out: fmt.Sprintf("uid %d\nprivacy\nend\n", uid)}
+	pt := &pipeTunnel{conn: cli, out: fmt.Sprintf("uid %d\nprivacy\nlrc 0\nl 8089 %d - 127.0.0.1\nend\n", uid, uid), pre: fmt.Sprintf("lrc 0\nl 8089 %d - 127.0.0.1\nend\n", uid)}
 	dial := verifiedDial(pt, "127.0.0.1:8089", 8089, p.verifyPolicy())
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) }}}
 	got := make(chan struct{})
@@ -693,10 +708,14 @@ func TestSetListenerOnlyAbortsRequestInFlight(t *testing.T) {
 type pipeTunnel struct {
 	conn net.Conn
 	out  string
+	pre  string
 }
 
 func (t *pipeTunnel) DialTCP(context.Context, string) (net.Conn, error) { return t.conn, nil }
-func (t *pipeTunnel) Run(context.Context, string, io.Reader) ([]byte, []byte, error) {
+func (t *pipeTunnel) Run(_ context.Context, _ string, stdin io.Reader) ([]byte, []byte, error) {
+	if isListenerScript(stdin) {
+		return []byte(t.pre), nil, nil
+	}
 	return []byte(t.out), nil, nil
 }
 func (t *pipeTunnel) RunLimited(ctx context.Context, cmd string, stdin io.Reader, _ int) ([]byte, []byte, error) {
@@ -772,5 +791,54 @@ func TestRestoredStateVerify(t *testing.T) {
 	cached.resetVolatile()
 	if !cached.Verify.ListenerOnly || cached.Verify.Mode != "" {
 		t.Fatalf("restored verify: %+v", cached.Verify)
+	}
+}
+
+// The listener-continuity check on a box that hides its socket tables:
+// the same listening socket of ours before and after the connection is
+// verified, with no opt-in needed; a changed, foreign, ambiguous or gone
+// listener refuses with no fallback, even with the opt-in; no trustworthy
+// owner blocks, even with the opt-in. Every refusal closes the connection
+// before a byte is written.
+func TestVerifiedDialContinuity(t *testing.T) {
+	uid := os.Getuid()
+	ctx := context.Background()
+	row := func(owner int, cookie, addr string) string {
+		return fmt.Sprintf("l 8089 %d %s %s\n", owner, cookie, addr)
+	}
+	pre := func(rows string) string { return "lrc 0\n" + rows + "end\n" }
+	post := func(rows string) string { return fmt.Sprintf("uid %d\nprivacy\nlrc 0\n%send\n", uid, rows) }
+	ours := row(uid, "4005", "127.0.0.1")
+	var modes []string
+	for _, optIn := range []bool{false, true} {
+		pol := verifyPolicy{allow: func() bool { return optIn }, note: func(m string) { modes = append(modes, m) }}
+		ft := &fakeTunnel{pre: pre(ours), out: post(ours)}
+		if _, err := verifiedDial(ft, "127.0.0.1:8089", 8089, pol)(ctx); err != nil {
+			t.Fatalf("the same listener of ours (opt-in %v): %v", optIn, err)
+		}
+		if modes[len(modes)-1] != VerifyListener {
+			t.Fatalf("mode %v", modes)
+		}
+		for name, f := range map[string]*fakeTunnel{
+			"changed cookie":       {pre: pre(ours), out: post(row(uid, "4006", "127.0.0.1"))},
+			"foreign after":        {pre: pre(ours), out: post(row(uid+1, "4006", "127.0.0.1"))},
+			"foreign before":       {pre: pre(row(uid+1, "4005", "127.0.0.1")), out: post(ours)},
+			"a second listener":    {pre: pre(ours), out: post(ours + row(uid+1, "9", "[::]"))},
+			"gone after":           {pre: pre(ours), out: post("")},
+			"no owner before":      {pre: "lrc 1\nend\n", out: post(ours)},
+			"no owner either side": {pre: pre("l 8089 x - 127.0.0.1\n"), out: post("l 8089 x - 127.0.0.1\n")},
+		} {
+			_, err := verifiedDial(f, "127.0.0.1:8089", 8089, pol)(ctx)
+			if err == nil {
+				t.Fatalf("%s (opt-in %v): must refuse", name, optIn)
+			}
+			if strings.HasPrefix(name, "no owner") != errors.Is(err, ErrVerifyBlocked) {
+				t.Fatalf("%s (opt-in %v): %v (missing information is blocked; a changed or foreign listener is a refusal)", name, optIn, err)
+			}
+			f.server.SetReadDeadline(time.Now().Add(time.Second))
+			if n, rerr := f.server.Read(make([]byte, 8)); n != 0 || rerr != io.EOF {
+				t.Fatalf("%s (opt-in %v): closed before any byte, got n=%d err=%v", name, optIn, n, rerr)
+			}
+		}
 	}
 }

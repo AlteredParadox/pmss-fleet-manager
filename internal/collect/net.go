@@ -109,13 +109,24 @@ type tunnel interface {
 // else's acceptor, does not get the connection.
 //
 // A box that denies this account its socket tables (socket-table privacy,
-// "privacy" from the script) cannot have the connection checked at all.
-// There the dial is refused with ErrVerifyBlocked unless pol allows the
-// listener check alone for this box (the per-box opt-in, off by default):
-// the opt-in relaxes that one outcome and nothing else. pol.note records
-// what each new connection got, for the box's state.
+// "privacy" from the script) gets the listener-continuity check instead:
+// the listening socket on the port is read just before the connection is
+// opened and again after it is (and before a byte is written); the same
+// socket (cookie), owned by this account, at both readings held the port
+// throughout, and nothing else can bind 127.0.0.1:port while it does, so
+// the connection went to our own process (see continuity). A changed or
+// foreign listener refuses, with no fallback. Only where ss gives the
+// owner uid but no cookie may the per-box opt-in (off by default) let the
+// uid alone apply; without a trustworthy uid the dial is refused with
+// ErrVerifyBlocked. pol.note records what each new connection got.
 func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer {
 	return func(ctx context.Context) (net.Conn, error) {
+		// The listener before the connection, for the continuity check on a
+		// box that hides its socket tables (read only there, below). Its
+		// failure costs nothing elsewhere: it is then simply unavailable.
+		pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
+		before, _, _ := cli.RunLimited(pctx, "sh", strings.NewReader(probe.ListenerScript(port)), socketTableLimit)
+		pcancel()
 		conn, err := cli.DialTCP(ctx, hp)
 		if err != nil {
 			return nil, err
@@ -128,21 +139,32 @@ func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer 
 			return nil, fmt.Errorf("could not verify who accepted the connection on port %d: %w", port, err)
 		}
 		ok, known, reason := probe.EstablishedOwner(out, port)
-		if !known && pol.allow != nil && pol.allow() {
-			admitted, ok := conn, true
-			if pol.admit != nil {
-				admitted, ok = pol.admit(conn)
+		if !known {
+			uid := probe.ScriptUID(out)
+			switch v, why := continuity(probe.ListenerIdentity(before, port, uid), probe.ListenerIdentity(out, port, uid)); v {
+			case contVerified:
+				pol.record(VerifyListener)
+				return conn, nil
+			case contRefused:
+				conn.Close()
+				return nil, fmt.Errorf("refusing to use the connection on port %d: %s", port, why)
+			case contUIDOnly:
+				if pol.allow != nil && pol.allow() {
+					admitted, ok := conn, true
+					if pol.admit != nil {
+						admitted, ok = pol.admit(conn)
+					}
+					if ok {
+						pol.record(VerifyListenerOnly)
+						return admitted, nil // opted in: the owner uid alone is what applies
+					}
+				}
 			}
-			if ok {
-				pol.record(VerifyListenerOnly)
-				return admitted, nil // opted in: the listener check is what applies
-			}
-		}
-		switch {
-		case !known:
-			conn.Close()
+			conn.Close() // contUnavailable, or contUIDOnly without the opt-in
 			pol.record(VerifyBlocked)
 			return nil, ErrVerifyBlocked
+		}
+		switch {
 		case !ok:
 			conn.Close()
 			return nil, fmt.Errorf("refusing to use the connection on port %d: %s", port, reason)
@@ -155,12 +177,44 @@ func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer 
 // What the last new WebUI/SCGI connection of a box got (VerifyState.Mode).
 const (
 	VerifyFull         = "full"          // the accepting socket was checked to be ours
-	VerifyListenerOnly = "listener-only" // tables denied; opted in to the listener check alone
+	VerifyListener     = "listener"      // tables denied; the same listening socket of ours before and after the connection
+	VerifyListenerOnly = "listener-only" // tables denied, no socket cookie; opted in to the owner uid alone
 	VerifyBlocked      = "blocked"       // tables denied; not opted in, refused
 )
 
+// The listener-continuity verdicts (continuity).
+const (
+	contVerified    = iota // the same socket of ours before and after
+	contRefused            // changed, foreign, ambiguous or gone: refuse, never fall back
+	contUIDOnly            // ours by the kernel's uid, but no cookie to compare: the opt-in's case
+	contUnavailable        // no trustworthy owner: blocked
+)
+
+// continuity compares the listener read before a connection with the one
+// read after it (probe.ListenerIdentity). Anything that shows the port is
+// not ours, or that its socket changed, refuses outright; only missing
+// information leaves a choice, and then only with a trustworthy uid.
+func continuity(before, after probe.Listener) (verdict int, reason string) {
+	for _, l := range []probe.Listener{before, after} {
+		switch l.Status {
+		case probe.ListenForeign, probe.ListenAmbiguous, probe.ListenNone:
+			return contRefused, l.Reason
+		}
+	}
+	switch {
+	case before.Status == probe.ListenUnavailable || after.Status == probe.ListenUnavailable:
+		return contUnavailable, "the box does not report who owns the listening socket"
+	case before.Status == probe.ListenOK && after.Status == probe.ListenOK:
+		if before.Cookie != after.Cookie {
+			return contRefused, "the listening socket changed while connecting (the client restarted, or something else took the port)"
+		}
+		return contVerified, ""
+	}
+	return contUIDOnly, "the box does not report the listening socket's identity"
+}
+
 // ErrVerifyBlocked refuses a connection the box gives no way to check.
-var ErrVerifyBlocked = errors.New("WebUI verification blocked by host socket privacy: the box does not let this account read its socket tables, so the dashboard cannot check who accepted the connection; see the box's verification page")
+var ErrVerifyBlocked = errors.New("WebUI verification blocked by host socket privacy: the box does not let this account read its socket tables, nor report the identity of the listening socket, so the dashboard cannot check who accepted the connection; see the box's verification page")
 
 // verifyPolicy is a box's say in verifiedDial: allow reports the
 // listener-only opt-in at dial time, note receives the outcome. The zero

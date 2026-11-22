@@ -311,7 +311,7 @@ else
   first=${tables%% *}
   if [ -e "$marker" ] || { [ -e "$first" ] && ! [ -r "$first" ]; }; then
     echo "privacy"
-  elif [ -e "$first" ]; then
+    ` + listenIdentShell + `  elif [ -e "$first" ]; then
     echo "failed table-empty"
   else
     echo "failed no-table"
@@ -332,13 +332,11 @@ echo end
 // Fallback: PMSS's opt-in socket-table privacy (its ADR 0068) makes those
 // tables root-only. Its documented tenant workflow, ss -tlnp, keeps working
 // (the stage-2 netlink filter lets LISTEN dumps through), so the listing
-// comes from ss as "d <port> <uid|x> <addr>": our uid when the socket
-// belongs to one of our processes (ss -p can only resolve those; another
-// account's /proc/<pid>/fd is unreadable), x when its owner cannot be seen.
-// The parser treats x as a foreign owner, so the check still fails closed.
-// Deliberately NOT ss -e, which would name the uid: it appends the socket's
-// cgroup path verbatim, a directory name the socket's owner chooses, which
-// can contain "uid:<ours>" or even a newline and a fabricated row.
+// comes from ss -e as "d <port> <uid|x> <addr>" (see ssListenAwk): the
+// owner uid the kernel reports for the socket. Not ss -p: it matches
+// sockets to processes by inode number, a wrapping 32-bit counter, so a
+// listener whose inode number equals one of our sockets' was labelled
+// ours.
 const listenShell = `l=$(awk '$4=="0A"{x=$2; a=x; sub(/.*:/,"",x); sub(/:.*/,"",a); print "h", x, $8, a}' /proc/net/tcp /proc/net/tcp6 2>/dev/null)
 if [ -n "$l" ]; then printf '%s\n' "$l"; else echo "via ss"; ` + listenViaSS + `; fi
 `
@@ -348,7 +346,33 @@ if [ -n "$l" ]; then printf '%s\n' "$l"; else echo "via ss"; ` + listenViaSS + `
 // State Recv-Q Send-Q Local Peer Process. The address is everything before
 // the last colon of Local (a %interface suffix dropped); a Process column
 // that starts with users:(( is one of our own sockets.
-const listenViaSS = `timeout 10 ss -Hltnp 2>/dev/null | awk -v uid="$uid" '$1=="LISTEN"{n=split($4,a,":"); p=a[n]; ad=substr($4,1,length($4)-length(p)-1); sub(/%.*/,"",ad); o="x"; if ($6 ~ /^users:\(\(/) o=uid; print "d", p, o, ad}'`
+const listenViaSS = `timeout 10 ss -Hltne 2>/dev/null | awk '` + ssListenAwk + ` print "d", p, u, ad}'`
+
+// ssListenAwk reads one ss -Hltne row into p (port), ad (address), u (the
+// owner uid, or x) and k (the socket cookie, or -), for the caller's print.
+// Positional, from the kernel-formatted columns only: State Recv-Q Send-Q
+// Local Peer, then uid:N (absent for uid 0, as ss leaves it out), ino:N,
+// sk:HEX. Everything after (cgroup:<path>, a directory name the socket's
+// owner chooses, so text that can read "uid:<ours>") is never looked at; a
+// row that does not have that shape is x and -, which refuses.
+const ssListenAwk = `$1=="LISTEN"{n=split($4,a,":"); p=a[n]; ad=substr($4,1,length($4)-length(p)-1); sub(/%.*/,"",ad); u="x"; k="-"
+  if ($6 ~ /^uid:[0-9]+$/ && $7 ~ /^ino:[0-9]+$/) { u=substr($6,5); if ($8 ~ /^sk:[0-9a-f]+$/) k=substr($8,4) }
+  else if ($6 ~ /^ino:[0-9]+$/) { u=0; if ($7 ~ /^sk:[0-9a-f]+$/) k=substr($7,4) }`
+
+// listenIdentShell prints the listening sockets on $port as ss reports them
+// to this account, "l <port> <uid|x> <cookie|-> <addr>" each, and "lrc <rc>"
+// for ss's exit status: what ListenerIdentity reads. It needs $port.
+const listenIdentShell = `lo=$(timeout 10 ss -Hltne "sport = :$port" 2>/dev/null); lrc=$?
+echo "lrc $lrc"
+[ -n "$lo" ] && printf '%s\n' "$lo" | awk '` + ssListenAwk + ` print "l", p, u, k, ad}'
+`
+
+// ListenerScript reports the listening socket on 127.0.0.1:<port> for the
+// listener-continuity check (ListenerIdentity): run just before a tunnel
+// connection is opened, and again (inside EstablishedScript) after it.
+func ListenerScript(port int) string {
+	return "#!/bin/sh\nLC_ALL=C; export LC_ALL\nport=" + strconv.Itoa(port) + "\n" + listenIdentShell + "echo end\n"
+}
 
 // logDirsShell and logFilesShell are the places under the home where the
 // PMSS stack and the apps customers install on it keep their logs, as shell
