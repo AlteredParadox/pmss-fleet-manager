@@ -1283,19 +1283,10 @@ func TestEstablishedOwner(t *testing.T) {
 	if ok, _, reason := EstablishedOwner(mk(fmt.Sprintf("c 05D2 %d 01 0100007F\ns 05D2 %d 01 0100007F 0 00\n", uid, uid)), port); !ok {
 		t.Fatalf("a queued connection of ours refused: %s", reason)
 	}
-	// ss fallback: decimal ports, an unattributable acceptor refuses.
-	dec := []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d ESTAB 127.0.0.1\ns 51234 x ESTAB 127.0.0.1\nend\n", uid, uid))
-	if ok, _, _ := EstablishedOwner(dec, port); ok {
-		t.Fatal("an unattributable acceptor must refuse")
-	}
-	// ss prints neither inode nor timer: trailing fields there are not the sign.
-	dec = []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d CLOSE-WAIT 127.0.0.1\ns 51234 x FIN-WAIT-2 127.0.0.1 0 03\nc 51235 %d ESTAB 127.0.0.1\ns 51235 %d ESTAB 127.0.0.1\nend\n", uid, uid, uid, uid))
-	if ok, _, _ := EstablishedOwner(dec, port); ok {
-		t.Fatal("an unattributable ss acceptor must refuse, trailing 0 or not")
-	}
-	dec = []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d ESTAB 127.0.0.1\ns 51234 %d FIN-WAIT-2 127.0.0.1\nend\n", uid, uid, uid))
-	if ok, _, reason := EstablishedOwner(dec, port); !ok {
-		t.Fatalf("own acceptor via ss: %s", reason)
+	// ss rows (a former fallback) are no evidence any more: refuse.
+	dec := []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d ESTAB 127.0.0.1\ns 51234 %d ESTAB 127.0.0.1\nend\n", uid, uid, uid))
+	if ok, known, _ := EstablishedOwner(dec, port); ok || !known {
+		t.Fatal("decimal rows must refuse")
 	}
 	// Policy fallback versus failure.
 	if _, known, _ := EstablishedOwner([]byte(fmt.Sprintf("uid %d\nprivacy\nend\n", uid)), port); known {
@@ -1312,18 +1303,22 @@ func TestEstablishedOwner(t *testing.T) {
 	}
 }
 
-// The script's decisions when /proc/net/tcp is unreadable: a failing ss is
-// a failure (refuse); a silent ss is the privacy fallback only when the
-// policy shows itself, by its marker or by its signature (the table
-// present but denied, ss still listing listeners), and a failure
-// otherwise; a working ss yields decimal rows.
+// The script's decisions when its hex path finds nothing. Tables present
+// but denied to this account, or the policy's marker: the privacy fallback
+// (listener check), whatever ss would list. ss is never consulted: on a
+// host where only the policy's first stage applies (PMSS #1303) ss lists
+// every socket but cannot attribute our sshd-held tunnel, so a check built
+// on it refused every connection. Tables absent or readable but empty
+// without the marker: a failure.
 func TestEstablishedScriptFallbacks(t *testing.T) {
 	bin := t.TempDir()
-	const absent, denied, readable = "no-such-table", "denied-table", "readable-table"
+	const absent, denied, empty = "no-such-table", "denied-table", "empty-table"
 	os.WriteFile(bin+"/"+denied, nil, 0)
-	os.WriteFile(bin+"/"+readable, nil, 0o600)
-	run := func(ss string, marker bool, table string) string {
-		os.WriteFile(bin+"/ss", []byte(ss), 0o700)
+	os.WriteFile(bin+"/"+empty, nil, 0o600)
+	// An ss that lists other tenants' sockets, as on a #1303 host; it
+	// must not matter, so it also records being run.
+	os.WriteFile(bin+"/ss", []byte("#!/bin/sh\ntouch \"$(dirname \"$0\")/ss-ran\"\necho 'ESTAB 0 0 127.0.0.1:41000 127.0.0.1:8089'\n"), 0o700)
+	run := func(marker bool, table string) string {
 		m := bin + "/absent"
 		if marker {
 			m = bin + "/marker"
@@ -1335,45 +1330,29 @@ func TestEstablishedScriptFallbacks(t *testing.T) {
 		out, _ := cmd.Output()
 		return string(out)
 	}
-	// ss that lists listeners (-l) but no other socket, as the privacy
-	// filter leaves it; and one that lists nothing at all.
-	silentButListeners := "#!/bin/sh\ncase \"$*\" in *l*) echo 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))';; esac\nexit 0\n"
-	silent := "#!/bin/sh\nexit 0\n"
-	if out := run("#!/bin/sh\nexit 255\n", false, denied); !strings.Contains(out, "failed 255") {
-		t.Fatalf("ss failing must report a failure: %q", out)
+	verdict := func(out string) (bool, bool) { ok, known, _ := EstablishedOwner([]byte(out), 8089); return ok, known }
+	if out := run(true, absent); !strings.Contains(out, "privacy") {
+		t.Fatalf("the marker is the privacy fallback: %q", out)
 	}
-	if out := run(silent, false, absent); !strings.Contains(out, "failed 0") {
-		t.Fatalf("ss printing nothing, no marker, no table at all: a failure: %q", out)
+	if out := run(false, absent); !strings.Contains(out, "failed no-table") {
+		t.Fatalf("no table and no marker is a failure: %q", out)
+	} else if ok, known := verdict(out); ok || !known {
+		t.Fatal("a failure must refuse")
 	}
-	if out := run(silent, true, absent); !strings.Contains(out, "privacy") || strings.Contains(out, "failed") {
-		t.Fatalf("ss printing nothing with the marker is the privacy fallback: %q", out)
+	if out := run(false, empty); !strings.Contains(out, "failed table-empty") {
+		t.Fatalf("a readable but empty table is a failure: %q", out)
 	}
-	if os.Getuid() != 0 { // root reads a mode-0 file, so the signature cannot be staged as root
-		// The marker out of reach (PMSS 2026-10-22 made /etc/seedbox
-		// root-only on some hosts) but the signature complete: privacy.
-		if out := run(silentButListeners, false, denied); !strings.Contains(out, "privacy") || strings.Contains(out, "failed") {
-			t.Fatalf("denied table + listeners visible + no other socket is the privacy policy: %q", out)
+	if os.Getuid() != 0 { // root reads a mode-0 file, so a denied table cannot be staged as root
+		out := run(false, denied)
+		if !strings.Contains(out, "privacy") || strings.Contains(out, "base") {
+			t.Fatalf("a denied table is the privacy fallback, whatever ss lists: %q", out)
 		}
-		// Signature incomplete: ss lists nothing at all (broken), or the
-		// table is readable (so its emptiness was real and ss should have
-		// had rows), or the table does not exist: all failures.
-		if out := run(silent, false, denied); !strings.Contains(out, "failed 0") {
-			t.Fatalf("ss listing no listeners either is a failure: %q", out)
-		}
-		if out := run(silentButListeners, false, readable); !strings.Contains(out, "failed 0") {
-			t.Fatalf("a readable table is not the privacy policy: %q", out)
-		}
-		if out := run(silentButListeners, false, absent); !strings.Contains(out, "failed 0") {
-			t.Fatalf("no table at all is not the privacy policy: %q", out)
+		if ok, known := verdict(out); ok || known {
+			t.Fatal("privacy is the one unknown")
 		}
 	}
-	fake := "#!/bin/sh\necho 'ESTAB 0 0 127.0.0.1:41000 127.0.0.1:8089 users:((\"sshd\",pid=1,fd=9))'\necho 'FIN-WAIT-2 0 0 127.0.0.1:8089 127.0.0.1:41000'\n"
-	out := run(fake, false, denied)
-	if !strings.Contains(out, "base dec") || !strings.Contains(out, "c 41000 "+strconv.Itoa(os.Getuid())+" ESTAB 127.0.0.1") || !strings.Contains(out, "s 41000 x FIN-WAIT-2 127.0.0.1") {
-		t.Fatalf("ss rows: %q", out)
-	}
-	if ok, known, reason := EstablishedOwner([]byte(out), 8089); ok || !known || !strings.Contains(reason, "another account") {
-		t.Fatalf("half-closed foreign acceptor via ss must refuse: %v %v %s", ok, known, reason)
+	if _, err := os.Stat(bin + "/ss-ran"); err == nil {
+		t.Fatal("the script must not consult ss")
 	}
 }
 

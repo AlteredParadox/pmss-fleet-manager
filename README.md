@@ -720,8 +720,8 @@ daemon, so it is not dialed. A loopback TCP endpoint
 its own and on a shared host every tenant can reach the same loopback port:
 anyone on the box could then drive your rTorrent. The dashboard checks that
 the port is owned by your account before it connects, which keeps it from
-talking to an impostor (on hosts whose socket-table privacy hides
-established sockets this falls back to the listener check described under
+talking to an impostor (on hosts whose socket-table privacy keeps the
+socket tables from your account this falls back to the listener check described under
 qBittorrent access, with its narrow release-and-rebind window), but it
 cannot keep others from talking to your rTorrent. Keep the unix socket
 unless the host isolates loopback between tenants. The client is PMSS's own, started by the panel's watchdog, so there is no
@@ -1163,8 +1163,10 @@ These are the design decisions that came out of it.
   byte is written, the established sockets on that port are checked to be
   yours too, so a co-tenant who grabs the port between the check and the
   connect gets the connection closed, not the credentials (on hosts whose
-  socket-table privacy hides established sockets, the listener check is
-  what applies). One login attempt runs at a time per box and its
+  socket-table privacy keeps `/proc/net/tcp` from your account, the
+  listener check is what applies: `ss` there cannot tell which socket is
+  your SSH tunnel's, so it cannot verify the connection either, including
+  hosts where Pulsed Media's `ss` filter did not load, PMSS #1303). One login attempt runs at a time per box and its
   outcome is shared with every request that was waiting on it, so a burst of
   actions sends the credentials once. A rejected login is held until the
   credentials change or the client is restarted from the dashboard, and a
