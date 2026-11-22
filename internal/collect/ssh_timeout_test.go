@@ -34,6 +34,14 @@ func TestSSHTimeoutOverride(t *testing.T) {
 		t.Fatalf("detection budget with 2m = %v", got)
 	}
 	SetSSHTimeout(0)
+	SetSSHTimeout(48 * time.Hour)
+	if got := sshTimeout(); got != MaxSSHTimeout {
+		t.Fatalf("above the maximum: %v", got)
+	}
+	if got := DetectBudget(); got != 2*MaxSSHTimeout+45*time.Second {
+		t.Fatalf("budget at the maximum overflows: %v", got)
+	}
+	SetSSHTimeout(0)
 	if got := sshTimeout(); got != defaultSSHTimeout {
 		t.Fatalf("default timeout = %v, want %v", got, defaultSSHTimeout)
 	}

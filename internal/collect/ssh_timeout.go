@@ -30,19 +30,24 @@ import (
 // the operator can raise it with -ssh-timeout / PMSS_SSH_TIMEOUT.
 const defaultSSHTimeout = 45 * time.Second
 
+// MaxSSHTimeout is the largest value SetSSHTimeout accepts. A day is already
+// far past useful, and it keeps the derived detection budget far from
+// overflowing the int64 a time.Duration holds.
+const MaxSSHTimeout = 24 * time.Hour
+
 // sshTimeoutNanos holds an override set by SetSSHTimeout; zero means the
 // default. Atomic because the pollers of every box read it concurrently with
 // the server's startup.
 var sshTimeoutNanos atomic.Int64
 
 // SetSSHTimeout sets the SSH-side deadline. A value of zero or less restores
-// the default.
+// the default; anything above MaxSSHTimeout is clamped to it.
 func SetSSHTimeout(d time.Duration) {
 	if d <= 0 {
 		sshTimeoutNanos.Store(0)
 		return
 	}
-	sshTimeoutNanos.Store(int64(d))
+	sshTimeoutNanos.Store(int64(min(d, MaxSSHTimeout)))
 }
 
 // sshTimeout returns the deadline in force.
