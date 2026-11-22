@@ -326,6 +326,16 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
   a credential there that is exactly shaped like this dashboard's
   ciphertext is refused rather than sent to a box as a password. Nothing
   changes in the dashboard.
+- **A box's credentials are tied to that box.** From 1.24 its SSH
+  password, WebUI password and start command are encrypted together with
+  the box's ID, host, port and user. A copy of the database edited by
+  someone without the secret (a box pointed at their own server, or one
+  box's password moved onto another) then does not decrypt: the dashboard
+  refuses to start on it, and a restore refuses the file, rather than
+  sending the password to that server. Editing a box in the dashboard
+  re-encrypts what it keeps for the new endpoint. The pinned host key is
+  not part of it. The first start of 1.24 converts the existing
+  credentials in place.
 - **Starting without the secret, or with a different one, is refused** with
   a log line saying so, or naming the first credential it could not read.
   The pollers would otherwise present ciphertext to your boxes as the
@@ -349,6 +359,11 @@ openssl rand -base64 32 > /etc/pmss-fleet-manager.secret && chmod 600 /etc/pmss-
   start, a forgotten download URL the default build). It is also the way
   through a damaged marker: whatever still decrypts with the configured
   secret is kept. Unset it afterwards.
+- **Do not roll back to a release before 1.24 with an encrypted
+  database once 1.24 has run with the secret.** Older releases do not
+  know the new format and refuse to start ("written by a newer version").
+  Restore a backup taken before the upgrade instead, or switch encryption
+  off first as described next.
 - **Do not roll back to a release before 1.9 with an encrypted
   database.** An older build knows nothing about the encryption and would
   present the ciphertext to your boxes as the password. Switch encryption
@@ -422,6 +437,18 @@ To restore, stop the dashboard and run:
   `-forget-encrypted-credentials` (the forms ask for the passwords again).
   A plain-text backup restored with a secret configured is encrypted on
   the spot.
+- **It refuses a file whose box credentials were changed outside the
+  dashboard**, such as a box's host edited in the backup by someone
+  without the secret, so the password never reaches their server
+  (*Encrypting stored credentials*).
+- **A backup made before 1.24 needs `-old-credentials keep` or `drop`.**
+  Its encrypted box credentials are not yet tied to their box, so nothing
+  can tell whether someone who could write the file pointed a box
+  elsewhere. `keep` restores them as the file has them (only for a file
+  that has been where nobody else could change it); `drop` restores
+  everything except those box credentials, and the edit forms ask for
+  them again. The check needs no secret, so `-skip-secret-check` does
+  not skip it. Backups taken with 1.24 or later need neither.
 - **The database it replaces is kept** beside it as
   `pmss-fleet-manager.db.before-restore-<UTC time>`, so a restore is
   undone by restoring that file. Delete it when you no longer need it: it
@@ -1436,6 +1463,20 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**Unreleased**
+
+- **Saved box credentials are tied to their box** (Codex audit of
+  1.23.0). With credential encryption on, an encrypted backup edited by
+  someone without the secret could point a box at their own server: the
+  restore accepted it, and the next poll sent them the saved password.
+  Each box's SSH password, WebUI password and start command are now
+  encrypted together with its ID, host, port and user, so such a file is
+  refused. The first start converts existing credentials in place. **After
+  that, releases before 1.24 refuse the database**: keep a backup from
+  before the upgrade if you may roll back. **Restoring a backup made
+  before 1.24 needs `-old-credentials keep` (a file only you could have
+  changed) or `-old-credentials drop`** (re-enter those passwords).
 
 **1.23.0**
 

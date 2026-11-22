@@ -26,6 +26,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"pmss-fleet-manager/internal/secrets"
 )
 
 // Summary describes a database file for the backup and restore commands.
@@ -33,7 +35,34 @@ type Summary struct {
 	Boxes     int   // rows in boxes
 	Encrypted bool  // the secrets_sealed marker says the credentials are ciphertext
 	Bytes     int64 // file size
+	// Unbound counts box credentials encrypted before 1.24, when they were
+	// not yet bound to their box (boxBinding): Restore refuses them unless
+	// told to keep or drop them (WithOldCredentials).
+	Unbound int
 }
+
+// OldCredentials is what Restore does with a backup's Unbound credentials.
+type OldCredentials int
+
+const (
+	// RefuseOldCredentials (the default) fails the restore: anyone who
+	// could edit the file without the secret could have pointed a box at
+	// their own server, and the next poll would send it the password.
+	RefuseOldCredentials OldCredentials = iota
+	// KeepOldCredentials restores them; the first open binds them to the
+	// box as the file names it. For a file nobody else could have changed.
+	KeepOldCredentials
+	// DropOldCredentials clears them before anything opens the copy; the
+	// edit forms ask for them again.
+	DropOldCredentials
+)
+
+// ErrOldCredentials is the refusal of a backup holding Unbound credentials.
+var ErrOldCredentials = errors.New("the backup holds box credentials encrypted before 1.24, which are not bound to their box: anyone who could change the file without the secret could have pointed a box at their own server")
+
+// WithOldCredentials sets what Restore does with credentials encrypted
+// before they were bound to their box. Only Restore reads it.
+func WithOldCredentials(m OldCredentials) Option { return func(s *Store) { s.oldCreds = m } }
 
 // Backup writes a consistent copy of the database at src to dst, which
 // must not exist yet. It is safe while the dashboard runs: VACUUM INTO
@@ -125,6 +154,9 @@ func Inspect(ctx context.Context, path string) (Summary, error) {
 		return sum, err
 	}
 	sum.Encrypted = sealed == "1"
+	if sum.Unbound, err = unboundCells(ctx, db, false); err != nil {
+		return sum, err
+	}
 	db.Close()
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -185,8 +217,27 @@ func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (
 	if err := copyFile(in, staged); err != nil {
 		return Summary{}, err
 	}
-	if _, err := Inspect(ctx, staged); err != nil {
+	sum, err := Inspect(ctx, staged)
+	if err != nil {
 		return Summary{}, err
+	}
+	// Before anything opens the copy, so neither the check below nor the
+	// first start can bind a tampered row's credentials to its new host.
+	// It needs no secret, so -skip-secret-check does not skip it.
+	var cfg Store
+	for _, o := range opts {
+		o(&cfg)
+	}
+	if sum.Unbound > 0 {
+		switch cfg.oldCreds {
+		case KeepOldCredentials:
+		case DropOldCredentials:
+			if err := dropUnbound(ctx, staged); err != nil {
+				return Summary{}, err
+			}
+		default:
+			return Summary{}, fmt.Errorf("%w (%d)", ErrOldCredentials, sum.Unbound)
+		}
 	}
 	if verify {
 		s, err := Open(staged, opts...)
@@ -201,6 +252,73 @@ func stage(ctx context.Context, in, staged string, verify bool, opts []Option) (
 		}
 	}
 	return Inspect(ctx, staged)
+}
+
+// unboundCells counts the box credentials in a version-1 envelope (any
+// value that the store would read as one, well-formed or not), clearing
+// them with drop. It reads only the columns the file has: an old file is
+// not migrated before it is checked.
+func unboundCells(ctx context.Context, db *sql.DB, drop bool) (int, error) {
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('boxes') WHERE name IN ('password','qbt_pass','qbt_start_cmd')`)
+	if err != nil {
+		return 0, err
+	}
+	var cols []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		cols = append(cols, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, col := range cols { // names from the fixed list above
+		rows, err := db.QueryContext(ctx, `SELECT id, `+col+` FROM boxes`)
+		if err != nil {
+			return 0, err
+		}
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			var v string
+			if err := rows.Scan(&id, &v); err != nil {
+				rows.Close()
+				return 0, err
+			}
+			if version, _ := secrets.Envelope(v); version == 1 {
+				ids = append(ids, id)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return 0, err
+		}
+		n += len(ids)
+		if !drop {
+			continue
+		}
+		for _, id := range ids {
+			if _, err := db.ExecContext(ctx, `UPDATE boxes SET `+col+`='' WHERE id=?`, id); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return n, nil
+}
+
+// dropUnbound clears the staged copy's unbound credentials.
+func dropUnbound(ctx context.Context, path string) error {
+	db, err := openExisting(path)
+	if err != nil {
+		return err
+	}
+	_, err = unboundCells(ctx, db, true)
+	return errors.Join(err, db.Close())
 }
 
 // replaceDB saves the database at dbPath, if there is one, and puts

@@ -216,7 +216,7 @@ func TestEnvelope(t *testing.T) {
 		{"pmss1:not-really-encrypted", 1, false}, // not base64
 		{"pmss1:AAAA", 1, false},                 // too short
 		{genuine, 1, true},
-		{"pmss2:" + genuine[len(Prefix):], 2, false},
+		{"pmss2:" + genuine[len(Prefix):], 2, true}, // well-formed; Open leaves v2 to OpenBound
 		{"pmss12:whatever", 12, false},
 		{"pmss1234:x", 0, false},
 		{"pmss01:" + genuine[len(Prefix):], 0, false}, // not canonical: not an envelope
@@ -254,5 +254,58 @@ func TestLoadRefusesHugeFile(t *testing.T) {
 	}
 	if l, err := Load(CurrentNames, "", path); err != nil || len(l.Master) != maxSecretFile {
 		t.Fatalf("at the cap: %v", err)
+	}
+}
+
+// Version 2 binds the value to what the caller names besides the column:
+// another binding, another label, the other envelope version or the
+// version-1 opener do not open it (Codex audit of 1.23.0).
+func TestSealBound(t *testing.T) {
+	sl, _ := New([]byte(testSecret))
+	other, _ := New([]byte("fedcba9876543210fedcba9876543210"))
+	sealed := sl.SealBound("boxes.password", "box 1 host odin", "secret")
+	if !strings.HasPrefix(sealed, PrefixBound) || !IsSealed(sealed) {
+		t.Fatalf("sealed %q", sealed)
+	}
+	if v, ok := Envelope(sealed); v != 2 || !ok {
+		t.Fatalf("envelope %d %v", v, ok)
+	}
+	if got, err := sl.OpenBound("boxes.password", "box 1 host odin", sealed); err != nil || got != "secret" {
+		t.Fatalf("open %q %v", got, err)
+	}
+	for name, open := range map[string]func() (string, error){
+		"binding":    func() (string, error) { return sl.OpenBound("boxes.password", "box 1 host evil", sealed) },
+		"label":      func() (string, error) { return sl.OpenBound("boxes.qbt_pass", "box 1 host odin", sealed) },
+		"key":        func() (string, error) { return other.OpenBound("boxes.password", "box 1 host odin", sealed) },
+		"downgraded": func() (string, error) { return sl.Open("boxes.password", Prefix+sealed[len(PrefixBound):]) },
+	} {
+		if _, err := open(); !errors.Is(err, ErrWrongKey) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := sl.OpenBound("boxes.password", "b", sealed); !errors.Is(err, ErrBoundWrong) {
+		t.Fatalf("not ErrBoundWrong: %v", err)
+	}
+	// A version-1 value is never opened as bound, whatever its key.
+	if _, err := sl.OpenBound("boxes.password", "b", sl.Seal("boxes.password", "secret")); !errors.Is(err, ErrUnbound) {
+		t.Fatalf("v1: %v", err)
+	}
+	// A version-1 body relabelled as version 2 does not open either.
+	v1 := sl.Seal("boxes.password", "secret")
+	if _, err := sl.OpenBound("boxes.password", "", PrefixBound+v1[len(Prefix):]); !errors.Is(err, ErrWrongKey) {
+		t.Fatalf("upgraded v1 body: %v", err)
+	}
+	var none *Sealer
+	if v := none.SealBound("x", "b", "plain"); v != "plain" {
+		t.Fatalf("nil seal %q", v)
+	}
+	if v, err := none.OpenBound("x", "b", "plain"); v != "plain" || err != nil {
+		t.Fatalf("nil open plain %q %v", v, err)
+	}
+	if _, err := none.OpenBound("x", "b", sealed); !errors.Is(err, ErrNoKey) {
+		t.Fatalf("nil open sealed %v", err)
+	}
+	if v := sl.SealBound("x", "b", ""); v != "" {
+		t.Fatalf("empty sealed to %q", v)
 	}
 }
