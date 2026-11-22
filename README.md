@@ -122,8 +122,13 @@ for you, and nothing is moved.
 **qBittorrent lifecycle.** Install or update `~/bin/qbittorrent-nox` from the
 [userdocs static build](https://github.com/userdocs/qbittorrent-nox-static)
 (URL configurable). The download's sha256 is checked against the digest
-GitHub publishes for the release asset (any GitHub release URL; other
-sources install unverified and say so), then an ELF and `--version` check
+GitHub publishes for the release asset (any GitHub release URL), or against
+one you add to the URL as `#sha256=<64 hex digits>` (a mirror, a private
+build). A URL other than the default with neither is refused; the default
+installs unverified, and says so, only when GitHub's API cannot be
+reached (a timeout, no connection, a server error, a confirmed rate
+limit), not when it answers without a digest for the build or fails its
+certificate check. Then an ELF and `--version` check
 runs before the binary is swapped in atomically. The dashboard checks the latest GitHub release every
 six hours and flags boxes that are behind or that need a restart to pick up a
 new binary. "Set up autostart" writes a `~/bin/qbt-start` screen launcher and
@@ -256,7 +261,8 @@ mkdir -p -m 700 ~/.config/pmss-fleet-manager
 where every user on the machine can read it.
 
 Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
-`PMSS_AUTH`, `PMSS_AUTH_FILE`, `PMSS_SSH_KEY`, `PMSS_MONITOR_ONLY`, `PMSS_LOG`,
+`PMSS_AUTH`, `PMSS_AUTH_FILE`, `PMSS_SSH_KEY`, `PMSS_SSH_TIMEOUT`,
+`PMSS_MONITOR_ONLY`, `PMSS_LOG`,
 `PMSS_ALLOWED_HOSTS`, `PMSS_BASE_PATH`, `PMSS_SECRET_FILE`,
 `PMSS_SECRET_PREVIOUS_FILE`,
 `PMSS_FORGET_ENCRYPTED_CREDENTIALS`; `PMSS_SECRET` and
@@ -269,6 +275,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-auth` | none | HTTP basic auth as `user:password`; set it if you bind to a non-loopback address |
 | `-auth-file` | none | file holding that login as `user:password` (a container secret, say); one trailing line ending is ignored and nothing else, so a password may end in a space. A configured file that is missing, empty or not `user:password` stops the start. Set this or `-auth` / `PMSS_AUTH`, not both |
 | `-ssh-key` | none | private key file tried for every box without a key path of its own, before `~/.ssh/id_*`; a box's own key path always wins |
+| `-ssh-timeout` | `45s` | how long an SSH connection may take to come up, and how long the detection probe and the poll's probe may run, e.g. `90s` or `2m`. Raise it for a box too busy to answer in time: the covered steps then fail with `context deadline exceeded` and the dashboard shows the box as degraded. Other SSH steps keep their own deadlines: the liveness check on an already open connection stays at 10 s, and rTorrent's detached transport at 20 s. Capped at `24h`. Applies to every box, not one. Detection in the add wizard gets a budget of twice this plus 45 s, so a box set to `2m` can actually be added |
 | `-monitor-only` | off | refuse the web UI's actions on the boxes (`PMSS_MONITOR_ONLY=1`): torrent, client, discovery, container, transfer and password actions answer 403 and their controls are hidden; monitoring runs as usual. Adding, editing and removing boxes, alerts, settings, refresh, du and log reads still work. It limits this interface, not the SSH keys it holds: see *Security and hardening* |
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
@@ -1384,7 +1391,8 @@ These are the design decisions that came out of it.
   other tabs are told to refresh, so one tab never reverts another.
 - **Scripts on the box** run as your user and are embedded in the binary
   (documented in `internal/collect/qbtinstall.go`). Install verifies the
-  download's sha256 against the GitHub release digest (fetched by the
+  download's sha256 against a `#sha256=` pin on the URL or the GitHub
+  release digest (refusing a non-default URL with neither; the digest is fetched by the
   dashboard host, compared on the box, so a swapped file on either path
   fails), then the ELF magic and `--version` output, before swapping the
   binary in atomically;
@@ -1507,6 +1515,14 @@ Newest first; each release's full notes are on the
   (someone without the secret could have written their own start command
   or download link there); **restoring a plain-text backup with a secret
   configured now needs `-accept-plain-credentials`**.
+- **A custom qBittorrent download URL needs a sha256** (Codex audit of
+  1.23.0). Install used to go ahead unverified when the URL was not a
+  GitHub release asset. Now any URL other than the default needs a digest:
+  GitHub's for a release asset, or yours, added as `#sha256=<digest>` to
+  the URL in settings. **If you use a mirror or a private build, add its
+  digest before the next install or update.**
+- The security headers (CSP, `X-Frame-Options`, `nosniff`, referrer
+  policy) are now sent on the Host-check, login and throttle refusals too.
 
 **1.23.0**
 

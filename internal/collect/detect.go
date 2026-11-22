@@ -141,7 +141,7 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 		b.Port = 22
 	}
 	b.HasPassword, b.HasQbtPass = b.Password != "", b.QbtPass != "" // shown by the wizard on every path
-	cctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, sshTimeout())
 	defer cancel()
 	cli, err := sshx.Dial(cctx, sshConfig(&b))
 	if err != nil {
@@ -154,7 +154,7 @@ func Detect(ctx context.Context, b store.Box) *DetectResult {
 	res.Facts.HostKeyFP = sshx.Fingerprint(b.HostKey)
 	add("ok", "ssh auth ok (%s) · host key %s", b.User, res.Facts.HostKeyFP)
 
-	pctx, cancel2 := context.WithTimeout(ctx, probeTimeout)
+	pctx, cancel2 := context.WithTimeout(ctx, sshTimeout())
 	defer cancel2()
 	tag := probe.NewTag()
 	out, stderr, err := cli.RunLimited(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)), probeOutputLimit)

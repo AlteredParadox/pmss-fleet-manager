@@ -72,6 +72,7 @@ func main() {
 	secretFile := flag.String("secret-file", os.Getenv("PMSS_SECRET_FILE"), "file holding the secret that encrypts stored credentials (or set PMSS_SECRET to the secret itself, which -h never prints); unset keeps them in plain text")
 	previousSecretFile := flag.String("previous-secret-file", os.Getenv("PMSS_SECRET_PREVIOUS_FILE"), "when changing or removing the secret: file holding the one the credentials are encrypted with now (or set PMSS_SECRET_PREVIOUS); remove it after one successful start")
 	monitorOnly := flag.Bool("monitor-only", os.Getenv("PMSS_MONITOR_ONLY") == "1", "refuse the web UI's actions on the boxes: torrent, client, discovery, container, transfer and password actions answer 403 and their controls are hidden; monitoring runs as usual (or set PMSS_MONITOR_ONLY=1); limits this interface, not the SSH accounts")
+	sshTimeout := flag.String("ssh-timeout", os.Getenv("PMSS_SSH_TIMEOUT"), "how long an SSH connection may take to come up, and how long the detection probe and the poll's probe may run, e.g. 90s or 2m (or set PMSS_SSH_TIMEOUT); raise it for a box too busy to answer within 45s, the default; other SSH steps keep their own deadlines; 24h at most")
 	forgetCreds := flag.Bool("forget-encrypted-credentials", os.Getenv("PMSS_FORGET_ENCRYPTED_CREDENTIALS") == "1", "after losing the secret: remove every stored credential that does not decrypt with the configured one, then start; the edit forms ask for them again")
 	flag.Parse()
 	if !flagGiven("auth") {
@@ -94,6 +95,19 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 	if authWarn != "" {
 		log.Warn(authWarn)
+	}
+	if *sshTimeout != "" {
+		d, err := time.ParseDuration(*sshTimeout)
+		if err != nil || d <= 0 {
+			fmt.Fprintf(os.Stderr, "-ssh-timeout: %q is not a positive duration (use 90s, 2m, ...)\n", *sshTimeout)
+			os.Exit(2)
+		}
+		if d > collect.MaxSSHTimeout {
+			fmt.Fprintf(os.Stderr, "-ssh-timeout: %q is above the %s maximum\n", *sshTimeout, collect.MaxSSHTimeout)
+			os.Exit(2)
+		}
+		collect.SetSSHTimeout(d)
+		log.Info("ssh timeout", "value", d)
 	}
 	sshx.DefaultKey = *sshKey
 	if w := sshKeyWarning(*sshKey); w != "" {

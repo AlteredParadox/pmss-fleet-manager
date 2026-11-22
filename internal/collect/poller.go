@@ -40,7 +40,6 @@ import (
 )
 
 const (
-	probeTimeout = 45 * time.Second
 	// probeOutputLimit bounds the probe's stdout in place of the
 	// transport's 16 MiB. The script's own caps add up to about 3.5 MiB
 	// at the very most (two traffic files and two live rings of 256 KiB,
@@ -573,7 +572,7 @@ func (p *poller) conn(ctx context.Context) (*sshx.Client, error) {
 		}
 		p.dropRtLocked(ctx) // its dialer held the closed transport (Codex on PR 123)
 	}
-	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, sshTimeout())
 	defer cancel()
 	cli, err := sshx.Dial(cctx, sshConfig(p.box))
 	if err != nil {
@@ -624,7 +623,7 @@ func (p *poller) persistPin(ctx context.Context, key string) error {
 func sshConfig(b *store.Box) sshx.Config {
 	return sshx.Config{
 		Host: b.Host, Port: b.Port, User: b.User, AuthMethod: b.AuthMethod,
-		KeyPath: b.KeyPath, Password: b.Password, HostKey: b.HostKey, Timeout: 15 * time.Second,
+		KeyPath: b.KeyPath, Password: b.Password, HostKey: b.HostKey, Timeout: sshTimeout(),
 	}
 }
 
@@ -701,7 +700,7 @@ func (p *poller) poll(ctx context.Context) {
 	inventory := p.inventoryDue(start) // consumes a pending request: one that lands from here on is for the next poll
 	settings := p.m.Settings()
 	catalogue := inventory && settings.PMDBEnabled && settings.PMDBUsername != "" // the catalogue's two figures: only while it is on
-	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	pctx, cancel := context.WithTimeout(ctx, sshTimeout())
 	out, stderr, err := cli.RunLimited(pctx, "sh", strings.NewReader(probe.ScriptWith(tag, p.qbtBinStat, inventory, catalogue)), probeOutputLimit)
 	cancel()
 	if err != nil && (len(out) == 0 || errors.Is(err, sshx.ErrOutputLimit)) {
@@ -1938,7 +1937,7 @@ func (p *poller) rawProbe(ctx context.Context) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	pctx, cancel := context.WithTimeout(ctx, sshTimeout())
 	defer cancel()
 	tag := probe.NewTag()
 	out, stderr, err := cli.RunLimited(pctx, "sh", strings.NewReader(probe.ScriptWithTag(tag)), probeOutputLimit)

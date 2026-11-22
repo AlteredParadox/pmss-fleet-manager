@@ -424,6 +424,11 @@ func (s *Server) routes() {
 
 // ServeHTTP applies auth and security headers then dispatches.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// First, so the refusals below (Host, login, throttle) carry them too.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", csp)
 	if !s.hostAllowed(r.Host) {
 		http.Error(w, "unexpected Host header; start with -allowed-hosts to serve this name", http.StatusMisdirectedRequest)
 		return
@@ -449,10 +454,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", csp)
 	if strings.HasPrefix(r.URL.Path, s.basePath+"/api/") && r.Method != http.MethodGet {
 		if err := csrfCheck(r); err != nil {
 			http.Error(w, err.Error(), http.StatusForbidden)
@@ -1867,7 +1868,7 @@ func (s *Server) handleDetect(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), collect.DetectBudget())
 	defer cancel()
 	res := collect.Detect(ctx, b)
 	writeJSON(w, 200, res)
