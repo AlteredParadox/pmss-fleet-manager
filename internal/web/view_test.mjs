@@ -671,3 +671,42 @@ test('compareSlowPct labels the counts with the threshold they were made at (fre
   assert.deepEqual(V.compareSlowPct(null, 7, 50), { pct: 50, stale: false }, 'nothing loaded yet');
   assert.deepEqual(V.compareSlowPct({ days: 7, boxes: {} }, 7, 50), { pct: 50, stale: false }, 'an answer without the field (older server)');
 });
+
+test('the overview search needs every word, any case, in what the box shows', () => {
+  const boxes = [
+    { id: 1, name: 'pm1', hostname: 'naxell.pulsedmedia.com', type: 'seedbox', status: 'online' },
+    { id: 2, name: 'Backup', hostname: '', host: '10.0.0.5', type: 'vps', status: 'offline' },
+    { id: 3, name: 'pm3', hostname: 'caspian.pulsedmedia.com', type: 'seedbox', status: 'degraded' },
+  ];
+  const fields = (b) => [b.name, b.hostname, b.host, b.type, b.plan];
+  const ids = (r) => r.shown.map((b) => b.id);
+  const all = V.fleetFilter(boxes, '', '', fields);
+  assert.deepEqual(ids(all), [1, 2, 3]);
+  assert.equal(all.filtered, false);
+  assert.deepEqual(all.statuses.map((c) => [c.key, c.count]), [['online', 1], ['degraded', 1], ['offline', 1]]);
+  assert.deepEqual(ids(V.fleetFilter(boxes, '  SEEDBOX ', '', fields)), [1, 3]);
+  assert.deepEqual(ids(V.fleetFilter(boxes, 'seedbox caspian', '', fields)), [3], 'every word must match');
+  assert.deepEqual(ids(V.fleetFilter(boxes, '10.0.0', '', fields)), [2], 'an empty hostname falls back to the host');
+  assert.deepEqual(ids(V.fleetFilter(boxes, 'undefined', '', fields)), [], 'a missing field is not the text "undefined"');
+  const none = V.fleetFilter(boxes, 'nothing', '', fields);
+  assert.deepEqual(none.shown, []);
+  assert.equal(none.filtered, true);
+});
+
+test('the overview status choice narrows the matches and stays listed at 0', () => {
+  const boxes = [
+    { id: 1, name: 'pm1', status: 'online' },
+    { id: 2, name: 'pm2', status: 'offline' },
+    { id: 3, name: 'pm3', status: 'online' },
+    { id: 4, name: 'odd', status: 'weird' },
+  ];
+  const fields = (b) => [b.name];
+  const r = V.fleetFilter(boxes, 'pm', 'online', fields);
+  assert.deepEqual(r.shown.map((b) => b.id), [1, 3]);
+  assert.deepEqual(r.statuses, [{ key: 'online', count: 2, on: true }, { key: 'offline', count: 1, on: false }], 'counts are of the words\' matches');
+  assert.equal(r.filtered, true);
+  const gone = V.fleetFilter(boxes, 'pm2', 'online', fields);
+  assert.deepEqual(gone.shown, []);
+  assert.deepEqual(gone.statuses, [{ key: 'online', count: 0, on: true }, { key: 'offline', count: 1, on: false }], 'the chosen status can still be cleared');
+  assert.deepEqual(V.fleetFilter(boxes, '', '', fields).statuses.map((c) => c.key), ['online', 'offline', 'weird'], 'an unknown status goes last');
+});

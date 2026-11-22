@@ -51,6 +51,7 @@ const S = {
   pw: null, // the open "change password" panel of a box (see blankPw); dropped on leaving the box
   torSort: loadTorSort(), // column sort per torrent table ('qbt', 'rtorrent', 'all'): { key, dir } or null for the default order
   svcHidden: loadSvcHidden(), // service statuses (lower case) left out of the settings page's Services table
+  fleetQ: '', fleetStatus: '', // the overview's search words and chosen status; kept across pages, not across reloads
 };
 // The Services table's hidden statuses, kept the way the torrent sort is.
 function loadSvcHidden() { try { const v = JSON.parse(window.localStorage.getItem('pfm.svcHidden') || '[]'); return Array.isArray(v) ? v.filter((k) => typeof k === 'string') : []; } catch { return []; } }
@@ -549,6 +550,9 @@ function renderMain() {
   const ae = document.activeElement;
   const pwKey = ae && m.contains(ae) && ae.dataset.pw && ae.type !== 'checkbox' ? ae.dataset.pw : '';
   const pwSel = pwKey ? [ae.selectionStart, ae.selectionEnd] : null;
+  // Likewise a search box (the overview's, or a filter) that has the caret.
+  const flKey = ae && m.contains(ae) ? (ae.hasAttribute('data-fleetq') ? '[data-fleetq]' : ae.hasAttribute('data-filter') ? '[data-filter]' : '') : '';
+  const flSel = flKey ? [ae.selectionStart, ae.selectionEnd] : null;
   switch (S.view) {
     case 'box': m.innerHTML = viewBox(); break;
     case 'torrents': m.innerHTML = viewTorrents(); break;
@@ -560,6 +564,8 @@ function renderMain() {
   }
   const pwEl = pwKey ? m.querySelector(`[data-pw="${pwKey}"]`) : null;
   if (pwEl) { pwEl.focus(); pwEl.setSelectionRange(pwSel[0], pwSel[1]); }
+  const flEl = flKey ? m.querySelector(flKey) : null;
+  if (flEl) { flEl.focus(); flEl.setSelectionRange(flSel[0], flSel[1]); }
   const ll = $('.loglist');
   if (ll && listTop !== null) ll.scrollTop = listTop;
   const lv = $('#logview');
@@ -592,9 +598,11 @@ function renderMain() {
 function viewFleet() {
   const t = S.totals || {};
   const renew = t.next_renewal ? `${esc(t.next_renewal.slice(5))} <small>· ${daysUntil(t.next_renewal) < 0 ? 'overdue' : daysUntil(t.next_renewal) + 'd'}</small>` : '—';
+  const F = pfmView.fleetFilter(S.boxes, S.fleetQ, S.fleetStatus, boxSearchText);
   const body = S.boxes.length === 0
     ? `<div class="empty">no boxes yet — <a href="#/add">add your first box</a></div>`
-    : (S.fleetView === 'table' ? fleetTable() : fleetCards());
+    : `${fleetFilterBar(F)}${!F.shown.length ? `<div class="empty">no box matches — <button class="link" data-act="fleet:clear">clear the filter</button></div>`
+      : S.fleetView === 'table' ? fleetTable(F.shown) : fleetCards(F.shown)}`;
   return `
     <div class="head">
       <div><div class="eyebrow">PMSS</div><h1>Fleet overview</h1></div>
@@ -618,6 +626,23 @@ function viewFleet() {
       ${t.currency ? `<div><div class="tile-label">monthly cost</div><div class="tile-value">${fmtMoney(t.monthly_cost, t.currency)}${t.monthly_cost_fleet > t.monthly_cost + 0.005 ? ` <small title="including services not added as boxes">/ ${fmtMoney(t.monthly_cost_fleet, t.currency)} total</small>` : ''}</div></div>` : ''}
     </div>
     ${body}`;
+}
+// boxSearchText: what the overview's search looks in, all of it on the card
+// or the table row so a match can be seen there.
+function boxSearchText(b) {
+  return [b.name, b.hostname, b.host, b.type, planOf(b), b.host_sys?.cpu_short, statusLabel(b.status)];
+}
+// fleetFilterBar: the search box and the status choice above the boxes,
+// with how many are shown while either narrows them. The tiles above stay
+// fleet-wide.
+function fleetFilterBar(F) {
+  const chips = F.statuses.length > 1 || S.fleetStatus
+    ? `<div class="seg" role="group" aria-label="status shown">${F.statuses.map((c) => `<button class="${c.on ? 'on' : ''}" aria-pressed="${c.on}" data-act="fleet:status" data-status="${esc(c.key)}" title="${c.on ? 'click to show every status' : 'show only these'}">${esc(statusLabel(c.key))} ${c.count}</button>`).join('')}</div>` : '';
+  return `<div class="fleet-filter">
+      <input class="filter" type="search" placeholder="search name, host, type, plan, cpu…" aria-label="search boxes" data-fleetq value="${esc(S.fleetQ)}">
+      ${chips}
+      ${F.filtered ? `<span class="muted">showing ${F.shown.length} of ${S.boxes.length} boxes · <button class="link" data-act="fleet:clear">clear</button></span>` : ''}
+    </div>`;
 }
 const CARD_SIZES = [[280, 'S'], [340, 'M'], [420, 'L'], [520, 'XL']];
 // slowPct: the hourly iowait mean above which an hour counts as slow.
@@ -659,9 +684,9 @@ function iowaitTitle(b) {
   const avg = (v, n) => (n ? fmtPct(v) : 'no polls yet');
   return `host iowait: now ${h.cpu_ok ? fmtPct(h.cpu_iowait_pct) : 'unknown'} · 15 min ${avg(w.avg15, w.n15)} · 30 min ${avg(w.avg30, w.n30)} · 1 h ${avg(w.avg60, w.n60)} (means over this dashboard's polls, ${w.n15 || 0} / ${w.n30 || 0} / ${w.n60 || 0} of them; the windows restart with the dashboard)`;
 }
-function fleetCards() {
+function fleetCards(boxes) {
   const dt = S.settings.disk_threshold_pct || 90, tt = S.settings.traffic_threshold_pct || 90;
-  return `<div class="cards" style="--card-min:${cardMin()}px">${S.boxes.map((b) => {
+  return `<div class="cards" style="--card-min:${cardMin()}px">${boxes.map((b) => {
     const tl = b.traffic.limit_bytes > 0;
     return `
     <div class="card click" data-go="/box/${b.id}">
@@ -684,11 +709,11 @@ function fleetCards() {
     </div>`;
   }).join('')}</div>`;
 }
-function fleetTable() {
+function fleetTable(boxes) {
   const dt = S.settings.disk_threshold_pct || 90, tt = S.settings.traffic_threshold_pct || 90;
   return `<div class="table fleet-table">
     <div class="trow head"><span>box</span><span>type</span><span>host cpu</span><span>disk</span><span>upload 30d</span><span>up / down</span><span>torrents</span><span>cpu/ram</span><span title="host iowait: now · 15 min · 30 min · 1 h">iowait</span><span>host up</span></div>
-    ${S.boxes.map((b) => `
+    ${boxes.map((b) => `
     <div class="trow click" data-go="/box/${b.id}">
       <div style="display:flex;align-items:center;gap:8px;min-width:0"><span class="led ${b.status}"></span><div class="ellip"><div class="ellip" style="font-weight:600">${esc(b.name)}</div><div class="sub">${esc(b.hostname || b.host)}</div></div></div>
       <span class="muted">${esc(b.type)}</span>
@@ -2627,6 +2652,8 @@ async function runAction(a, act) {
   else if (a === 'app:watch') await appWatchAction(act);
   else if (a.startsWith('log:')) await logAction(a, act);
   else if (a.startsWith('xfer:')) await transferAction(a, act);
+  else if (a === 'fleet:status') { S.fleetStatus = S.fleetStatus === act.dataset.status ? '' : act.dataset.status; render(); }
+  else if (a === 'fleet:clear') { S.fleetQ = ''; S.fleetStatus = ''; render(); }
   else if (a === 'cmp:days') await loadCompare(Number(act.dataset.days) === 30 ? 30 : 7);
   else if (a === 'cmp:sort') { const k = act.dataset.key, c = S.cmp.sort; S.cmp.sort = { key: k, dir: c.key === k ? (c.dir === 'desc' ? 'asc' : 'desc') : (CMP_ASC.has(k) ? 'asc' : 'desc') }; render(); }
   else if (a === 'hist:days') await loadHistory(S.selId, Number(act.dataset.days) === 30 ? 30 : 7);
@@ -2696,6 +2723,7 @@ document.addEventListener('input', (e) => {
     if (s.dataset.s === 'pm_api_key' && s.value) S.settingsDraft.clear_pm_api_key = false; // a key typed after "remove" replaces instead
     return;
   }
+  if (e.target.closest('[data-fleetq]')) { S.fleetQ = e.target.value; render(); return; }
   const fl = e.target.closest('[data-filter]');
   if (fl) {
     S.filter = fl.value;
