@@ -203,8 +203,11 @@ function toast(msg, kind = '') {
   $('#toasts').appendChild(el);
   setTimeout(() => el.remove(), msg.length > 80 ? 9000 : 4500);
 }
-async function api(method, path, body) {
+// api sends one request; timeoutMs (optional) aborts it, throwing a
+// TimeoutError, when no answer has come by then.
+async function api(method, path, body, timeoutMs) {
   const opts = { method, headers: {} };
+  if (timeoutMs) opts.signal = AbortSignal.timeout(timeoutMs);
   if (method !== 'GET') opts.headers['X-PMSS-Request'] = '1'; // the server's CSRF guard: a form cannot send it
   if (body instanceof FormData) opts.body = body; // multipart: the browser sets the boundary
   else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
@@ -2774,6 +2777,9 @@ async function alertsAction(a, act) {
   else if (a === 'alert:dismiss') { act.disabled = true; await api('DELETE', `${BASE}/api/alerts/${act.dataset.id}`); await loadAlerts(); }
   else if (a === 'alerts:clear-resolved') { await api('POST', BASE + '/api/alerts/clear-resolved'); toast('resolved alerts cleared', 'ok'); await loadAlerts(); }
 }
+// SETTINGS_SAVE_MS bounds a settings save, so the dialog's save lock cannot
+// outlive a request that never answers.
+const SETTINGS_SAVE_MS = 20000;
 // saveSettings sends the touched fields and adopts the answer as the draft.
 async function saveSettings() {
   // Only the fields touched in this tab go up (plus the API-key
@@ -2783,7 +2789,17 @@ async function saveSettings() {
   const d = settingsPatch(S.settingsDraft, S.settingsTouched);
   const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
   const pmdbChanged = 'pmdb_enabled' in d || 'pmdb_username' in d;
-  const saved = await api('PUT', BASE + '/api/settings', d);
+  let saved;
+  try {
+    saved = await api('PUT', BASE + '/api/settings', d, SETTINGS_SAVE_MS);
+  } catch (err) {
+    if (err?.name !== 'TimeoutError') throw err;
+    // No answer: the save may or may not have landed. Read the saved
+    // settings again (the draft and its touched fields stay) before the
+    // operator decides to save again (fred on #232).
+    await loadState();
+    throw new Error(`the save got no answer in ${SETTINGS_SAVE_MS / 1000} s and may or may not have been applied: the settings were read again, check them and save again if needed`);
+  }
   stateSeq++; // a state load started before the save must not put the old values back
   S.settings = saved; S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render(); renderSettings();
   if (keyChanged) { S.services = null; servicesSeq++; setTimeout(loadServices, 1500); }
@@ -2957,7 +2973,7 @@ document.addEventListener('keydown', (e) => {
   if (!S.settingsOpen) return;
   if (e.key === 'Escape') { e.preventDefault(); closeSettings(); return; }
   if (e.key !== 'Tab') return;
-  const items = [...document.querySelectorAll('#dlg button:not([disabled]), #dlg input, #dlg select, #dlg a[href], #dlg summary')].filter((el) => el.offsetParent !== null);
+  const items = [...document.querySelectorAll('#dlg button, #dlg input, #dlg select, #dlg a[href], #dlg summary')].filter((el) => el.offsetParent !== null && !el.matches(':disabled'));
   if (!items.length) return;
   const first = items[0], last = items[items.length - 1];
   if (!$('#dlg').contains(document.activeElement)) { e.preventDefault(); first.focus(); }
