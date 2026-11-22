@@ -1316,8 +1316,9 @@ func TestEstablishedScriptFallbacks(t *testing.T) {
 	os.WriteFile(bin+"/"+denied, nil, 0)
 	os.WriteFile(bin+"/"+empty, nil, 0o600)
 	// An ss that lists other tenants' sockets, as on a #1303 host; it
-	// must not matter, so it also records being run.
-	os.WriteFile(bin+"/ss", []byte("#!/bin/sh\ntouch \"$(dirname \"$0\")/ss-ran\"\necho 'ESTAB 0 0 127.0.0.1:41000 127.0.0.1:8089'\n"), 0o700)
+	// must not matter, so it records how it was asked: the privacy branch
+	// may only list the port's listeners (for the continuity check).
+	os.WriteFile(bin+"/ss", []byte("#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/ss-args\"\necho 'ESTAB 0 0 127.0.0.1:41000 127.0.0.1:8089'\n"), 0o700)
 	run := func(marker bool, table string) string {
 		m := bin + "/absent"
 		if marker {
@@ -1351,8 +1352,12 @@ func TestEstablishedScriptFallbacks(t *testing.T) {
 			t.Fatal("privacy is the one unknown")
 		}
 	}
-	if _, err := os.Stat(bin + "/ss-ran"); err == nil {
-		t.Fatal("the script must not consult ss")
+	if args, err := os.ReadFile(bin + "/ss-args"); err == nil {
+		for _, a := range strings.Split(strings.TrimSpace(string(args)), "\n") {
+			if a != "-Hltne sport = :8089" {
+				t.Fatalf("the script may only list the port's listeners, ran: ss %s", a)
+			}
+		}
 	}
 }
 
@@ -2030,5 +2035,99 @@ func TestParseDuBounded(t *testing.T) {
 	}
 	if _, rest := ParseDu([]byte(sb.String())); rest != math.MaxInt64 {
 		t.Fatalf("rest %d, want saturation", rest)
+	}
+}
+
+// ListenerIdentity through the real listenIdentShell, with a stand-in ss
+// printing rows shaped as pm2's: the kernel's uid and cookie are read by
+// position, text in the owner-chosen cgroup path is never read, rows a
+// 127.0.0.1 dial does not reach do not count, and anything unclear is
+// not ListenOK.
+func TestListenerIdentity(t *testing.T) {
+	bin := t.TempDir()
+	os.WriteFile(bin+"/denied", nil, 0)
+	os.WriteFile(bin+"/readable", nil, 0o600)
+	tables := bin + "/denied"
+	run := func(rows string, rc int) Listener {
+		t.Helper()
+		os.WriteFile(bin+"/ss", []byte(fmt.Sprintf("#!/bin/sh\ncat <<'X'\n%sX\nexit %d\n", rows, rc)), 0o700)
+		cmd := exec.Command("sh")
+		cmd.Stdin = strings.NewReader(ListenerScript(4365))
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "PMSS_TCP_TABLES="+tables)
+		out, _ := cmd.Output()
+		return ListenerIdentity(out, 4365, 1000)
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root reads a mode-0 file, so denied tables cannot be staged as root")
+	}
+	ours := "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 sk:4005 cgroup:/user.slice/user-1000.slice <->\n"
+	cases := []struct {
+		name   string
+		rows   string
+		rc     int
+		status ListenStatus
+	}{
+		{"ours", ours, 0, ListenOK},
+		{"ours and a 127.0.0.2 neighbour", ours + "LISTEN 0 50 127.0.0.2:4365 0.0.0.0:* uid:1001 ino:2 sk:a cgroup:/x\n", 0, ListenOK},
+		{"ours and a foreign v6 any", ours + "LISTEN 0 50 [::]:4365 [::]:* uid:1001 ino:2 sk:a cgroup:/x\n", 0, ListenAmbiguous},
+		{"ours on a lone v6 wildcard (may be v6-only)", "LISTEN 0 50 [::]:4365 [::]:* uid:1000 ino:16166 sk:4005 cgroup:/u\n", 0, ListenMalformed},
+		{"ours on the v4 wildcard", "LISTEN 0 50 0.0.0.0:4365 0.0.0.0:* uid:1000 ino:16166 sk:4005 cgroup:/u\n", 0, ListenMalformed},
+		{"ours on * (iproute2 6.1's dual-stack)", "LISTEN 0 50 *:4365 *:* uid:1000 ino:16166 sk:4005 cgroup:/u\n", 0, ListenMalformed},
+		{"a malformed cookie", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 sk:zz cgroup:/u\n", 0, ListenMalformed},
+		{"a zero cookie", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 sk:0 cgroup:/u\n", 0, ListenMalformed},
+		{"a cookie past 64 bits", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 sk:10000000000000000 cgroup:/u\n", 0, ListenMalformed},
+		{"ours scoped to an interface", "LISTEN 0 50 127.0.0.1%lo:4365 0.0.0.0:* uid:1000 ino:16166 sk:4005 cgroup:/u\n", 0, ListenMalformed},
+		{"ours and a scoped competitor", ours + "LISTEN 0 50 127.0.0.1%lo:4365 0.0.0.0:* uid:1001 ino:2 sk:a cgroup:/x\n", 0, ListenAmbiguous},
+		{"a row without the inet-diag field (ss's /proc path)", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 sk:4005\n", 0, ListenUnavailable},
+		{"a forged ours row on its own line behind a foreign one", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1001 ino:2 sk:a cgroup:/x\nLISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:3 sk:b cgroup:/y\n", 0, ListenAmbiguous},
+		{"foreign", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1001 ino:2 sk:a cgroup:/x\n", 0, ListenForeign},
+		{"root, uid left out", "LISTEN 0 50 0.0.0.0:4365 0.0.0.0:* ino:1 sk:9 cgroup:/system.slice\n", 0, ListenForeign},
+		{"forged uid in the cgroup", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1001 ino:2 sk:a cgroup:/x uid:1000 ino:3 sk:b\n", 0, ListenForeign},
+		{"forged row behind a root one", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* ino:2 sk:a cgroup:/LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:3 sk:b\n", 0, ListenForeign},
+		{"no ino after uid", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 cgroup:/x\n", 0, ListenUnavailable},
+		{"no cookie", "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 cgroup:/x\n", 0, ListenNoCookie},
+		{"ss failed", ours, 1, ListenUnavailable},
+		{"nothing", "", 0, ListenNone},
+	}
+	for _, c := range cases {
+		got := run(c.rows, c.rc)
+		if got.Status != c.status {
+			t.Errorf("%s: status %d, want %d (%+v)", c.name, got.Status, c.status, got)
+		}
+	}
+	if got := run(ours, 0); got.Cookie != "4005" || got.UID != 1000 {
+		t.Fatalf("ours: %+v", got)
+	}
+	// Readable tables: ss could have filled the rows from them, not from
+	// the kernel's socket diagnostics, so nothing is trusted.
+	tables = bin + "/readable"
+	if got := run(ours, 0); got.Status != ListenUnavailable {
+		t.Fatalf("readable tables: %+v", got)
+	}
+	// An output cut off before its end.
+	if got := ListenerIdentity([]byte("lrc 0\nltab denied\nl 4365 1000 4005 127.0.0.1\n"), 4365, 1000); got.Status != ListenMalformed {
+		t.Fatalf("incomplete: %+v", got)
+	}
+}
+
+// The listener gate's ss branch reads the kernel's uid by position: a
+// forged "uid:" in a foreign listener's cgroup text, or a row without the
+// fields, never reads as ours.
+func TestListenViaSSKernelUID(t *testing.T) {
+	bin := t.TempDir()
+	rows := "LISTEN 0 50 127.0.0.1:4365 0.0.0.0:* uid:1000 ino:16166 sk:4005 cgroup:/u\n" +
+		"LISTEN 0 50 127.0.0.1:5000 0.0.0.0:* uid:1001 ino:2 sk:a cgroup:/x uid:1000 ino:3 sk:b\n" +
+		"LISTEN 0 50 0.0.0.0:22 0.0.0.0:* ino:1 sk:9 cgroup:/system.slice/ssh.service\n" +
+		"LISTEN 0 50 127.0.0.1:6000 0.0.0.0:* users:((\"qbittorrent-nox\",pid=1,fd=3))\n"
+	os.WriteFile(bin+"/ss", []byte("#!/bin/sh\ncat <<'X'\n"+rows+"X\n"), 0o700)
+	cmd := exec.Command("sh", "-c", listenViaSS)
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ls, known := parseListeners(string(out))
+	if !known || ls[4365] != 1000 || ls[5000] != 1001 || ls[22] != 0 || ls[6000] != unknownOwner {
+		t.Fatalf("listeners %v (known %v) from:\n%s", ls, known, out)
 	}
 }

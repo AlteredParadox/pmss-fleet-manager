@@ -743,10 +743,10 @@ function toggleServiceStatus(hidden, key) {
 function verifyView(v) {
   const on = !!v?.listener_only, mode = v?.mode || '';
   const inUse = on && mode === 'listener-only';
-  const blocked = !on && mode === 'blocked';
+  const blocked = mode === 'blocked'; // also with the opt-in: it cannot help where the owner is unknown
   let tagTitle = '';
   if (inUse) tagTitle = 'listener-only: this box hides its socket tables, so who accepted the WebUI connection is not verified (you allowed this); click to review';
-  else if (on && mode === 'full') tagTitle = 'listener-only allowed, not in use: full verification works on this box again; click to review';
+  else if (on && (mode === 'full' || mode === 'listener')) tagTitle = 'listener-only allowed, not in use: connections on this box are verified; click to review';
   else if (on) tagTitle = 'listener-only allowed; no connection made under it yet; click to review';
   return { on, mode, inUse, blocked, tag: on, tagTitle, page: on || blocked };
 }

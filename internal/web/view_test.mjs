@@ -723,6 +723,8 @@ test('verification states: blocked only without the opt-in, the tag whenever it 
   assert.equal(idle.inUse, false); assert.equal(idle.tag, true); assert.match(idle.tagTitle, /not in use/);
   assert.match(V.verifyView({ listener_only: true }).tagTitle, /no connection/);
   assert.equal(V.verifyView({ listener_only: false, mode: 'full' }).page, false, 'a fully verified box needs no page');
-  // A stale "blocked" next to a given opt-in is not shown as blocked.
-  assert.equal(V.verifyView({ listener_only: true, mode: 'blocked' }).blocked, false);
+  assert.equal(V.verifyView({ listener_only: false, mode: 'listener' }).page, false, 'nor one verified by the listener');
+  assert.match(V.verifyView({ listener_only: true, mode: 'listener' }).tagTitle, /not in use/);
+  // Blocked is shown even with the opt-in on: it cannot help where the owner is unknown (fred on #219).
+  assert.equal(V.verifyView({ listener_only: true, mode: 'blocked' }).blocked, true);
 });

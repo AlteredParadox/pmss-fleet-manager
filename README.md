@@ -1169,23 +1169,29 @@ These are the design decisions that came out of it.
   credentials change or the client is restarted from the dashboard, and a
   ban is held 65 minutes, so a bad password cannot walk the box's loopback
   into qBittorrent's IP ban.
-- **Hosts that hide their socket tables: listener-only, per box, off by
-  default.** The after-connect check reads `/proc/net/tcp`. Where Pulsed
-  Media's socket-table privacy keeps it from your account, the check cannot
-  run (and `ss` is no substitute: it cannot tell which socket is your SSH
-  tunnel's, also on hosts where PMSS's `ss` filter did not load, PMSS
-  #1303). The dashboard then does not connect to that box's WebUI or
-  rTorrent at all: its card says **WebUI verification blocked by host
-  socket privacy · review**, and one click opens the box's *verification*
-  page. That page explains the trade-off and lets you allow the listener
-  check alone for that box. What it risks: if your client stops, a
-  co-tenant watching for that moment could take the port in the seconds
-  between the check and the connection and receive your WebUI login, and
-  with it run commands as your account through the client's settings.
-  Unlikely, but serious. A box with it allowed carries a **listener-only**
-  tag (orange while a connection actually relies on it). Moving the box to
-  another host, port or account turns it off, and where the box lets the
-  dashboard read its tables again, full verification is used on its own.
+- **Hosts that hide their socket tables.** The after-connect check reads
+  `/proc/net/tcp`. Where Pulsed Media's socket-table privacy keeps it from
+  your account (also on hosts where PMSS's `ss` filter did not load, PMSS
+  #1303), the dashboard checks the **listening** socket instead, which
+  privacy leaves visible: just before connecting and again just after
+  (before a byte is sent), `ss` must report exactly one listener a
+  connection to 127.0.0.1 can reach, owned by your account (the kernel's
+  uid), with the same socket cookie both times. Nothing else can bind that
+  address while it is held, so the connection reached your own client. A
+  changed socket (the client restarted, or something else took the port)
+  or a foreign one refuses, with no fallback.
+- **Listener-only, per box, off by default.** Only for a box whose `ss`
+  reports the listener's owner but not its socket cookie: the card then
+  says **WebUI verification blocked by host socket privacy · review**, and
+  one click opens the box's *verification* page, which explains the
+  trade-off and lets you allow the owner check alone for that box. What it
+  risks: if your client stops, a co-tenant watching for that moment could
+  take the port between the check and the connection and receive your
+  WebUI login, and with it run commands as your account through the
+  client's settings. A box with it allowed carries a **listener-only** tag
+  (orange while a connection relies on it). Moving the box to another
+  host, port or account, or replacing its host key, turns it off. A box
+  that reports no owner at all stays blocked.
 - **Host keys.** Trust on first use, pinned to host and port. A supplied key
   never silently replaces a pin; a host or port change, or "forget the pinned
   SSH host key" after a reinstall, clears it. Saved SSH and WebUI passwords
