@@ -109,7 +109,8 @@ test('the confirmation and action markup of a row carry the client (snapshot of 
   const app = readFileSync(new URL('./static/app.js', import.meta.url), 'utf8');
   assert.match(app, /data-client="\$\{esc\(client\)\}"/, 'row buttons carry data-client');
   assert.match(app, /pfmView\.torrentControls\(client, t\.kind, t\.state\)/, 'the start/pause/stop choice goes through the helper');
-  assert.match(app, /refuses otherwise, leaving the torrent in place/, 'the rTorrent remove-with-data confirmation states the real ordering');
+  assert.match(app, /pfmView\.deleteFilesConfirmation\(client, /, 'the remove-with-data confirmation goes through the helper');
+  assert.match(V.deleteFilesConfirmation('rtorrent', 'x', '1 B', { name: 'b' }), /refuses otherwise, leaving the torrent in place/, 'the rTorrent remove-with-data confirmation states the real ordering');
   assert.match(app, /\/\$\{seg\}\/torrents\//, 'actions are routed per client');
 });
 
@@ -727,4 +728,18 @@ test('verification states: blocked only without the opt-in, the tag whenever it 
   assert.match(V.verifyView({ listener_only: true, mode: 'listener' }).tagTitle, /not in use/);
   // Blocked is shown even with the opt-in on: it cannot help where the owner is unknown (fred on #219).
   assert.equal(V.verifyView({ listener_only: true, mode: 'blocked' }).blocked, true);
+});
+
+test('the delete-files confirmation names the box by name and identity, for both clients (fred on #227)', () => {
+  const a = { id: 1, name: 'stu', user: 'stu', host: 'h1.example', port: 22 };
+  const b = { id: 2, name: 'stu', user: 'stu', host: 'h2.example', port: 2222 };
+  for (const client of ['qbt', 'rtorrent']) {
+    const qa = pfmView.deleteFilesConfirmation(client, 'Some.Torrent', '1.5 GiB', a);
+    const qb = pfmView.deleteFilesConfirmation(client, 'Some.Torrent', '1.5 GiB', b);
+    assert.ok(qa.includes('on stu — stu@h1.example?'), qa);
+    assert.ok(qb.includes('on stu — stu@h2.example:2222?'), qb);
+    assert.notEqual(qa, qb);
+    assert.ok(qa.includes('DELETE its 1.5 GiB of files') && qa.includes('Some.Torrent'), qa);
+  }
+  assert.ok(pfmView.deleteFilesConfirmation('rtorrent', 'x', '1 B', a).includes("rTorrent's download directory"));
 });

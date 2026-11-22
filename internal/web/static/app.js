@@ -793,13 +793,13 @@ function boxPowerBtn(b, q) {
   if (S.monitorOnly) return '';
   const again = q.pmss_managed ? 'then Pulsed Media\'s watchdog starts it again' : 'then started again with the box\'s start command (default: ~/bin/qbt-start when present)';
   return q.enabled ? (q.process_up
-    ? `<button ${boxRef(b)} data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(b.name)}? It is asked to exit cleanly, ${again}">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button ${boxRef(b)} data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(b.name)}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
+    ? `<button ${boxRef(b)} data-act="qbt:restart" data-confirm="Restart qbittorrent-nox on ${esc(boxLabelOf(b))}? It is asked to exit cleanly, ${again}">${q.restart_needed ? '<span class="warn">restart client</span>' : 'restart client'}</button><button ${boxRef(b)} data-act="qbt:stop" data-confirm="Stop qbittorrent-nox on ${esc(boxLabelOf(b))}? Torrents stop seeding until it is started again (the cron helper restarts it within 5 min if installed).">stop client</button>`
     : q.pmss_managed ? '' : `<button ${boxRef(b)} data-act="qbt:start">start client</button>`) : '';
 }
 function boxInstallBtn(b, q) {
   if (q.pmss_managed || S.monitorOnly) return '';
   return (q.enabled || q.installed || b.type === 'seedbox')
-    ? `<button ${boxRef(b)} data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(b.name) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(b.name) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
+    ? `<button ${boxRef(b)} data-act="qbt:install" data-confirm="${q.installed ? 'Download the latest qbittorrent-nox build and replace ~/bin/qbittorrent-nox on ' + esc(boxLabelOf(b)) + '? The running instance keeps the old version until restarted.' : 'Download qbittorrent-nox to ~/bin on ' + esc(boxLabelOf(b)) + '?'}">${q.installed ? (q.update_available ? `<span class="warn">update client → ${esc(q.latest_version)}</span>` : 'update client') : 'install client'}</button>` : '';
 }
 function boxActions(b) {
   return `<div class="actions">
@@ -1262,7 +1262,7 @@ function clientSection(b, c, f, first) {
       <div style="font-size:12px"><b>${c.label} ${esc(q.version || '')}</b> <span class="muted">· ${q.total} torrents · ${q.seeding} seeding · ${q.leeching} leeching · ${q.paused} paused${q.errored ? ` · <span class="bad">${q.errored} error</span>` : ''}${transferNote(q.torrents || [])}${notes}${avail.down ? ` · <span class="warn">not responding${q.error ? ': ' + esc(q.error) : ''}</span>` : ''}</span>${removeFailed}</div>
       <div class="actions">
         ${first ? `<input class="filter" placeholder="filter…" data-filter value="${esc(S.filter)}">` : ''}
-        ${c.key === 'qbt' && !S.monitorOnly ? `<button class="small" ${boxRef(b)} data-act="qbt:pause" title="stop every torrent in qBittorrent" data-confirm="Stop all torrents in qBittorrent on ${esc(b.name)}?">stop all</button>
+        ${c.key === 'qbt' && !S.monitorOnly ? `<button class="small" ${boxRef(b)} data-act="qbt:pause" title="stop every torrent in qBittorrent" data-confirm="Stop all torrents in qBittorrent on ${esc(boxLabelOf(b))}?">stop all</button>
         <button class="small" ${boxRef(b)} data-act="qbt:resume" title="start every torrent, including any stopped on purpose">start all</button>` : ''}
         ${avail.stopped || S.monitorOnly ? '' : `<button class="small" ${boxRef(b)} data-act="tor-add:toggle" data-client="${c.key}">${addOpen ? 'close' : 'add'}</button>`}
       </div>
@@ -1294,7 +1294,7 @@ function rtDiscoveryNote(r, b) {
   if (!list.length) return '';
   return ' · ' + list.map((d) => {
     if (S.monitorOnly) return discState(`${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}`, d.warn, pfmView.rtDiscoveryState(d));
-    return `<button class="disc ${d.warn ? 'warn' : ''}" ${boxRef(b)} data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(pfmView.rtDiscoveryHint(d))}"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(b.name)}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
+    return `<button class="disc ${d.warn ? 'warn' : ''}" ${boxRef(b)} data-act="disc:${d.k}" data-client="rtorrent" data-on="${d.on ? '1' : ''}" title="${esc(pfmView.rtDiscoveryHint(d))}"${d.on ? '' : ` data-confirm="Enable ${d.label} for rTorrent on ${esc(boxLabelOf(b))}? It is saved to ~/.rtorrent.rc.custom. Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${d.label} ${d.on ? 'on' : 'off'}${d.pending ? ' ↻' : ''}</button>`;
   }).join(' · ') + ' · <span class="disc na" title="rTorrent has no local service discovery">LSD n/a</span>';
 }
 
@@ -1422,7 +1422,7 @@ function discoveryNote(q, b) {
   return ' · ' + DISCOVERY.map(([k, l]) => {
     const on = q.discovery[k];
     if (S.monitorOnly) return discState(`${l} ${on ? 'on' : 'off'}`, on, `${l} ${on ? 'enabled' : 'disabled'}`);
-    return `<button class="disc ${on ? 'warn' : ''}" ${boxRef(b)} data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(b.name)}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
+    return `<button class="disc ${on ? 'warn' : ''}" ${boxRef(b)} data-act="disc:${k}" data-on="${on ? '1' : ''}" title="${l} ${on ? 'enabled — click to disable' : 'disabled — click to enable'}"${on ? '' : ` data-confirm="Enable ${l} on ${esc(boxLabelOf(b))}? Private trackers usually forbid it; torrents from them may be flagged or banned."`}>${l} ${on ? 'on' : 'off'}</button>`;
   }).join(' · ');
 }
 // Toast after an add. qBittorrent 5.2+ reports per-entry counts; older
@@ -1481,9 +1481,7 @@ function torrentButtons(b, t, fleet = false) {
     : !pfmView.clientActionable(b, client) ? ` disabled title="${label} is stopped on purpose on this box (~/.rtorrentDisable); this row is from before it stopped"` : '';
   const h = `data-hash="${esc(t.hash)}" data-box="${b.id}" data-rev="${Number(b.box_rev) || 0}" data-client="${esc(client)}"${off}`;
   const name = esc(t.name);
-  const files = client === 'rtorrent'
-    ? `Remove ${name} from rTorrent AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(b.name)}? The box first checks that the path lies inside rTorrent's download directory and refuses otherwise, leaving the torrent in place. If it passes, the torrent is removed and then its files are deleted; should the deletion fail at that point, the torrent is already gone and files may remain. This cannot be undone.`
-    : `Remove ${name} AND DELETE its ${fmtBytes(t.size, 1)} of files on ${esc(boxLabelOf(b))}? This cannot be undone.`;
+  const files = esc(pfmView.deleteFilesConfirmation(client, t.name, fmtBytes(t.size, 1), boxById(b.id) || b));
   // Icons; the hover text names each. A disabled button's own title (in h)
   // comes first and so is the one shown; one that does not apply to the
   // torrent's state is disabled and says why. Pause is rTorrent's alone
@@ -1492,7 +1490,7 @@ function torrentButtons(b, t, fleet = false) {
   // resumes a paused rTorrent torrent.
   const can = pfmView.torrentControls(client, t.kind, t.state);
   const btn = (act, ok, label, why, icon, extra = '') => `<button class="icon" data-act="tor:${act}" ${h}${ok ? '' : ' disabled'} title="${ok ? label : why}" aria-label="${label}"${extra}>${icon}</button>`;
-  return `${btn('start', can.start, client === 'rtorrent' && t.state === 'paused' ? 'resume' : 'start', 'already running', ICON.start)}${can.pause === null || fleet ? '' : btn('pause', can.pause, 'pause (stays open; start resumes it)', 'not running', ICON.pause)}${btn('stop', can.stop, 'stop', 'already stopped', ICON.stop, ` data-confirm="Stop ${name} on ${esc(b.name)}?"`)}<button class="icon" data-act="tor:remove" ${h} title="remove (keeps the files)" aria-label="remove, keeping the files" data-confirm="Remove ${name} from ${label} on ${esc(b.name)}? The downloaded files stay on disk.">${ICON.remove}</button><button class="icon danger" data-act="tor:remove-data" ${h} title="remove and delete the files" aria-label="remove and delete the files" data-confirm="${files}">${ICON.trash}</button>`;
+  return `${btn('start', can.start, client === 'rtorrent' && t.state === 'paused' ? 'resume' : 'start', 'already running', ICON.start)}${can.pause === null || fleet ? '' : btn('pause', can.pause, 'pause (stays open; start resumes it)', 'not running', ICON.pause)}${btn('stop', can.stop, 'stop', 'already stopped', ICON.stop, ` data-confirm="Stop ${name} on ${esc(boxLabelOf(b))}?"`)}<button class="icon" data-act="tor:remove" ${h} title="remove (keeps the files)" aria-label="remove, keeping the files" data-confirm="Remove ${name} from ${label} on ${esc(boxLabelOf(b))}? The downloaded files stay on disk.">${ICON.remove}</button><button class="icon danger" data-act="tor:remove-data" ${h} title="remove and delete the files" aria-label="remove and delete the files" data-confirm="${files}">${ICON.trash}</button>`;
 }
 // Torrent row icons (16-unit grid, drawn in the button's colour).
 const ICON = {

@@ -449,6 +449,16 @@ function endpointIdentity(ep) {
   const m = /^(.+):(\d{1,5})\/([^/]+)$/.exec(String(ep ?? ''));
   return m ? boxIdentity(m[3], m[1], m[2]) : '';
 }
+// deleteFilesConfirmation: the question before a torrent is removed with
+// its files, naming the box by boxLabel (box: a full record, size: already
+// formatted), so a fleet of boxes named alike says which one loses the
+// files. Plain text: the caller escapes it into the attribute.
+function deleteFilesConfirmation(client, torrentName, size, box) {
+  const where = boxLabel(box);
+  return client === 'rtorrent'
+    ? `Remove ${torrentName} from rTorrent AND DELETE its ${size} of files on ${where}? The box first checks that the path lies inside rTorrent's download directory and refuses otherwise, leaving the torrent in place. If it passes, the torrent is removed and then its files are deleted; should the deletion fail at that point, the torrent is already gone and files may remain. This cannot be undone.`
+    : `Remove ${torrentName} AND DELETE its ${size} of files on ${where}? This cannot be undone.`;
+}
 // boxChoices: the destination picker's options, one per box, labelled by
 // boxLabel; two records that would still read the same (one machine and
 // account added twice under one name) get their box number as well.
@@ -786,5 +796,5 @@ function compareSlowPct(data, days, current) {
   return counted === null ? { pct: current, stale: false } : { pct: counted, stale: counted !== current };
 }
 
-globalThis.pfmView = { verifyView, fleetFilter, serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, compareSlowPct, estimateLines };
+globalThis.pfmView = { verifyView, fleetFilter, serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, deleteFilesConfirmation, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, compareSlowPct, estimateLines };
 })();
