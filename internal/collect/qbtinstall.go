@@ -18,10 +18,13 @@ package collect
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -312,11 +315,14 @@ func releaseDigest(ctx context.Context, download string) (digest, reason string,
 	req.Header.Set("User-Agent", "pmss-fleet-manager")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", "GitHub API: " + err.Error(), true
+		return "", "GitHub API: " + err.Error(), transientNetError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		busy := resp.StatusCode >= 500 || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests
+		// A 5xx, or a rate limit GitHub confirms (429, or 403 with no
+		// requests left); any other refusal is an answer.
+		busy := resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests ||
+			resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0"
 		return "", fmt.Sprintf("GitHub API answered HTTP %d", resp.StatusCode), busy
 	}
 	var rel struct {
@@ -340,6 +346,36 @@ func releaseDigest(ctx context.Context, download string) (digest, reason string,
 		return d, "", false
 	}
 	return "", "the release has no asset named " + asset, false
+}
+
+// transientNetError reports whether a failed request to GitHub's API is
+// one that says nothing about the download: a timeout, a name that did
+// not resolve, a connection that could not be made. A TLS failure (an
+// untrusted or mismatched certificate) is not: something answered as
+// api.github.com and could not prove it, which must not let the default
+// build install unverified (fred on #224).
+func transientNetError(err error) bool {
+	var cert *tls.CertificateVerificationError
+	var unknown x509.UnknownAuthorityError
+	var host x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	var rec tls.RecordHeaderError
+	switch {
+	case errors.As(err, &cert), errors.As(err, &unknown), errors.As(err, &host), errors.As(err, &invalid), errors.As(err, &rec):
+		return false
+	}
+	var dns *net.DNSError
+	var op *net.OpError
+	var ne net.Error
+	switch {
+	case errors.As(err, &dns):
+		return true
+	case errors.As(err, &op) && op.Op == "dial":
+		return true
+	case errors.As(err, &ne) && ne.Timeout():
+		return true
+	}
+	return false
 }
 
 // shellQuote single-quotes a string for POSIX sh.

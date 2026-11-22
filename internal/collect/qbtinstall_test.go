@@ -253,7 +253,12 @@ func TestReleaseDigest(t *testing.T) {
 		case "/repos/o/r/releases/tags/busy":
 			w.WriteHeader(503)
 		case "/repos/o/r/releases/tags/limited":
+			w.Header().Set("X-RateLimit-Remaining", "0")
 			w.WriteHeader(403)
+		case "/repos/o/r/releases/tags/forbidden":
+			w.WriteHeader(403)
+		case "/repos/o/r/releases/tags/toomany":
+			w.WriteHeader(429)
 		case "/repos/o/r/releases/latest":
 			w.Write([]byte(`{"tag_name":"release-5.2.4_v2.0.15","assets":[{"name":"other","digest":"sha256:` + strings.Repeat("a", 64) + `"},{"name":"x86_64-qbittorrent-nox","digest":"sha256:` + strings.Repeat("AB", 32) + `"},{"name":"nodigest"}]}`))
 		default:
@@ -279,6 +284,8 @@ func TestReleaseDigest(t *testing.T) {
 		"https://github.com/o/r/releases/download/v9/x86_64-qbittorrent-nox": {"HTTP 404", false},
 		"https://github.com/o/r/releases/download/busy/x":                    {"HTTP 503", true},
 		"https://github.com/o/r/releases/download/limited/x":                 {"HTTP 403", true},
+		"https://github.com/o/r/releases/download/forbidden/x":               {"HTTP 403", false},
+		"https://github.com/o/r/releases/download/toomany/x":                 {"HTTP 429", true},
 		"https://example.com/x86_64-qbittorrent-nox":                         {"not a GitHub release", false},
 	} {
 		if d, why, outage := releaseDigest(ctx, url); d != "" || !strings.Contains(why, want.why) || outage != want.outage {
@@ -484,5 +491,31 @@ func TestInstallDigest(t *testing.T) {
 	p := &poller{m: m, box: &store.Box{ID: 7}}
 	if _, err := p.qbtInstall(ctx, "https://example.com/qbittorrent-nox"); !errors.Is(err, errNoDigest) {
 		t.Errorf("install: %v", err)
+	}
+}
+
+// A TLS failure is not an outage: something answered as GitHub and could
+// not prove it (fred on #224). A refused connection is.
+func TestReleaseDigestTransport(t *testing.T) {
+	ctx := context.Background()
+	const u = "https://github.com/o/r/releases/latest/download/x86_64-qbittorrent-nox"
+	old := githubAPI
+	defer func() { githubAPI = old }()
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	githubAPI = tlsSrv.URL // its certificate is not trusted by the default client
+	if d, why, outage := releaseDigest(ctx, u); d != "" || outage || !strings.Contains(why, "certificate") {
+		t.Errorf("untrusted certificate: %q %q outage=%v", d, why, outage)
+	}
+	tlsSrv.Close()
+
+	closed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	githubAPI = closed.URL
+	closed.Close()
+	if d, why, outage := releaseDigest(ctx, u); d != "" || !outage {
+		t.Errorf("refused connection: %q %q outage=%v", d, why, outage)
+	}
+	if transientNetError(errors.New("something else")) {
+		t.Error("an unclassified error counted as an outage")
 	}
 }

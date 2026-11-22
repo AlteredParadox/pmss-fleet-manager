@@ -126,8 +126,9 @@ GitHub publishes for the release asset (any GitHub release URL), or against
 one you add to the URL as `#sha256=<64 hex digits>` (a mirror, a private
 build). A URL other than the default with neither is refused; the default
 installs unverified, and says so, only when GitHub's API cannot be
-reached (no connection, a server error, rate limiting), not when it
-answers without a digest for the build. Then an ELF and `--version` check
+reached (a timeout, no connection, a server error, a confirmed rate
+limit), not when it answers without a digest for the build or fails its
+certificate check. Then an ELF and `--version` check
 runs before the binary is swapped in atomically. The dashboard checks the latest GitHub release every
 six hours and flags boxes that are behind or that need a restart to pick up a
 new binary. "Set up autostart" writes a `~/bin/qbt-start` screen launcher and
