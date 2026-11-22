@@ -66,6 +66,13 @@ type poller struct {
 	dkUID int            // the UID dk was dialled for
 	guard *qbt.AuthGuard // outlives p.qbt; see qbt.AuthGuard
 
+	// listenerOnly is the box's opt-in to the listener check alone where
+	// the tables are denied (store.Box.ListenerOnly), read at every dial;
+	// verifyMode is what the last new connection got (Verify* or "").
+	// Atomics: dials run with and without p.mu held.
+	listenerOnly atomic.Bool
+	verifyMode   atomic.Value // string
+
 	prevCPU     int64
 	prevCPUAt   time.Time
 	prevTicks   probe.CPUTicks // last /proc/stat reading, for the host-wide busy figure
@@ -273,7 +280,47 @@ func (p *poller) storeFix(start time.Time, keepDirs bool) func(s, stored *BoxSta
 }
 
 func newPoller(m *Manager, b *store.Box) *poller {
-	return &poller{m: m, box: b, guard: &qbt.AuthGuard{}, wakeCh: make(chan struct{}, 1), stopCh: make(chan struct{}), doneCh: make(chan struct{})}
+	p := &poller{m: m, box: b, guard: &qbt.AuthGuard{}, wakeCh: make(chan struct{}, 1), stopCh: make(chan struct{}), doneCh: make(chan struct{})}
+	p.listenerOnly.Store(b.ListenerOnly)
+	return p
+}
+
+// verifyPolicy is this box's say in verifiedDial.
+func (p *poller) verifyPolicy() verifyPolicy {
+	return verifyPolicy{allow: p.listenerOnly.Load, note: p.noteVerify}
+}
+
+// noteVerify records what a new connection got, logging each change.
+func (p *poller) noteVerify(mode string) {
+	if prev := p.verifyModeNow(); prev != mode {
+		p.verifyMode.Store(mode)
+		if p.m != nil && p.m.log != nil {
+			p.m.log.Info("WebUI connection verification", "box", p.box.Name, "mode", mode, "was", prev)
+		}
+	}
+}
+
+func (p *poller) verifyModeNow() string {
+	s, _ := p.verifyMode.Load().(string)
+	return s
+}
+
+// setListenerOnly applies a change of the opt-in. Turning it off drops
+// every pooled WebUI and rTorrent connection made under it, so none
+// outlives the consent; the next dial is checked again.
+func (p *poller) setListenerOnly(ctx context.Context, on bool) {
+	p.listenerOnly.Store(on)
+	if on || p.verifyModeNow() != VerifyListenerOnly {
+		return
+	}
+	p.mu.Lock()
+	if p.qbt != nil {
+		p.qbt.Close()
+		p.qbt = nil
+	}
+	p.dropRtLocked(ctx)
+	p.mu.Unlock()
+	p.verifyMode.Store("")
 }
 
 func (p *poller) wake() {
@@ -529,7 +576,7 @@ func (p *poller) sshDialTCP(addr string) qbt.Dialer {
 		if _, ps, err := net.SplitHostPort(addr); err == nil {
 			port, _ = strconv.Atoi(ps)
 		}
-		return verifiedDial(cli, addr, port)(ctx)
+		return verifiedDial(cli, addr, port, p.verifyPolicy())(ctx)
 	}
 }
 
@@ -624,6 +671,9 @@ func (p *poller) poll(ctx context.Context) {
 		st.Ready = true // the facts below are this generation's; actions may use them
 	}
 
+	if !p.listenerOnly.Load() && p.verifyModeNow() == VerifyListenerOnly {
+		p.setListenerOnly(ctx, false) // a dial that was in flight when the opt-in was withdrawn
+	}
 	if p.box.QbtEnabled {
 		p.pollQbt(ctx, &st, snap)
 	} else {
@@ -642,6 +692,7 @@ func (p *poller) poll(ctx context.Context) {
 		st.Rt = RtState{Enabled: false, ProcessUp: running, ProcessKnown: known, ConfFound: snap.Rt.ConfFound, Disabled: snap.Rt.Disabled,
 			Endpoint: clip(rtEndpoint(rtBox{p.box.RtSCGI}, snap), 600)}
 	}
+	st.Verify = VerifyState{ListenerOnly: p.listenerOnly.Load(), Mode: p.verifyModeNow()}
 	if p.box.DockerEnabled {
 		p.pollDocker(ctx, &st, snap)
 	} else {

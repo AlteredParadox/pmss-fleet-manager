@@ -254,7 +254,7 @@ func changesNoBox(route string) bool {
 	switch route {
 	case "POST /api/boxes", "PUT " + boxRoute, "DELETE " + boxRoute,
 		"POST " + boxRoute + "/probe", "POST " + boxRoute + "/refresh", "POST " + boxRoute + "/du",
-		"POST " + boxRoute + "/rtorrent/remove-failure/dismiss", "POST " + boxRoute + "/apps/watch",
+		"POST " + boxRoute + "/rtorrent/remove-failure/dismiss", "POST " + boxRoute + "/apps/watch", "POST " + boxRoute + "/verification",
 		"POST " + boxRoute + "/logs/read", "POST " + boxRoute + "/containers/{cid}/logs",
 		"POST /api/detect", "POST /api/transfers/{tid}/dismiss", "POST " + boxRoute + "/transfers/dirs",
 		"POST " + boxRoute + "/transfers/estimate",
@@ -342,6 +342,7 @@ func (s *Server) routes() {
 	handle("POST "+bp+boxRoute+"/rtorrent/discovery", s.handleSetRtDiscovery)
 	handle("POST "+bp+boxRoute+"/containers/{cid}/{action}", s.handleContainerAction)
 	handle("POST "+bp+boxRoute+"/apps/watch", s.handleAppWatch)
+	handle("POST "+bp+boxRoute+"/verification", s.handleSetVerification)        // the listener-only opt-in: the dashboard's own record, changes nothing on the box
 	handle("POST "+bp+boxRoute+"/logs/read", s.handleReadLog)                   // runs tail over SSH: POST so the CSRF check applies
 	handle("POST "+bp+boxRoute+"/containers/{cid}/logs", s.handleContainerLogs) // literal segment wins over {action}
 	handle("GET "+bp+"/api/transfers", s.handleTransfers)
@@ -1785,6 +1786,32 @@ func (s *Server) handleAppWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.m.SetAppWatch(r.Context(), id, in.Key, in.On); err != nil {
+		writeErr(w, actionCode(err), err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// handleSetVerification sets the box's listener-only opt-in. The value
+// must be stated: a body without it is refused rather than read as off.
+func (s *Server) handleSetVerification(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	var in struct {
+		ListenerOnly *bool `json:"listener_only"`
+	}
+	if err := decodeStrict(r, &in); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if in.ListenerOnly == nil {
+		writeErr(w, 400, errors.New("listener_only is required"))
+		return
+	}
+	if err := s.m.SetListenerOnly(r.Context(), id, *in.ListenerOnly); err != nil {
 		writeErr(w, actionCode(err), err)
 		return
 	}

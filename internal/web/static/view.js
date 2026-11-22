@@ -733,6 +733,24 @@ function toggleServiceStatus(hidden, key) {
   return hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key];
 }
 
+/* verifyView: how a box's WebUI/rTorrent connections are checked, for the
+   card, the table and the box page (BoxState.verify). blocked: the box
+   denies this account its socket tables and the listener-only opt-in is
+   off, so the dashboard refuses to connect. tag: the opt-in is on; inUse
+   says whether the last new connection actually relied on it (otherwise
+   full verification works again, or nothing has connected yet). page: the
+   verification tab is worth showing. */
+function verifyView(v) {
+  const on = !!v?.listener_only, mode = v?.mode || '';
+  const inUse = on && mode === 'listener-only';
+  const blocked = !on && mode === 'blocked';
+  const tagTitle = !on ? '' : inUse
+    ? 'listener-only: this box hides its socket tables, so who accepted the WebUI connection is not verified (you allowed this); click to review'
+    : mode === 'full' ? 'listener-only allowed, not in use: full verification works on this box again; click to review'
+      : 'listener-only allowed; no connection made under it yet; click to review';
+  return { on, mode, inUse, blocked, tag: on, tagTitle, page: on || blocked };
+}
+
 /* fleetFilter: the overview's search and status choice, for a fleet too
    big to scan. Every word of the query must appear (case-insensitively) in
    one of the texts fields(b) gives for a box (app.js's boxSearchText).
@@ -768,5 +786,5 @@ function compareSlowPct(data, days, current) {
   return counted === null ? { pct: current, stale: false } : { pct: counted, stale: counted !== current };
 }
 
-globalThis.pfmView = { fleetFilter, serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, compareSlowPct, estimateLines };
+globalThis.pfmView = { verifyView, fleetFilter, serviceStatusFilter, serviceStatusToggles, toggleServiceStatus, genPassword, passwordProblem, passwordFormError, passwordRequest, passwordResultLines, draftAfterPassword, hostShare, ramHostShare, cpuQuotaMeter, ramLimitMeter, pctFine, clientTotals, torrentControls, rateSourceLabel, clientAvailability, clientActionable, showClient, torrentsTab, addSummary, nextSort, sortTorrents, rtDiscovery, rtDiscoveryState, rtDiscoveryHint, rtDiscoveryToast, rtDiscoveryOn, boxRef, boxPath, transferState, transferCleanupLabel, startToast, transferMeter, transferRequest, resyncLoads, homeLabel, joinPath, parentRel, newFolderError, transferConfirmation, boxIdentity, boxLabel, endpointIdentity, boxChoices, draftAfterStart, transferMode, transferModeLabel, moveError, transferStreams, historyLines, historyTraffic, historyDue, compareRow, compareSort, compareSlowPct, estimateLines };
 })();

@@ -102,6 +102,7 @@ type BoxState struct {
 	Docker  DockerState  `json:"docker"`
 	Dirs    DirsState    `json:"dirs"`
 	Apps    AppsState    `json:"apps"`
+	Verify  VerifyState  `json:"verify"`
 	Logs    LogsState    `json:"logs"`
 	Live    LiveState    `json:"live"`
 }
@@ -289,6 +290,15 @@ type TorrentView struct {
 }
 
 // QbtState is the torrent client view.
+// VerifyState is how the box's WebUI and rTorrent connections are checked:
+// ListenerOnly is the opt-in (store.Box.ListenerOnly), Mode what the last
+// new connection got (VerifyFull, VerifyListenerOnly, VerifyBlocked; empty
+// before the first one, or after the opt-in was withdrawn).
+type VerifyState struct {
+	ListenerOnly bool   `json:"listener_only"`
+	Mode         string `json:"mode,omitempty"`
+}
+
 type QbtState struct {
 	Enabled       bool   `json:"enabled"`
 	Installed     bool   `json:"installed"`
@@ -592,6 +602,7 @@ func fromBox(b *store.Box) BoxState {
 		Docker:    DockerState{Enabled: b.DockerEnabled},
 		Dirs:      DirsState{Enabled: b.DuEnabled},
 		Apps:      AppsState{Watched: append([]string{}, b.AppsWatch...)},
+		Verify:    VerifyState{ListenerOnly: b.ListenerOnly},
 		HostKeyFP: fingerprintOrEmpty(b.HostKey),
 	}
 }

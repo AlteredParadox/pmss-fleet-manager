@@ -708,7 +708,8 @@ function fleetCards(boxes) {
       <div class="card-head">
         <div class="card-title"><span class="led ${b.status}" title="${esc(statusLabel(b.status))}${b.status_reason ? ' — ' + esc(b.status_reason) : ''}"></span><span class="n">${esc(b.name)}</span>${iowaitCell(b)}</div>
         <div class="sub">${esc(b.hostname || b.host)}${b.status_reason ? ` · <span class="${b.status === 'offline' ? 'bad' : 'warn'}">${esc(b.status_reason)}</span>` : ''}${(() => { const n = retryNote(b); return n ? ` · <span class="muted">${esc(n)}</span>` : ''; })()}</div>
-        <div class="tags"><span class="tag">${esc(b.type)}</span>${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${tiersTag(b)}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}${b.rtorrent?.enabled && b.rtorrent.version ? `<span class="tag" title="rTorrent">rt ${esc(b.rtorrent.version)}</span>` : ''}${discoveryTag(b.qbt)}</div>
+        ${(() => { const l = verifyLinks(b, true); return l.blocked ? `<div class="sub">${l.blocked}</div>` : ''; })()}
+        <div class="tags"><span class="tag">${esc(b.type)}</span>${verifyLinks(b, true).tag}${planOf(b) ? `<span class="tag" title="plan">${esc(planOf(b))}</span>` : ''}${tiersTag(b)}${b.host_sys.cpu_short ? `<span class="tag" title="${esc(b.host_sys.cpu_model)}">${esc(b.host_sys.cpu_short)}${b.host_sys.hw_encode === 'QSV' || b.host_sys.hw_encode === 'VAAPI' || b.host_sys.hw_encode === 'NVENC' ? ' · ' + esc(b.host_sys.hw_encode) : ''}</span>` : ''}${b.qbt.enabled && b.qbt.version ? `<span class="tag" title="qBittorrent${b.qbt.update_available ? ', update available' : ''}">qbt ${esc(b.qbt.version)}${b.qbt.update_available ? ' ↑' : ''}</span>` : ''}${b.rtorrent?.enabled && b.rtorrent.version ? `<span class="tag" title="rTorrent">rt ${esc(b.rtorrent.version)}</span>` : ''}${discoveryTag(b.qbt)}</div>
       </div>
       <div style="display:grid;gap:8px">
         <div><div class="kv"><span>disk</span><b>${b.disk.ok || b.disk.quota_bytes ? `${fmtBytes(b.disk.used_bytes, 1)} / ${fmtBytes(b.disk.quota_bytes, 1)}` : 'n/a'}</b></div>
@@ -730,7 +731,7 @@ function fleetTable(boxes) {
     <div class="trow head"><span>box</span><span>type</span><span>host cpu</span><span>disk</span><span>upload 30d</span><span>up / down</span><span>torrents</span><span>cpu/ram</span><span title="host iowait: now · 15 min · 30 min · 1 h">iowait</span><span>host up</span></div>
     ${boxes.map((b) => `
     <div class="trow click" data-go="/box/${b.id}">
-      <div style="display:flex;align-items:center;gap:8px;min-width:0"><span class="led ${b.status}"></span><div class="ellip"><div class="ellip" style="font-weight:600">${esc(b.name)}</div><div class="sub">${esc(b.hostname || b.host)}</div></div></div>
+      <div style="display:flex;align-items:center;gap:8px;min-width:0"><span class="led ${b.status}"></span><div class="ellip"><div class="ellip" style="font-weight:600">${esc(b.name)}</div><div class="sub">${(() => { const l = verifyLinks(b, false); return l.blocked || l.tag || esc(b.hostname || b.host); })()}</div></div></div>
       <span class="muted">${esc(b.type)}</span>
       <span class="ellip" title="${esc(b.host_sys.cpu_model || '')}">${esc(b.host_sys.cpu_short || '—')}${b.host_sys.hw_encode ? ` <span class="${b.host_sys.gpu_access ? 'ok' : 'warn'}" style="font-size:10px">${esc(b.host_sys.hw_encode)}</span>` : ''}</span>
       <div><div style="font-size:11px">${b.disk.quota_bytes ? `${fmtBytes(b.disk.used_bytes, 1)} / ${fmtBytes(b.disk.quota_bytes, 1)}` : 'n/a'}</div><div class="meter" style="margin-top:4px;height:3px"><i class="${levelClass(b.disk.pct, dt)}" style="width:${Math.min(100, b.disk.pct)}%"></i></div></div>
@@ -757,6 +758,9 @@ function viewBox() {
   if (pfmView.torrentsTab(b)) tabs.push(['torrents', 'torrents']); // the stopped-on-purpose note and a removal notice live there too
   if (b.docker.enabled || b.docker.socket_up) tabs.push(['containers', 'containers']);
   tabs.push(['history', 'history'], ['services', 'services'], ['logs', 'logs'], ['storage', 'storage'], ['transfers', 'transfers'], ['host', 'host']);
+  // Shown when it has something to say, and whenever it is asked for (the
+  // card's link, a reload of that URL), so the link always lands here.
+  if (pfmView.verifyView(b.verify).page || S.tab === 'verification') tabs.push(['verification', 'verification']);
   if (!tabs.some(([k]) => k === S.tab)) S.tab = 'overview';
   const renewDays = daysUntil(renewalOf(b));
   let body = '';
@@ -770,6 +774,7 @@ function viewBox() {
     case 'storage': body = tabStorage(b); break;
     case 'transfers': body = tabTransfers(b); break;
     case 'host': body = tabHost(b); break;
+    case 'verification': body = tabVerification(b); break;
     default: body = tabOverview(b, renewDays);
   }
   return `
@@ -1924,6 +1929,34 @@ function userLinkRow(b, label, tail) {
   const u = esc(userUrl(b, tail));
   return `<div><span>${label}</span><a href="${u}" target="_blank" rel="noopener">${u.replace(/^https:\/\//, '')}</a></div>`;
 }
+/* ----- verification: the listener-only opt-in, with what it risks ----- */
+function verifyLinks(b, card) {
+  const v = pfmView.verifyView(b.verify);
+  const go = `data-go="/box/${b.id}/verification"`;
+  return {
+    blocked: v.blocked ? `<button class="link warn" ${go} title="the dashboard does not connect to this box's WebUI: click to see why and what you can do">WebUI verification blocked by host socket privacy · review</button>` : '',
+    tag: v.tag ? `<button type="button" class="tag verify${v.inUse ? ' inuse' : ''}" ${go} title="${esc(v.tagTitle)}">listener-only${card && !v.inUse ? ' · idle' : ''}</button>` : '',
+  };
+}
+function tabVerification(b) {
+  const v = pfmView.verifyView(b.verify);
+  const state = v.blocked ? '<span class="warn">blocked: the dashboard does not connect to the WebUI on this box</span>'
+    : v.inUse ? '<span class="warn">listener-only in use: who accepted the connection is not verified</span>'
+      : v.mode === 'full' ? `<span class="ok">fully verified</span>${v.on ? ' <span class="muted">(listener-only is allowed, and not needed now)</span>' : ''}`
+        : `<span class="muted">no WebUI or rTorrent connection made since the dashboard started${v.on ? ' (listener-only is allowed)' : ''}</span>`;
+  const btn = v.on
+    ? `<button data-act="verify:set" data-on="" title="refuse connections this box gives no way to verify">turn listener-only off</button>`
+    : `<button class="warn" data-act="verify:set" data-on="1" data-confirm="Allow the listener check alone on ${esc(b.name)}? The dashboard will send your WebUI login after checking only who holds the port. A co-tenant who takes the port in the seconds after your client stops could receive it, and with it run commands as your account through the client's settings.">allow listener-only on this box</button>`;
+  return `<div class="grid"><div class="panel verify-page">
+    <div class="tile-label">WebUI connection check</div>
+    <div class="meta"><span>now</span><span>${state}</span></div>
+    <p>Before it sends your WebUI login, the dashboard checks two things on the box: that the WebUI port is held by your account (the <b>listener check</b>, on every poll), and, right after connecting, that the socket which <b>accepted</b> the connection is yours too. The second check reads the kernel's socket tables. ${v.blocked || v.inUse ? 'This box does not let your account read them (Pulsed Media\'s socket-table privacy), so the second check cannot run here.' : 'It runs where the box lets your account read them; Pulsed Media\'s socket-table privacy can prevent that.'}</p>
+    <p><b>What listener-only risks.</b> The dashboard still checks who holds the port, but not who accepted the connection. If your qBittorrent or rTorrent stops (a crash, a restart), a co-tenant on the same host who is watching for that moment could take the port in the seconds between the check and the connection, and receive your WebUI username and password. With those they could log into your client and, through its settings (qBittorrent's "run external program"), run commands as your account. It is unlikely, as it needs a hostile co-tenant on this host ready to win that race, but the result would be serious.</p>
+    <p><b>Leaving it off</b> keeps the dashboard from connecting to the WebUI on such a box: no torrent figures or torrent actions from the dashboard for it, and nothing sent that could be caught.</p>
+    <p class="muted">The setting is for this box only and starts off. Moving the box to another host, port or account turns it off. Where the box lets the dashboard read its socket tables again, full verification is used on its own.</p>
+    <div class="actions">${btn}</div>
+  </div></div>`;
+}
 function tabHost(b) {
   const h = b.host_sys;
   const memPct = h.mem_total ? (1 - h.mem_avail / h.mem_total) * 100 : 0;
@@ -2671,6 +2704,7 @@ async function runAction(a, act) {
   else if (a === 'fleet:clear') { S.fleetQ = ''; S.fleetStatus = ''; render(); }
   else if (a === 'cmp:days') await loadCompare(Number(act.dataset.days) === 30 ? 30 : 7);
   else if (a === 'cmp:sort') { const k = act.dataset.key, c = S.cmp.sort; S.cmp.sort = { key: k, dir: c.key === k ? (c.dir === 'desc' ? 'asc' : 'desc') : (CMP_ASC.has(k) ? 'asc' : 'desc') }; render(); }
+  else if (a === 'verify:set') { act.disabled = true; const on = !!act.dataset.on; await api('POST', `${BASE}/api/boxes/${S.selId}/verification`, { listener_only: on }); toast(on ? 'listener-only allowed on this box' : 'listener-only turned off: connections this box gives no way to verify are refused', on ? 'warn' : 'ok'); await loadDetail(S.selId); }
   else if (a === 'hist:days') await loadHistory(S.selId, Number(act.dataset.days) === 30 ? 30 : 7);
   else if (a.startsWith('pw:')) await passwordAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);

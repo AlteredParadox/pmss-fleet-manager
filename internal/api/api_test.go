@@ -666,6 +666,49 @@ func TestAppWatch(t *testing.T) {
 	}
 }
 
+// The listener-only opt-in: stated explicitly, persisted, in the box's
+// state, and changeable in monitor-only mode (it changes nothing on a box).
+func TestSetVerification(t *testing.T) {
+	s, st := newTestServer(t)
+	ctx := context.Background()
+	if err := s.m.AddBox(ctx, &store.Box{Name: "y", Host: "y.example", User: "u", Port: 22, Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	boxes, _ := st.ListBoxes(ctx)
+	id := boxes[0].ID
+	url := fmt.Sprintf("/api/boxes/%d/verification", id)
+	hdr := map[string]string{"Origin": "http://dash.local:8080", "Content-Type": "application/json"}
+	for _, body := range []string{`{}`, `{"listener_only":"yes"}`, `{"listener_only":true,"x":1}`} {
+		if code, _ := do(t, s, "POST", url, body, hdr); code != 400 {
+			t.Fatalf("%s: code %d", body, code)
+		}
+	}
+	if got, _ := st.GetBox(ctx, id); got.ListenerOnly {
+		t.Fatal("refused requests must not change it")
+	}
+	if code, out := do(t, s, "POST", url, `{"listener_only":true}`, hdr); code != 200 {
+		t.Fatalf("on: %d %s", code, out)
+	}
+	got, _ := st.GetBox(ctx, id)
+	state, _ := s.m.State(id)
+	if !got.ListenerOnly || !state.Verify.ListenerOnly {
+		t.Fatalf("on: stored %v, state %+v", got.ListenerOnly, state.Verify)
+	}
+	s.monitorOnly = true
+	if code, out := do(t, s, "POST", url, `{"listener_only":false}`, hdr); code != 200 {
+		t.Fatalf("off in monitor-only: %d %s", code, out)
+	}
+	s.monitorOnly = false
+	got, _ = st.GetBox(ctx, id)
+	state, _ = s.m.State(id)
+	if got.ListenerOnly || state.Verify.ListenerOnly {
+		t.Fatalf("off: stored %v, state %+v", got.ListenerOnly, state.Verify)
+	}
+	if code, _ := do(t, s, "POST", "/api/boxes/999999/verification", `{"listener_only":true}`, hdr); code != 404 {
+		t.Fatalf("missing box: %d", code)
+	}
+}
+
 func TestReadLogValidation(t *testing.T) {
 	s, _ := newTestServer(t)
 	ctx := context.Background()

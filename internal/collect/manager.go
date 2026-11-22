@@ -932,6 +932,32 @@ func (m *Manager) mutateState(id int64, fn func(*BoxState)) {
 	}, commitOpts{})
 }
 
+// SetListenerOnly records the box's opt-in to the listener check alone
+// where it denies this account its socket tables (store.Box.ListenerOnly),
+// applies it to the box's poller at once (withdrawing it drops the
+// connections made under it) and polls again, so the card shows the new
+// state without waiting.
+func (m *Manager) SetListenerOnly(ctx context.Context, id int64, on bool) error {
+	p := m.poller(id)
+	if p == nil {
+		return store.ErrNotFound
+	}
+	if err := m.st.SetListenerOnly(ctx, id, on); err != nil {
+		return err
+	}
+	p.setListenerOnly(ctx, on)
+	mode := p.verifyModeNow()
+	if _, ok := m.commit(id, func(s *BoxState) *BoxState {
+		s.Verify = VerifyState{ListenerOnly: on, Mode: mode}
+		return s
+	}, commitOpts{publish: true}); !ok {
+		return store.ErrNotFound
+	}
+	m.log.Info("listener-only verification changed", "box", p.box.Name, "on", on)
+	p.wake()
+	return nil
+}
+
 // SetAppWatch adds or removes one detected application from the box's
 // watch list, persists it, and re-evaluates the alert rules at once so an
 // "app not running" alert appears or resolves without waiting for a poll.

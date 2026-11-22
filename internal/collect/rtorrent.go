@@ -164,7 +164,7 @@ func (p *poller) rtDialer(cli *sshx.Client, ep string) (rtorrent.Dialer, error) 
 		if err != nil {
 			return nil, errors.New("rtorrent: bad endpoint port")
 		}
-		return rtorrent.Dialer(verifiedDial(cli, hp, port)), nil
+		return rtorrent.Dialer(verifiedDial(cli, hp, port, p.verifyPolicy())), nil
 	}
 	return nil, errors.New("rtorrent: no SCGI endpoint known (set one under edit, or check ~/.rtorrent.rc)")
 }
