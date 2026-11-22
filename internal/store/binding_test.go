@@ -496,7 +496,8 @@ func TestRestoreRefusesForeignSchema(t *testing.T) {
 		"view":    `CREATE VIEW v AS SELECT id FROM boxes`,
 		// A virtual table and the shadow tables its module creates.
 		"virtual": `CREATE VIRTUAL TABLE notes USING fts5(body)`,
-		// Spelled so that a text match on "CREATE VIRTUAL" would miss it.
+		// Another spelling (SQLite stores the statement normalized, so
+		// this guards the parse, not a text match).
 		"virtual, odd spelling": `create /* x */ virtual table notes2 using fts5(body)`,
 	} {
 		t.Run(name, func(t *testing.T) {
