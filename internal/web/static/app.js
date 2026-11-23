@@ -78,6 +78,11 @@ function saveNavCollapsed() { try { window.localStorage.setItem('pfm.navCollapse
 // The class lives on <body> so the folded layout is one rule set in the
 // stylesheet, not an inline width this script has to undo.
 function applyNav() { document.body.classList.toggle('nav-collapsed', !!S.navCollapsed); }
+// The fold hides the button that had focus (the sidebar is display:none), so
+// focus moves to the toggle still shown, and the next Tab enters the menu
+// instead of restarting from the document. A redraw of the sidebar calls this
+// too, to put focus back on the fold button it replaced.
+function focusNav() { (S.navCollapsed ? $('#navopen') : $('#side [data-nav="toggle"]'))?.focus({ preventScroll: true }); }
 
 /* ---------- helpers ---------- */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -577,7 +582,9 @@ function render() { renderSide(); if (!composing) renderMain(); }
 function renderSide() {
   const t = S.totals || {};
   const navActive = (v) => (S.view === v || (v === 'fleet' && (S.view === 'box' || S.view === 'edit'))) ? 'active' : '';
-  $('#side').innerHTML = `
+  const side = $('#side');
+  const navFocused = side.contains(document.activeElement) && document.activeElement.dataset.nav === 'toggle'; // found again below
+  side.innerHTML = `
     <div class="brand"><div class="led"></div><div class="name">FLEET<span>.ctl</span></div>
       <button class="nav-toggle ghost" data-nav="toggle" title="hide the menu" aria-label="hide the menu">«</button></div>
     <button class="nav ${navActive('fleet')}" data-go="/fleet"><span>fleet</span></button>
@@ -596,6 +603,7 @@ function renderSide() {
       ${S.monitorOnly ? '<div class="muted" title="started with -monitor-only: torrent, client, discovery, container, transfer and password actions are refused; monitoring runs as usual">monitor-only</div>' : ''}
     </div>
     <button class="nav side-settings ${S.settingsOpen ? 'active' : ''}" data-act="settings:open" aria-haspopup="dialog"><span>settings</span></button>`;
+  if (navFocused) focusNav();
 }
 
 /* ---------- settings dialog ---------- */
@@ -2610,6 +2618,7 @@ document.addEventListener('click', async (e) => {
     S.navCollapsed = !S.navCollapsed;
     saveNavCollapsed();
     applyNav();
+    focusNav();
     return;
   }
   const goEl = e.target.closest('[data-go]');
