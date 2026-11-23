@@ -697,7 +697,7 @@ A complete unit, `~/.config/containers/systemd/pmss-fleet-manager.container`:
 Description=PMSS Fleet Manager
 
 [Container]
-Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.24
+Image=ghcr.io/alteredparadox/pmss-fleet-manager:1.25
 ContainerName=pmss-fleet-manager
 PublishPort=127.0.0.1:8080:8080
 Volume=pmss-fleet-data:/data
@@ -1499,7 +1499,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.24.0 is the current release. The code was written against five real Pulsed
+1.25.0 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1511,10 +1511,10 @@ checksums, and a matching container image on GHCR.
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
-**Unreleased**
+**1.25.0**
 
 - **Fixed: saving settings failed with a qBittorrent download URL saved
-  before 1.24.** 1.24.0 accepted no `#` fragment in that URL other than a
+  before 1.24** (#233). 1.24.0 accepted no `#` fragment in that URL other than a
   `#sha256=` pin, and checked the stored URL on every save, so a URL copied
   with a fragment from a GitHub releases page made any settings change fail.
   Other fragments are accepted again (they are never sent, and are ignored),
@@ -1522,14 +1522,14 @@ Newest first; each release's full notes are on the
   *page* is not a download: install wants the asset itself, e.g.
   `https://github.com/userdocs/qbittorrent-nox-static/releases/download/release-5.1.4_v1.2.20/x86_64-qbittorrent-nox`,
   whose sha256 GitHub publishes.
-- **Services has its own page, with search and filters** (Discord
+- **Services has its own page, with search and filters** (#229, Discord
   request). The Services table moved from the bottom of Settings to a
   *services* page in the sidebar (shown once a Pulsed Media API key is
   set), with a text search, a status choice and a choice between services
   with a box in this dashboard and those not added here, each with its
   count. It replaces the per-status toggles, which only appeared once the
   feed held two statuses; a status hidden with them is listed again.
-- **Settings is a dialog.** A *settings* button at the bottom of the
+- **Settings is a dialog** (#232). A *settings* button at the bottom of the
   sidebar opens it over whatever page you are on, with a section list
   (general, polling and alerts, Pulsed Media, plan priorities, pmdb.fyi,
   qBittorrent, about) instead of one long page. Changes are a draft until
