@@ -413,9 +413,12 @@ func TestValidDownloadURL(t *testing.T) {
 		"https://example.com/b#sha256=" + strings.Repeat("AB", 32): true,
 		"https://example.com/b#sha256=" + strings.Repeat("a", 63):  false,
 		"https://example.com/b#sha256=" + strings.Repeat("g", 64):  false,
-		"https://example.com/b#md5=" + strings.Repeat("a", 32):     false,
-		"https://example.com/b#top":                                false,
-		"https://example.com/b#":                                   false,
+		"https://example.com/b#sha256=":                            false,
+		// Any other fragment is ignored (never sent; 1.24.0 refused it).
+		"https://example.com/b#md5=" + strings.Repeat("a", 32): true,
+		"https://example.com/b#top":                            true,
+		"https://example.com/b#":                               true,
+		"https://github.com/userdocs/qbittorrent-nox-static/releases?page=2#release-release-5.1.4_v1.2.20": true,
 	} {
 		if got := ValidDownloadURL(u); got != want {
 			t.Errorf("%.60q: %v, want %v", u, got, want)
@@ -517,5 +520,24 @@ func TestReleaseDigestTransport(t *testing.T) {
 	}
 	if transientNetError(errors.New("something else")) {
 		t.Error("an unclassified error counted as an outage")
+	}
+}
+
+// downloadPin cuts any fragment off the URL the box fetches; only a
+// sha256= one is a pin (a malformed one is refused), any other is ignored.
+func TestDownloadPin(t *testing.T) {
+	for in, want := range map[string]struct {
+		clean, digest string
+		ok            bool
+	}{
+		"https://example.com/b": {"https://example.com/b", "", true},
+		"https://example.com/b#sha256=" + strings.Repeat("AB", 32): {"https://example.com/b", strings.Repeat("ab", 32), true},
+		"https://example.com/b?x=1#top":                            {"https://example.com/b?x=1", "", true},
+		"https://example.com/b#sha256=nothex":                      {"https://example.com/b#sha256=nothex", "", false},
+	} {
+		clean, digest, ok := downloadPin(in)
+		if clean != want.clean || digest != want.digest || ok != want.ok {
+			t.Errorf("%s: %q %q %v", in, clean, digest, ok)
+		}
 	}
 }
