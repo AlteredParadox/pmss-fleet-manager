@@ -693,6 +693,18 @@ d 80 0`
 	if ok, reason := snap2.PortOwner(8080); ok || snap2.ListenersKnown || !strings.Contains(reason, "could not read") {
 		t.Fatalf("unknown listeners must refuse: %v %q", ok, reason)
 	}
+	// PortForeign names another owner only: not ours, nobody, or no reading.
+	if !snap.PortForeign(8080) || !snap.PortForeign(80) || snap.PortForeign(37849) || snap.PortForeign(9999) || snap2.PortForeign(8080) {
+		t.Fatal("PortForeign: foreign 8080/80 only")
+	}
+	snap.Listeners[7000], snap.Listeners[7001] = contestedPort, unknownOwner
+	if !snap.PortForeign(7000) || !snap.PortForeign(7001) {
+		t.Fatal("PortForeign: contested and invisible owners are foreign")
+	}
+	snap.UID = 0
+	if snap.PortForeign(8080) {
+		t.Fatal("PortForeign: no own uid, no verdict")
+	}
 }
 
 func TestTruncatedNamesLastSection(t *testing.T) {
@@ -1251,7 +1263,7 @@ func TestEstablishedOwner(t *testing.T) {
 		t.Fatalf("own connection refused: %s\n%s", reason, out)
 	}
 
-	uid := os.Getuid()
+	uid := 1001 // the canned tables' tenant: never root, whoever runs the test (Codex on #237)
 	mk := func(rows string) []byte { return []byte(fmt.Sprintf("uid %d\nbase hex\n%send\n", uid, rows)) }
 	own := fmt.Sprintf("c BEEF %d 01 0100007F\ns BEEF %d 01 0100007F\n", uid, uid)
 	if ok, known, reason := EstablishedOwner(mk(own), port); !ok || !known {
@@ -1317,7 +1329,6 @@ func TestEstablishedOwner(t *testing.T) {
 		"s 05D2 0 05 0100007F 4242 00",
 		fmt.Sprintf("s 05D2 %d 05 0100007F 4242 00", uid+1),
 		fmt.Sprintf("s 05D2 %d 01 0100007F 0 00", uid+1), // queued on another account's listener
-		"s 05D2 0 05 0100007F 0 00",                      // inode 0 without the time-wait timer
 		"s 05D2 0 05 0100007F 4242 03",                   // the timer without inode 0
 	} {
 		rows := ownIno + fmt.Sprintf("c 05D2 %d 08 0100007F\n%s\n", uid, row)
@@ -1328,10 +1339,30 @@ func TestEstablishedOwner(t *testing.T) {
 	if ok, _, reason := EstablishedOwner(mk(ownIno+fmt.Sprintf("c 05D2 %d 01 0100007F\ns 05D2 0 05 0100007F 0 03\n", uid)), port); ok || !strings.Contains(reason, "not visible") {
 		t.Fatalf("an open connection with a dead acceptor: %v %s", ok, reason)
 	}
-	// A connection still in our listener's accept queue: inode 0, our uid,
-	// a live timer. It is ours and passes (Codex on #217).
+	// An acceptor of ours with inode 0 and a live timer passes.
 	if ok, _, reason := EstablishedOwner(mk(fmt.Sprintf("c 05D2 %d 01 0100007F\ns 05D2 %d 01 0100007F 0 00\n", uid, uid)), port); !ok {
-		t.Fatalf("a queued connection of ours refused: %s", reason)
+		t.Fatalf("an inode-0 acceptor of ours refused: %s", reason)
+	}
+	// A connection the listener has not accept()ed yet is uid 0, inode 0,
+	// a live timer (measured on 6.12, 2026-11-23), as is an orphan not yet
+	// in time-wait: Pending, a refusal the caller may read again, with
+	// the socket's shape in the reason.
+	for _, row := range []string{"s 05D2 0 01 0100007F 0 00", "s 05D2 0 05 0100007F 0 00", "s 05D2 0 04 0100007F 0 01"} {
+		v := CheckEstablished(mk(ownIno+fmt.Sprintf("c 05D2 %d 01 0100007F\n%s\n", uid, row)), port)
+		f := strings.Fields(row)
+		if v.OK || !v.Known || !v.Pending || !strings.Contains(v.Reason, "no owner yet (state "+f[3]+", inode 0, timer "+f[6]+")") {
+			t.Fatalf("%q: %+v", row, v)
+		}
+	}
+	// A hard refusal of another connection wins over a pending one.
+	v := CheckEstablished(mk(fmt.Sprintf("c 05D2 %d 01 0100007F\ns 05D2 0 01 0100007F 0 00\nc BEEF %d 01 0100007F\ns BEEF %d 01 0100007F 4242 00\n", uid, uid, uid+1)), port)
+	if v.OK || v.Pending || !strings.Contains(v.Reason, fmt.Sprintf("another account (uid %d, state 01, inode 4242, timer 00)", uid+1)) {
+		t.Fatalf("hard refusal beside a pending one: %+v", v)
+	}
+	// Box text that is not of the kernel's form never reaches the reason.
+	v = CheckEstablished(mk(fmt.Sprintf("c 05D2 %d 01 0100007F\ns 05D2 %d 01<b> 0100007F 9x 00\n", uid, uid+1)), port)
+	if v.OK || !strings.Contains(v.Reason, "state ?, inode ?, timer 00") {
+		t.Fatalf("malformed fields: %+v", v)
 	}
 	// ss rows (a former fallback) are no evidence any more: refuse.
 	dec := []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d ESTAB 127.0.0.1\ns 51234 %d ESTAB 127.0.0.1\nend\n", uid, uid, uid))
@@ -1440,6 +1471,51 @@ func TestEstablishedScriptOrphanAcceptor(t *testing.T) {
 	}
 	if ok, known, reason := EstablishedOwner(out, 3772); !ok || !known {
 		t.Fatalf("pm3's rows refused: %v %v %s\n%s", ok, known, reason, out)
+	}
+}
+
+// The real script on this machine's kernel: a connection the listener has
+// not accept()ed yet is Pending (uid 0, inode 0, a live timer: 6.12, the
+// row the pm3 refusals of 2026-11-22/23 fit) or, on a kernel that lists it
+// under the listener's uid (the ubuntu-26.04 CI runner), ours already;
+// never a refusal. Accepted, it is ours.
+func TestEstablishedScriptAcceptQueue(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("as root the unaccepted row would pair as ours")
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	conn, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	out, stderr, code := runSh(t, EstablishedScript(port))
+	if code != 0 {
+		t.Fatalf("script: code %d err %q", code, stderr)
+	}
+	v := CheckEstablished([]byte(out), port)
+	if !v.Known {
+		t.Skipf("non-listening sockets not visible here: %q", out)
+	}
+	switch {
+	case v.OK:
+		t.Log("this kernel lists an unaccepted connection under the listener's uid")
+	case !v.Pending || !strings.HasPrefix(v.Shape, "state 01, inode 0, timer "):
+		t.Fatalf("unaccepted connection: %+v\n%s", v, out)
+	}
+	c, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	out, _, _ = runSh(t, EstablishedScript(port))
+	if v := CheckEstablished([]byte(out), port); !v.OK || v.Pending {
+		t.Fatalf("after accept(): %+v\n%s", v, out)
 	}
 }
 

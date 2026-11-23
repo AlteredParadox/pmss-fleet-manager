@@ -2148,6 +2148,10 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("the slow-hour iowait threshold must be 1..100 %"))
 		return
 	}
+	if in.QbtAlertPolls < 1 || in.QbtAlertPolls > 2 {
+		writeErr(w, 400, errors.New("the qBittorrent alert must wait for 1 or 2 failed polls"))
+		return
+	}
 	if in.RenewalWarnDays < 0 || in.RenewalWarnDays > 365 || in.DuIntervalHours < 0 || in.DuIntervalHours > 720 {
 		writeErr(w, 400, errors.New("out of range"))
 		return

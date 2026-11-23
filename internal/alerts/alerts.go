@@ -216,7 +216,7 @@ func wantProbeRules(s *collect.BoxState, set store.Settings, open []string) []wa
 	}
 	active = append(active, wantDisk(s, set)...)
 	active = append(active, wantTraffic(s, set)...)
-	active = append(active, wantQbt(s)...)
+	active = append(active, wantQbt(s, set)...)
 	active = append(active, wantRt(s)...)
 	active = append(active, wantDocker(s, open)...)
 	active = append(active, wantApps(s)...)
@@ -272,11 +272,13 @@ func wantTraffic(s *collect.BoxState, set store.Settings) []want {
 	return active
 }
 
-// wantQbt raises the alert for a monitored qBittorrent that does not answer.
-func wantQbt(s *collect.BoxState) []want {
+// wantQbt raises the alert for a monitored qBittorrent that does not answer
+// or is not running, once set.QbtAlertPolls polls in a row found it so (1:
+// at once). A WebUI port held by another account raises it at once.
+func wantQbt(s *collect.BoxState, set store.Settings) []want {
 	var active []want
 	name := s.Name
-	if s.Qbt.Enabled && !s.Qbt.Reachable {
+	if s.Qbt.Enabled && !s.Qbt.Reachable && (set.QbtAlertPolls <= 1 || s.Qbt.PortForeign || s.Qbt.Misses >= set.QbtAlertPolls) {
 		what := "qBittorrent Web API not responding"
 		if !s.Qbt.ProcessUp {
 			what = "qbittorrent-nox is not running"

@@ -1512,6 +1512,23 @@ checksums, and a matching container image on GHCR.
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
 
+**Unreleased**
+
+- **Fixed: an occasional "accepted by another account (uid 0)" refusal**
+  of the qBittorrent connection, a few times a day on a busy box. A
+  connection qBittorrent has not taken with `accept()` yet is listed by the
+  kernel as uid 0 with no inode, so a slow client looked like a root-owned
+  one. Such a socket is now read again for up to about 1.5 s, nothing sent
+  meanwhile, and judged once it has an owner; one that never gets one, or
+  gets someone else's, is still refused. The refusal names the socket's
+  state, inode and timer.
+- **The qBittorrent alert can wait for a second failed poll**
+  (*Settings → qbittorrent → client down alert*). It covers both "Web API
+  not responding" and "qbittorrent-nox is not running". The default stays
+  the first failed poll; "after 2 failed polls in a row" lets one slow
+  answer pass. A WebUI port held by another account is still raised at
+  once. Setting key `qbt_alert_polls` (1 or 2).
+
 **1.25.1**
 
 - **The sidebar folds away** (#235, by vasilvestre). A `«` button in the

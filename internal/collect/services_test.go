@@ -498,8 +498,10 @@ func TestServiceActiveStatuses(t *testing.T) {
 // pipe (the other end is the "server"), Run answers EstablishedScript with
 // a canned table.
 type fakeTunnel struct {
-	out    string // EstablishedScript's answer
-	pre    string // ListenerScript's (the listener before the connection)
+	out    string   // EstablishedScript's answer
+	outs   []string // or its answers in turn, the last one repeated
+	reads  int      // EstablishedScript runs so far
+	pre    string   // ListenerScript's (the listener before the connection)
 	runErr error
 	server net.Conn
 }
@@ -518,6 +520,10 @@ func (f *fakeTunnel) Run(ctx context.Context, cmd string, stdin io.Reader) ([]by
 	if isListenerScript(stdin) {
 		return []byte(f.pre), nil, f.runErr
 	}
+	f.reads++
+	if len(f.outs) > 0 {
+		return []byte(f.outs[min(f.reads, len(f.outs))-1]), nil, f.runErr
+	}
 	return []byte(f.out), nil, f.runErr
 }
 
@@ -526,6 +532,67 @@ func (f *fakeTunnel) Run(ctx context.Context, cmd string, stdin io.Reader) ([]by
 func isListenerScript(stdin io.Reader) bool {
 	b, _ := io.ReadAll(stdin)
 	return !strings.Contains(string(b), "PMSS_PRIVACY_MARKER")
+}
+
+// A connection qBittorrent has not accept()ed yet is listed as uid 0 with
+// inode 0 (pm3, 2026-11-23): verifiedDial reads the table again and uses the
+// connection once its acceptor is ours, and still refuses one that ends up
+// another account's or never gets an owner, unused either way.
+func TestVerifiedDialAcceptQueue(t *testing.T) {
+	saved := acceptRetryDelays
+	acceptRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { acceptRetryDelays = saved })
+	uid := 1001 // the canned tables' tenant: never root, whoever runs the test (Codex on #237)
+	table := func(acceptor string) string {
+		return fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\n%s\nend\n", uid, uid, acceptor)
+	}
+	queued := table("s BEEF 0 01 0100007F 0 00")
+	ours := table(fmt.Sprintf("s BEEF %d 01 0100007F 4242 00", uid))
+	foreign := table(fmt.Sprintf("s BEEF %d 01 0100007F 4242 00", uid+1))
+	ctx := context.Background()
+
+	ft := &fakeTunnel{outs: []string{queued, queued, ours}}
+	var waited []string
+	pol := verifyPolicy{waited: func(port, n int, shape string) { waited = append(waited, fmt.Sprint(port, " ", n, " ", shape)) }}
+	conn, err := verifiedDial(ft, "127.0.0.1:8089", 8089, pol)(ctx)
+	if err != nil {
+		t.Fatalf("accepted on the third reading: %v", err)
+	}
+	conn.Close()
+	if ft.reads != 3 || fmt.Sprint(waited) != "[8089 2 state 01, inode 0, timer 00]" {
+		t.Fatalf("readings %d, waited %v", ft.reads, waited)
+	}
+	// Verified at once: nothing to report.
+	if conn, err := verifiedDial(&fakeTunnel{outs: []string{ours}}, "127.0.0.1:8089", 8089, pol)(ctx); err != nil || len(waited) != 1 {
+		t.Fatalf("verified at once: %v, waited %v", err, waited)
+	} else {
+		conn.Close()
+	}
+	for name, f := range map[string]*fakeTunnel{
+		"never accepted":           {outs: []string{queued}},
+		"accepted by someone else": {outs: []string{queued, foreign}},
+	} {
+		_, err := verifiedDial(f, "127.0.0.1:8089", 8089, verifyPolicy{})(ctx)
+		if err == nil {
+			t.Fatalf("%s: must refuse", name)
+		}
+		f.server.SetReadDeadline(time.Now().Add(time.Second))
+		if n, rerr := f.server.Read(make([]byte, 16)); n != 0 || rerr != io.EOF {
+			t.Fatalf("%s: connection must be closed before any byte, got n=%d err=%v", name, n, rerr)
+		}
+		if name == "never accepted" {
+			if f.reads != len(acceptRetryDelays)+1 || !strings.Contains(err.Error(), "no owner yet (state 01, inode 0, timer 00)") {
+				t.Fatalf("never accepted: %d readings, %v", f.reads, err)
+			}
+		} else if !strings.Contains(err.Error(), "another account") {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// A root-owned live socket (it has an inode) refuses at once.
+	f := &fakeTunnel{outs: []string{table("s BEEF 0 01 0100007F 4242 00")}}
+	if _, err := verifiedDial(f, "127.0.0.1:8089", 8089, verifyPolicy{})(ctx); err == nil || f.reads != 1 {
+		t.Fatalf("root's live acceptor: %v after %d readings", err, f.reads)
+	}
 }
 
 // verifiedDial hands out a connection only when the box attributes its

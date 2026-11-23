@@ -111,6 +111,11 @@ type Settings struct {
 	// IOWaitSlowPct is the hourly mean host iowait above which the box
 	// history and the comparison view count an hour as a slow one.
 	IOWaitSlowPct int `json:"iowait_slow_pct"`
+	// QbtAlertPolls is how many polls in a row must find a monitored
+	// qBittorrent down (Web API not answering, or the process not running)
+	// before its alert is raised: 1 (at once, the default) or 2 (one failed
+	// poll is let pass).
+	QbtAlertPolls int `json:"qbt_alert_polls"`
 
 	// PMAPIKey is the Pulsed Media customer API key. It is never sent to the
 	// browser: Public() blanks it and sets HasPMAPIKey instead. On PUT an
@@ -142,6 +147,9 @@ const DefaultQbtDownloadURL = "https://github.com/userdocs/qbittorrent-nox-stati
 // DefaultIOWaitSlowPct is the slow-hour threshold until one is chosen.
 const DefaultIOWaitSlowPct = 20
 
+// DefaultQbtAlertPolls raises the qBittorrent alert on the first failed poll.
+const DefaultQbtAlertPolls = 1
+
 // DefaultSettings are used when a key has never been written.
 func DefaultSettings() Settings {
 	return Settings{
@@ -156,6 +164,7 @@ func DefaultSettings() Settings {
 		QbtDownloadURL:   DefaultQbtDownloadURL,
 		CardMinPx:        340,
 		IOWaitSlowPct:    DefaultIOWaitSlowPct,
+		QbtAlertPolls:    DefaultQbtAlertPolls,
 	}
 }
 
@@ -903,6 +912,7 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 	geti("du_interval_hours", &out.DuIntervalHours)
 	geti("card_min_px", &out.CardMinPx)
 	geti("iowait_slow_pct", &out.IOWaitSlowPct)
+	geti("qbt_alert_polls", &out.QbtAlertPolls)
 	gets("theme", &out.Theme)
 	gets("fleet_view", &out.FleetView)
 	gets("client_area_url", &out.ClientAreaURL)
@@ -939,6 +949,7 @@ func (s *Store) SaveSettings(ctx context.Context, st Settings) error {
 		"qbt_download_url":      s.sealer.Seal(labelQbtDownloadURL, st.QbtDownloadURL),
 		"card_min_px":           strconv.Itoa(st.CardMinPx),
 		"iowait_slow_pct":       strconv.Itoa(st.IOWaitSlowPct),
+		"qbt_alert_polls":       strconv.Itoa(st.QbtAlertPolls),
 		"pm_api_key":            s.sealer.Seal(labelPMAPIKey, st.PMAPIKey),
 		"pmdb_username":         st.PMDBUsername,
 		"pmdb_enabled":          boolKV(st.PMDBEnabled),

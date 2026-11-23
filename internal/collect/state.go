@@ -305,13 +305,20 @@ type VerifyState struct {
 }
 
 type QbtState struct {
-	Enabled       bool   `json:"enabled"`
-	Installed     bool   `json:"installed"`
-	ProcessUp     bool   `json:"process_up"`
-	Reachable     bool   `json:"reachable"`
-	Version       string `json:"version,omitempty"`
-	Port          int    `json:"port"`
-	Error         string `json:"error,omitempty"`
+	Enabled   bool   `json:"enabled"`
+	Installed bool   `json:"installed"`
+	ProcessUp bool   `json:"process_up"`
+	Reachable bool   `json:"reachable"`
+	Version   string `json:"version,omitempty"`
+	Port      int    `json:"port"`
+	Error     string `json:"error,omitempty"`
+	// Misses counts the polls in a row that found the client not
+	// answering (0 after one that reached it), for the alert's
+	// qbt_alert_polls setting.
+	Misses int `json:"misses,omitempty"`
+	// PortForeign: this poll found the WebUI port held by another account
+	// (probe.Snapshot.PortForeign) and sent nothing; its alert never waits.
+	PortForeign   bool   `json:"-"`
 	LocalBypass   bool   `json:"local_bypass"`  // qBittorrent.conf bypasses auth for localhost
 	SubnetBypass  bool   `json:"subnet_bypass"` // whitelist bypass enabled
 	SubnetList    string `json:"subnet_list,omitempty"`
@@ -495,6 +502,7 @@ func (s *BoxState) adoptIdentity(from BoxState) {
 // an edit.
 func (s *BoxState) resetVolatile() {
 	s.Qbt.PortOK, s.Qbt.Reachable, s.Qbt.AuthHold = false, false, false
+	s.Qbt.Misses, s.Qbt.PortForeign = 0, false // the target's; an edit may have moved it (fred on #237)
 	s.Rt.PortOK, s.Rt.Reachable = false, false
 	s.Docker.Reachable = false
 	s.Dirs.Running = false

@@ -18,6 +18,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -115,6 +116,83 @@ func TestPollQbtRestartResetsFirewalledClock(t *testing.T) {
 	p2.pollQbt(ctx, &st, snap2)
 	if st.Qbt.Connection != "connected" || st.Qbt.FirewalledSince != "" {
 		t.Fatalf("connected: %+v", st.Qbt)
+	}
+}
+
+// Misses counts the polls in a row that did not reach the client (the
+// qbt_alert_polls setting reads it) and a poll that reaches it clears it.
+func TestPollQbtCountsMisses(t *testing.T) {
+	srv := fakeWebUI(t, "connected")
+	p, snap := pollQbtFixture(t, srv)
+	ctx := context.Background()
+	st := BoxState{}
+	p.pollQbt(ctx, &st, snap)
+	if !st.Qbt.Reachable || st.Qbt.Misses != 0 {
+		t.Fatalf("reached: %+v", st.Qbt)
+	}
+	p.dialTCP = func(string) qbt.Dialer {
+		return func(ctx context.Context) (net.Conn, error) { return nil, errors.New("refusing to use the connection") }
+	}
+	p.qbt.Close()
+	p.qbt = nil // the client keeps its dialer and pooled connections
+	for want := 1; want <= 3; want++ {
+		p.pollQbt(ctx, &st, snap)
+		if st.Qbt.Reachable || st.Qbt.Misses != want {
+			t.Fatalf("miss %d: reachable %v, misses %d", want, st.Qbt.Reachable, st.Qbt.Misses)
+		}
+	}
+	snap.Qbt.Running = false // the process gone counts too
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.Misses != 4 {
+		t.Fatalf("process down: misses %d", st.Qbt.Misses)
+	}
+	// Another target (qBittorrent.conf moved the port): its own count.
+	st.Qbt.Misses = 1
+	p.box.QbtPort = 0
+	snap.Qbt.Running, snap.Qbt.ConfPort = true, 8090
+	snap.Listeners[8090] = 1001
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.Port != 8090 || st.Qbt.Misses != 1 {
+		t.Fatalf("first miss on the new port: port %d, misses %d", st.Qbt.Port, st.Qbt.Misses)
+	}
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.Misses != 2 {
+		t.Fatalf("second miss on the same port: %d", st.Qbt.Misses)
+	}
+	// A port held by another account is flagged: its alert never waits.
+	snap.Listeners[8090] = 1002
+	p.pollQbt(ctx, &st, snap)
+	if !st.Qbt.PortForeign || st.Qbt.Reachable {
+		t.Fatalf("foreign listener: %+v", st.Qbt)
+	}
+	// Nothing listening yet (a client starting up), or a table that could
+	// not be read: refused as well, but a miss like any other (fred on #237).
+	misses := st.Qbt.Misses
+	delete(snap.Listeners, 8090)
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.PortForeign || st.Qbt.Reachable || st.Qbt.Misses != misses+1 {
+		t.Fatalf("nothing listening: %+v", st.Qbt)
+	}
+	snap.ListenersKnown = false
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.PortForeign || st.Qbt.Reachable {
+		t.Fatalf("unreadable table: %+v", st.Qbt)
+	}
+	snap.ListenersKnown = true
+	// A stopped client whose port another account took: flagged as well,
+	// though the poll returns before the ownership check (Codex on #237).
+	snap.Qbt.Running, snap.Listeners[8090] = false, 1002
+	p.pollQbt(ctx, &st, snap)
+	if !st.Qbt.PortForeign || st.Qbt.ProcessUp {
+		t.Fatalf("stopped client, foreign port: %+v", st.Qbt)
+	}
+	snap.Qbt.Running, snap.Listeners[8090] = true, 1001
+	snap.Listeners[8090] = 1001
+	p.box.QbtPort, snap.Qbt.ConfPort = 8089, 8089
+	p2, _ := pollQbtFixture(t, srv)
+	p2.pollQbt(ctx, &st, snap)
+	if !st.Qbt.Reachable || st.Qbt.Misses != 0 {
+		t.Fatalf("reached again: %+v", st.Qbt)
 	}
 }
 

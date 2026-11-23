@@ -303,7 +303,9 @@ func newPoller(m *Manager, b *store.Box) *poller {
 
 // verifyPolicy is this box's say in verifiedDial.
 func (p *poller) verifyPolicy() verifyPolicy {
-	return verifyPolicy{allow: p.listenerOnly.Load, admit: p.admitListenerOnly, note: p.noteVerify}
+	return verifyPolicy{allow: p.listenerOnly.Load, admit: p.admitListenerOnly, note: p.noteVerify, waited: func(port, n int, shape string) {
+		p.m.log.Info("connection verified after re-reading the socket table", "box", p.box.Name, "port", port, "rereads", n, "acceptor_was", shape)
+	}}
 }
 
 // admitListenerOnly is the last word on a listener-only connection: under
@@ -1243,10 +1245,20 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		FirewalledSince: carriedFirewalledSince(st.Qbt, snap.Qbt.Running, p.qbtRestarted), ListenPort: st.Qbt.ListenPort,
 		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: clip(snap.Qbt.SubnetList, 1024), ConfUser: clip(snap.Qbt.Username, 64),
 		HasCreds:      p.box.QbtUser != "" || p.box.QbtPass != "",
-		BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, StartHelperStale: snap.Qbt.StartHelperStale, CronInstalled: snap.Qbt.CronEntries > 0, PMSSManaged: snap.Qbt.PMSSManaged}
-	versionOK := false // this poll read the running version (it is otherwise carried over for display)
-	defer func() {     // runs after st.Qbt is set below
+		BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, StartHelperStale: snap.Qbt.StartHelperStale, CronInstalled: snap.Qbt.CronEntries > 0, PMSSManaged: snap.Qbt.PMSSManaged,
+		// Before the early returns: another account on the port of a stopped
+		// client (the co-tenant case below) is raised at once too (Codex on #237).
+		PortForeign: snap.PortForeign(port)}
+	versionOK := false      // this poll read the running version (it is otherwise carried over for display)
+	misses := st.Qbt.Misses // the polls in a row before this one that did not reach the client
+	if st.Qbt.Port != port {
+		misses = 0 // another target (an edit, or qBittorrent.conf): its own count (fred on #237)
+	}
+	defer func() { // runs after st.Qbt is set below
 		q := &st.Qbt
+		if q.Misses = 0; !q.Reachable {
+			q.Misses = min(misses+1, 1000)
+		}
 		// Compare only a version this poll confirmed, or a restarted client
 		// whose version call failed would keep "restart to apply" lit.
 		q.RestartNeeded = versionOK && q.ProcessUp && q.Version != "" && q.BinaryVersion != "" && q.Version != q.BinaryVersion

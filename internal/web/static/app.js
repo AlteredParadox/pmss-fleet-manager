@@ -2498,6 +2498,8 @@ function viewSettings() {
 `,
     qbittorrent: () => `
     <div class="panel"><div class="tile-label">qbittorrent-nox</div>
+      <label class="row">client down alert${sel('qbt_alert_polls', [[1, 'on the first failed poll'], [2, 'after 2 failed polls in a row']], s.qbt_alert_polls || 1)}</label>
+      <div class="hint">How many polls in a row must find a monitored qBittorrent down (its Web API not answering, or qbittorrent-nox not running) before its alert is raised. Waiting for a second poll lets a single slow answer pass. A WebUI port held by another account is raised at once either way.</div>
       <label class="f">download URL for install / update<input data-s="qbt_download_url" value="${esc(s.qbt_download_url || '')}"></label>
       <div class="hint">Default is the userdocs static x86_64 build. Installed to ~/bin/qbittorrent-nox, mode 700, after a sha256 check, an ELF check and a --version check. Any other URL needs a digest to check against: a GitHub release asset has one, otherwise add #sha256=&lt;the build's sha256&gt; to the URL.</div>
     </div>
@@ -2894,7 +2896,7 @@ async function settingsAction(a, act) {
 function settingsPatch(draft, touched) {
   const d = {};
   for (const k of Object.keys(touched)) if (k in draft) d[k] = draft[k];
-  for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px', 'iowait_slow_pct']) if (k in d) d[k] = Number(d[k]);
+  for (const k of ['poll_interval_sec', 'disk_threshold_pct', 'traffic_threshold_pct', 'renewal_warn_days', 'du_interval_hours', 'card_min_px', 'iowait_slow_pct', 'qbt_alert_polls']) if (k in d) d[k] = Number(d[k]);
   if (draft.pm_api_key) { d.pm_api_key = draft.pm_api_key; delete d.clear_pm_api_key; }
   else { delete d.pm_api_key; if (draft.clear_pm_api_key) d.clear_pm_api_key = true; else delete d.clear_pm_api_key; }
   if ('pmdb_enabled' in d) d.pmdb_enabled = !!d.pmdb_enabled;
