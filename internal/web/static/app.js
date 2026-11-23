@@ -212,10 +212,24 @@ async function api(method, path, body, timeoutMs) {
   if (body instanceof FormData) opts.body = body; // multipart: the browser sets the boundary
   else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(path, opts);
-  let data = null;
-  try { data = await r.json(); } catch { /* no body */ }
+  const data = await readJSON(r, opts.signal);
   if (!r.ok) throw Object.assign(new Error((data?.error ? data.error + (data.output ? ' — ' + data.output.split('\n').slice(-2).join(' · ') : '') : null) || `${r.status} ${r.statusText}`), { status: r.status });
   return data;
+}
+
+// readJSON reads a response's JSON body, null for none or not JSON. With a
+// signal, the read is bound by it too: a body that stalls after the
+// headers rejects with the signal's reason (a TimeoutError) instead of
+// reading as an empty answer (fred on #232).
+function readJSON(r, signal) {
+  const body = r.json().catch(() => null);
+  if (!signal) return body;
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason || Object.assign(new Error('aborted'), { name: 'AbortError' }));
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener('abort', abort, { once: true });
+    body.then(resolve).finally(() => signal.removeEventListener('abort', abort));
+  });
 }
 
 /* ---------- routing ---------- */
@@ -2780,6 +2794,13 @@ async function alertsAction(a, act) {
 // SETTINGS_SAVE_MS bounds a settings save, so the dialog's save lock cannot
 // outlive a request that never answers.
 const SETTINGS_SAVE_MS = 20000;
+// rereadAfterUnknownSave reads the settings again after a save whose outcome
+// is unknown, and says whether that worked.
+async function rereadAfterUnknownSave() {
+  const ok = await loadState();
+  toast(ok ? 'settings read again: check them, then save again if needed' : 'could not read the settings again: reload the page before saving again', ok ? 'warn' : 'bad');
+  if (S.settingsOpen) renderSettings();
+}
 // saveSettings sends the touched fields and adopts the answer as the draft.
 async function saveSettings() {
   // Only the fields touched in this tab go up (plus the API-key
@@ -2794,11 +2815,15 @@ async function saveSettings() {
     saved = await api('PUT', BASE + '/api/settings', d, SETTINGS_SAVE_MS);
   } catch (err) {
     if (err?.name !== 'TimeoutError') throw err;
-    // No answer: the save may or may not have landed. Read the saved
-    // settings again (the draft and its touched fields stay) before the
-    // operator decides to save again (fred on #232).
-    await loadState();
-    throw new Error(`the save got no answer in ${SETTINGS_SAVE_MS / 1000} s and may or may not have been applied: the settings were read again, check them and save again if needed`);
+    saved = null;
+  }
+  if (!saved || typeof saved !== 'object') {
+    // No answer, or no body: the save may or may not have landed. The
+    // draft and its touched fields stay; the saved settings are read again
+    // outside the save lock (that read may stall too), and its own toast
+    // says whether it worked (fred and Codex on #232).
+    void rereadAfterUnknownSave();
+    throw new Error(`the save got no complete answer in ${SETTINGS_SAVE_MS / 1000} s and may or may not have been applied; reading the saved settings again`);
   }
   stateSeq++; // a state load started before the save must not put the old values back
   S.settings = saved; S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render(); renderSettings();
