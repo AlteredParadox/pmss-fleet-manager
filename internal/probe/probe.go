@@ -295,7 +295,8 @@ func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
 // A socket the listener has not handed to accept() yet has no file either:
 // the kernel lists it as uid 0 with inode 0 and a live timer (measured on
 // 6.12, 2026-11-23: "01, uid 0, inode 0, timer 00" until accept(), the
-// listener's uid and an inode after), and so does an orphan its process
+// listener's uid and an inode after; the kernel of CI's ubuntu-26.04 runner
+// already shows the listener's uid there), and so does an orphan its process
 // closed a moment ago that has not reached time-wait. Neither proves
 // anything about the reader yet, so such an acceptor is not refused or
 // skipped: the verdict is Pending, and the caller reads the table again

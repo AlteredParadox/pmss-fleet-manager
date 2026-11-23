@@ -1463,8 +1463,10 @@ func TestEstablishedScriptOrphanAcceptor(t *testing.T) {
 }
 
 // The real script on this machine's kernel: a connection the listener has
-// not accept()ed yet is Pending (uid 0, inode 0, a live timer), and ours
-// once accepted. This is the row the pm3 refusals of 2026-11-22/23 fit.
+// not accept()ed yet is Pending (uid 0, inode 0, a live timer: 6.12, the
+// row the pm3 refusals of 2026-11-22/23 fit) or, on a kernel that lists it
+// under the listener's uid (the ubuntu-26.04 CI runner), ours already;
+// never a refusal. Accepted, it is ours.
 func TestEstablishedScriptAcceptQueue(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("as root the unaccepted row would pair as ours")
@@ -1488,7 +1490,10 @@ func TestEstablishedScriptAcceptQueue(t *testing.T) {
 	if !v.Known {
 		t.Skipf("non-listening sockets not visible here: %q", out)
 	}
-	if !v.Pending || v.OK || !strings.HasPrefix(v.Shape, "state 01, inode 0, timer ") {
+	switch {
+	case v.OK:
+		t.Log("this kernel lists an unaccepted connection under the listener's uid")
+	case !v.Pending || !strings.HasPrefix(v.Shape, "state 01, inode 0, timer "):
 		t.Fatalf("unaccepted connection: %+v\n%s", v, out)
 	}
 	c, err := ln.Accept()
