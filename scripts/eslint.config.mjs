@@ -10,7 +10,7 @@ export default [{
     sourceType: "script",
     globals: {
       window: "readonly", document: "readonly", location: "readonly", history: "readonly",
-      fetch: "readonly", FormData: "readonly", EventSource: "readonly", requestAnimationFrame: "readonly",
+      fetch: "readonly", AbortSignal: "readonly", FormData: "readonly", EventSource: "readonly", requestAnimationFrame: "readonly",
       setTimeout: "readonly", clearTimeout: "readonly", setInterval: "readonly", confirm: "readonly",
       Promise: "readonly", console: "readonly", Set: "readonly", Map: "readonly", Number: "readonly",
       String: "readonly", Math: "readonly", Date: "readonly", Object: "readonly", JSON: "readonly", Array: "readonly",

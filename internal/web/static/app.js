@@ -43,6 +43,8 @@ const S = {
   logOpen: new Set(), // directories whose "older / rotated" group the user expanded on the logs tab
   add: { mode: 'add', step: 1, form: null, errors: {}, detect: null, busy: false, editId: null },
   settingsDraft: null, settingsTouched: {},
+  settingsOpen: false, settingsTab: 'general', lastHash: 'fleet', // the settings dialog, its section, and the page it opened over
+  settingsSaving: false, routed: false, // a save in flight (the dialog is locked until it settles); a page has been routed
   transfers: null, // box-to-box copies from /api/transfers, loaded on a box's transfers tab
   cmp: { days: 7, data: null, busy: false, err: '', sort: { key: 'free', dir: 'desc' } }, // the comparison view
   hist: null, // the history tab's last answer: { box, days, data, busy, err, at }
@@ -201,16 +203,33 @@ function toast(msg, kind = '') {
   $('#toasts').appendChild(el);
   setTimeout(() => el.remove(), msg.length > 80 ? 9000 : 4500);
 }
-async function api(method, path, body) {
+// api sends one request; timeoutMs (optional) aborts it, throwing a
+// TimeoutError, when no answer has come by then.
+async function api(method, path, body, timeoutMs) {
   const opts = { method, headers: {} };
+  if (timeoutMs) opts.signal = AbortSignal.timeout(timeoutMs);
   if (method !== 'GET') opts.headers['X-PMSS-Request'] = '1'; // the server's CSRF guard: a form cannot send it
   if (body instanceof FormData) opts.body = body; // multipart: the browser sets the boundary
   else if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(path, opts);
-  let data = null;
-  try { data = await r.json(); } catch { /* no body */ }
+  const data = await readJSON(r, opts.signal);
   if (!r.ok) throw Object.assign(new Error((data?.error ? data.error + (data.output ? ' — ' + data.output.split('\n').slice(-2).join(' · ') : '') : null) || `${r.status} ${r.statusText}`), { status: r.status });
   return data;
+}
+
+// readJSON reads a response's JSON body, null for none or not JSON. With a
+// signal, the read is bound by it too: a body that stalls after the
+// headers rejects with the signal's reason (a TimeoutError) instead of
+// reading as an empty answer (fred on #232).
+function readJSON(r, signal) {
+  const body = r.json().catch(() => null);
+  if (!signal) return body;
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason || Object.assign(new Error('aborted'), { name: 'AbortError' }));
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener('abort', abort, { once: true });
+    body.then(resolve).finally(() => signal.removeEventListener('abort', abort));
+  });
 }
 
 /* ---------- routing ---------- */
@@ -218,7 +237,20 @@ function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const parts = h.split('/').filter(Boolean);
   const view = parts[0] || 'fleet';
-  S.view = ['fleet', 'torrents', 'compare', 'box', 'add', 'alerts', 'services', 'settings', 'edit'].includes(view) ? view : 'fleet';
+  // #/settings opens the dialog over the page it was opened from (or the
+  // fleet, on a fresh load) and leaves that page's address in the bar.
+  // A page already on show is left exactly as it is (an edit form keeps its
+  // draft, a box keeps its tab): only a fresh load routes the page under it
+  // (fred on #232).
+  if (view === 'settings') {
+    history.replaceState(null, '', `#/${S.lastHash}`);
+    openSettings(parts[1]);
+    if (!S.routed) route();
+    return;
+  }
+  S.routed = true;
+  S.lastHash = h || 'fleet';
+  S.view = ['fleet', 'torrents', 'compare', 'box', 'add', 'alerts', 'services', 'edit'].includes(view) ? view : 'fleet';
   if (S.view === 'compare') void loadCompare();
   if (S.view === 'box') {
     S.selId = Number(parts[1]) || null;
@@ -236,7 +268,6 @@ function route() {
   }
   if (S.view === 'alerts') void loadAlerts();
   if (S.view === 'torrents') void loadTorrents();
-  if (S.view === 'settings') { S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; void loadPMDB(); void loadPlans(); }
   if (S.view === 'services') void loadServices();
   S.filter = '';
   S.torAdd = null;
@@ -272,7 +303,7 @@ async function loadState() {
     S.totals = d.totals || {};
     if (r.kept) recomputeTotals(); // the list is newer than the snapshot's totals
     S.settings = d.settings || {};
-    applyTheme(S.view === 'settings' && S.settingsDraft && S.settingsTouched.theme ? S.settingsDraft.theme : S.settings.theme); // keep an unsaved preview
+    applyTheme(S.settingsOpen && S.settingsDraft && S.settingsTouched.theme ? S.settingsDraft.theme : S.settings.theme); // keep an unsaved preview
     if (!S.fleetViewTouched) S.fleetView = S.settings.fleet_view || 'cards';
     S.baseline = true; // a full snapshot has landed at least once
     return true;
@@ -361,7 +392,7 @@ async function loadPMDB() {
   try { next = await api('GET', BASE + '/api/pmdb'); } catch (e) { next = { enabled: false, hosts: [], error: e.message }; }
   if (seq !== pmdbSeq) return;
   S.pmdb = next;
-  if (S.view === 'settings') render();
+  if (S.settingsOpen) renderSettings();
 }
 async function loadPlans() {
   const seq = ++plansSeq;
@@ -369,7 +400,7 @@ async function loadPlans() {
   try { next = await api('GET', BASE + '/api/plans'); } catch (e) { next = { configured: false, plans: [], error: e.message }; }
   if (seq !== plansSeq) return;
   S.plans = next;
-  if (S.view === 'settings') render();
+  if (S.settingsOpen) renderSettings();
 }
 async function loadServices() {
   const seq = ++servicesSeq;
@@ -466,11 +497,12 @@ function connectEvents() {
         if (S.view === 'compare') void loadCompare();
         if (S.view === 'box' && S.tab === 'history' && S.selId) void loadHistory(S.selId);
       }
-      if (S.view !== 'settings') { render(); return; }
+      if (!S.settingsOpen) { render(); return; }
       for (const k of Object.keys(S.settings)) if (!S.settingsTouched[k] && !SECRET_SETTINGS.has(k)) S.settingsDraft[k] = S.settings[k];
       applyTheme(S.settingsDraft.theme);
       void loadPMDB(); // the other tab may have switched the catalogue off or changed the identifier: the panel follows
       render();
+      renderSettings();
     });
   });
   es.addEventListener('services', async (ev) => {
@@ -485,14 +517,14 @@ function connectEvents() {
     const e = JSON.parse(ev.data);
     pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
     await loadState(); // every box's tiers were re-resolved
-    if (S.view === 'settings') void loadPlans();
+    if (S.settingsOpen) void loadPlans();
     else if (S.view === 'box' && S.selId) void loadDetail(S.selId);
     else render();
   });
   es.addEventListener('pmdb', (ev) => {
     const e = JSON.parse(ev.data);
     pfmRevisions.acceptAlerts(S, e.alerts_unacked, e.alerts_rev || 0);
-    if (S.view === 'settings') void loadPMDB();
+    if (S.settingsOpen) void loadPMDB();
   });
   es.addEventListener('transfers', () => {
     if (S.view === 'box' && S.tab === 'transfers') void loadTransfers();
@@ -544,7 +576,6 @@ function renderSide() {
     <button class="nav ${navActive('add')}" data-go="/add"><span>add box</span></button>
     <button class="nav ${navActive('alerts')}" data-go="/alerts"><span>alerts</span>${S.unacked ? `<span class="badge">${S.unacked}</span>` : ''}</button>
     ${S.settings?.has_pm_api_key || S.view === 'services' ? `<button class="nav ${navActive('services')}" data-go="/services"><span>services</span></button>` : ''}
-    <button class="nav ${navActive('settings')}" data-go="/settings"><span>settings</span></button>
     <div class="spacer"></div>
     <div class="side-stats">
       <div><span>boxes</span><b>${t.count || 0}</b></div>
@@ -553,7 +584,62 @@ function renderSide() {
       <div><span>last poll</span><b>${fmtAgo(t.last_poll)}</b></div>
       <div class="conn ${S.live ? 'live' : ''}"><span class="dot"></span>${S.live ? 'live updates' : 'reconnecting…'}</div>
       ${S.monitorOnly ? '<div class="muted" title="started with -monitor-only: torrent, client, discovery, container, transfer and password actions are refused; monitoring runs as usual">monitor-only</div>' : ''}
-    </div>`;
+    </div>
+    <button class="nav side-settings ${S.settingsOpen ? 'active' : ''}" data-act="settings:open" aria-haspopup="dialog"><span>settings</span></button>`;
+}
+
+/* ---------- settings dialog ---------- */
+// openSettings shows the dialog over the current page, with a fresh draft of
+// the saved settings (or keeps the open one, switching to tab if given).
+function openSettings(tab) {
+  if (tab && SETTINGS_TABS.some(([k]) => k === tab)) S.settingsTab = tab;
+  if (!S.settingsOpen) {
+    S.settingsOpen = true;
+    S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {};
+    void loadPMDB(); void loadPlans();
+  }
+  renderSettings();
+  renderSide();
+  $('.dlg-tabs .on')?.focus();
+}
+// closeSettings drops the draft (asking first when something was changed)
+// and puts the saved theme back if a preview was showing.
+function closeSettings() {
+  if (!S.settingsOpen || S.settingsSaving) return; // a save in flight settles first
+  if (settingsDirty() && !confirm('Discard the settings you changed?')) return;
+  S.settingsOpen = false; S.settingsDraft = null; S.settingsTouched = {};
+  applyTheme(S.settings.theme);
+  renderSettings();
+  render();
+  $('[data-act="settings:open"]')?.focus();
+}
+// renderSettings draws the dialog in its own layer, outside #main, so the
+// pages' live re-renders never touch it; a field with the caret keeps it.
+function renderSettings() {
+  const d = $('#dlg');
+  if (!d) return;
+  document.body.classList.toggle('dlg-open', S.settingsOpen);
+  if (!S.settingsOpen) { d.innerHTML = ''; return; }
+  // The control with focus is found again after the redraw by what it is:
+  // a field by its setting, a tab by its section, a choice by its value,
+  // a button by its action (a late plan or pmdb answer redraws the dialog).
+  const ae = document.activeElement;
+  const inDlg = ae && d.contains(ae);
+  const q = (v) => String(v).replace(/["\\]/g, '\\$&'); // our own identifiers; quoted for the attribute selector
+  let key = '';
+  if (inDlg && ae.dataset.s) key = `[data-s="${q(ae.dataset.s)}"]`;
+  else if (inDlg && ae.dataset.stab) key = `[data-stab="${q(ae.dataset.stab)}"]`;
+  else if (inDlg && ae.dataset.sSeg) key = `[data-s-seg="${q(ae.dataset.sSeg)}"][data-v="${q(ae.dataset.v)}"]`;
+  else if (inDlg && ae.dataset.act) key = `[data-act="${q(ae.dataset.act)}"]`;
+  const sel = key && ae.dataset.s && ae.type !== 'checkbox' && typeof ae.selectionStart === 'number' ? [ae.selectionStart, ae.selectionEnd] : null;
+  const pane0 = d.querySelector('.dlg-pane');
+  const scroll = pane0 && pane0.dataset.pane === S.settingsTab ? pane0.scrollTop : 0; // a new section starts at its top
+  d.innerHTML = viewSettings();
+  if (S.settingsSaving) d.querySelector('.dlg-pane fieldset')?.setAttribute('disabled', '');
+  const pane = d.querySelector('.dlg-pane');
+  if (pane) pane.scrollTop = scroll;
+  const el = key ? d.querySelector(key) : null;
+  if (el) { el.focus({ preventScroll: true }); if (sel) el.setSelectionRange(sel[0], sel[1]); }
 }
 
 function renderMain() {
@@ -581,7 +667,6 @@ function renderMain() {
     case 'add': case 'edit': m.innerHTML = viewAdd(); break;
     case 'alerts': m.innerHTML = viewAlerts(); break;
     case 'services': m.innerHTML = viewServices(); break;
-    case 'settings': m.innerHTML = viewSettings(); break;
     default: m.innerHTML = viewFleet();
   }
   const pwEl = pwKey ? m.querySelector(`[data-pw="${pwKey}"]`) : null;
@@ -2337,16 +2422,23 @@ function viewAlerts() {
 function boxName(id) { const b = S.boxes.find((x) => x.id === id); return b ? boxLabelOf(b) : 'removed box'; }
 
 /* ----- settings ----- */
+// SETTINGS_TABS: the dialog's sections, in the order its tab list shows them.
+const SETTINGS_TABS = [['general', 'general'], ['alerts', 'polling & alerts'], ['pulsedmedia', 'pulsedmedia'], ['plans', 'plan priorities'], ['pmdb', 'pmdb.fyi'], ['qbittorrent', 'qbittorrent'], ['about', 'about']];
+// viewSettings is the settings dialog: a tab list, the chosen section and a
+// footer whose save sends every touched field (settingsPatch), whichever
+// section it was touched in.
 function viewSettings() {
   const s = S.settingsDraft || S.settings;
   const sel = (name, opts, cur) => `<select data-s="${name}">${opts.map(([v, l]) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
-  return `<div class="settings">
-    <h1 style="margin:0 0 6px">Settings</h1>
+  const panels = {
+    general: () => `
     <div class="panel"><div class="tile-label">appearance</div>
       <div class="row"><span>theme</span><div class="seg"><button class="${s.theme !== 'light' ? 'on' : ''}" data-s-seg="theme" data-v="dark">dark</button><button class="${s.theme === 'light' ? 'on' : ''}" data-s-seg="theme" data-v="light">light</button></div></div>
       <div class="row"><span>card size</span><div class="seg">${CARD_SIZES.map(([px, l]) => `<button class="${Number(s.card_min_px) === px ? 'on' : ''}" data-s-seg="card_min_px" data-v="${px}">${l}</button>`).join('')}</div></div>
       <div class="row"><span>default fleet view</span><div class="seg"><button class="${s.fleet_view !== 'table' ? 'on' : ''}" data-s-seg="fleet_view" data-v="cards">cards</button><button class="${s.fleet_view === 'table' ? 'on' : ''}" data-s-seg="fleet_view" data-v="table">table</button></div></div>
     </div>
+`,
+    alerts: () => `
     <div class="panel"><div class="tile-label">polling &amp; alerts</div>
       <label class="row">refresh interval${sel('poll_interval_sec', [[10, '10 s'], [30, '30 s'], [60, '60 s'], [120, '2 min'], [300, '5 min']], s.poll_interval_sec)}</label>
       <label class="row">disk alert threshold${sel('disk_threshold_pct', [[80, '80%'], [90, '90%'], [95, '95%']], s.disk_threshold_pct)}</label>
@@ -2355,34 +2447,63 @@ function viewSettings() {
       <label class="row">renewal warning${sel('renewal_warn_days', [[3, '3 days'], [7, '7 days'], [14, '14 days'], [30, '30 days']], s.renewal_warn_days)}</label>
       <label class="row">directory measurement${sel('du_interval_hours', [[0, 'manual only'], [6, 'every 6 h'], [12, 'every 12 h'], [24, 'daily'], [168, 'weekly']], s.du_interval_hours)}</label>
     </div>
-    <div class="panel"><div class="tile-label">qbittorrent-nox</div>
-      <label class="f">download URL for install / update<input data-s="qbt_download_url" value="${esc(s.qbt_download_url || '')}"></label>
-      <div class="hint">Default is the userdocs static x86_64 build. Installed to ~/bin/qbittorrent-nox, mode 700, after a sha256 check, an ELF check and a --version check. Any other URL needs a digest to check against: a GitHub release asset has one, otherwise add #sha256=&lt;the build's sha256&gt; to the URL.</div>
-    </div>
+`,
+    pulsedmedia: () => `
     <div class="panel"><div class="tile-label">pulsedmedia account</div>
       <label class="row">client area<input data-s="client_area_url" value="${esc(s.client_area_url || '')}"></label>
       ${s.client_area_url ? `<div class="row"><span></span><a href="${esc(safeHref(s.client_area_url))}" target="_blank" rel="noopener">open client area ↗</a></div>` : ''}
       <label class="row">API key<input data-s="pm_api_key" type="password" autocomplete="off" value="${esc(s.pm_api_key || '')}" placeholder="${s.clear_pm_api_key ? 'will be removed on save' : S.settings.has_pm_api_key ? '•••••••• (stored)' : 'paste key'}"></label>
       <div class="hint">Read-only customer API key from the client area (<a href="https://pulsedmedia.com/clients/index.php?m=pmapi" target="_blank" rel="noopener">?m=pmapi ↗</a>). Fills in plan names, prices and renewal dates for boxes whose host or username matches a service. Stored in the local database; leave blank to keep the current key.${S.settings.has_pm_api_key && !s.clear_pm_api_key ? ` <button class="small ghost" data-act="settings:clear-key">remove key</button>` : ''}</div>
     </div>
+`,
+    plans: () => `
     <div class="panel"><div class="tile-label">plan priorities (I/O and CPU)</div>
       <div class="hint">Each Pulsed Media plan has an I/O priority and a CPU priority: a weight on systemd's scale that decides the box's share of the disk or the processor when the host is busy (Archive below 100, Standard from 100, Performance from 500, High from 1000). The customer API does not report them; the public <a href="https://pulsedmedia.com/eternal-vainamoinen.php" target="_blank" rel="noopener">plan page ↗</a> prints them for every plan on sale, so the dashboard reads that page and matches its listings to each box's plan name (the plan typed on the box, else the product the API matched). <b>What leaves this dashboard:</b> one request for that public page, carrying nothing about your account, when you press the button below, and on its own, only while an API key is set, when a box's product is missing from the last read (once per product, automatic reads at least an hour apart). Plans no longer sold are not on the page: type their weights into the box's edit form instead.</div>
       ${viewPlans()}
     </div>
+`,
+    pmdb: () => `
     <div class="panel"><div class="tile-label">pmdb.fyi hardware catalogue</div>
       <label class="check"><input type="checkbox" data-s="pmdb_enabled" ${s.pmdb_enabled ? 'checked' : ''}> submit the hosts my boxes run on to the community hardware catalogue and keep their rows current</label>
       <label class="row">submission identifier<input data-s="pmdb_username" maxlength="64" autocomplete="off" value="${esc(s.pmdb_username || '')}" placeholder="a nickname, reused for every submission"></label>
-      <div class="hint"><a href="https://pmdb.fyi" target="_blank" rel="noopener">pmdb.fyi ↗</a> is a community-run, public table of Pulsed Media host hardware (<a href="https://github.com/schmintendo/pmdb" target="_blank" rel="noopener">source ↗</a>). Submissions need no key, only an identifier: a nickname of your choosing that links your submissions together (a label, not a login; the catalogue's current public API and pages leave it out). Use the same one you use when uploading by hand. Changing it later makes a second contributor entry rather than renaming the old one, so contributor and plan counts can double. <b>What leaves this dashboard when enabled:</b> a request for the public list, now and then the catalogue's plan list and one host's public page, and for each host a submission carrying the identifier, the host's hostname, CPU model, core count, clock, RAM, swap, storage (the last two measured the way yabs.sh does, so they agree with YABS uploads), whether it is a KVM guest, its distribution, kernel and architecture, the plan name of your box on it (only when it matches a plan the catalogue knows) and the number of user accounts on the host. Nothing about your usage, torrents, client or SSH setup is sent; as with any web request, the service sees your IP address and the client name (pmss-fleet-manager). The catalogue keeps one row per host that every contributor's submission replaces: the dashboard sends the fullest row it can and, where it lacks a value, reads the catalogue's current row first and repeats that value, or skips the host when it cannot, so a known value is not erased (best effort: another contributor can post between its read and its write). A host is resubmitted when these facts change, after 30 days, or when the identifier changes; at most 25 submissions every ten minutes. Checked after each box's quarter-hourly inventory and every six hours.</div>
+      <details class="adv"><summary>what pmdb.fyi is and what this sends</summary><div class="hint"><a href="https://pmdb.fyi" target="_blank" rel="noopener">pmdb.fyi ↗</a> is a community-run, public table of Pulsed Media host hardware (<a href="https://github.com/schmintendo/pmdb" target="_blank" rel="noopener">source ↗</a>). Submissions need no key, only an identifier: a nickname of your choosing that links your submissions together (a label, not a login; the catalogue's current public API and pages leave it out). Use the same one you use when uploading by hand. Changing it later makes a second contributor entry rather than renaming the old one, so contributor and plan counts can double. <b>What leaves this dashboard when enabled:</b> a request for the public list, now and then the catalogue's plan list and one host's public page, and for each host a submission carrying the identifier, the host's hostname, CPU model, core count, clock, RAM, swap, storage (the last two measured the way yabs.sh does, so they agree with YABS uploads), whether it is a KVM guest, its distribution, kernel and architecture, the plan name of your box on it (only when it matches a plan the catalogue knows) and the number of user accounts on the host. Nothing about your usage, torrents, client or SSH setup is sent; as with any web request, the service sees your IP address and the client name (pmss-fleet-manager). The catalogue keeps one row per host that every contributor's submission replaces: the dashboard sends the fullest row it can and, where it lacks a value, reads the catalogue's current row first and repeats that value, or skips the host when it cannot, so a known value is not erased (best effort: another contributor can post between its read and its write). A host is resubmitted when these facts change, after 30 days, or when the identifier changes; at most 25 submissions every ten minutes. Checked after each box's quarter-hourly inventory and every six hours.</div></details>
       ${viewPMDB()}
     </div>
-    <div class="form-foot" style="justify-content:flex-start"><button class="primary" data-act="settings:save">save settings</button></div>
+`,
+    qbittorrent: () => `
+    <div class="panel"><div class="tile-label">qbittorrent-nox</div>
+      <label class="f">download URL for install / update<input data-s="qbt_download_url" value="${esc(s.qbt_download_url || '')}"></label>
+      <div class="hint">Default is the userdocs static x86_64 build. Installed to ~/bin/qbittorrent-nox, mode 700, after a sha256 check, an ELF check and a --version check. Any other URL needs a digest to check against: a GitHub release asset has one, otherwise add #sha256=&lt;the build's sha256&gt; to the URL.</div>
+    </div>
+`,
+    about: () => `
     <div class="panel"><div class="tile-label">about &amp; licensing</div>
       <div class="row"><span>version</span><span>${esc(S.version || 'dev')}${S.monitorOnly ? ' · <span class="muted" title="started with -monitor-only: torrent, client, discovery, container, transfer and password actions are refused; monitoring runs as usual">monitor-only</span>' : ''}</span></div>
       <div class="hint">pmss-fleet-manager is free software under the GNU Affero General Public License v3 or later. Because you are using it over a network, you are entitled to its source code.</div>
       <div class="row" style="justify-content:flex-start;gap:16px"><a href="${esc(BASE)}/license" target="_blank" rel="noopener">license ↗</a><a href="${esc(BASE)}/third-party-licenses" target="_blank" rel="noopener">third-party notices ↗</a><a href="${esc(S.sourceUrl || BASE + '/source')}" target="_blank" rel="noopener">source code ↗</a></div>
     </div>
-  </div>`;
+`,
+  };
+  const tab = panels[S.settingsTab] ? S.settingsTab : 'general';
+  return `<div class="dlg-scrim">
+  <div class="dlg settings-dlg" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="dlg-head"><h2 id="settings-title">Settings</h2><button class="dlg-x" data-act="settings:close" aria-label="close settings" title="close (Esc)">×</button></div>
+    <div class="dlg-body">
+      <div class="dlg-tabs" role="tablist" aria-label="settings sections">${SETTINGS_TABS.map(([k, l]) => `<button role="tab" aria-selected="${k === tab}" class="${k === tab ? 'on' : ''}" data-act="settings:tab" data-stab="${k}">${esc(l)}</button>`).join('')}</div>
+      <div class="dlg-pane" role="tabpanel" data-pane="${tab}"><fieldset class="settings">${panels[tab]()}</fieldset></div>
+    </div>
+    <div class="dlg-foot">${settingsFoot()}</div>
+  </div>
+</div>`;
 }
+// settingsFoot is the dialog's footer, redrawn alone while typing so the
+// field being typed in keeps its caret.
+function settingsFoot() {
+  const dirty = settingsDirty();
+  if (S.settingsSaving) return '<span class="muted">saving…</span><button disabled>cancel</button><button class="primary" disabled>save</button>';
+  return `${dirty ? '<span class="muted">unsaved changes</span>' : ''}<button data-act="settings:close">${dirty ? 'cancel' : 'close'}</button><button class="primary" data-act="settings:save" ${dirty ? '' : 'disabled'}>save</button>`;
+}
+const settingsDirty = () => Object.keys(S.settingsTouched || {}).length > 0;
 // viewPlans shows when the plan page was last read and what it listed,
 // marking the listings the fleet's boxes resolve to.
 function viewPlans() {
@@ -2491,17 +2612,20 @@ document.addEventListener('click', async (e) => {
   if (tab) {
     S.tab = tab.dataset.tab; S.filter = ''; S.torAdd = null; S.logView = null; S.logOpen = new Set();
     history.replaceState(null, '', `#/box/${S.selId}/${S.tab}`);
+    S.lastHash = `box/${S.selId}/${S.tab}`; // the settings dialog returns here
     if (S.tab === 'logs') rescanLogsIfStale();
     if (S.tab === 'transfers') void loadTransfers();
     if (S.tab === 'history') void loadHistory(S.selId);
     render();
     return;
   }
+  if (e.target.classList?.contains('dlg-scrim')) { closeSettings(); return; }
   const seg = e.target.closest('[data-s-seg]');
+  if (seg && S.settingsSaving) return;
   if (seg) {
     S.settingsDraft[seg.dataset.sSeg] = seg.dataset.v; S.settingsTouched[seg.dataset.sSeg] = true;
     if (seg.dataset.sSeg === 'theme') { applyTheme(seg.dataset.v); }
-    render(); return;
+    renderSettings(); return;
   }
   const act = e.target.closest('[data-act]');
   if (!act) return;
@@ -2667,22 +2791,58 @@ async function alertsAction(a, act) {
   else if (a === 'alert:dismiss') { act.disabled = true; await api('DELETE', `${BASE}/api/alerts/${act.dataset.id}`); await loadAlerts(); }
   else if (a === 'alerts:clear-resolved') { await api('POST', BASE + '/api/alerts/clear-resolved'); toast('resolved alerts cleared', 'ok'); await loadAlerts(); }
 }
-async function settingsAction(a) {
-  if (a === 'settings:save') {
-    // Only the fields touched in this tab go up (plus the API-key
-    // operation): the server merges them onto its current settings, so a
-    // save here cannot revert a change another tab made meanwhile, even one
-    // whose settings event has not reached this tab yet.
-    const d = settingsPatch(S.settingsDraft, S.settingsTouched);
-    const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
-    const pmdbChanged = 'pmdb_enabled' in d || 'pmdb_username' in d;
-    const saved = await api('PUT', BASE + '/api/settings', d);
-    stateSeq++; // a state load started before the save must not put the old values back
-    S.settings = saved; S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render();
-    if (keyChanged) { S.services = null; servicesSeq++; setTimeout(loadServices, 1500); }
-    if (pmdbChanged) void loadPMDB(); // the first check runs a few seconds later and announces itself with a pmdb event
+// SETTINGS_SAVE_MS bounds a settings save, so the dialog's save lock cannot
+// outlive a request that never answers.
+const SETTINGS_SAVE_MS = 20000;
+// rereadAfterUnknownSave reads the settings again after a save whose outcome
+// is unknown, and says whether that worked.
+async function rereadAfterUnknownSave() {
+  const ok = await loadState();
+  toast(ok ? 'settings read again: check them, then save again if needed' : 'could not read the settings again: reload the page before saving again', ok ? 'warn' : 'bad');
+  if (S.settingsOpen) renderSettings();
+}
+// saveSettings sends the touched fields and adopts the answer as the draft.
+async function saveSettings() {
+  // Only the fields touched in this tab go up (plus the API-key
+  // operation): the server merges them onto its current settings, so a
+  // save here cannot revert a change another tab made meanwhile, even one
+  // whose settings event has not reached this tab yet.
+  const d = settingsPatch(S.settingsDraft, S.settingsTouched);
+  const keyChanged = !!(d.pm_api_key || d.clear_pm_api_key);
+  const pmdbChanged = 'pmdb_enabled' in d || 'pmdb_username' in d;
+  let saved;
+  try {
+    saved = await api('PUT', BASE + '/api/settings', d, SETTINGS_SAVE_MS);
+  } catch (err) {
+    if (err?.name !== 'TimeoutError') throw err;
+    saved = null;
   }
-  else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; S.settingsTouched.clear_pm_api_key = true; render(); }
+  if (!saved || typeof saved !== 'object') {
+    // No answer, or no body: the save may or may not have landed. The
+    // draft and its touched fields stay; the saved settings are read again
+    // outside the save lock (that read may stall too), and its own toast
+    // says whether it worked (fred and Codex on #232).
+    void rereadAfterUnknownSave();
+    throw new Error(`the save got no complete answer in ${SETTINGS_SAVE_MS / 1000} s and may or may not have been applied; reading the saved settings again`);
+  }
+  stateSeq++; // a state load started before the save must not put the old values back
+  S.settings = saved; S.settingsDraft = settingsDraftOf(S.settings); S.settingsTouched = {}; applyTheme(S.settings.theme); S.fleetViewTouched = false; S.fleetView = S.settings.fleet_view; toast('settings saved', 'ok'); render(); renderSettings();
+  if (keyChanged) { S.services = null; servicesSeq++; setTimeout(loadServices, 1500); }
+  if (pmdbChanged) void loadPMDB(); // the first check runs a few seconds later and announces itself with a pmdb event
+}
+async function settingsAction(a, act) {
+  if (a === 'settings:save') {
+    // The dialog is locked while the save is in flight: no edits that the
+    // answer would overwrite, no second save, no closing on a draft that is
+    // still being committed. A failure keeps the draft (fred on #232).
+    if (S.settingsSaving) return;
+    S.settingsSaving = true; renderSettings();
+    try { await saveSettings(); } finally { S.settingsSaving = false; renderSettings(); }
+  }
+  else if (a === 'settings:clear-key') { S.settingsDraft.clear_pm_api_key = true; S.settingsDraft.pm_api_key = ''; S.settingsTouched.clear_pm_api_key = true; renderSettings(); }
+  else if (a === 'settings:open') openSettings();
+  else if (a === 'settings:close') closeSettings();
+  else if (a === 'settings:tab') { S.settingsTab = act.dataset.stab; renderSettings(); $('.dlg-tabs .on')?.focus(); }
   else if (a === 'settings:plans-sync') {
     toast('reading the plan page…');
     let v;
@@ -2690,9 +2850,9 @@ async function settingsAction(a) {
     plansSeq++; S.plans = v;
     await loadState(); // the boxes' tiers follow the fresh read
     if (S.view === 'box' && S.selId) await loadDetail(S.selId);
-    toast(`plan page read: ${v.plans.length} listings`, 'ok'); render();
+    toast(`plan page read: ${v.plans.length} listings`, 'ok'); render(); renderSettings();
   }
-  else if (a === 'settings:pmdb-sync') { toast('checking pmdb.fyi…'); const v = await api('POST', BASE + '/api/pmdb/sync'); pmdbSeq++; S.pmdb = v; toast(v.error ? v.error : `checked ${v.hosts.length} hosts`, v.error ? 'bad' : 'ok'); render(); }
+  else if (a === 'settings:pmdb-sync') { toast('checking pmdb.fyi…'); const v = await api('POST', BASE + '/api/pmdb/sync'); pmdbSeq++; S.pmdb = v; toast(v.error ? v.error : `checked ${v.hosts.length} hosts`, v.error ? 'bad' : 'ok'); renderSettings(); }
 }
 // settingsPatch is the settings save body: the touched fields, numbers as
 // numbers, the API key only when typed and the clear flag only when set
@@ -2750,7 +2910,7 @@ async function runAction(a, act) {
   else if (a === 'hist:days') await loadHistory(S.selId, Number(act.dataset.days) === 30 ? 30 : 7);
   else if (a.startsWith('pw:')) await passwordAction(a, act);
   else if (a === 'ack' || a === 'ack-all' || a === 'alert:dismiss' || a === 'alerts:clear-resolved') await alertsAction(a, act);
-  else if (a.startsWith('settings:')) await settingsAction(a);
+  else if (a.startsWith('settings:')) await settingsAction(a, act);
   else if (a.startsWith('svc:')) await servicesAction(a, act);
   else if (a.startsWith('add:') || a === 'edit:save') await wizardAction(a);
 }
@@ -2811,9 +2971,11 @@ document.addEventListener('input', (e) => {
     return;
   }
   const s = e.target.closest('[data-s]');
-  if (s && S.settingsDraft) {
+  if (s && S.settingsDraft && !S.settingsSaving) {
     S.settingsDraft[s.dataset.s] = s.type === 'checkbox' ? s.checked : s.value; S.settingsTouched[s.dataset.s] = true;
     if (s.dataset.s === 'pm_api_key' && s.value) S.settingsDraft.clear_pm_api_key = false; // a key typed after "remove" replaces instead
+    const foot = $('.dlg-foot');
+    if (foot) foot.innerHTML = settingsFoot(); // the footer only: the field keeps its caret
     return;
   }
   // Search boxes: renderMain keeps their caret; mid-composition, render()
@@ -2830,6 +2992,18 @@ document.addEventListener('compositionend', (e) => {
   const el = searchBox(e.target);
   if (el) { if ('fleetq' in el.dataset) S.fleetQ = el.value; else if ('svcq' in el.dataset) S.svcQ = el.value; else S.filter = el.value; }
   render();
+});
+// While the settings dialog is open, Escape closes it and Tab cycles inside it.
+document.addEventListener('keydown', (e) => {
+  if (!S.settingsOpen) return;
+  if (e.key === 'Escape') { e.preventDefault(); closeSettings(); return; }
+  if (e.key !== 'Tab') return;
+  const items = [...document.querySelectorAll('#dlg button, #dlg input, #dlg select, #dlg a[href], #dlg summary')].filter((el) => el.offsetParent !== null && !el.matches(':disabled'));
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  if (!$('#dlg').contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+  else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 });
 window.addEventListener('hashchange', route);
 

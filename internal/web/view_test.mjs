@@ -767,3 +767,15 @@ test('the delete-files confirmation names the box by name and identity, for both
   }
   assert.ok(V.deleteFilesConfirmation('rtorrent', 'x', '1 B', a).includes("rTorrent's download directory"));
 });
+
+test('the settings dialog never carries data-tab, which the click handler routes as a box-page tab', () => {
+  // A dialog tab or pane with data-tab was taken for the box page's tab
+  // strip: every click in it switched the box tab instead (seen while
+  // building the dialog). Its sections use data-stab, its pane data-pane.
+  const app = readFileSync(new URL('./static/app.js', import.meta.url), 'utf8');
+  const start = app.indexOf('function viewSettings()');
+  const end = app.indexOf('function settingsFoot()', start);
+  assert.ok(start > 0 && end > start, 'viewSettings found');
+  assert.ok(!/data-tab=/.test(app.slice(start, end)), 'no data-tab in the dialog markup');
+  assert.match(app.slice(start, end), /data-stab="\$\{k\}"/);
+});
