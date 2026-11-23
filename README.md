@@ -274,7 +274,7 @@ where every user on the machine can read it.
 Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 `PMSS_AUTH`, `PMSS_AUTH_FILE`, `PMSS_SSH_KEY`, `PMSS_SSH_TIMEOUT`,
 `PMSS_MONITOR_ONLY`, `PMSS_LOG`,
-`PMSS_ALLOWED_HOSTS`, `PMSS_BASE_PATH`, `PMSS_SECRET_FILE`,
+`PMSS_ALLOWED_HOSTS`, `PMSS_BASE_PATH`, `PMSS_FRAME_ANCESTORS`, `PMSS_SECRET_FILE`,
 `PMSS_SECRET_PREVIOUS_FILE`,
 `PMSS_FORGET_ENCRYPTED_CREDENTIALS`; `PMSS_SECRET` and
 `PMSS_SECRET_PREVIOUS` exist only as environment variables:
@@ -291,6 +291,7 @@ Flags, or the matching environment variables `PMSS_LISTEN`, `PMSS_DATA`,
 | `-log` | `info` | `debug`, `info`, `warn`, `error` |
 | `-allowed-hosts` | none | extra Host header names to serve, comma-separated, e.g. the name a reverse proxy uses; the listen addresses and localhost are always allowed, and on a wildcard bind (`0.0.0.0`, `::`) so is any IP address |
 | `-base-path` | none | URL prefix when a reverse proxy serves the dashboard under a sub-path and forwards it unchanged, e.g. `/fleet` (then open `https://proxy/fleet/`); leave unset if the proxy strips the prefix before forwarding |
+| `-frame-ancestors` | none | origins allowed to embed the dashboard in a frame, comma-separated, e.g. `https://homeassistant.local:8123` (an origin only: scheme, host and optional port; prefer a DNS name, because browsers are not required to match an IP literal). Unset keeps the default refusal `frame-ancestors 'none'` and `X-Frame-Options: DENY`; once set, the CSP names those origins and keeps `'self'`, so the dashboard can also be framed by its own origin, and `X-Frame-Options` is dropped, because it cannot carry more than one ancestor. Home Assistant shows apps in an iframe, so its app wrapper needs this. A listed origin can frame the dashboard and so present its controls to its users: list only a parent you trust not to mislead them into acting on the boxes |
 | `-secret-file` | none | file holding the secret that encrypts the stored credentials, or set `PMSS_SECRET` to the secret itself; see *Encrypting stored credentials* below. Unset keeps them in plain text |
 | `-previous-secret-file` | none | when changing or removing the secret: file holding the one the credentials are encrypted with now, or set `PMSS_SECRET_PREVIOUS`; for one start |
 | `-forget-encrypted-credentials` | off | after losing the secret: remove every stored credential that does not decrypt, then start |

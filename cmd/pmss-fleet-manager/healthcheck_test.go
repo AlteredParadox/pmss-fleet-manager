@@ -75,7 +75,7 @@ func TestHealthcheckAgainstServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Stop()
-	srv := httptest.NewServer(api.New(st, m, "me:pw", "/fleet"))
+	srv := httptest.NewServer(api.New(st, m, "me:pw", "/fleet", nil))
 	defer srv.Close()
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
 	u, err := healthURL("0.0.0.0:" + port)
