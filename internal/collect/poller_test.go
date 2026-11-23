@@ -146,7 +146,27 @@ func TestPollQbtCountsMisses(t *testing.T) {
 	if st.Qbt.Misses != 4 {
 		t.Fatalf("process down: misses %d", st.Qbt.Misses)
 	}
-	snap.Qbt.Running = true
+	// Another target (qBittorrent.conf moved the port): its own count.
+	st.Qbt.Misses = 1
+	p.box.QbtPort = 0
+	snap.Qbt.Running, snap.Qbt.ConfPort = true, 8090
+	snap.Listeners[8090] = 1001
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.Port != 8090 || st.Qbt.Misses != 1 {
+		t.Fatalf("first miss on the new port: port %d, misses %d", st.Qbt.Port, st.Qbt.Misses)
+	}
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.Misses != 2 {
+		t.Fatalf("second miss on the same port: %d", st.Qbt.Misses)
+	}
+	// A port held by another account is flagged: its alert never waits.
+	snap.Listeners[8090] = 1002
+	p.pollQbt(ctx, &st, snap)
+	if !st.Qbt.PortRefused || st.Qbt.Reachable {
+		t.Fatalf("foreign listener: %+v", st.Qbt)
+	}
+	snap.Listeners[8090] = 1001
+	p.box.QbtPort, snap.Qbt.ConfPort = 8089, 8089
 	p2, _ := pollQbtFixture(t, srv)
 	p2.pollQbt(ctx, &st, snap)
 	if !st.Qbt.Reachable || st.Qbt.Misses != 0 {

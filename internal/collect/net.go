@@ -139,6 +139,9 @@ func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer 
 		// called accept(), or an orphan is closing) is read again a few
 		// times, nothing written meanwhile; it is judged once it has an
 		// owner, and refused if it never gets one (probe.EstablishedOwner).
+		// The readings share vctx's 10 s on purpose: a box too slow to run
+		// them in that time is refused, as one too slow for a single
+		// reading was, rather than holding the poll longer.
 		for attempt := 0; ; attempt++ {
 			out, _, err = cli.RunLimited(vctx, "sh", strings.NewReader(probe.EstablishedScript(port)), socketTableLimit)
 			if err != nil && len(out) == 0 {
@@ -148,7 +151,7 @@ func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer 
 			prev := v
 			if v = probe.CheckEstablished(out, port); !v.Pending || err != nil || attempt >= len(acceptRetryDelays) {
 				if v.OK && attempt > 0 && pol.waited != nil {
-					pol.waited(attempt, prev.Shape)
+					pol.waited(port, attempt, prev.Shape)
 				}
 				break
 			}
@@ -260,7 +263,7 @@ type verifyPolicy struct {
 	note  func(mode string)
 	// waited, if set, hears of a connection verified only after re-reading
 	// the table: how many re-reads, and the shape the acceptor had.
-	waited func(rereads int, shape string)
+	waited func(port, rereads int, shape string)
 }
 
 func (v verifyPolicy) record(mode string) {

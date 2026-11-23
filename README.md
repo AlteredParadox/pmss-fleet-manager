@@ -1526,7 +1526,8 @@ Newest first; each release's full notes are on the
   (*Settings → qbittorrent → client down alert*). It covers both "Web API
   not responding" and "qbittorrent-nox is not running". The default stays
   the first failed poll; "after 2 failed polls in a row" lets one slow
-  answer pass. Setting key `qbt_alert_polls` (1 or 2).
+  answer pass. A WebUI port held by another account is still raised at
+  once. Setting key `qbt_alert_polls` (1 or 2).
 
 **1.25.1**
 

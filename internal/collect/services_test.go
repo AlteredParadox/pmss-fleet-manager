@@ -542,7 +542,7 @@ func TestVerifiedDialAcceptQueue(t *testing.T) {
 	saved := acceptRetryDelays
 	acceptRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	t.Cleanup(func() { acceptRetryDelays = saved })
-	uid := os.Getuid()
+	uid := 1001 // the canned tables' tenant: never root, whoever runs the test (Codex on #237)
 	table := func(acceptor string) string {
 		return fmt.Sprintf("uid %d\nbase hex\nc BEEF %d 01 0100007F\n%s\nend\n", uid, uid, acceptor)
 	}
@@ -553,13 +553,13 @@ func TestVerifiedDialAcceptQueue(t *testing.T) {
 
 	ft := &fakeTunnel{outs: []string{queued, queued, ours}}
 	var waited []string
-	pol := verifyPolicy{waited: func(n int, shape string) { waited = append(waited, fmt.Sprint(n, " ", shape)) }}
+	pol := verifyPolicy{waited: func(port, n int, shape string) { waited = append(waited, fmt.Sprint(port, " ", n, " ", shape)) }}
 	conn, err := verifiedDial(ft, "127.0.0.1:8089", 8089, pol)(ctx)
 	if err != nil {
 		t.Fatalf("accepted on the third reading: %v", err)
 	}
 	conn.Close()
-	if ft.reads != 3 || fmt.Sprint(waited) != "[2 state 01, inode 0, timer 00]" {
+	if ft.reads != 3 || fmt.Sprint(waited) != "[8089 2 state 01, inode 0, timer 00]" {
 		t.Fatalf("readings %d, waited %v", ft.reads, waited)
 	}
 	// Verified at once: nothing to report.

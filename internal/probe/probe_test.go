@@ -1251,7 +1251,7 @@ func TestEstablishedOwner(t *testing.T) {
 		t.Fatalf("own connection refused: %s\n%s", reason, out)
 	}
 
-	uid := os.Getuid()
+	uid := 1001 // the canned tables' tenant: never root, whoever runs the test (Codex on #237)
 	mk := func(rows string) []byte { return []byte(fmt.Sprintf("uid %d\nbase hex\n%send\n", uid, rows)) }
 	own := fmt.Sprintf("c BEEF %d 01 0100007F\ns BEEF %d 01 0100007F\n", uid, uid)
 	if ok, known, reason := EstablishedOwner(mk(own), port); !ok || !known {

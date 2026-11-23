@@ -315,7 +315,10 @@ type QbtState struct {
 	// Misses counts the polls in a row that found the client not
 	// answering (0 after one that reached it), for the alert's
 	// qbt_alert_polls setting.
-	Misses        int    `json:"misses,omitempty"`
+	Misses int `json:"misses,omitempty"`
+	// PortRefused: this poll found the WebUI port held by another account
+	// (or unverifiable) and sent nothing; its alert never waits.
+	PortRefused   bool   `json:"-"`
 	LocalBypass   bool   `json:"local_bypass"`  // qBittorrent.conf bypasses auth for localhost
 	SubnetBypass  bool   `json:"subnet_bypass"` // whitelist bypass enabled
 	SubnetList    string `json:"subnet_list,omitempty"`
@@ -499,6 +502,7 @@ func (s *BoxState) adoptIdentity(from BoxState) {
 // an edit.
 func (s *BoxState) resetVolatile() {
 	s.Qbt.PortOK, s.Qbt.Reachable, s.Qbt.AuthHold = false, false, false
+	s.Qbt.Misses = 0 // counted for the target a poll reaches; an edit may have moved it (fred on #237)
 	s.Rt.PortOK, s.Rt.Reachable = false, false
 	s.Docker.Reachable = false
 	s.Dirs.Running = false

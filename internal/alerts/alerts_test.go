@@ -100,6 +100,11 @@ func TestWantQbtAlertPolls(t *testing.T) {
 	s := collect.BoxState{Name: "seed-01"}
 	s.Qbt.Enabled, s.Qbt.ProcessUp, s.Qbt.Error = true, true, "refused"
 	one, two := store.Settings{QbtAlertPolls: 1}, store.Settings{QbtAlertPolls: 2}
+	s.Qbt.PortRefused = true // another account holds the WebUI port: at once, whatever the setting
+	if got := wantQbt(&s, two); !slices.ContainsFunc(got, func(w want) bool { return w.key == "qbt" }) {
+		t.Fatal("a foreign listener must not wait")
+	}
+	s.Qbt.PortRefused = false
 	for _, c := range []struct {
 		misses     int
 		set        store.Settings

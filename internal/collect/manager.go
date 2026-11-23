@@ -772,7 +772,7 @@ func dropRetargetedRows(prev *BoxState, old, fresh *store.Box) *BoxState {
 		c.Rt.Torrents = nil
 	}
 	if qb {
-		c.Qbt.Torrents = nil
+		c.Qbt.Torrents, c.Qbt.Misses = nil, 0
 	}
 	return &c
 }
