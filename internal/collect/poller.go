@@ -1245,7 +1245,10 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		FirewalledSince: carriedFirewalledSince(st.Qbt, snap.Qbt.Running, p.qbtRestarted), ListenPort: st.Qbt.ListenPort,
 		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: clip(snap.Qbt.SubnetList, 1024), ConfUser: clip(snap.Qbt.Username, 64),
 		HasCreds:      p.box.QbtUser != "" || p.box.QbtPass != "",
-		BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, StartHelperStale: snap.Qbt.StartHelperStale, CronInstalled: snap.Qbt.CronEntries > 0, PMSSManaged: snap.Qbt.PMSSManaged}
+		BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, StartHelperStale: snap.Qbt.StartHelperStale, CronInstalled: snap.Qbt.CronEntries > 0, PMSSManaged: snap.Qbt.PMSSManaged,
+		// Before the early returns: another account on the port of a stopped
+		// client (the co-tenant case below) is raised at once too (Codex on #237).
+		PortForeign: snap.PortForeign(port)}
 	versionOK := false      // this poll read the running version (it is otherwise carried over for display)
 	misses := st.Qbt.Misses // the polls in a row before this one that did not reach the client
 	if st.Qbt.Port != port {
@@ -1279,7 +1282,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	if ok, reason := snap.PortOwner(port); !ok {
 		// Shared host: a co-tenant can bind our WebUI port while our client
 		// is down and harvest the credentials the login would send.
-		qs.Error, qs.PortForeign = reason, snap.PortForeign(port)
+		qs.Error = reason
 		st.Qbt = qs
 		return
 	}

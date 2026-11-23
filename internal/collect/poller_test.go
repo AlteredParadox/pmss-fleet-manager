@@ -179,6 +179,14 @@ func TestPollQbtCountsMisses(t *testing.T) {
 		t.Fatalf("unreadable table: %+v", st.Qbt)
 	}
 	snap.ListenersKnown = true
+	// A stopped client whose port another account took: flagged as well,
+	// though the poll returns before the ownership check (Codex on #237).
+	snap.Qbt.Running, snap.Listeners[8090] = false, 1002
+	p.pollQbt(ctx, &st, snap)
+	if !st.Qbt.PortForeign || st.Qbt.ProcessUp {
+		t.Fatalf("stopped client, foreign port: %+v", st.Qbt)
+	}
+	snap.Qbt.Running, snap.Listeners[8090] = true, 1001
 	snap.Listeners[8090] = 1001
 	p.box.QbtPort, snap.Qbt.ConfPort = 8089, 8089
 	p2, _ := pollQbtFixture(t, srv)
