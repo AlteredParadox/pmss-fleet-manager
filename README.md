@@ -1500,7 +1500,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.25.0 is the current release. The code was written against five real Pulsed
+1.25.1 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1511,6 +1511,16 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.25.1**
+
+- **The sidebar folds away** (#235, by vasilvestre). A `«` button in the
+  sidebar's top row hides it and gives its 220px back to the page, for a
+  phone or the dashboard inside a Home Assistant panel; a `☰` button in the
+  top-left corner brings it back. The choice is kept in this browser
+  (`pfm.navCollapsed` in local storage), across reloads and new tabs, and
+  applies before the page first draws. Keyboard focus moves to whichever
+  button is shown.
 
 **1.25.0**
 
