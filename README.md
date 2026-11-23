@@ -1519,8 +1519,8 @@ Newest first; each release's full notes are on the
   phone or the dashboard inside a Home Assistant panel; a `☰` button in the
   top-left corner brings it back. The choice is kept in this browser
   (`pfm.navCollapsed` in local storage), across reloads and new tabs, and
-  applies before the page first draws. Keyboard focus moves to whichever
-  button is shown.
+  is restored on load without waiting for the API. Keyboard focus moves to
+  whichever button is shown.
 
 **1.25.0**
 
@@ -1555,7 +1555,10 @@ Newest first; each release's full notes are on the
   than one). Each value must be an origin (http or https, a DNS name or
   IPv4 address, an optional port); an invalid one stops the start before
   the database is opened. List only a parent you trust. Embedding under
-  Home Assistant's ingress has not been verified yet.
+  Home Assistant's ingress was confirmed after the release by vasilvestre on Home
+  Assistant OS (issue #230). Reached over ingress, the dashboard runs
+  without its own `-auth` (Home Assistant signs the user in), so do not
+  also expose that unauthenticated port directly.
 
 **1.24.0**
 
