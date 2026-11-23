@@ -137,6 +137,18 @@ func (s *Snapshot) PortOwner(port int) (ok bool, reason string) {
 	return true, ""
 }
 
+// PortForeign reports whether PortOwner's refusal names another owner: the
+// port is held by another account, by more than one, or by a process whose
+// owner is not visible. Nothing listening, an unreadable table or an
+// unknown own uid are failed or early readings, not evidence of anyone.
+func (s *Snapshot) PortForeign(port int) bool {
+	if !s.ListenersKnown || s.UID <= 0 {
+		return false
+	}
+	uid, found := s.Listeners[port]
+	return found && uid != s.UID
+}
+
 // loopbackReachable reports whether a listener's local address is one that
 // a connection to 127.0.0.1 reaches: either a /proc/net/tcp{,6} address
 // (hex, little-endian words) or the textual form ss prints.

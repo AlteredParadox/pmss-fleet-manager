@@ -1279,7 +1279,7 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 	if ok, reason := snap.PortOwner(port); !ok {
 		// Shared host: a co-tenant can bind our WebUI port while our client
 		// is down and harvest the credentials the login would send.
-		qs.Error, qs.PortRefused = reason, true
+		qs.Error, qs.PortForeign = reason, snap.PortForeign(port)
 		st.Qbt = qs
 		return
 	}

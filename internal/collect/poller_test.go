@@ -162,9 +162,23 @@ func TestPollQbtCountsMisses(t *testing.T) {
 	// A port held by another account is flagged: its alert never waits.
 	snap.Listeners[8090] = 1002
 	p.pollQbt(ctx, &st, snap)
-	if !st.Qbt.PortRefused || st.Qbt.Reachable {
+	if !st.Qbt.PortForeign || st.Qbt.Reachable {
 		t.Fatalf("foreign listener: %+v", st.Qbt)
 	}
+	// Nothing listening yet (a client starting up), or a table that could
+	// not be read: refused as well, but a miss like any other (fred on #237).
+	misses := st.Qbt.Misses
+	delete(snap.Listeners, 8090)
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.PortForeign || st.Qbt.Reachable || st.Qbt.Misses != misses+1 {
+		t.Fatalf("nothing listening: %+v", st.Qbt)
+	}
+	snap.ListenersKnown = false
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.PortForeign || st.Qbt.Reachable {
+		t.Fatalf("unreadable table: %+v", st.Qbt)
+	}
+	snap.ListenersKnown = true
 	snap.Listeners[8090] = 1001
 	p.box.QbtPort, snap.Qbt.ConfPort = 8089, 8089
 	p2, _ := pollQbtFixture(t, srv)

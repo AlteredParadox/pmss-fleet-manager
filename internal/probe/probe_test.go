@@ -693,6 +693,18 @@ d 80 0`
 	if ok, reason := snap2.PortOwner(8080); ok || snap2.ListenersKnown || !strings.Contains(reason, "could not read") {
 		t.Fatalf("unknown listeners must refuse: %v %q", ok, reason)
 	}
+	// PortForeign names another owner only: not ours, nobody, or no reading.
+	if !snap.PortForeign(8080) || !snap.PortForeign(80) || snap.PortForeign(37849) || snap.PortForeign(9999) || snap2.PortForeign(8080) {
+		t.Fatal("PortForeign: foreign 8080/80 only")
+	}
+	snap.Listeners[7000], snap.Listeners[7001] = contestedPort, unknownOwner
+	if !snap.PortForeign(7000) || !snap.PortForeign(7001) {
+		t.Fatal("PortForeign: contested and invisible owners are foreign")
+	}
+	snap.UID = 0
+	if snap.PortForeign(8080) {
+		t.Fatal("PortForeign: no own uid, no verdict")
+	}
 }
 
 func TestTruncatedNamesLastSection(t *testing.T) {
