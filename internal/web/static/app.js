@@ -81,8 +81,11 @@ function applyNav() { document.body.classList.toggle('nav-collapsed', !!S.navCol
 // The fold hides the button that had focus (the sidebar is display:none), so
 // focus moves to the toggle still shown, and the next Tab enters the menu
 // instead of restarting from the document. A redraw of the sidebar calls this
-// too, to put focus back on the fold button it replaced.
-function focusNav() { (S.navCollapsed ? $('#navopen') : $('#side [data-nav="toggle"]'))?.focus({ preventScroll: true }); }
+// too, to put focus back on the fold button it replaced, and must not scroll
+// the page under the reader. Below 820px the rail sits at the top of the
+// document while Show is fixed, so only the click lets focus scroll it back
+// into view.
+function focusNav(scroll = false) { (S.navCollapsed ? $('#navopen') : $('#side [data-nav="toggle"]'))?.focus({ preventScroll: !scroll }); }
 
 /* ---------- helpers ---------- */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -2618,7 +2621,7 @@ document.addEventListener('click', async (e) => {
     S.navCollapsed = !S.navCollapsed;
     saveNavCollapsed();
     applyNav();
-    focusNav();
+    focusNav(true);
     return;
   }
   const goEl = e.target.closest('[data-go]');
