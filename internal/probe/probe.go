@@ -308,10 +308,11 @@ func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 
 // Established is CheckEstablished's verdict: EstablishedOwner's ok, known
 // and reason, and Pending when the refusal rests only on accepting sockets
-// that have no owner yet (see EstablishedOwner).
+// that have no owner yet (see EstablishedOwner), with Shape the state,
+// inode and timer of one of them (validated, see socketShape).
 type Established struct {
 	OK, Known, Pending bool
-	Reason             string
+	Reason, Shape      string
 }
 
 // acceptorRow is what EstablishedOwner keeps of one accepting socket.
@@ -341,14 +342,16 @@ func socketShape(f []string) string {
 
 // CheckEstablished is EstablishedOwner with the Pending case told apart.
 func CheckEstablished(out []byte, port int) Established {
-	ok, known, pending, reason := establishedOwner(out, port)
-	return Established{OK: ok, Known: known, Pending: pending, Reason: reason}
+	ok, known, shape, reason := establishedOwner(out, port)
+	return Established{OK: ok, Known: known, Pending: shape != "", Shape: shape, Reason: reason}
 }
 
-func establishedOwner(out []byte, port int) (ok, known, pending bool, reason string) {
+// establishedOwner returns, for a pending verdict, the waiting socket's
+// shape in place of a flag (empty otherwise).
+func establishedOwner(out []byte, port int) (ok, known bool, pending, reason string) {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	if strings.TrimSpace(lines[len(lines)-1]) != "end" {
-		return false, true, false, "the box's socket table came back incomplete"
+		return false, true, "", "the box's socket table came back incomplete"
 	}
 	uid, base := -1, 0
 	acceptors := map[string]acceptorRow{} // our ephemeral port (as printed) -> the accepting socket
@@ -364,9 +367,9 @@ func establishedOwner(out []byte, port int) (ok, known, pending bool, reason str
 				uid, _ = strconv.Atoi(f[1])
 			}
 		case "privacy":
-			return false, false, false, "the box does not let this account read its socket tables (socket-table privacy)"
+			return false, false, "", "the box does not let this account read its socket tables (socket-table privacy)"
 		case "failed":
-			return false, true, false, "could not inspect the box's socket table (" + strings.Join(f[1:], " ") + ")"
+			return false, true, "", "could not inspect the box's socket table (" + strings.Join(f[1:], " ") + ")"
 		case "base":
 			if len(f) == 2 && f[1] == "hex" {
 				base = 16
@@ -402,10 +405,10 @@ func establishedOwner(out []byte, port int) (ok, known, pending bool, reason str
 		}
 	}
 	if uid < 0 {
-		return false, true, false, "could not read the account's uid on the box"
+		return false, true, "", "could not read the account's uid on the box"
 	}
 	if len(clients) == 0 {
-		return false, true, false, fmt.Sprintf("the connection to port %d is not in the box's socket table", port)
+		return false, true, "", fmt.Sprintf("the connection to port %d is not in the box's socket table", port)
 	}
 	paired, waiting := 0, ""
 	for _, c := range clients {
@@ -414,22 +417,22 @@ func establishedOwner(out []byte, port int) (ok, known, pending bool, reason str
 		case !found && peerClosed(c[1]):
 			continue // a leftover with no reader on the other side
 		case !found:
-			return false, true, false, fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
+			return false, true, "", fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
 		case a.uid == uid:
 			paired++
 		case a.queued:
 			waiting = a.shape // judged once it has an owner; any hard refusal below still wins
 		default:
-			return false, true, false, fmt.Sprintf("the connection to port %d was accepted by another account (uid %d, %s); refusing to use it", port, a.uid, a.shape)
+			return false, true, "", fmt.Sprintf("the connection to port %d was accepted by another account (uid %d, %s); refusing to use it", port, a.uid, a.shape)
 		}
 	}
 	if waiting != "" {
-		return false, true, true, fmt.Sprintf("the socket that took the connection to port %d has no owner yet (%s): not accepted by its listener, or closing; refusing to use it", port, waiting)
+		return false, true, waiting, fmt.Sprintf("the socket that took the connection to port %d has no owner yet (%s): not accepted by its listener, or closing; refusing to use it", port, waiting)
 	}
 	if paired == 0 {
-		return false, true, false, fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
+		return false, true, "", fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
 	}
-	return true, true, false, ""
+	return true, true, "", ""
 }
 
 // ScriptUID is the "uid N" line EstablishedScript (and ListenerScript's

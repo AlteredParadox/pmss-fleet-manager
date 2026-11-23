@@ -272,8 +272,9 @@ func wantTraffic(s *collect.BoxState, set store.Settings) []want {
 	return active
 }
 
-// wantQbt raises the alert for a monitored qBittorrent that does not answer,
-// once set.QbtAlertPolls polls in a row found it so (1: at once).
+// wantQbt raises the alert for a monitored qBittorrent that does not answer
+// or is not running, once set.QbtAlertPolls polls in a row found it so (1:
+// at once).
 func wantQbt(s *collect.BoxState, set store.Settings) []want {
 	var active []want
 	name := s.Name

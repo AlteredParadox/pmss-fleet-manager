@@ -1462,6 +1462,46 @@ func TestEstablishedScriptOrphanAcceptor(t *testing.T) {
 	}
 }
 
+// The real script on this machine's kernel: a connection the listener has
+// not accept()ed yet is Pending (uid 0, inode 0, a live timer), and ours
+// once accepted. This is the row the pm3 refusals of 2026-11-22/23 fit.
+func TestEstablishedScriptAcceptQueue(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("as root the unaccepted row would pair as ours")
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	conn, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	out, stderr, code := runSh(t, EstablishedScript(port))
+	if code != 0 {
+		t.Fatalf("script: code %d err %q", code, stderr)
+	}
+	v := CheckEstablished([]byte(out), port)
+	if !v.Known {
+		t.Skipf("non-listening sockets not visible here: %q", out)
+	}
+	if !v.Pending || v.OK || !strings.HasPrefix(v.Shape, "state 01, inode 0, timer ") {
+		t.Fatalf("unaccepted connection: %+v\n%s", v, out)
+	}
+	c, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	out, _, _ = runSh(t, EstablishedScript(port))
+	if v := CheckEstablished([]byte(out), port); !v.OK || v.Pending {
+		t.Fatalf("after accept(): %+v\n%s", v, out)
+	}
+}
+
 // Without flock, bounded() skips the command instead of running it
 // unguarded: a stuck earlier run could not be told from none (GPT audit
 // 2026-10-22 finding 12).

@@ -303,7 +303,9 @@ func newPoller(m *Manager, b *store.Box) *poller {
 
 // verifyPolicy is this box's say in verifiedDial.
 func (p *poller) verifyPolicy() verifyPolicy {
-	return verifyPolicy{allow: p.listenerOnly.Load, admit: p.admitListenerOnly, note: p.noteVerify}
+	return verifyPolicy{allow: p.listenerOnly.Load, admit: p.admitListenerOnly, note: p.noteVerify, waited: func(n int, shape string) {
+		p.m.log.Info("WebUI connection verified after re-reading the socket table", "box", p.box.Name, "rereads", n, "acceptor_was", shape)
+	}}
 }
 
 // admitListenerOnly is the last word on a listener-only connection: under

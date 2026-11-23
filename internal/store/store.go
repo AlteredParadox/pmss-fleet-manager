@@ -112,8 +112,9 @@ type Settings struct {
 	// history and the comparison view count an hour as a slow one.
 	IOWaitSlowPct int `json:"iowait_slow_pct"`
 	// QbtAlertPolls is how many polls in a row must find a monitored
-	// qBittorrent not answering before its alert is raised: 1 (at once,
-	// the default) or 2 (one failed poll is let pass).
+	// qBittorrent down (Web API not answering, or the process not running)
+	// before its alert is raised: 1 (at once, the default) or 2 (one failed
+	// poll is let pass).
 	QbtAlertPolls int `json:"qbt_alert_polls"`
 
 	// PMAPIKey is the Pulsed Media customer API key. It is never sent to the

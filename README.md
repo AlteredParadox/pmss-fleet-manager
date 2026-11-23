@@ -1522,10 +1522,11 @@ Newest first; each release's full notes are on the
   meanwhile, and judged once it has an owner; one that never gets one, or
   gets someone else's, is still refused. The refusal names the socket's
   state, inode and timer.
-- **The qBittorrent "not responding" alert can wait for a second failed
-  poll** (*Settings → qbittorrent → "not responding" alert*). The default
-  stays the first failed poll; "after 2 failed polls in a row" lets one
-  slow answer pass. Setting key `qbt_alert_polls` (1 or 2).
+- **The qBittorrent alert can wait for a second failed poll**
+  (*Settings → qbittorrent → client down alert*). It covers both "Web API
+  not responding" and "qbittorrent-nox is not running". The default stays
+  the first failed poll; "after 2 failed polls in a row" lets one slow
+  answer pass. Setting key `qbt_alert_polls` (1 or 2).
 
 **1.25.1**
 

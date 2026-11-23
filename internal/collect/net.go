@@ -145,7 +145,11 @@ func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer 
 				conn.Close()
 				return nil, fmt.Errorf("could not verify who accepted the connection on port %d: %w", port, err)
 			}
+			prev := v
 			if v = probe.CheckEstablished(out, port); !v.Pending || err != nil || attempt >= len(acceptRetryDelays) {
+				if v.OK && attempt > 0 && pol.waited != nil {
+					pol.waited(attempt, prev.Shape)
+				}
 				break
 			}
 			select {
@@ -254,6 +258,9 @@ type verifyPolicy struct {
 	allow func() bool
 	admit func(net.Conn) (net.Conn, bool) // optional final say as a connection is let through: the conn to use, or refuse (poller.admitListenerOnly)
 	note  func(mode string)
+	// waited, if set, hears of a connection verified only after re-reading
+	// the table: how many re-reads, and the shape the acceptor had.
+	waited func(rereads int, shape string)
 }
 
 func (v verifyPolicy) record(mode string) {

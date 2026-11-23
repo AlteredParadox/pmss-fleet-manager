@@ -552,13 +552,21 @@ func TestVerifiedDialAcceptQueue(t *testing.T) {
 	ctx := context.Background()
 
 	ft := &fakeTunnel{outs: []string{queued, queued, ours}}
-	conn, err := verifiedDial(ft, "127.0.0.1:8089", 8089, verifyPolicy{})(ctx)
+	var waited []string
+	pol := verifyPolicy{waited: func(n int, shape string) { waited = append(waited, fmt.Sprint(n, " ", shape)) }}
+	conn, err := verifiedDial(ft, "127.0.0.1:8089", 8089, pol)(ctx)
 	if err != nil {
 		t.Fatalf("accepted on the third reading: %v", err)
 	}
 	conn.Close()
-	if ft.reads != 3 {
-		t.Fatalf("readings %d, want 3", ft.reads)
+	if ft.reads != 3 || fmt.Sprint(waited) != "[2 state 01, inode 0, timer 00]" {
+		t.Fatalf("readings %d, waited %v", ft.reads, waited)
+	}
+	// Verified at once: nothing to report.
+	if conn, err := verifiedDial(&fakeTunnel{outs: []string{ours}}, "127.0.0.1:8089", 8089, pol)(ctx); err != nil || len(waited) != 1 {
+		t.Fatalf("verified at once: %v, waited %v", err, waited)
+	} else {
+		conn.Close()
 	}
 	for name, f := range map[string]*fakeTunnel{
 		"never accepted":           {outs: []string{queued}},
