@@ -93,6 +93,37 @@ func TestDaysUntilDate(t *testing.T) {
 	}
 }
 
+// wantQbt raises "not responding" on the first failed poll by default, and
+// only from the second one in a row when qbt_alert_polls is 2; a client
+// that is reachable, or not monitored, raises nothing either way.
+func TestWantQbtAlertPolls(t *testing.T) {
+	s := collect.BoxState{Name: "seed-01"}
+	s.Qbt.Enabled, s.Qbt.ProcessUp, s.Qbt.Error = true, true, "refused"
+	one, two := store.Settings{QbtAlertPolls: 1}, store.Settings{QbtAlertPolls: 2}
+	for _, c := range []struct {
+		misses     int
+		set        store.Settings
+		reachable  bool
+		enabled    bool
+		wantRaised bool
+	}{
+		{1, one, false, true, true},
+		{0, one, false, true, true}, // an action marked it unreachable: as before
+		{1, two, false, true, false},
+		{2, two, false, true, true},
+		{5, two, false, true, true},
+		{0, two, true, true, false},
+		{3, two, false, false, false},
+	} {
+		s.Qbt.Misses, s.Qbt.Reachable, s.Qbt.Enabled = c.misses, c.reachable, c.enabled
+		got := wantQbt(&s, c.set)
+		raised := slices.ContainsFunc(got, func(w want) bool { return w.key == "qbt" })
+		if raised != c.wantRaised {
+			t.Errorf("misses %d, polls %d, reachable %v, enabled %v: raised %v", c.misses, c.set.QbtAlertPolls, c.reachable, c.enabled, raised)
+		}
+	}
+}
+
 func TestWantQbtConnection(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	s := collect.BoxState{Name: "seed-01"}

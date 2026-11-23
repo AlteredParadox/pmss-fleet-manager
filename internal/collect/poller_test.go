@@ -18,6 +18,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -115,6 +116,41 @@ func TestPollQbtRestartResetsFirewalledClock(t *testing.T) {
 	p2.pollQbt(ctx, &st, snap2)
 	if st.Qbt.Connection != "connected" || st.Qbt.FirewalledSince != "" {
 		t.Fatalf("connected: %+v", st.Qbt)
+	}
+}
+
+// Misses counts the polls in a row that did not reach the client (the
+// qbt_alert_polls setting reads it) and a poll that reaches it clears it.
+func TestPollQbtCountsMisses(t *testing.T) {
+	srv := fakeWebUI(t, "connected")
+	p, snap := pollQbtFixture(t, srv)
+	ctx := context.Background()
+	st := BoxState{}
+	p.pollQbt(ctx, &st, snap)
+	if !st.Qbt.Reachable || st.Qbt.Misses != 0 {
+		t.Fatalf("reached: %+v", st.Qbt)
+	}
+	p.dialTCP = func(string) qbt.Dialer {
+		return func(ctx context.Context) (net.Conn, error) { return nil, errors.New("refusing to use the connection") }
+	}
+	p.qbt.Close()
+	p.qbt = nil // the client keeps its dialer and pooled connections
+	for want := 1; want <= 3; want++ {
+		p.pollQbt(ctx, &st, snap)
+		if st.Qbt.Reachable || st.Qbt.Misses != want {
+			t.Fatalf("miss %d: reachable %v, misses %d", want, st.Qbt.Reachable, st.Qbt.Misses)
+		}
+	}
+	snap.Qbt.Running = false // the process gone counts too
+	p.pollQbt(ctx, &st, snap)
+	if st.Qbt.Misses != 4 {
+		t.Fatalf("process down: misses %d", st.Qbt.Misses)
+	}
+	snap.Qbt.Running = true
+	p2, _ := pollQbtFixture(t, srv)
+	p2.pollQbt(ctx, &st, snap)
+	if !st.Qbt.Reachable || st.Qbt.Misses != 0 {
+		t.Fatalf("reached again: %+v", st.Qbt)
 	}
 }
 

@@ -1129,6 +1129,31 @@ func TestSettingsOldDownloadURLDoesNotBlockSaves(t *testing.T) {
 }
 
 // The slow-hour threshold defaults to 20 % and is saved within 1..100.
+// The qBittorrent alert waits for 1 (the default) or 2 failed polls; a
+// save that leaves the field out keeps the stored value.
+func TestSettingsQbtAlertPolls(t *testing.T) {
+	srv, _ := newTestServer(t)
+	if got := srv.m.Settings().QbtAlertPolls; got != 1 {
+		t.Fatalf("default %d", got)
+	}
+	for _, c := range []struct {
+		body string
+		code int
+	}{
+		{`{"qbt_alert_polls":0}`, 400},
+		{`{"qbt_alert_polls":3}`, 400},
+		{`{"qbt_alert_polls":2}`, 200},
+		{`{"poll_interval_sec":60}`, 200},
+	} {
+		if code, out := do(t, srv, "PUT", "/api/settings", c.body, nil); code != c.code {
+			t.Errorf("%s: %d %s", c.body, code, out)
+		}
+	}
+	if got := srv.m.Settings().QbtAlertPolls; got != 2 {
+		t.Fatalf("stored %d", got)
+	}
+}
+
 func TestSettingsIOWaitSlowPct(t *testing.T) {
 	srv, _ := newTestServer(t)
 	if got := srv.m.Settings().IOWaitSlowPct; got != 20 {

@@ -305,13 +305,17 @@ type VerifyState struct {
 }
 
 type QbtState struct {
-	Enabled       bool   `json:"enabled"`
-	Installed     bool   `json:"installed"`
-	ProcessUp     bool   `json:"process_up"`
-	Reachable     bool   `json:"reachable"`
-	Version       string `json:"version,omitempty"`
-	Port          int    `json:"port"`
-	Error         string `json:"error,omitempty"`
+	Enabled   bool   `json:"enabled"`
+	Installed bool   `json:"installed"`
+	ProcessUp bool   `json:"process_up"`
+	Reachable bool   `json:"reachable"`
+	Version   string `json:"version,omitempty"`
+	Port      int    `json:"port"`
+	Error     string `json:"error,omitempty"`
+	// Misses counts the polls in a row that found the client not
+	// answering (0 after one that reached it), for the alert's
+	// qbt_alert_polls setting.
+	Misses        int    `json:"misses,omitempty"`
 	LocalBypass   bool   `json:"local_bypass"`  // qBittorrent.conf bypasses auth for localhost
 	SubnetBypass  bool   `json:"subnet_bypass"` // whitelist bypass enabled
 	SubnetList    string `json:"subnet_list,omitempty"`

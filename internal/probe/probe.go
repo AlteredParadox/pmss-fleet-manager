@@ -288,17 +288,71 @@ func PortOwnerNow(out []byte, port int) (ok bool, reason string) {
 // closes an idle keep-alive connection, our side waits in CLOSE-WAIT for
 // the box's sshd, and for up to a minute the pair looked like a root-owned
 // acceptor. Both marks are needed: a connection still in the listener's
-// accept queue also has inode 0, but a live timer and its owner's uid,
-// and is judged like any acceptor (Codex on #217). A live socket, root's
-// or another account's, half-closed or not, still refuses.
+// accept queue also has inode 0, but a live timer (Codex on #217), and is
+// not skipped (below). A live socket, root's or another account's,
+// half-closed or not, still refuses.
+//
+// A socket the listener has not handed to accept() yet has no file either:
+// the kernel lists it as uid 0 with inode 0 and a live timer (measured on
+// 6.12, 2026-11-23: "01, uid 0, inode 0, timer 00" until accept(), the
+// listener's uid and an inode after), and so does an orphan its process
+// closed a moment ago that has not reached time-wait. Neither proves
+// anything about the reader yet, so such an acceptor is not refused or
+// skipped: the verdict is Pending, and the caller reads the table again
+// (verifiedDial) until the socket has an owner or a time-wait record;
+// still pending at the end refuses.
 func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
+	v := CheckEstablished(out, port)
+	return v.OK, v.Known, v.Reason
+}
+
+// Established is CheckEstablished's verdict: EstablishedOwner's ok, known
+// and reason, and Pending when the refusal rests only on accepting sockets
+// that have no owner yet (see EstablishedOwner).
+type Established struct {
+	OK, Known, Pending bool
+	Reason             string
+}
+
+// acceptorRow is what EstablishedOwner keeps of one accepting socket.
+type acceptorRow struct {
+	uid    int
+	queued bool   // uid 0, inode 0, a live timer: not accept()ed yet, or an orphan closing
+	shape  string // its state, inode and timer, for the refusal reason
+}
+
+var hexField, decField = regexp.MustCompile(`^[0-9A-Fa-f]{1,2}$`), regexp.MustCompile(`^[0-9]{1,20}$`)
+
+// socketShape renders a socket row's state (and, from the hex tables, its
+// inode and timer type) for a reason; anything not of the kernel's form
+// is shown as "?", so box output never reaches the reason as it is.
+func socketShape(f []string) string {
+	pick := func(i int, re *regexp.Regexp) string {
+		if i < len(f) && re.MatchString(f[i]) {
+			return f[i]
+		}
+		return "?"
+	}
+	if len(f) < 7 {
+		return "state " + pick(3, hexField)
+	}
+	return "state " + pick(3, hexField) + ", inode " + pick(5, decField) + ", timer " + pick(6, hexField)
+}
+
+// CheckEstablished is EstablishedOwner with the Pending case told apart.
+func CheckEstablished(out []byte, port int) Established {
+	ok, known, pending, reason := establishedOwner(out, port)
+	return Established{OK: ok, Known: known, Pending: pending, Reason: reason}
+}
+
+func establishedOwner(out []byte, port int) (ok, known, pending bool, reason string) {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	if strings.TrimSpace(lines[len(lines)-1]) != "end" {
-		return false, true, "the box's socket table came back incomplete"
+		return false, true, false, "the box's socket table came back incomplete"
 	}
 	uid, base := -1, 0
-	acceptors := map[string]int{} // our ephemeral port (as printed) -> uid of the accepting socket
-	var clients [][2]string       // our ephemeral port and TCP state, for connections to the loopback port
+	acceptors := map[string]acceptorRow{} // our ephemeral port (as printed) -> the accepting socket
+	var clients [][2]string               // our ephemeral port and TCP state, for connections to the loopback port
 	for _, l := range lines {
 		f := strings.Fields(l)
 		if len(f) == 0 {
@@ -310,9 +364,9 @@ func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 				uid, _ = strconv.Atoi(f[1])
 			}
 		case "privacy":
-			return false, false, "the box does not let this account read its socket tables (socket-table privacy)"
+			return false, false, false, "the box does not let this account read its socket tables (socket-table privacy)"
 		case "failed":
-			return false, true, "could not inspect the box's socket table (" + strings.Join(f[1:], " ") + ")"
+			return false, true, false, "could not inspect the box's socket table (" + strings.Join(f[1:], " ") + ")"
 		case "base":
 			if len(f) == 2 && f[1] == "hex" {
 				base = 16
@@ -339,36 +393,43 @@ func EstablishedOwner(out []byte, port int) (ok, known bool, reason string) {
 			if !loopbackReachable(f[4]) {
 				continue // accepted on another address: not reachable by our dial, not ours to judge
 			}
-			if prev, dup := acceptors[f[1]]; dup && prev != owner {
-				acceptors[f[1]] = contestedPort
+			row := acceptorRow{uid: owner, queued: owner == 0 && len(f) == 7 && f[5] == "0", shape: socketShape(f)}
+			if prev, dup := acceptors[f[1]]; dup && prev.uid != owner {
+				acceptors[f[1]] = acceptorRow{uid: contestedPort, shape: "contested"}
 			} else {
-				acceptors[f[1]] = owner
+				acceptors[f[1]] = row
 			}
 		}
 	}
 	if uid < 0 {
-		return false, true, "could not read the account's uid on the box"
+		return false, true, false, "could not read the account's uid on the box"
 	}
 	if len(clients) == 0 {
-		return false, true, fmt.Sprintf("the connection to port %d is not in the box's socket table", port)
+		return false, true, false, fmt.Sprintf("the connection to port %d is not in the box's socket table", port)
 	}
-	paired := 0
+	paired, waiting := 0, ""
 	for _, c := range clients {
-		owner, found := acceptors[c[0]]
+		a, found := acceptors[c[0]]
 		switch {
 		case !found && peerClosed(c[1]):
 			continue // a leftover with no reader on the other side
 		case !found:
-			return false, true, fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
-		case owner != uid:
-			return false, true, fmt.Sprintf("the connection to port %d was accepted by another account (uid %d); refusing to use it", port, owner)
+			return false, true, false, fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
+		case a.uid == uid:
+			paired++
+		case a.queued:
+			waiting = a.shape // judged once it has an owner; any hard refusal below still wins
+		default:
+			return false, true, false, fmt.Sprintf("the connection to port %d was accepted by another account (uid %d, %s); refusing to use it", port, a.uid, a.shape)
 		}
-		paired++
+	}
+	if waiting != "" {
+		return false, true, true, fmt.Sprintf("the socket that took the connection to port %d has no owner yet (%s): not accepted by its listener, or closing; refusing to use it", port, waiting)
 	}
 	if paired == 0 {
-		return false, true, fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
+		return false, true, false, fmt.Sprintf("the socket that accepted the connection to port %d is not visible; refusing to use it", port)
 	}
-	return true, true, ""
+	return true, true, false, ""
 }
 
 // ScriptUID is the "uid N" line EstablishedScript (and ListenerScript's

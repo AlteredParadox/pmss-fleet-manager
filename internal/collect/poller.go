@@ -1244,9 +1244,13 @@ func (p *poller) pollQbt(ctx context.Context, st *BoxState, snap *probe.Snapshot
 		LocalBypass: snap.Qbt.LocalHostAuth, SubnetBypass: snap.Qbt.SubnetBypass, SubnetList: clip(snap.Qbt.SubnetList, 1024), ConfUser: clip(snap.Qbt.Username, 64),
 		HasCreds:      p.box.QbtUser != "" || p.box.QbtPass != "",
 		BinaryVersion: clip(snap.Qbt.BinaryVersion, 64), StartHelper: snap.Qbt.StartHelper, StartHelperStale: snap.Qbt.StartHelperStale, CronInstalled: snap.Qbt.CronEntries > 0, PMSSManaged: snap.Qbt.PMSSManaged}
-	versionOK := false // this poll read the running version (it is otherwise carried over for display)
-	defer func() {     // runs after st.Qbt is set below
+	versionOK := false      // this poll read the running version (it is otherwise carried over for display)
+	misses := st.Qbt.Misses // the polls in a row before this one that did not reach the client
+	defer func() {          // runs after st.Qbt is set below
 		q := &st.Qbt
+		if q.Misses = 0; !q.Reachable {
+			q.Misses = min(misses+1, 1000)
+		}
 		// Compare only a version this poll confirmed, or a restarted client
 		// whose version call failed would keep "restart to apply" lit.
 		q.RestartNeeded = versionOK && q.ProcessUp && q.Version != "" && q.BinaryVersion != "" && q.Version != q.BinaryVersion

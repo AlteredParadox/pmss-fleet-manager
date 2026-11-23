@@ -1317,7 +1317,6 @@ func TestEstablishedOwner(t *testing.T) {
 		"s 05D2 0 05 0100007F 4242 00",
 		fmt.Sprintf("s 05D2 %d 05 0100007F 4242 00", uid+1),
 		fmt.Sprintf("s 05D2 %d 01 0100007F 0 00", uid+1), // queued on another account's listener
-		"s 05D2 0 05 0100007F 0 00",                      // inode 0 without the time-wait timer
 		"s 05D2 0 05 0100007F 4242 03",                   // the timer without inode 0
 	} {
 		rows := ownIno + fmt.Sprintf("c 05D2 %d 08 0100007F\n%s\n", uid, row)
@@ -1328,10 +1327,30 @@ func TestEstablishedOwner(t *testing.T) {
 	if ok, _, reason := EstablishedOwner(mk(ownIno+fmt.Sprintf("c 05D2 %d 01 0100007F\ns 05D2 0 05 0100007F 0 03\n", uid)), port); ok || !strings.Contains(reason, "not visible") {
 		t.Fatalf("an open connection with a dead acceptor: %v %s", ok, reason)
 	}
-	// A connection still in our listener's accept queue: inode 0, our uid,
-	// a live timer. It is ours and passes (Codex on #217).
+	// An acceptor of ours with inode 0 and a live timer passes.
 	if ok, _, reason := EstablishedOwner(mk(fmt.Sprintf("c 05D2 %d 01 0100007F\ns 05D2 %d 01 0100007F 0 00\n", uid, uid)), port); !ok {
-		t.Fatalf("a queued connection of ours refused: %s", reason)
+		t.Fatalf("an inode-0 acceptor of ours refused: %s", reason)
+	}
+	// A connection the listener has not accept()ed yet is uid 0, inode 0,
+	// a live timer (measured on 6.12, 2026-11-23), as is an orphan not yet
+	// in time-wait: Pending, a refusal the caller may read again, with
+	// the socket's shape in the reason.
+	for _, row := range []string{"s 05D2 0 01 0100007F 0 00", "s 05D2 0 05 0100007F 0 00", "s 05D2 0 04 0100007F 0 01"} {
+		v := CheckEstablished(mk(ownIno+fmt.Sprintf("c 05D2 %d 01 0100007F\n%s\n", uid, row)), port)
+		f := strings.Fields(row)
+		if v.OK || !v.Known || !v.Pending || !strings.Contains(v.Reason, "no owner yet (state "+f[3]+", inode 0, timer "+f[6]+")") {
+			t.Fatalf("%q: %+v", row, v)
+		}
+	}
+	// A hard refusal of another connection wins over a pending one.
+	v := CheckEstablished(mk(fmt.Sprintf("c 05D2 %d 01 0100007F\ns 05D2 0 01 0100007F 0 00\nc BEEF %d 01 0100007F\ns BEEF %d 01 0100007F 4242 00\n", uid, uid, uid+1)), port)
+	if v.OK || v.Pending || !strings.Contains(v.Reason, fmt.Sprintf("another account (uid %d, state 01, inode 4242, timer 00)", uid+1)) {
+		t.Fatalf("hard refusal beside a pending one: %+v", v)
+	}
+	// Box text that is not of the kernel's form never reaches the reason.
+	v = CheckEstablished(mk(fmt.Sprintf("c 05D2 %d 01 0100007F\ns 05D2 %d 01<b> 0100007F 9x 00\n", uid, uid+1)), port)
+	if v.OK || !strings.Contains(v.Reason, "state ?, inode ?, timer 00") {
+		t.Fatalf("malformed fields: %+v", v)
 	}
 	// ss rows (a former fallback) are no evidence any more: refuse.
 	dec := []byte(fmt.Sprintf("uid %d\nbase dec\nc 51234 %d ESTAB 127.0.0.1\ns 51234 %d ESTAB 127.0.0.1\nend\n", uid, uid, uid))

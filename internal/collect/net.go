@@ -133,12 +133,29 @@ func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer 
 		}
 		vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		out, _, err := cli.RunLimited(vctx, "sh", strings.NewReader(probe.EstablishedScript(port)), socketTableLimit)
-		if err != nil && len(out) == 0 {
-			conn.Close()
-			return nil, fmt.Errorf("could not verify who accepted the connection on port %d: %w", port, err)
+		var out []byte
+		var v probe.Established
+		// An accepting socket with no owner yet (the listener has not
+		// called accept(), or an orphan is closing) is read again a few
+		// times, nothing written meanwhile; it is judged once it has an
+		// owner, and refused if it never gets one (probe.EstablishedOwner).
+		for attempt := 0; ; attempt++ {
+			out, _, err = cli.RunLimited(vctx, "sh", strings.NewReader(probe.EstablishedScript(port)), socketTableLimit)
+			if err != nil && len(out) == 0 {
+				conn.Close()
+				return nil, fmt.Errorf("could not verify who accepted the connection on port %d: %w", port, err)
+			}
+			if v = probe.CheckEstablished(out, port); !v.Pending || err != nil || attempt >= len(acceptRetryDelays) {
+				break
+			}
+			select {
+			case <-vctx.Done():
+				conn.Close()
+				return nil, fmt.Errorf("refusing to use the connection on port %d: %s", port, v.Reason)
+			case <-time.After(acceptRetryDelays[attempt]):
+			}
 		}
-		ok, known, reason := probe.EstablishedOwner(out, port)
+		ok, known, reason := v.OK, v.Known, v.Reason
 		if !known {
 			if preErr != nil || err != nil {
 				conn.Close() // a read that failed, partly or wholly, is no evidence either way
@@ -177,6 +194,11 @@ func verifiedDial(cli tunnel, hp string, port int, pol verifyPolicy) qbt.Dialer 
 		return conn, nil
 	}
 }
+
+// acceptRetryDelays are the pauses between readings of the socket table
+// while the socket that took a new connection has no owner yet: about 1.5 s
+// in all, for a client whose event loop is slow to accept(). A var for tests.
+var acceptRetryDelays = []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond}
 
 // What the last new WebUI/SCGI connection of a box got (VerifyState.Mode).
 const (
