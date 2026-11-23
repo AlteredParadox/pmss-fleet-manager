@@ -56,6 +56,9 @@ const S = {
   fleetQ: '', fleetStatus: '', // the overview's search words and chosen status; kept across pages, not across reloads
   navCollapsed: loadNavCollapsed(), // the left menu folded away; kept across reloads
 };
+// Fold before the first paint: waiting for /api/state would show the empty
+// rail and then collapse it, a visible jump on a slow box or behind a proxy.
+applyNav();
 // The Services table's hidden statuses, kept the way the torrent sort is.
 // The Services page's status and box choices, kept in this browser. A
 // status the feed no longer has stays chosen (listed at 0) until changed.
@@ -632,7 +635,9 @@ function closeSettings() {
   applyTheme(S.settings.theme);
   renderSettings();
   render();
-  $('[data-act="settings:open"]')?.focus();
+  // The settings button sits in the rail, which is hidden when folded: focus
+  // would land on <body>, so hand it to the toggle still shown instead.
+  if (S.navCollapsed) focusNav(); else $('[data-act="settings:open"]')?.focus();
 }
 // renderSettings draws the dialog in its own layer, outside #main, so the
 // pages' live re-renders never touch it; a field with the caret keeps it.
@@ -3040,7 +3045,6 @@ window.addEventListener('hashchange', route);
 void (async () => {
   await loadState();
   resetAdd();
-  applyNav();
   route();
   connectEvents();
   setInterval(() => { if (S.view === 'fleet' || S.view === 'box') renderSide(); }, 15000);
