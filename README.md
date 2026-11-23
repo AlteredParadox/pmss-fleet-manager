@@ -1537,6 +1537,15 @@ Newest first; each release's full notes are on the
   *save*; *cancel*, Escape or a click outside asks before dropping them,
   and a theme preview reverts. `#/settings` (or `#/settings/<section>`)
   still opens it. On a phone it fills the screen.
+- **`-frame-ancestors` / `PMSS_FRAME_ANCESTORS`** (#231, by vasilvestre,
+  issue #230): origins allowed to show the dashboard in a frame, for a
+  wrapper such as a Home Assistant app. Unset (the default) keeps the
+  refusal of every frame. Set, the CSP allows the dashboard's own origin and
+  the listed ones, and `X-Frame-Options` is dropped (it cannot name more
+  than one). Each value must be an origin (http or https, a DNS name or
+  IPv4 address, an optional port); an invalid one stops the start before
+  the database is opened. List only a parent you trust. Embedding under
+  Home Assistant's ingress has not been verified yet.
 
 **1.24.0**
 
