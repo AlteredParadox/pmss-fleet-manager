@@ -54,6 +54,7 @@ const S = {
   torSort: loadTorSort(), // column sort per torrent table ('qbt', 'rtorrent', 'all'): { key, dir } or null for the default order
   svcQ: '', ...loadSvcFilter(), // the Services page's search words (not kept across reloads) and its status and box choices (kept)
   fleetQ: '', fleetStatus: '', // the overview's search words and chosen status; kept across pages, not across reloads
+  navCollapsed: loadNavCollapsed(), // the left menu folded away; kept across reloads
 };
 // The Services table's hidden statuses, kept the way the torrent sort is.
 // The Services page's status and box choices, kept in this browser. A
@@ -69,6 +70,14 @@ function saveSvcFilter() { try { window.localStorage.setItem('pfm.svcFilter', JS
 // localStorage when it is available, per tab otherwise.
 function loadTorSort() { try { const v = JSON.parse(window.localStorage.getItem('pfm.torSort') || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
 function saveTorSort() { try { window.localStorage.setItem('pfm.torSort', JSON.stringify(S.torSort)); } catch { /* storage unavailable: this tab only */ } }
+// The menu's fold state is a per-browser convenience, kept like the torrent
+// sort. A window with no room for a 220px rail is the reason it exists: the
+// dashboard inside a Home Assistant panel, or a phone.
+function loadNavCollapsed() { try { return window.localStorage.getItem('pfm.navCollapsed') === '1'; } catch { return false; } }
+function saveNavCollapsed() { try { window.localStorage.setItem('pfm.navCollapsed', S.navCollapsed ? '1' : '0'); } catch { /* storage unavailable: this tab only */ } }
+// The class lives on <body> so the folded layout is one rule set in the
+// stylesheet, not an inline width this script has to undo.
+function applyNav() { document.body.classList.toggle('nav-collapsed', !!S.navCollapsed); }
 
 /* ---------- helpers ---------- */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -569,7 +578,8 @@ function renderSide() {
   const t = S.totals || {};
   const navActive = (v) => (S.view === v || (v === 'fleet' && (S.view === 'box' || S.view === 'edit'))) ? 'active' : '';
   $('#side').innerHTML = `
-    <div class="brand"><div class="led"></div><div class="name">FLEET<span>.ctl</span></div></div>
+    <div class="brand"><div class="led"></div><div class="name">FLEET<span>.ctl</span></div>
+      <button class="nav-toggle ghost" data-nav="toggle" title="hide the menu" aria-label="hide the menu">«</button></div>
     <button class="nav ${navActive('fleet')}" data-go="/fleet"><span>fleet</span></button>
     <button class="nav ${navActive('torrents')}" data-go="/torrents"><span>torrents</span></button>
     <button class="nav ${navActive('compare')}" data-go="/compare"><span>compare</span></button>
@@ -2595,6 +2605,13 @@ function afterRender() {
   }
 }
 document.addEventListener('click', async (e) => {
+  const navEl = e.target.closest('[data-nav]');
+  if (navEl) {
+    S.navCollapsed = !S.navCollapsed;
+    saveNavCollapsed();
+    applyNav();
+    return;
+  }
   const goEl = e.target.closest('[data-go]');
   if (goEl && !e.target.closest('[data-act]')) { e.preventDefault(); go(goEl.dataset.go); return; }
   const cs = e.target.closest('[data-cardsize]');
@@ -3011,6 +3028,7 @@ window.addEventListener('hashchange', route);
 void (async () => {
   await loadState();
   resetAdd();
+  applyNav();
   route();
   connectEvents();
   setInterval(() => { if (S.view === 'fleet' || S.view === 'box') renderSide(); }, 15000);
