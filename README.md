@@ -1500,7 +1500,7 @@ every PR and `make license-headers` stamps any new file.
 
 ## Status
 
-1.25.0 is the current release. The code was written against five real Pulsed
+1.25.1 is the current release. The code was written against five real Pulsed
 Media boxes (KVM, Dragon-R, Mesitorvi N100, M1000) running PMSS with
 qBittorrent 5.2.x and 5.3.x and reviewed as described under *Security and hardening*.
 Other setups should work but have not been tried. Issues and pull requests
@@ -1511,6 +1511,16 @@ checksums, and a matching container image on GHCR.
 
 Newest first; each release's full notes are on the
 [releases page](https://github.com/AlteredParadox/pmss-fleet-manager/releases).
+
+**1.25.1**
+
+- **The sidebar folds away** (#235, by vasilvestre). A `«` button in the
+  sidebar's top row hides it and gives its 220px back to the page, for a
+  phone or the dashboard inside a Home Assistant panel; a `☰` button in the
+  top-left corner brings it back. The choice is kept in this browser
+  (`pfm.navCollapsed` in local storage), across reloads and new tabs, and
+  is restored on load without waiting for the API. Keyboard focus moves to
+  whichever button is shown.
 
 **1.25.0**
 
@@ -1545,7 +1555,10 @@ Newest first; each release's full notes are on the
   than one). Each value must be an origin (http or https, a DNS name or
   IPv4 address, an optional port); an invalid one stops the start before
   the database is opened. List only a parent you trust. Embedding under
-  Home Assistant's ingress has not been verified yet.
+  Home Assistant's ingress was confirmed after the release by vasilvestre on Home
+  Assistant OS (issue #230). Reached over ingress, the dashboard runs
+  without its own `-auth` (Home Assistant signs the user in), so do not
+  also expose that unauthenticated port directly.
 
 **1.24.0**
 
