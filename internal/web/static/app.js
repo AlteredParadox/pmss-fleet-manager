@@ -54,7 +54,11 @@ const S = {
   torSort: loadTorSort(), // column sort per torrent table ('qbt', 'rtorrent', 'all'): { key, dir } or null for the default order
   svcQ: '', ...loadSvcFilter(), // the Services page's search words (not kept across reloads) and its status and box choices (kept)
   fleetQ: '', fleetStatus: '', // the overview's search words and chosen status; kept across pages, not across reloads
+  navCollapsed: loadNavCollapsed(), // the left menu folded away; kept across reloads
 };
+// Fold before the first paint: waiting for /api/state would show the empty
+// rail and then collapse it, a visible jump on a slow box or behind a proxy.
+applyNav();
 // The Services table's hidden statuses, kept the way the torrent sort is.
 // The Services page's status and box choices, kept in this browser. A
 // status the feed no longer has stays chosen (listed at 0) until changed.
@@ -69,6 +73,22 @@ function saveSvcFilter() { try { window.localStorage.setItem('pfm.svcFilter', JS
 // localStorage when it is available, per tab otherwise.
 function loadTorSort() { try { const v = JSON.parse(window.localStorage.getItem('pfm.torSort') || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; } }
 function saveTorSort() { try { window.localStorage.setItem('pfm.torSort', JSON.stringify(S.torSort)); } catch { /* storage unavailable: this tab only */ } }
+// The menu's fold state is a per-browser convenience, kept like the torrent
+// sort. A window with no room for a 220px rail is the reason it exists: the
+// dashboard inside a Home Assistant panel, or a phone.
+function loadNavCollapsed() { try { return window.localStorage.getItem('pfm.navCollapsed') === '1'; } catch { return false; } }
+function saveNavCollapsed() { try { window.localStorage.setItem('pfm.navCollapsed', S.navCollapsed ? '1' : '0'); } catch { /* storage unavailable: this tab only */ } }
+// The class lives on <body> so the folded layout is one rule set in the
+// stylesheet, not an inline width this script has to undo.
+function applyNav() { document.body.classList.toggle('nav-collapsed', !!S.navCollapsed); }
+// The fold hides the button that had focus (the sidebar is display:none), so
+// focus moves to the toggle still shown, and the next Tab enters the menu
+// instead of restarting from the document. A redraw of the sidebar calls this
+// too, to put focus back on the fold button it replaced, and must not scroll
+// the page under the reader. Below 820px the rail sits at the top of the
+// document while Show is fixed, so only the click lets focus scroll it back
+// into view.
+function focusNav(scroll = false) { (S.navCollapsed ? $('#navopen') : $('#side [data-nav="toggle"]'))?.focus({ preventScroll: !scroll }); }
 
 /* ---------- helpers ---------- */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -568,8 +588,11 @@ function render() { renderSide(); if (!composing) renderMain(); }
 function renderSide() {
   const t = S.totals || {};
   const navActive = (v) => (S.view === v || (v === 'fleet' && (S.view === 'box' || S.view === 'edit'))) ? 'active' : '';
-  $('#side').innerHTML = `
-    <div class="brand"><div class="led"></div><div class="name">FLEET<span>.ctl</span></div></div>
+  const side = $('#side');
+  const navFocused = side.contains(document.activeElement) && document.activeElement.dataset.nav === 'toggle'; // found again below
+  side.innerHTML = `
+    <div class="brand"><div class="led"></div><div class="name">FLEET<span>.ctl</span></div>
+      <button class="nav-toggle ghost" data-nav="toggle" title="hide the menu" aria-label="hide the menu">«</button></div>
     <button class="nav ${navActive('fleet')}" data-go="/fleet"><span>fleet</span></button>
     <button class="nav ${navActive('torrents')}" data-go="/torrents"><span>torrents</span></button>
     <button class="nav ${navActive('compare')}" data-go="/compare"><span>compare</span></button>
@@ -586,6 +609,7 @@ function renderSide() {
       ${S.monitorOnly ? '<div class="muted" title="started with -monitor-only: torrent, client, discovery, container, transfer and password actions are refused; monitoring runs as usual">monitor-only</div>' : ''}
     </div>
     <button class="nav side-settings ${S.settingsOpen ? 'active' : ''}" data-act="settings:open" aria-haspopup="dialog"><span>settings</span></button>`;
+  if (navFocused) focusNav();
 }
 
 /* ---------- settings dialog ---------- */
@@ -611,7 +635,9 @@ function closeSettings() {
   applyTheme(S.settings.theme);
   renderSettings();
   render();
-  $('[data-act="settings:open"]')?.focus();
+  // The settings button sits in the rail, which is hidden when folded: focus
+  // would land on <body>, so hand it to the toggle still shown instead.
+  if (S.navCollapsed) focusNav(); else $('[data-act="settings:open"]')?.focus();
 }
 // renderSettings draws the dialog in its own layer, outside #main, so the
 // pages' live re-renders never touch it; a field with the caret keeps it.
@@ -2595,6 +2621,14 @@ function afterRender() {
   }
 }
 document.addEventListener('click', async (e) => {
+  const navEl = e.target.closest('[data-nav]');
+  if (navEl) {
+    S.navCollapsed = !S.navCollapsed;
+    saveNavCollapsed();
+    applyNav();
+    focusNav(true);
+    return;
+  }
   const goEl = e.target.closest('[data-go]');
   if (goEl && !e.target.closest('[data-act]')) { e.preventDefault(); go(goEl.dataset.go); return; }
   const cs = e.target.closest('[data-cardsize]');
