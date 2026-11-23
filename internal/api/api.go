@@ -2004,7 +2004,7 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	s.settingsMu.Lock()
 	defer s.settingsMu.Unlock()
 	in := s.m.Settings()
-	prevKey := in.PMAPIKey
+	prevKey, prevURL := in.PMAPIKey, in.QbtDownloadURL
 	in.PMAPIKey = ""
 	if err := json.Unmarshal(body, &in); err != nil {
 		writeErr(w, 400, err)
@@ -2052,8 +2052,11 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 	if in.QbtDownloadURL == "" {
 		in.QbtDownloadURL = store.DefaultQbtDownloadURL
 	}
-	if !collect.ValidDownloadURL(in.QbtDownloadURL) {
-		writeErr(w, 400, errors.New("qbt_download_url must be an https URL of URL characters only, at most 2048 bytes"))
+	// Checked when it changes: a URL stored by an older release under an
+	// older rule must not make every other settings save fail (install
+	// checks it again anyway). An unchanged URL is kept as it is.
+	if in.QbtDownloadURL != prevURL && !collect.ValidDownloadURL(in.QbtDownloadURL) {
+		writeErr(w, 400, errors.New("qbt_download_url must be an https URL of URL characters only, at most 2048 bytes; a #sha256= pin must be 64 hex digits"))
 		return
 	}
 	if in.CardMinPx < 240 || in.CardMinPx > 900 {

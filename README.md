@@ -1513,6 +1513,15 @@ Newest first; each release's full notes are on the
 
 **Unreleased**
 
+- **Fixed: saving settings failed with a qBittorrent download URL saved
+  before 1.24.** 1.24.0 accepted no `#` fragment in that URL other than a
+  `#sha256=` pin, and checked the stored URL on every save, so a URL copied
+  with a fragment from a GitHub releases page made any settings change fail.
+  Other fragments are accepted again (they are never sent, and are ignored),
+  and the URL is checked only when it is changed. Note that a releases
+  *page* is not a download: install wants the asset itself, e.g.
+  `https://github.com/userdocs/qbittorrent-nox-static/releases/download/release-5.1.4_v1.2.20/x86_64-qbittorrent-nox`,
+  whose sha256 GitHub publishes.
 - **Services has its own page, with search and filters** (Discord
   request). The Services table moved from the bottom of Settings to a
   *services* page in the sidebar (shown once a Pulsed Media API key is

@@ -1103,6 +1103,31 @@ func TestSettingsDownloadURL(t *testing.T) {
 	}
 }
 
+// A URL stored under an older rule (here a malformed pin) does not make an
+// unrelated save fail, and is kept as it is; changing the URL is checked.
+// A fragment copied from a releases page is accepted (reported after 1.24.0:
+// "https://github.com/userdocs/qbittorrent-nox-static/releases?page=2#release-...").
+func TestSettingsOldDownloadURLDoesNotBlockSaves(t *testing.T) {
+	srv, _ := newTestServer(t)
+	const old = "https://example.com/b#sha256=nothex"
+	st := srv.m.Settings()
+	st.QbtDownloadURL = old
+	srv.m.SetSettings(st)
+	if code, out := do(t, srv, "PUT", "/api/settings", `{"disk_threshold_pct":95}`, nil); code != 200 {
+		t.Fatalf("unrelated save: %d %s", code, out)
+	}
+	if got := srv.m.Settings(); got.DiskThresholdPct != 95 || got.QbtDownloadURL != old {
+		t.Fatalf("after save: %d %q", got.DiskThresholdPct, got.QbtDownloadURL)
+	}
+	if code, _ := do(t, srv, "PUT", "/api/settings", `{"qbt_download_url":"https://example.com/c#sha256=nothex"}`, nil); code != 400 {
+		t.Fatalf("changed to a malformed pin: %d", code)
+	}
+	const page = "https://github.com/userdocs/qbittorrent-nox-static/releases?page=2#release-release-5.1.4_v1.2.20"
+	if code, out := do(t, srv, "PUT", "/api/settings", `{"qbt_download_url":"`+page+`"}`, nil); code != 200 {
+		t.Fatalf("releases-page fragment: %d %s", code, out)
+	}
+}
+
 // The slow-hour threshold defaults to 20 % and is saved within 1..100.
 func TestSettingsIOWaitSlowPct(t *testing.T) {
 	srv, _ := newTestServer(t)

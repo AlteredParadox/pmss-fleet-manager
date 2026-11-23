@@ -211,7 +211,8 @@ const maxDownloadURL = 2048
 // ValidDownloadURL is the one rule for the qBittorrent download URL, at
 // save time and again at install: bounded, URL characters only (it goes
 // into a shell command, quoted), a well-formed https URL with a host and
-// no user info, and no fragment other than a sha256 pin (downloadPin).
+// no user info, and a fragment that, if it starts "sha256=", is a
+// well-formed pin (downloadPin; any other fragment is ignored).
 func ValidDownloadURL(u string) bool {
 	if len(u) > maxDownloadURL || !safeURL.MatchString(u) {
 		return false
@@ -234,8 +235,15 @@ func downloadPin(u string) (clean, digest string, ok bool) {
 		return u, "", true
 	}
 	d, isPin := strings.CutPrefix(frag, "sha256=")
+	if !isPin {
+		// Any other fragment (a link copied from a releases page, say) is
+		// not sent anyway: ignored, and cut like a pin. 1.24.0 refused it,
+		// which made a URL saved by an older release fail every settings
+		// save.
+		return clean, "", true
+	}
 	d = strings.ToLower(d)
-	if !isPin || !sha256Hex.MatchString(d) {
+	if !sha256Hex.MatchString(d) {
 		return u, "", false
 	}
 	return clean, d, true
