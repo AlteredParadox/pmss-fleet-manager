@@ -1516,11 +1516,11 @@ Newest first; each release's full notes are on the
 
 - **Fixed: an occasional "accepted by another account (uid 0)" refusal**
   of the qBittorrent connection, a few times a day on a busy box (#237). The
-  kernel lists a socket with no owner yet, one not yet taken with
+  kernel can list a socket with no owner yet, one not yet taken with
   `accept()` or one still closing, as uid 0 with no inode, so it looked
   like a root-owned one. On the box that showed it, it was a closing
-  socket (FIN_WAIT1). Such a
-  socket is now read again for up to about 1.5 s, nothing sent
+  socket (FIN_WAIT1). Such a socket is now read again for up to about
+  1.5 s, nothing sent
   meanwhile, and judged once it has an owner; one that never gets one, or
   gets someone else's, is still refused. The refusal names the socket's
   state, inode and timer.
